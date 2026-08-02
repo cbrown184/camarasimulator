@@ -7,9 +7,9 @@
 //! - **`authorization_code` + PKCE** (RFC 6749 §4.1.3, RFC 7636): the three-legged
 //!   flow, redeeming a code minted by `GET /oauth2/authorize` ([`super::authorize`]).
 //!
-//! The remaining advertised grant, CIBA
-//! (`urn:openid:params:grant-type:ciba`), is filled in by a later pass and until
-//! then returns `unsupported_grant_type`.
+//! - **CIBA** (`urn:openid:params:grant-type:ciba`): the backchannel flow. The
+//!   client starts it at `POST /bc-authorize` ([`super::ciba`]) and then **polls**
+//!   this endpoint with the returned `auth_req_id` until the end user authorizes.
 //!
 //! The endpoint issues a **real, signed** RS256 JWT (RFC 9068 `at+jwt`) using
 //! the bundled JWKS key, so a client that fetches `/oauth2/jwks` can verify it.
@@ -44,7 +44,7 @@ use base64::Engine as _;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use super::{base_url, codes, keys};
+use super::{base_url, ciba, codes, keys};
 
 /// Lifetime of an issued access token, in seconds (1 hour).
 const EXPIRES_IN: u64 = 3600;
@@ -61,6 +61,8 @@ struct TokenForm {
     code: Option<String>,
     redirect_uri: Option<String>,
     code_verifier: Option<String>,
+    // CIBA grant (OpenID CIBA Core §10.1): the id from `POST /bc-authorize`.
+    auth_req_id: Option<String>,
 }
 
 /// `POST /oauth2/token`.
@@ -82,12 +84,7 @@ pub async fn handler(headers: HeaderMap, body: String) -> Response {
     match form.grant_type.as_deref() {
         Some("client_credentials") => client_credentials(&headers, form),
         Some("authorization_code") => authorization_code(&headers, form),
-        // Advertised in discovery but not yet implemented in this build.
-        Some("urn:openid:params:grant-type:ciba") => oauth_error(
-            StatusCode::BAD_REQUEST,
-            "unsupported_grant_type",
-            "grant type is advertised by discovery but not yet implemented in this build",
-        ),
+        Some("urn:openid:params:grant-type:ciba") => ciba_grant(&headers, form),
         Some(_) => oauth_error(
             StatusCode::BAD_REQUEST,
             "unsupported_grant_type",
@@ -202,6 +199,69 @@ fn authorization_code(headers: &HeaderMap, form: TokenForm) -> Response {
     issue_access_token(&issuer, &entry.audience, &client_id, "camarasim-user", &entry.scope)
 }
 
+/// Issue a token for the **CIBA** grant (`urn:openid:params:grant-type:ciba`,
+/// OpenID CIBA Core §10.1). The client polls this endpoint with the `auth_req_id`
+/// returned by `POST /bc-authorize` ([`super::ciba`]) until the end user authorizes.
+///
+/// The authenticated `client_id` must match the client the `auth_req_id` was
+/// issued to. The poll outcome ([`ciba::poll`]) maps to the CIBA token-error set
+/// (OpenID CIBA Core §11), all HTTP 400:
+///   - not yet authorized → `authorization_pending`;
+///   - end user rejected → `access_denied`;
+///   - request expired → `expired_token`;
+///   - unknown id, or id issued to a different client → `invalid_grant`.
+///
+/// On approval the token's `aud` is the audience captured at `/bc-authorize` and
+/// its `sub` is the simulator's synthetic resource owner (`camarasim-user`); the
+/// `auth_req_id` is consumed (single use).
+fn ciba_grant(headers: &HeaderMap, form: TokenForm) -> Response {
+    let client_id = match client_id_from_basic(headers).or(form.client_id) {
+        Some(id) => id,
+        None => {
+            return oauth_error(
+                StatusCode::UNAUTHORIZED,
+                "invalid_client",
+                "client authentication required (client_secret_basic or client_secret_post)",
+            )
+        }
+    };
+    let auth_req_id = match form.auth_req_id.filter(|a| !a.is_empty()) {
+        Some(a) => a,
+        None => {
+            return oauth_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+                "the 'auth_req_id' parameter is required",
+            )
+        }
+    };
+
+    match ciba::poll(&auth_req_id, &client_id) {
+        ciba::Poll::Approved { scope, audience } => {
+            let issuer = base_url(headers);
+            issue_access_token(&issuer, &audience, &client_id, "camarasim-user", &scope)
+        }
+        ciba::Poll::Pending => oauth_error(
+            StatusCode::BAD_REQUEST,
+            "authorization_pending",
+            "the end-user authorization is pending; poll again after the interval",
+        ),
+        ciba::Poll::Denied => oauth_error(
+            StatusCode::BAD_REQUEST,
+            "access_denied",
+            "the end user denied the authorization request",
+        ),
+        ciba::Poll::Expired => oauth_error(
+            StatusCode::BAD_REQUEST,
+            "expired_token",
+            "the auth_req_id has expired; start a new backchannel request",
+        ),
+        ciba::Poll::Unknown | ciba::Poll::WrongClient => {
+            invalid_grant("the auth_req_id is invalid or was not issued to this client")
+        }
+    }
+}
+
 /// An `invalid_grant` token-endpoint error (RFC 6749 §5.2), HTTP 400.
 fn invalid_grant(description: &str) -> Response {
     oauth_error(StatusCode::BAD_REQUEST, "invalid_grant", description)
@@ -255,7 +315,10 @@ fn encode_jwt(claims: &Value) -> String {
 /// Extract a `client_id` from an HTTP Basic `Authorization` header
 /// (`client_secret_basic`). The secret is not checked. Returns `None` if the
 /// header is absent, malformed, or carries an empty client id.
-fn client_id_from_basic(headers: &HeaderMap) -> Option<String> {
+///
+/// `pub(super)` so the CIBA endpoints ([`super::ciba`]) authenticate clients the
+/// same way as the token grants.
+pub(super) fn client_id_from_basic(headers: &HeaderMap) -> Option<String> {
     let value = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
     let encoded = value.strip_prefix("Basic ")?;
     let decoded = STANDARD.decode(encoded.trim()).ok()?;
@@ -279,16 +342,18 @@ fn next_jti(now: u64) -> String {
     format!("{now:x}-{n:x}")
 }
 
-/// Token-endpoint responses must not be cached (RFC 6749 §5.1).
-fn no_store() -> [(header::HeaderName, &'static str); 2] {
+/// Token-endpoint responses must not be cached (RFC 6749 §5.1). `pub(super)` so
+/// the CIBA `/bc-authorize` response ([`super::ciba`]) carries the same header.
+pub(super) fn no_store() -> [(header::HeaderName, &'static str); 2] {
     [
         (header::CACHE_CONTROL, "no-store"),
         (header::PRAGMA, "no-cache"),
     ]
 }
 
-/// An OAuth2 token-endpoint error (RFC 6749 §5.2).
-fn oauth_error(status: StatusCode, code: &str, description: &str) -> Response {
+/// An OAuth2 token-endpoint error (RFC 6749 §5.2). `pub(super)` so the CIBA
+/// `/bc-authorize` endpoint ([`super::ciba`]) returns the same error shape.
+pub(super) fn oauth_error(status: StatusCode, code: &str, description: &str) -> Response {
     let body = json!({ "error": code, "error_description": description });
     (status, no_store(), Json(body)).into_response()
 }
@@ -460,15 +525,188 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn advertised_but_unimplemented_grant_is_unsupported() {
-        // CIBA is advertised by discovery but not yet implemented in this build.
+    async fn ciba_grant_without_auth_req_id_is_invalid_request() {
+        // CIBA is implemented; the poll still requires an auth_req_id.
         let (status, _, body) = post_token(
             "grant_type=urn:openid:params:grant-type:ciba&client_id=client-1",
             None,
         )
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert_eq!(body["error"], "unsupported_grant_type");
+        assert_eq!(body["error"], "invalid_request");
+    }
+
+    #[tokio::test]
+    async fn ciba_grant_without_client_is_invalid_client() {
+        let (status, _, body) = post_token(
+            "grant_type=urn:openid:params:grant-type:ciba&auth_req_id=whatever",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["error"], "invalid_client");
+    }
+
+    #[tokio::test]
+    async fn ciba_grant_with_unknown_auth_req_id_is_invalid_grant() {
+        let (status, _, body) = post_token(
+            "grant_type=urn:openid:params:grant-type:ciba&client_id=client-1&auth_req_id=never-issued",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"], "invalid_grant");
+    }
+
+    // --- CIBA grant end to end (POST /bc-authorize -> poll POST /oauth2/token) ---
+    //
+    // These drive the full backchannel flow through one router: start at
+    // /bc-authorize to mint an auth_req_id, then poll the token endpoint, so the
+    // shared in-memory request store is exercised across both requests.
+
+    /// Run the backchannel leg for `login_hint`/`scope` and return the auth_req_id.
+    async fn bc_authorize(login_hint: &str, scope: &str) -> Value {
+        let hint_enc = serde_urlencoded::to_string([("login_hint", login_hint)]).unwrap();
+        let body = format!("client_id=app-1&scope={scope}&{hint_enc}");
+        let response = super::super::routes()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/bc-authorize")
+                    .header("host", "sim.local:8080")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[tokio::test]
+    async fn ciba_poll_issues_a_token_for_an_approved_request() {
+        let bc = bc_authorize("tel:+34600000001", "openid").await;
+        let auth_req_id = bc["auth_req_id"].as_str().unwrap();
+        assert_eq!(bc["expires_in"], ciba::EXPIRES_IN);
+        assert_eq!(bc["interval"], ciba::INTERVAL);
+
+        let body = format!(
+            "grant_type=urn:openid:params:grant-type:ciba&client_id=app-1&auth_req_id={auth_req_id}"
+        );
+        let (status, _, resp) = post_token(&body, None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(resp["token_type"], "Bearer");
+        assert_eq!(resp["scope"], "openid");
+        let (_, claims) = decode_jwt(resp["access_token"].as_str().unwrap());
+        // Backchannel is a three-legged flow: sub is the sim end user, not the client.
+        assert_eq!(claims["sub"], "camarasim-user");
+        assert_eq!(claims["client_id"], "app-1");
+        assert_eq!(claims["aud"], "http://sim.local:8080");
+        assert_eq!(claims["scope"], "openid");
+    }
+
+    #[tokio::test]
+    async fn ciba_auth_req_id_is_single_use() {
+        let bc = bc_authorize("tel:+34600000001", "openid").await;
+        let auth_req_id = bc["auth_req_id"].as_str().unwrap();
+        let body = format!(
+            "grant_type=urn:openid:params:grant-type:ciba&client_id=app-1&auth_req_id={auth_req_id}"
+        );
+        let (first, _, _) = post_token(&body, None).await;
+        assert_eq!(first, StatusCode::OK);
+        // A second poll after the token was issued finds nothing.
+        let (second, _, resp) = post_token(&body, None).await;
+        assert_eq!(second, StatusCode::BAD_REQUEST);
+        assert_eq!(resp["error"], "invalid_grant");
+    }
+
+    #[tokio::test]
+    async fn ciba_pending_login_hint_reports_authorization_pending() {
+        let bc = bc_authorize("tel:+34600000000-pending", "openid").await;
+        let auth_req_id = bc["auth_req_id"].as_str().unwrap();
+        let body = format!(
+            "grant_type=urn:openid:params:grant-type:ciba&client_id=app-1&auth_req_id={auth_req_id}"
+        );
+        let (status, _, resp) = post_token(&body, None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(resp["error"], "authorization_pending");
+        // Pending is not consumed: a second poll still reports pending.
+        let (again, _, resp2) = post_token(&body, None).await;
+        assert_eq!(again, StatusCode::BAD_REQUEST);
+        assert_eq!(resp2["error"], "authorization_pending");
+    }
+
+    #[tokio::test]
+    async fn ciba_denied_login_hint_reports_access_denied() {
+        let bc = bc_authorize("tel:+34600000000-denied", "openid").await;
+        let auth_req_id = bc["auth_req_id"].as_str().unwrap();
+        let body = format!(
+            "grant_type=urn:openid:params:grant-type:ciba&client_id=app-1&auth_req_id={auth_req_id}"
+        );
+        let (status, _, resp) = post_token(&body, None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(resp["error"], "access_denied");
+    }
+
+    #[tokio::test]
+    async fn ciba_poll_rejects_a_mismatched_client() {
+        let bc = bc_authorize("tel:+34600000001", "openid").await;
+        let auth_req_id = bc["auth_req_id"].as_str().unwrap();
+        // A different client polling the same auth_req_id must not get a token.
+        let body = format!(
+            "grant_type=urn:openid:params:grant-type:ciba&client_id=other-app&auth_req_id={auth_req_id}"
+        );
+        let (status, _, resp) = post_token(&body, None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(resp["error"], "invalid_grant");
+    }
+
+    #[tokio::test]
+    async fn bc_authorize_requires_a_login_hint() {
+        let response = super::super::routes()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/bc-authorize")
+                    .header("host", "sim.local:8080")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from("client_id=app-1&scope=openid"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let resp: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(resp["error"], "invalid_request");
+    }
+
+    #[tokio::test]
+    async fn bc_authorize_requires_client_authentication() {
+        let response = super::super::routes()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/bc-authorize")
+                    .header("host", "sim.local:8080")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from("scope=openid&login_hint=tel:%2B34600000001"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let resp: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(resp["error"], "invalid_client");
     }
 
     // --- authorization_code grant (redeeming a code from /oauth2/authorize) ---

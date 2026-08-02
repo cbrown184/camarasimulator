@@ -7,17 +7,16 @@
 //! - `GET /oauth2/jwks` — JWK Set for the token signing key.
 //! - `GET /oauth2/authorize` — authorization endpoint (`authorization_code` +
 //!   PKCE, auto-consent).
-//! - `POST /oauth2/token` — token endpoint (`client_credentials` and
-//!   `authorization_code` grants).
+//! - `POST /oauth2/token` — token endpoint (`client_credentials`,
+//!   `authorization_code`, and CIBA grants).
+//! - `POST /bc-authorize` — CIBA backchannel authentication endpoint.
 //!
 //! It also provides the resource-server half of the profile: [`verify::Claims`],
 //! the token-verification extractor protected CAMARA endpoints use to require a
 //! valid access token (signature / audience / expiry) and enforce scope.
-//!
-//! Planned (advertised by discovery, filled in by later passes):
-//! `/oauth2/token` (CIBA grant), `/bc-authorize`.
 
 mod authorize;
+mod ciba;
 mod codes;
 mod keys;
 mod token;
@@ -40,6 +39,7 @@ pub fn routes() -> Router {
         .route("/oauth2/jwks", get(jwks))
         .route("/oauth2/authorize", get(authorize::handler))
         .route("/oauth2/token", post(token::handler))
+        .route("/bc-authorize", post(ciba::handler))
 }
 
 /// Resolve the externally-visible base URL used to build absolute endpoint URLs

@@ -21,7 +21,14 @@ signature against the JWKS, `exp`, `aud`) and enforces scope, returning the CAMA
 model (401 `UNAUTHENTICATED` / 403 `PERMISSION_DENIED`) with RFC 6750 `WWW-Authenticate`.
 No CAMARA business APIs yet.
 
-**Next up:** Phase 0 — `POST /bc-authorize` + CIBA token polling.
+All three CAMARA grants now work: `client_credentials`, `authorization_code`+PKCE,
+and CIBA. `POST /bc-authorize` mints a single-use, in-memory `auth_req_id` (headless
+auto-consent; the `login_hint` selects approved/pending/denied per DESIGN §7), and the
+token endpoint's `ciba` grant polls it, returning the CIBA token-error set
+(`authorization_pending` / `access_denied` / `expired_token`) or an access token.
+
+**Next up:** Phase 0 — Purpose/scope enforcement + shared reserved-identifier scenario
+convention (DESIGN §7).
 
 ## In progress (claimed this pass)
 
@@ -35,7 +42,7 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 - [x] `POST /oauth2/token` — `client_credentials` grant (signed JWT, scopes, expiry)
 - [x] Token verification middleware for protected routes (audience/scope/expiry)
 - [x] `GET /oauth2/authorize` + `POST /oauth2/token` — `authorization_code` + PKCE (auto-consent)
-- [ ] `POST /bc-authorize` + CIBA token polling
+- [x] `POST /bc-authorize` + CIBA token polling
 - [ ] Purpose/scope enforcement + shared reserved-identifier scenario convention (DESIGN §7)
 
 ### Phase 1 — Stateless, non-spatial
@@ -72,6 +79,22 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-02 — Phase 0: implemented CIBA — `POST /bc-authorize` + the `ciba` token-polling
+  grant. New `src/auth/ciba.rs`: process-global in-memory backchannel-request store
+  (`std::sync::Mutex<HashMap>`, lock never held across await), opaque single-use `auth_req_id`
+  (`base64url(SHA-256(counter‖now))`, mirrors codes.rs). `/bc-authorize` authenticates the client
+  (reuses token.rs `client_id_from_basic`), requires `login_hint`+`scope`, and returns
+  `{auth_req_id, expires_in:120, interval:5}`. Functional case (§7) driven by `login_hint`:
+  default→approved, contains `pending`→`authorization_pending`, contains `denied`→`access_denied`.
+  `token.rs`: `ciba` grant branch polls the store → maps OpenID CIBA Core §11 outcomes (approved
+  issues a token via shared `issue_access_token`, aud = captured audience, sub = `camarasim-user`;
+  else `authorization_pending`/`access_denied`/`expired_token`/`invalid_grant`); approved id
+  consumed (single use). Made token.rs `oauth_error`/`no_store`/`client_id_from_basic` `pub(super)`.
+  No new deps (reuses sha2/base64/serde_urlencoded). Spec: added `/bc-authorize` path +
+  Backchannel{Request,Response} schemas, extended `/oauth2/token` (auth_req_id, CIBA error set) and
+  OAuthError enum, documented functional cases. Full backchannel flow tested end-to-end
+  (bc-authorize → poll) incl. approved/pending/denied/single-use/wrong-client/unknown. 84 tests
+  green (was 67). — binary: 897K (918424 B)
 - 2026-08-02 — Phase 0: implemented `GET /oauth2/authorize` + the `authorization_code` + PKCE
   grant at `POST /oauth2/token`. New `src/auth/codes.rs`: process-global in-memory, single-use
   authorization-code store (`std::sync::Mutex<HashMap>`, lock never held across await),

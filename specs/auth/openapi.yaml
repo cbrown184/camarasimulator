@@ -230,6 +230,82 @@ paths:
               example:
                 error: invalid_request
                 error_description: the 'redirect_uri' parameter is required
+  /bc-authorize:
+    post:
+      operationId: backchannelAuthenticate
+      summary: CIBA backchannel authentication endpoint
+      description: |
+        Starts the **CIBA** flow (`urn:openid:params:grant-type:ciba`), the CAMARA
+        backchannel grant (docs/DESIGN.md §6; OpenID Connect CIBA Core 1.0). Unlike
+        `authorization_code`, the client never redirects the user agent: it calls
+        this endpoint out of band with a `login_hint` identifying the end user and
+        gets back an `auth_req_id`, then **polls** `POST /oauth2/token`
+        (`grant_type=urn:openid:params:grant-type:ciba`, `auth_req_id=<id>`) until
+        the end user authorizes. The CAMARA profile uses `poll` delivery.
+
+        The request body is `application/x-www-form-urlencoded`.
+
+        ### Simulator functional cases (docs/DESIGN.md §7)
+
+        CamaraSim is headless — there is no device to prompt — so the **`login_hint`
+        is the control plane** and deterministically selects the authorization
+        outcome the later token poll resolves to:
+
+        - **default** → the request is **approved** immediately; the first poll
+          returns an access token.
+        - `login_hint` containing **`pending`** → stays `authorization_pending`;
+          every poll returns that error (models an end user who has not yet acted).
+        - `login_hint` containing **`denied`** → `access_denied`; the end user
+          rejected the request. (`denied` wins if both markers are present.)
+
+        Client authentication works exactly as at the token endpoint
+        (`client_secret_basic` or `client_secret_post`; any secret accepted). The
+        issued `auth_req_id` is single-use on success (consumed when the token is
+        issued) and expires after `expires_in` seconds.
+
+        Errors use the OAuth2 format (RFC 6749 §5.2) with `Cache-Control: no-store`:
+          - missing `login_hint` or `scope` → `invalid_request` (400)
+          - no client authentication → `invalid_client` (401)
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: "#/components/schemas/BackchannelAuthenticationRequest"
+      responses:
+        "200":
+          description: Backchannel authentication request accepted.
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+              description: Always `no-store`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BackchannelAuthenticationResponse"
+              example:
+                auth_req_id: 1c266114-a1be-4252-8ad1-04986c5b9ac1
+                expires_in: 120
+                interval: 5
+        "400":
+          description: Missing `login_hint` or `scope`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OAuthError"
+              example:
+                error: invalid_request
+                error_description: the 'login_hint' parameter is required
+        "401":
+          description: Client authentication failed / missing.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OAuthError"
+              example:
+                error: invalid_client
+                error_description: client authentication required (client_secret_basic or client_secret_post)
   /oauth2/token:
     post:
       operationId: token
@@ -244,9 +320,8 @@ paths:
           APIs that need no end-user context.
         - `authorization_code` + PKCE (RFC 6749 §4.1.3, RFC 7636) — redeems a code
           minted by `GET /oauth2/authorize` for an access token.
-
-        The `urn:openid:params:grant-type:ciba` grant is advertised by discovery
-        but not yet implemented in this build and returns `unsupported_grant_type`.
+        - `urn:openid:params:grant-type:ciba` (OpenID CIBA Core §10.1) — the
+          backchannel **poll**: redeems an `auth_req_id` from `POST /bc-authorize`.
 
         **Issued token.** A real, signed **RS256** JWT with an `at+jwt` header
         (RFC 9068) whose `kid` matches the key published at `/oauth2/jwks`, so
@@ -278,13 +353,30 @@ paths:
         authorization request, or the `code_verifier` does not satisfy the stored
         S256 `code_challenge`.
 
+        For the **CIBA** grant the request carries `client_id` and the `auth_req_id`
+        from `POST /bc-authorize`. The authenticated client must match the one the
+        `auth_req_id` was issued to; the token's `aud` is the audience captured at
+        `/bc-authorize` and its `sub` is the simulator's synthetic resource owner
+        (`camarasim-user`). The `auth_req_id` is **single-use** (consumed when the
+        token is issued). While the end user has not authorized, the poll returns
+        the CIBA token-error set (OpenID CIBA Core §11), all HTTP 400:
+          - not yet authorized → `authorization_pending`
+          - end user rejected → `access_denied`
+          - `auth_req_id` expired → `expired_token`
+          - unknown `auth_req_id`, or one issued to a different client →
+            `invalid_grant`
+
+        (The functional case is selected by the `login_hint` at `/bc-authorize`.)
+
         Errors use the OAuth2 token-endpoint format (RFC 6749 §5.2) with
         `Cache-Control: no-store`:
           - missing `grant_type`, or a required parameter absent → `invalid_request` (400)
-          - unknown / not-yet-implemented `grant_type` → `unsupported_grant_type` (400)
+          - unknown / unsupported `grant_type` → `unsupported_grant_type` (400)
           - no client authentication → `invalid_client` (401)
-          - invalid / expired / reused / mismatched authorization code, or failed
-            PKCE verification → `invalid_grant` (400)
+          - invalid / expired / reused / mismatched authorization code, failed PKCE
+            verification, or an unknown/mismatched `auth_req_id` → `invalid_grant` (400)
+          - CIBA poll not yet complete → `authorization_pending` / `access_denied` /
+            `expired_token` (400)
       requestBody:
         required: true
         content:
@@ -406,9 +498,9 @@ components:
         grant_type:
           type: string
           description: |
-            The OAuth2 grant type. `client_credentials` and `authorization_code`
-            are implemented; the CIBA grant is advertised by discovery but returns
-            `unsupported_grant_type` for now.
+            The OAuth2 grant type. All three CAMARA grants are implemented:
+            `client_credentials`, `authorization_code`, and the CIBA poll
+            (`urn:openid:params:grant-type:ciba`).
           enum:
             - client_credentials
             - authorization_code
@@ -447,6 +539,63 @@ components:
             The PKCE code verifier (`authorization_code` grant, RFC 7636). Must
             satisfy the stored S256 `code_challenge`
             (`base64url(SHA-256(code_verifier)) == code_challenge`).
+        auth_req_id:
+          type: string
+          description: |
+            The backchannel authentication request id from `POST /bc-authorize`
+            (CIBA grant). Required for `urn:openid:params:grant-type:ciba`; the
+            authenticated `client_id` must match the one it was issued to.
+    BackchannelAuthenticationRequest:
+      type: object
+      description: |
+        A CIBA `POST /bc-authorize` request (OpenID CIBA Core §7.1), sent as
+        `application/x-www-form-urlencoded`.
+      required:
+        - login_hint
+        - scope
+      properties:
+        login_hint:
+          type: string
+          description: |
+            Identifies the end user to authenticate (CAMARA uses a `tel:` URI,
+            e.g. `tel:+34600000000`). In the simulator it **also selects the
+            functional case** (docs/DESIGN.md §7): a hint containing `pending`
+            stays `authorization_pending`, one containing `denied` yields
+            `access_denied`, and any other hint is approved immediately.
+        scope:
+          type: string
+          description: |
+            Space-delimited requested scopes (e.g. a CAMARA purpose scope). Copied
+            verbatim into the issued token. Required.
+        client_id:
+          type: string
+          description: |
+            Client identifier for `client_secret_post` authentication. May instead
+            be supplied via HTTP Basic (`client_secret_basic`). Any secret is
+            accepted by the simulator.
+        client_secret:
+          type: string
+          description: Client secret. Accepted but not validated by the simulator.
+    BackchannelAuthenticationResponse:
+      type: object
+      description: |
+        A CIBA `POST /bc-authorize` success response (OpenID CIBA Core §7.3).
+      required:
+        - auth_req_id
+        - expires_in
+        - interval
+      properties:
+        auth_req_id:
+          type: string
+          description: |
+            Opaque, single-use handle for the authorization request. The client
+            polls `POST /oauth2/token` with it until a token is issued.
+        expires_in:
+          type: integer
+          description: Seconds the `auth_req_id` is valid for (120).
+        interval:
+          type: integer
+          description: Minimum seconds to wait between token polls (5).
     TokenResponse:
       type: object
       required:
@@ -470,9 +619,11 @@ components:
       type: object
       description: |
         OAuth2 error (RFC 6749 §5.2 / §4.1.2.1). Returned as a JSON body by the
-        token endpoint and by the authorize endpoint's non-redirectable errors;
-        the authorize endpoint's redirectable errors use the same `error` codes as
-        query parameters on the `Location` redirect.
+        token, `/bc-authorize`, and authorize (non-redirectable) endpoints; the
+        authorize endpoint's redirectable errors use the same `error` codes as
+        query parameters on the `Location` redirect. The CIBA poll additionally
+        uses the OpenID CIBA Core §11 token-error codes (`authorization_pending`,
+        `access_denied`, `expired_token`).
       required:
         - error
       properties:
@@ -486,6 +637,9 @@ components:
             - unsupported_grant_type
             - unsupported_response_type
             - invalid_scope
+            - authorization_pending
+            - access_denied
+            - expired_token
         error_description:
           type: string
     JwkSet:
