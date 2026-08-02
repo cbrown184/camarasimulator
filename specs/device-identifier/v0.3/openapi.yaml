@@ -1,0 +1,283 @@
+# CamaraSim — Device Identifier, API version v0.3 (CAMARA 0.3.0, release r2.2).
+#
+# Vendored from the CAMARA Device Identifier API (device-identifier 0.3.0, the
+# API version carried by the latest public release r2.2) and annotated with
+# CamaraSim's parameter-driven functional cases (docs/DESIGN.md §7, §9). Backed
+# by `src/apis/device_identifier/v0_3.rs`; spec and code must not drift.
+#
+# Device Identifier has never reached 1.0.0, so — mirroring the KYC Match v0.3
+# decision (DESIGN §9) — it is mounted under its real published version rather
+# than a loose "v1".
+#
+# The full API defines POST /retrieve-identifier, /retrieve-type and
+# /retrieve-ppid. CamaraSim implements them incrementally; this spec currently
+# serves `POST /retrieve-type` (the other operations are not yet mounted, so the
+# served spec matches the code).
+openapi: 3.0.3
+info:
+  title: Device Identifier
+  description: |
+    Obtains details about the physical device a mobile subscription is attached
+    to. This CamaraSim reference double serves the device *type* operation:
+    `POST /retrieve-type` returns the device's manufacturer, model and Type
+    Allocation Code (TAC), without exposing a full device identifier.
+
+    The device can be identified either by the `device` object in the request
+    body (two-legged / CIBA) or by the identity a three-legged access token
+    authenticated (in which case `device` is omitted). The endpoint requires the
+    `device-identifier:retrieve-type` scope.
+
+    ## Functional cases — the input is the control plane (docs/DESIGN.md §7)
+
+    The identifier is the submitted device identifier (`phoneNumber`, else
+    `networkAccessIdentifier`, else the IPv4 `publicAddress`, else `ipv6Address`),
+    or — when no `device` is supplied — the access token's subject (`sub`). The
+    result is chosen deterministically from that identifier's trailing three
+    digits:
+
+    - **Reserved error suffix** — if the identifier's trailing three digits name
+      a reserved CAMARA status, the endpoint answers with that canonical CAMARA
+      error instead of a result (shared convention — see the referenced
+      `errors.yaml`): `…400`, `…401`, `…403`, `…404`, `…409`, `…422`, `…429`,
+      `…500`, `…503`.
+    - **any other tail** (including `…000` and an identifier with no trailing
+      digits, such as the synthetic subject) — the endpoint returns a device
+      type chosen from the trailing three digits over a fixed 6-entry table
+      (`DEVICE_TYPES[digits % 6]`; `…000`/none → the default entry), so the
+      reported device model is itself a control plane.
+
+    Examples: `+123456789001` → OnePlus 12; `+123456789002` → Google Pixel 8 Pro;
+    `+123456789000` → the default (Apple iPhone 15 Pro); `+123456789404` →
+    `404 NOT_FOUND`.
+  version: "0.3.0"
+  license:
+    name: Apache-2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0.html
+
+servers:
+  - url: "{apiRoot}/device-identifier/v0.3"
+    variables:
+      apiRoot:
+        default: http://localhost:8080
+        description: API root, e.g. the CamaraSim base URL.
+
+paths:
+  /retrieve-type:
+    post:
+      operationId: retrieveType
+      summary: Retrieve the type of a device
+      description: |
+        Returns the device's `manufacturer`, `model` and `tac` (Type Allocation
+        Code), plus the `lastChecked` timestamp, echoing back the `device`
+        identifier that was used. Supply a `device`, or omit it to use the device
+        identified by a three-legged access token.
+
+        See the API description for the parameter-driven functional cases.
+      security:
+        - openId:
+            - device-identifier:retrieve-type
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RequestBody"
+      responses:
+        "200":
+          description: The device's type.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TypeResponse"
+              examples:
+                type:
+                  summary: Device type for a non-error identifier
+                  value:
+                    lastChecked: "2024-01-01T14:27:08Z"
+                    tac: "35847104"
+                    manufacturer: OnePlus
+                    model: OnePlus 12
+                    device:
+                      phoneNumber: "+123456789001"
+        "400":
+          $ref: "../../shared/errors.yaml#/components/responses/InvalidArgument"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "409":
+          $ref: "../../shared/errors.yaml#/components/responses/Conflict"
+        "422":
+          $ref: "../../shared/errors.yaml#/components/responses/ServiceNotApplicable"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          Result selected from the identifier (the first present device
+          identifier, else the access token subject) whose trailing three digits
+          drive the case (docs/DESIGN.md §7). Reserved error suffixes come from
+          the shared convention in errors.yaml. Otherwise the reported device
+          type is DEVICE_TYPES[digits % 6] over the fixed table
+          [(35692005,Apple,iPhone 15 Pro),(35847104,OnePlus,OnePlus 12),
+          (35438509,Google,Pixel 8 Pro),(86234502,Xiaomi,Redmi Note 13),
+          (35315106,Samsung,Galaxy S24 Ultra),(35201607,Motorola,Edge 50)], with
+          …000 / no trailing digits falling to the default (Apple) entry, so the
+          model is a second control plane. Note: canonical Device Identifier
+          0.3.0 declares 400/401/403/404/422/429 on this operation (with codes
+          IDENTIFIER_NOT_FOUND / MISSING_IDENTIFIER / etc.); CamaraSim exposes
+          the full shared error set so every reserved suffix is reachable
+          (reserved suffixes use the generic Commonalities codes, and 409/500/503
+          are CamaraSim extensions). `lastChecked` is the current time. A supplied
+          `device` is used as-is; CamaraSim does not model the three-legged
+          IDENTIFIER_MISMATCH / UNNECESSARY_IDENTIFIER 422 sub-cases.
+        cases:
+          - input: identifier ending in a reserved error suffix (e.g. …404)
+            result: the canonical CAMARA error for that status
+          - input: "identifier ending in …000, or with no trailing digits"
+            result: "200 default type (Apple iPhone 15 Pro)"
+          - input: "identifier with any other numeric tail (e.g. …001)"
+            result: '200 { tac, manufacturer, model } from DEVICE_TYPES[digits % 6]'
+          - input: "`device` present but carrying no identifier"
+            result: "400 INVALID_ARGUMENT"
+          - input: no `device` and no token subject
+            result: "422 MISSING_IDENTIFIER"
+
+components:
+  securitySchemes:
+    openId:
+      $ref: "../../auth/openapi.yaml#/components/securitySchemes/camaraOAuth"
+
+  parameters:
+    XCorrelator:
+      name: x-correlator
+      in: header
+      required: false
+      description: Correlation id for the request, echoed back on the response.
+      schema:
+        type: string
+
+  headers:
+    XCorrelator:
+      description: The `x-correlator` from the request, echoed if one was sent.
+      required: false
+      schema:
+        type: string
+
+  schemas:
+    RequestBody:
+      type: object
+      description: Request to retrieve information about a device.
+      properties:
+        device:
+          $ref: "#/components/schemas/Device"
+
+    Device:
+      type: object
+      description: >-
+        Identifies the device. At least one identifier must be present. Optional
+        at the request level: omit `device` to use the device identified by a
+        three-legged access token. CamaraSim keys its functional cases off the
+        first present identifier, in the order phoneNumber → networkAccessIdentifier
+        → ipv4Address.publicAddress → ipv6Address.
+      minProperties: 1
+      properties:
+        phoneNumber:
+          type: string
+          description: A phone number in E.164 format (starting with `+`).
+          pattern: '^\+[1-9][0-9]{4,14}$'
+          example: "+123456789012"
+        networkAccessIdentifier:
+          type: string
+          description: A network access identifier assigned by the operator.
+          example: "user012@example.com"
+        ipv4Address:
+          $ref: "#/components/schemas/DeviceIpv4Addr"
+        ipv6Address:
+          type: string
+          description: The device's IPv6 address.
+          example: "2001:db8::11"
+
+    DeviceIpv4Addr:
+      type: object
+      description: >-
+        The device's IPv4 address information. CamaraSim reads `publicAddress` as
+        the identifier; `privateAddress`/`publicPort` are accepted for fidelity.
+      properties:
+        publicAddress:
+          type: string
+          example: "203.0.113.12"
+        privateAddress:
+          type: string
+          example: "192.0.2.25"
+        publicPort:
+          type: integer
+          format: int32
+          minimum: 0
+          maximum: 65535
+          example: 59765
+
+    DeviceResponse:
+      type: object
+      description: >-
+        The single device identifier that was used to identify the device, echoed
+        back on the response (`maxProperties: 1`). CamaraSim echoes a supplied
+        identifier as-is; for a three-legged token it echoes the subject as a
+        `phoneNumber` when the subject is E.164, and otherwise omits `device`.
+      maxProperties: 1
+      properties:
+        phoneNumber:
+          type: string
+          pattern: '^\+[1-9][0-9]{4,14}$'
+          example: "+123456789001"
+        networkAccessIdentifier:
+          type: string
+          example: "user001@example.com"
+        ipv4Address:
+          $ref: "#/components/schemas/DeviceIpv4Addr"
+        ipv6Address:
+          type: string
+          example: "2001:db8::11"
+
+    TypeResponse:
+      type: object
+      description: The device's type (manufacturer / model / TAC).
+      required:
+        - lastChecked
+        - tac
+      properties:
+        device:
+          $ref: "#/components/schemas/DeviceResponse"
+        lastChecked:
+          type: string
+          format: date-time
+          description: >-
+            Date and time the information was last confirmed correct by the
+            operator (RFC 3339, UTC). CamaraSim returns the current time.
+          example: "2024-01-01T14:27:08Z"
+        tac:
+          type: string
+          description: The device's Type Allocation Code (first 8 digits of the IMEI).
+          pattern: '^[0-9]{8}$'
+          maxLength: 8
+          example: "35847104"
+        manufacturer:
+          type: string
+          description: The device manufacturer.
+          maxLength: 32
+          example: OnePlus
+        model:
+          type: string
+          description: The device model.
+          maxLength: 32
+          example: OnePlus 12

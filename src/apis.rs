@@ -11,7 +11,9 @@
 //! - **KYC Match v0.3** — `/kyc-match/v0.3/…`.
 //! - **Device Reachability Status v1** — `/device-reachability-status/v1/…`.
 //! - **Device Roaming Status v1** — `/device-roaming-status/v1/…`.
+//! - **Device Identifier v0.3** — `/device-identifier/v0.3/…`.
 
+pub mod device_identifier;
 pub mod device_reachability_status;
 pub mod device_roaming_status;
 pub mod kyc_match;
@@ -28,4 +30,5 @@ pub fn routes() -> Router {
         .merge(kyc_match::routes())
         .merge(device_reachability_status::routes())
         .merge(device_roaming_status::routes())
+        .merge(device_identifier::routes())
 }

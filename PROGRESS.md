@@ -108,7 +108,19 @@ no-digit subject) → `{roaming:false}` (home network); any other numeric tail �
 `{roaming:true, countryCode, countryName}`, where the visited country is a fixed
 6-entry MCC/ISO-3166 table indexed by `digits % 6`, making the country a second
 control plane. `x-correlator` echoed on every response.
-**Next up:** Device Identifier.
+
+**Device Identifier v0.3** has begun. `POST /retrieve-type` is live at
+`/device-identifier/v0.3/retrieve-type` (scope `device-identifier:retrieve-type`,
+operationId `retrieveType`). Mounted under the API's real published version
+(CAMARA 0.3.0, release r2.2 — it has never reached 1.0.0), mirroring KYC Match's
+`v0.3`. Same identifier resolution as the device-status APIs (submitted `device`
+id, else token subject). Reserved error suffix → canonical CAMARA error;
+otherwise the identifier's trailing three digits pick a device type from a fixed
+6-entry `(TAC, manufacturer, model)` table (`digits % 6`; `…000`/no-digits →
+default Apple entry), so the reported model is a second control plane. The
+response echoes the `device` identifier used (single-property `DeviceResponse`)
+and a current `lastChecked`. `x-correlator` echoed on every response.
+**Next up:** Device Identifier `POST /retrieve-identifier` / `/retrieve-ppid`.
 
 ## In progress (claimed this pass)
 
@@ -138,7 +150,10 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 - [~] Device Status — reachability, roaming (canonical split, DESIGN §9):
   - [x] Device Reachability Status v1 — `POST /retrieve` (`/device-reachability-status/v1`)
   - [x] Device Roaming Status v1 — `POST /retrieve` (`/device-roaming-status/v1`; CAMARA 1.0.0)
-- [ ] Device Identifier
+- [~] Device Identifier v0.3 (`/device-identifier/v0.3`; CAMARA 0.3.0, release r2.2):
+  - [x] `POST /retrieve-type` (`device-identifier:retrieve-type`)
+  - [ ] `POST /retrieve-identifier` (`device-identifier:retrieve-identifier`)
+  - [ ] `POST /retrieve-ppid` (`device-identifier:retrieve-ppid`)
 
 ### Phase 3 — Stateful, non-spatial
 - [ ] One-Time-Password SMS — `POST /send-code`, `POST /validate-code` (in-memory store)
@@ -165,6 +180,36 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-02 — Phase 2 (Device Identifier begun): Device Identifier v0.3 — `POST /retrieve-type`
+  (CAMARA Device Identifier 0.3.0, the API version carried by the latest public release r2.2;
+  never reached 1.0.0, so mounted under real `v0.3` like KYC Match — DESIGN §9). New
+  `src/apis/device_identifier/{,v0_3}.rs` mounted at `/device-identifier/v0.3/retrieve-type`,
+  merged into the app router; `/` catalog now lists device-identifier v0.3. Protected by the
+  `Claims` extractor (scope `device-identifier:retrieve-type`, operationId `retrieveType`,
+  confirmed against the r2.2 upstream spec). Body `RequestBody{device?}` parsed as `Bytes` with
+  `deny_unknown_fields` (nested `Device`/`DeviceIpv4Addr` too) → precise `INVALID_ARGUMENT`;
+  empty body allowed. Identifier resolution mirrors the device-status APIs (first present device
+  id [phoneNumber E.164-validated, else NAI, else IPv4 publicAddress, else ipv6Address], else
+  token subject → 422 MISSING_IDENTIFIER; empty `device{}` → 400). Functional cases (§7) from the
+  identifier's trailing three digits: reserved suffix → canonical CAMARA error; otherwise the
+  reported device type = `DEVICE_TYPES[digits % 6]` over a fixed 6-entry `(TAC, manufacturer,
+  model)` table [(35692005,Apple,iPhone 15 Pro),(35847104,OnePlus,OnePlus 12),(35438509,Google,
+  Pixel 8 Pro),(86234502,Xiaomi,Redmi Note 13),(35315106,Samsung,Galaxy S24 Ultra),(35201607,
+  Motorola,Edge 50)] with `…000`/no-digits → default (Apple), so the model is a second control
+  plane; every TAC is 8 digits (CAMARA `^[0-9]{8}$`). Response carries `lastChecked` (current
+  time, RFC 3339 UTC via a self-contained `rfc3339_utc`/`civil_from_days` like sim_swap — no
+  date/time dep), `tac`/`manufacturer`/`model`, and echoes the `device` identifier used as a
+  single-property `DeviceResponse` (subject echoed as phoneNumber only when E.164). `x-correlator`
+  echoed on all responses. No new deps. Spec: new `specs/device-identifier/v0.3/openapi.yaml` —
+  vendored 0.3.0 `POST /retrieve-type` + `RequestBody`/`Device`/`DeviceIpv4Addr`/`DeviceResponse`/
+  `TypeResponse` schemas, `$ref`-ing shared `errors.yaml` + auth `camaraOAuth`, with
+  `x-camarasim-scenarios` documenting the cases (full shared error set exposed, noted vs canonical
+  400/401/403/404/422/429; reserved suffixes use generic Commonalities codes; 409/500/503 are
+  CamaraSim extensions; retrieve-identifier/retrieve-ppid deferred so served spec matches code).
+  222 tests green (was 204; +18: 4 units [device-type/TAC-pattern/E.164/rfc3339] + 14 integration
+  covering type/different-type/default-tail/reserved-error/non-phone-ids-echoed/bad-phone/
+  empty-device/unknown-field/subject-fallback/subject-reserved-error/non-numeric-subject-no-echo/
+  scope/auth/x-correlator). — binary: 1022K (1046184 B; +11128 B)
 - 2026-08-02 — Phase 2: Device Roaming Status v1 — `POST /retrieve` (CAMARA Device Roaming
   Status 1.0.0), the "roaming" half of the Spring25 Device Status split. New
   `src/apis/device_roaming_status/{,v1}.rs` mounted at `/device-roaming-status/v1/retrieve`,
