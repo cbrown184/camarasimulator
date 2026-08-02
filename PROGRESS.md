@@ -21,7 +21,7 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 ## Backlog (work top-down; respect phases — see docs/DESIGN.md §12)
 
 ### Phase 0 — Auth foundation
-- [ ] `GET /.well-known/openid-configuration` (discovery) + served metadata
+- [x] `GET /.well-known/openid-configuration` (discovery) + served metadata
 - [ ] `GET /oauth2/jwks` (JWKS) + signing key management
 - [ ] `POST /oauth2/token` — `client_credentials` grant (signed JWT, scopes, expiry)
 - [ ] Token verification middleware for protected routes (audience/scope/expiry)
@@ -63,5 +63,10 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-02 — Phase 0: implemented `GET /.well-known/openid-configuration` (OIDC discovery).
+  New `src/auth/` module; base URL from `CAMARASIM_ISSUER` env or `X-Forwarded-Proto`+`Host`.
+  Advertises all 3 CAMARA grants (client_credentials/authorization_code/CIBA), RS256, S256 PKCE,
+  CIBA poll. Authored `specs/auth/openapi.yaml`. Catalog now links the discovery doc. 10 tests
+  green, no new deps. — binary: 704K (720856 B)
 - 2026-08-02 — Repo bootstrapped: docs (DESIGN/AGENT), PROGRESS, axum skeleton (`/health`, `/`),
   size-tuned release profile, first test. Ready for Phase 0.

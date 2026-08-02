@@ -4,6 +4,8 @@
 //! API catalog. CAMARA APIs, auth, and versioning are added incrementally by the
 //! autonomous build agent — see docs/DESIGN.md and PROGRESS.md.
 
+mod auth;
+
 use axum::{routing::get, Json, Router};
 use serde_json::{json, Value};
 
@@ -13,6 +15,7 @@ fn app() -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/", get(catalog))
+        .merge(auth::routes())
 }
 
 /// Liveness probe.
@@ -27,6 +30,10 @@ async fn catalog() -> Json<Value> {
         "service": "camarasimulator",
         "version": env!("CARGO_PKG_VERSION"),
         "apis": [],
+        "authorization_servers": [{
+            "issuer": "/",
+            "openid_configuration": "/.well-known/openid-configuration",
+        }],
     }))
 }
 
@@ -78,5 +85,24 @@ mod tests {
 
         assert_eq!(body["service"], "camarasimulator");
         assert_eq!(body["apis"].as_array().unwrap().len(), 0);
+        assert_eq!(
+            body["authorization_servers"][0]["openid_configuration"],
+            "/.well-known/openid-configuration"
+        );
+    }
+
+    #[tokio::test]
+    async fn discovery_is_reachable_through_the_app() {
+        let response = app()
+            .oneshot(
+                Request::builder()
+                    .uri("/.well-known/openid-configuration")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
     }
 }
