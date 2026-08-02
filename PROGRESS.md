@@ -85,8 +85,20 @@ verdict chosen from each attribute's own value (`unavailable`→not_available,
 `nomatch`→false, else true). At least one non-`phoneNumber` attribute is
 required → 400 `KNOW_YOUR_CUSTOMER.INVALID_PARAM_COMBINATION`.
 
-This completes Phase 1 (stateless, non-spatial). **Next up:** Phase 2 — Device
-Status (reachability / roaming).
+This completes Phase 1 (stateless, non-spatial).
+
+**Phase 2 has begun.** The former combined CAMARA *Device Status* API was split
+(Spring25) into separate **Device Reachability Status** and **Device Roaming
+Status** APIs, so — like KYC Match's `v0.3` — CamaraSim mounts the real published
+APIs rather than a loose "device-status v1". **Device Reachability Status v1**
+`POST /retrieve` is live at `/device-reachability-status/v1/retrieve` (scope
+`device-reachability-status:read`, operationId `getReachabilityStatus`): the
+identifier is the submitted `device` (phoneNumber, else networkAccessIdentifier,
+else the IPv4 `publicAddress`, else ipv6Address) or — when omitted — the token
+subject. Reserved error suffix → canonical CAMARA error; `…000` → not reachable
+(empty `connectivity`); odd trailing digits → reachable over SMS only; anything
+else → reachable over `["DATA","SMS"]`. `x-correlator` echoed on every response.
+**Next up:** Device Roaming Status (the "roaming" half), then Device Identifier.
 
 ## In progress (claimed this pass)
 
@@ -113,7 +125,9 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 - [x] KYC Match v0.3 — `POST /match` (mounted `/kyc-match/v0.3`; CAMARA 0.3.0)
 
 ### Phase 2 — Stateless device queries
-- [ ] Device Status — reachability, roaming
+- [~] Device Status — reachability, roaming (canonical split, DESIGN §9):
+  - [x] Device Reachability Status v1 — `POST /retrieve` (`/device-reachability-status/v1`)
+  - [ ] Device Roaming Status — `POST /retrieve`
 - [ ] Device Identifier
 
 ### Phase 3 — Stateful, non-spatial
@@ -141,6 +155,33 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-02 — Phase 2 (begun): Device Reachability Status v1 — `POST /retrieve` (CAMARA
+  Device Reachability Status 1.0.0). The former combined *Device Status* API was split in
+  Spring25 into Device Reachability Status + Device Roaming Status, so — like KYC Match's
+  `v0.3` — mounted under the real published API/version rather than a loose "device-status v1"
+  (DESIGN §9). New `src/apis/device_reachability_status/{,v1}.rs` mounted at
+  `/device-reachability-status/v1/retrieve`, merged into the app router; `/` catalog now lists
+  device-reachability-status v1. Protected by the `Claims` extractor (scope
+  `device-reachability-status:read`, operationId `getReachabilityStatus`, confirmed against the
+  1.0.0 upstream spec). Body `RequestReachabilityStatus{device?}` parsed as `Bytes` with
+  `deny_unknown_fields` (nested `Device`/`DeviceIpv4Addr` too) → precise `INVALID_ARGUMENT` on
+  malformed/unknown-field input; empty body allowed (device optional). Identifier = first present
+  device id (phoneNumber [E.164-validated], else networkAccessIdentifier, else IPv4 publicAddress,
+  else ipv6Address) or, when no device, the token subject (three-legged fallback → 422
+  MISSING_IDENTIFIER if absent); empty `device{}` → 400. Functional cases (§7) from the
+  identifier's trailing three digits: reserved suffix → canonical CAMARA error; `…000` →
+  `{reachable:false, connectivity:[]}`; odd → `{reachable:true, connectivity:["SMS"]}`; else →
+  `{reachable:true, connectivity:["DATA","SMS"]}` (happy-path default, incl. no-digit subject).
+  `x-correlator` echoed on all responses. No new deps (reuses shared `scenarios`/`errors`, local
+  E.164 validator like NV/SIM-Swap). Spec: new `specs/device-reachability-status/v1/openapi.yaml`
+  — vendored 1.0.0 `POST /retrieve` + `RequestReachabilityStatus`/`Device`/`DeviceIpv4Addr`/
+  `ReachabilityStatusResponse` schemas, `$ref`-ing shared `errors.yaml` + auth `camaraOAuth`, with
+  `x-camarasim-scenarios` documenting the cases (full shared error set exposed, noted vs canonical
+  400/401/403/404/422/429/503; three-legged IDENTIFIER_MISMATCH/UNNECESSARY_IDENTIFIER not
+  modelled). 187 tests green (was 170; +17: 3 units [reachability/E.164/device-precedence] + 14
+  integration covering data+SMS/SMS-only/not-reachable/reserved-error/non-phone-ids/bad-phone/
+  empty-device/unknown-field/subject-fallback/subject-reserved-error/non-numeric-subject/scope/
+  auth/x-correlator). — binary: 1004K (1027752 B; +14936 B)
 - 2026-08-02 — Phase 1 (complete): KYC Match — `POST /match` (CAMARA Know Your Customer Match
   0.3.0). New `src/apis/kyc_match/{,v0_3}.rs` mounted at `/kyc-match/v0.3/match`, merged into the
   app router; `/` catalog now lists kyc-match v0.3. Mounted under the API's real published version

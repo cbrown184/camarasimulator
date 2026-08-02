@@ -9,7 +9,9 @@
 //! - **Number Verification v1** — `/number-verification/v1/…`.
 //! - **SIM Swap v2** — `/sim-swap/v2/…`.
 //! - **KYC Match v0.3** — `/kyc-match/v0.3/…`.
+//! - **Device Reachability Status v1** — `/device-reachability-status/v1/…`.
 
+pub mod device_reachability_status;
 pub mod kyc_match;
 pub mod number_verification;
 pub mod sim_swap;
@@ -22,4 +24,5 @@ pub fn routes() -> Router {
         .merge(number_verification::routes())
         .merge(sim_swap::routes())
         .merge(kyc_match::routes())
+        .merge(device_reachability_status::routes())
 }
