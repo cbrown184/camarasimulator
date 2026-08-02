@@ -54,7 +54,7 @@ all of them at once:
 curl -s -X POST localhost:8080/oauth2/token \
   -d grant_type=client_credentials \
   -d client_id=demo \
-  --data-urlencode 'scope=number-verification:verify number-verification:device-phone-number:read sim-swap:check sim-swap:retrieve-date kyc-match:match device-reachability-status:read device-roaming-status:read device-identifier:retrieve-type device-identifier:retrieve-identifier device-identifier:retrieve-ppid one-time-password-sms:send-validate'
+  --data-urlencode 'scope=number-verification:verify number-verification:device-phone-number:read sim-swap:check sim-swap:retrieve-date kyc-match:match device-reachability-status:read device-roaming-status:read device-identifier:retrieve-type device-identifier:retrieve-identifier device-identifier:retrieve-ppid one-time-password-sms:send-validate quality-on-demand:sessions:create quality-on-demand:sessions:read'
 ```
 
 Response — copy the `access_token` into the calls below (shown as `<access_token>`):
@@ -78,6 +78,8 @@ Response — copy the `access_token` into the calls below (shown as `<access_tok
 | `device-identifier:retrieve-identifier` | `POST /device-identifier/v0.3/retrieve-identifier` |
 | `device-identifier:retrieve-ppid` | `POST /device-identifier/v0.3/retrieve-ppid` |
 | `one-time-password-sms:send-validate` | `POST /one-time-password-sms/v1/{send-code,validate-code}` |
+| `quality-on-demand:sessions:create` | `POST /quality-on-demand/v1/sessions` |
+| `quality-on-demand:sessions:read` | `GET /quality-on-demand/v1/sessions/{sessionId}` |
 
 ### Number Verification v1
 
@@ -183,6 +185,25 @@ curl -s -X POST localhost:8080/one-time-password-sms/v1/validate-code \
   -H 'Authorization: Bearer <access_token>' \
   -H 'Content-Type: application/json' \
   -d '{"authenticationId":"<authenticationId>","code":"789012"}'
+```
+
+### Quality on Demand v1
+
+A stateful, resource-oriented API: create a QoS session, then read it back by its
+`sessionId`. The identifier's trailing digits pick the case — `…000` grants a
+`REQUESTED` (pending) session, any other tail an `AVAILABLE` one, and a reserved
+suffix (e.g. `…409`) the matching CAMARA error.
+
+```bash
+# Create a session -> 201 {"sessionId":"…","qosStatus":"AVAILABLE",…}
+curl -s -X POST localhost:8080/quality-on-demand/v1/sessions \
+  -H 'Authorization: Bearer <access_token>' \
+  -H 'Content-Type: application/json' \
+  -d '{"device":{"phoneNumber":"+123456789012"},"applicationServer":{"ipv4Address":"203.0.113.0/24"},"qosProfile":"QOS_L","duration":3600}'
+
+# Read it back by id (from the create response) -> 200 SessionInfo
+curl -s localhost:8080/quality-on-demand/v1/sessions/<sessionId> \
+  -H 'Authorization: Bearer <access_token>'
 ```
 
 ## Project layout
