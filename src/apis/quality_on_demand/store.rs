@@ -54,6 +54,16 @@ pub fn get(id: &str) -> Option<Value> {
         .cloned()
 }
 
+/// Remove the session stored under `id`, returning its `SessionInfo` if one was
+/// present, or `None` if no such session existed. `deleteSession` uses the
+/// distinction to answer `204` (a session was deleted) vs `404` (unknown id).
+pub fn remove(id: &str) -> Option<Value> {
+    store()
+        .lock()
+        .expect("qod session store not poisoned")
+        .remove(id)
+}
+
 /// Mint a fresh, opaque, UUID-shaped `sessionId`.
 ///
 /// The 16 bytes come from `SHA-256(counter ‖ now)` — the monotonic counter alone
@@ -115,5 +125,18 @@ mod tests {
         insert(id.clone(), info.clone());
         assert_eq!(get(&id), Some(info));
         assert!(get("no-such-session").is_none());
+    }
+
+    #[test]
+    fn remove_returns_the_session_once_then_none() {
+        let id = new_session_id();
+        assert!(remove(&id).is_none(), "not stored yet → None");
+        let info = json!({ "sessionId": id, "qosStatus": "AVAILABLE" });
+        insert(id.clone(), info.clone());
+        // First remove yields the stored session and evicts it…
+        assert_eq!(remove(&id), Some(info));
+        // …a second remove finds nothing (single-use delete), and get agrees.
+        assert!(remove(&id).is_none());
+        assert!(get(&id).is_none());
     }
 }

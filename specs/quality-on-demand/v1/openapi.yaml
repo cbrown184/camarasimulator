@@ -6,8 +6,8 @@
 # `src/apis/quality_on_demand/v1.rs` and its in-memory session store; spec and
 # code must not drift.
 #
-# This first slice serves `POST /sessions` and `GET /sessions/{sessionId}`.
-# `DELETE /sessions/{sessionId}`, `POST /sessions/{sessionId}/extend`,
+# This slice serves `POST /sessions`, `GET /sessions/{sessionId}`, and
+# `DELETE /sessions/{sessionId}`. `POST /sessions/{sessionId}/extend`,
 # `POST /retrieve-sessions`, and the CloudEvents notifications on `sink` are
 # deferred to later passes; the served spec covers only what is implemented.
 openapi: 3.0.3
@@ -49,7 +49,9 @@ info:
       name is accepted.
 
     `getSession` returns the stored `SessionInfo` (`200`), or `404 NOT_FOUND`
-    when no session exists for the id.
+    when no session exists for the id. `deleteSession` evicts the session and
+    returns `204 No Content`, or `404 NOT_FOUND` for an unknown id; it emits no
+    CloudEvents `DELETE_REQUESTED` notification (notifications are deferred).
   version: "1.1.0"
   license:
     name: Apache-2.0
@@ -262,6 +264,53 @@ paths:
           - input: a sessionId returned by a prior createSession
             result: "200 SessionInfo (the stored representation)"
           - input: an unknown sessionId
+            result: "404 NOT_FOUND"
+    delete:
+      operationId: deleteSession
+      summary: Delete a QoS session
+      description: |
+        Deletes the session identified by `sessionId`, releasing its QoS grant,
+        and returns `204 No Content`. `404 NOT_FOUND` if no such session exists
+        (never created, or already deleted). CamaraSim emits no CloudEvents
+        `DELETE_REQUESTED` notification — notifications are deferred.
+      security:
+        - openId:
+            - quality-on-demand:sessions:delete
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+        - name: sessionId
+          in: path
+          required: true
+          description: The `sessionId` returned by `createSession`.
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "204":
+          description: The session was deleted. No response body.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          Keyed on the `sessionId` path parameter against the in-memory store:
+          delete is single-use, so a second delete of the same id is 404.
+        cases:
+          - input: a sessionId of a session that currently exists
+            result: "204 No Content (the session is evicted)"
+          - input: an unknown or already-deleted sessionId
             result: "404 NOT_FOUND"
 
 components:

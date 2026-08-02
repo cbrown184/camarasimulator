@@ -171,8 +171,12 @@ error (so `…409` drives the QoD 409 CONFLICT), else tail `…000`/no-digits �
 (startedAt=now, expiresAt=now+duration); `duration` — `<1`→400 INVALID_ARGUMENT,
 `>86400`→400 `QUALITY_ON_DEMAND.DURATION_OUT_OF_RANGE`; `qosProfile` — a name
 containing `unavailable`→422 `QUALITY_ON_DEMAND.QOS_PROFILE_NOT_APPLICABLE`.
-`x-correlator` echoed on every response. DELETE/extend/retrieve-sessions and
-CloudEvents notifications are deferred.
+`x-correlator` echoed on every response. `DELETE /sessions/{sessionId}`
+(`quality-on-demand:sessions:delete`, `deleteSession`) is now live too: keyed
+only on the store state, it evicts an existing session → `204 No Content`
+(single-use) or returns `404 NOT_FOUND` for an unknown/already-deleted id; no
+`DELETE_REQUESTED` CloudEvent is emitted (notifications deferred). extend/
+retrieve-sessions and CloudEvents notifications are still deferred.
 
 ## In progress (claimed this pass)
 
@@ -214,7 +218,7 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   (`/quality-on-demand/v1`; CAMARA 1.1.0, r3.2; in-memory session store):
   - [x] `POST /sessions` (`quality-on-demand:sessions:create`, `createSession`)
   - [x] `GET /sessions/{sessionId}` (`quality-on-demand:sessions:read`, `getSession`)
-  - [ ] `DELETE /sessions/{sessionId}` (`quality-on-demand:sessions:delete`)
+  - [x] `DELETE /sessions/{sessionId}` (`quality-on-demand:sessions:delete`, `deleteSession`)
   - [ ] `POST /sessions/{sessionId}/extend` (`quality-on-demand:sessions:update`)
   - [ ] `POST /retrieve-sessions` (`quality-on-demand:sessions:retrieve-by-device`)
   - [ ] CloudEvents notifications on `sink` (qosStatus changes / expiry)
@@ -240,6 +244,27 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-02 — Phase 3: Quality on Demand v1 — `DELETE /sessions/{sessionId}`
+  (CAMARA quality-on-demand 1.1.0, r3.2), operationId `deleteSession`, scope
+  `quality-on-demand:sessions:delete` (confirmed against the r3.2 upstream spec).
+  Added the route (`get(get_session).delete(delete_session)` on the existing
+  `/sessions/:session_id`) + `delete_session` handler to
+  `src/apis/quality_on_demand/v1.rs`, and a `store::remove(id) -> Option<Value>`
+  to `store.rs`. Keyed only on the in-memory store state (no identifier control
+  plane — the path param is an opaque UUID): a session that exists is evicted →
+  `204 No Content` (empty body); an unknown or already-deleted id → `404
+  NOT_FOUND`; delete is single-use (second delete of the same id → 404).
+  `x-correlator` echoed on both the 204 and the 404. No CloudEvents
+  `DELETE_REQUESTED` notification (notifications still deferred). No new deps.
+  Spec: added the `delete` operation (operationId `deleteSession`) to the
+  `/sessions/{sessionId}` path in `specs/quality-on-demand/v1/openapi.yaml` —
+  204 (no body) + the shared 401/403/404/429/500/503 responses, `$ref`-ing
+  auth `camaraOAuth`, with `x-camarasim-scenarios` documenting the store-keyed
+  cases; header/description prose updated (DELETE no longer listed as deferred).
+  295 tests green (was 288; +7: 1 store unit [remove-once-then-none] + 6
+  integration covering create→delete→204+gone / single-use-second-404 /
+  unknown-404 / scope-isolation [read↮delete, delete↮read/create] / no-token-401
+  / x-correlator-on-204+404). — binary: 1108432 B (+3544 B)
 - 2026-08-02 — Phase 3: Quality on Demand v1 (begun) — `POST /sessions` **and**
   `GET /sessions/{sessionId}` (CAMARA quality-on-demand 1.1.0, release r3.2 — the
   latest stable; major v1, so mounted at `/quality-on-demand/v1`, confirmed against

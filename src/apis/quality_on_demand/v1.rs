@@ -6,16 +6,21 @@
 //!   `quality-on-demand:sessions:create`).
 //! - `GET /quality-on-demand/v1/sessions/{sessionId}` — read back a session by id
 //!   (operationId `getSession`, scope `quality-on-demand:sessions:read`).
+//! - `DELETE /quality-on-demand/v1/sessions/{sessionId}` — delete a session by id
+//!   (operationId `deleteSession`, scope `quality-on-demand:sessions:delete`).
 //!
-//! `DELETE`, `extend`, `retrieve-sessions`, and the CloudEvents notifications on
-//! `sink` are deferred to later passes (see `PROGRESS.md`); `sink`/`sinkCredential`
-//! are accepted for schema fidelity but no notification is emitted yet.
+//! `extend`, `retrieve-sessions`, and the CloudEvents notifications on `sink` are
+//! deferred to later passes (see `PROGRESS.md`); `sink`/`sinkCredential` are
+//! accepted for schema fidelity but no notification is emitted yet — so a
+//! `deleteSession` fires no `DELETE_REQUESTED` CloudEvent.
 //!
 //! ## What it does
 //!
 //! `createSession` mints an opaque, UUID-shaped `sessionId` ([`super::store`]),
 //! renders the `SessionInfo` for the request, remembers it, and returns `201`;
-//! `getSession` returns the stored `SessionInfo` (`200`) or `404 NOT_FOUND`.
+//! `getSession` returns the stored `SessionInfo` (`200`) or `404 NOT_FOUND`;
+//! `deleteSession` evicts the session from the store and returns `204 No Content`,
+//! or `404 NOT_FOUND` when no session exists for the id.
 //!
 //! ## Functional cases — the input is the control plane (docs/DESIGN.md §7)
 //!
@@ -59,6 +64,8 @@ use crate::scenarios;
 const CREATE_SCOPE: &str = "quality-on-demand:sessions:create";
 /// Scope required to read a session (CAMARA quality-on-demand 1.1.0).
 const READ_SCOPE: &str = "quality-on-demand:sessions:read";
+/// Scope required to delete a session (CAMARA quality-on-demand 1.1.0).
+const DELETE_SCOPE: &str = "quality-on-demand:sessions:delete";
 
 /// The simulator's fixed QoS-profile maximum duration, in seconds (24 h). A
 /// requested `duration` beyond this is out of range for the (single, simulated)
@@ -71,7 +78,7 @@ pub fn routes() -> Router {
         .route("/quality-on-demand/v1/sessions", post(create_session))
         .route(
             "/quality-on-demand/v1/sessions/:session_id",
-            get(get_session),
+            get(get_session).delete(delete_session),
         )
 }
 
@@ -252,6 +259,32 @@ async fn get_session(claims: Claims, headers: HeaderMap, Path(session_id): Path<
 
     match store::get(&session_id) {
         Some(info) => with_correlator((StatusCode::OK, Json(info)).into_response(), &correlator),
+        None => with_correlator(
+            CamaraError::not_found("No session found for the provided sessionId.").into_response(),
+            &correlator,
+        ),
+    }
+}
+
+/// `DELETE /quality-on-demand/v1/sessions/{sessionId}`.
+///
+/// Deletes the session, releasing its QoS grant. Keyed only on the stored state:
+/// a session that exists is evicted → `204 No Content`; an unknown (or already
+/// deleted) id → `404 NOT_FOUND`. No CloudEvents `DELETE_REQUESTED` notification
+/// is emitted — notifications are deferred (see the module docs).
+async fn delete_session(
+    claims: Claims,
+    headers: HeaderMap,
+    Path(session_id): Path<String>,
+) -> Response {
+    let correlator = headers.get("x-correlator").cloned();
+
+    if let Err(e) = claims.require_scope(DELETE_SCOPE) {
+        return with_correlator(e.into_response(), &correlator);
+    }
+
+    match store::remove(&session_id) {
+        Some(_) => with_correlator(StatusCode::NO_CONTENT.into_response(), &correlator),
         None => with_correlator(
             CamaraError::not_found("No session found for the provided sessionId.").into_response(),
             &correlator,
@@ -592,6 +625,16 @@ mod tests {
         request("GET", &path, token, None, correlator).await
     }
 
+    /// DELETE a session by id with an optional Bearer token and correlator.
+    async fn delete_session_req(
+        token: Option<&str>,
+        session_id: &str,
+        correlator: Option<&str>,
+    ) -> (StatusCode, HeaderMap, Value) {
+        let path = format!("{SESSIONS}/{session_id}");
+        request("DELETE", &path, token, None, correlator).await
+    }
+
     async fn request(
         method: &str,
         path: &str,
@@ -801,6 +844,103 @@ mod tests {
         let (status, _, body) = post_sessions(Some(&token), &b, None).await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(body["code"], "UNAVAILABLE");
+    }
+
+    #[tokio::test]
+    async fn create_then_delete_returns_204_and_the_session_is_gone() {
+        // Create a session…
+        let create = mint_token(CREATE_SCOPE).await;
+        let (status, _, created) =
+            post_sessions(Some(&create), &create_body("+123456789012", "QOS_L", 120), None).await;
+        assert_eq!(status, StatusCode::CREATED);
+        let id = created["sessionId"].as_str().unwrap().to_string();
+
+        // …delete it → 204 No Content, with an empty body.
+        let del = mint_token(DELETE_SCOPE).await;
+        let (status, _, body) = delete_session_req(Some(&del), &id, None).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(body, Value::Null);
+
+        // …and it is gone: a subsequent GET is 404.
+        let read = mint_token(READ_SCOPE).await;
+        let (status, _, body) = get_session_req(Some(&read), &id, None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn delete_is_single_use_second_delete_is_not_found() {
+        let create = mint_token(CREATE_SCOPE).await;
+        let (_, _, created) =
+            post_sessions(Some(&create), &create_body("+123456789012", "QOS_L", 60), None).await;
+        let id = created["sessionId"].as_str().unwrap().to_string();
+
+        let del = mint_token(DELETE_SCOPE).await;
+        let (status, _, _) = delete_session_req(Some(&del), &id, None).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        // A second delete of the same id finds nothing.
+        let (status, _, body) = delete_session_req(Some(&del), &id, None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn delete_unknown_session_is_not_found() {
+        let del = mint_token(DELETE_SCOPE).await;
+        let (status, _, body) =
+            delete_session_req(Some(&del), "11111111-1111-4111-8111-111111111111", None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn delete_requires_the_delete_scope() {
+        // A read token must not satisfy the delete scope.
+        let read = mint_token(READ_SCOPE).await;
+        let (status, _, body) = delete_session_req(Some(&read), "any-id", None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["code"], "PERMISSION_DENIED");
+        // A delete token must not satisfy the read or create scope.
+        let del = mint_token(DELETE_SCOPE).await;
+        let (status, _, body) = get_session_req(Some(&del), "any-id", None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["code"], "PERMISSION_DENIED");
+        let (status, _, body) =
+            post_sessions(Some(&del), &create_body("+123456789012", "QOS_L", 60), None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["code"], "PERMISSION_DENIED");
+    }
+
+    #[tokio::test]
+    async fn delete_without_a_token_is_unauthenticated() {
+        let (status, _, body) =
+            delete_session_req(None, "11111111-1111-4111-8111-111111111111", None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["code"], "UNAUTHENTICATED");
+    }
+
+    #[tokio::test]
+    async fn x_correlator_is_echoed_on_delete_204_and_404() {
+        // Echoed on the 204 (created-then-deleted)…
+        let create = mint_token(CREATE_SCOPE).await;
+        let (_, _, created) =
+            post_sessions(Some(&create), &create_body("+123456789012", "QOS_L", 60), None).await;
+        let id = created["sessionId"].as_str().unwrap().to_string();
+        let del = mint_token(DELETE_SCOPE).await;
+        let (status, headers, _) = delete_session_req(Some(&del), &id, Some("corr-del")).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-del")
+        );
+        // …and on the 404 (unknown id).
+        let (status, headers, _) =
+            delete_session_req(Some(&del), "no-such-id", Some("corr-del-404")).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-del-404")
+        );
     }
 
     #[tokio::test]
