@@ -1,7 +1,10 @@
-//! Number Verification **v1** — `POST /number-verification/v1/verify`.
+//! Number Verification **v1** (CAMARA Number Verification 1.0.0).
 //!
-//! CAMARA Number Verification 1.0.0. This pass implements the `POST /verify`
-//! endpoint; `GET /device-phone-number` follows in a later pass.
+//! Two endpoints:
+//! - `POST /number-verification/v1/verify` — silently confirm a submitted
+//!   number matches the device's own number.
+//! - `GET /number-verification/v1/device-phone-number` — return the device's
+//!   own number (see [`device_phone_number`]).
 //!
 //! ## What it does
 //!
@@ -35,7 +38,7 @@
 use axum::body::Bytes;
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::post;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::json;
@@ -44,12 +47,25 @@ use crate::auth::verify::Claims;
 use crate::errors::CamaraError;
 use crate::scenarios;
 
-/// The OAuth2 scope this endpoint requires (CAMARA Number Verification 1.0.0).
+/// The OAuth2 scope the `POST /verify` endpoint requires (CAMARA NV 1.0.0).
 const VERIFY_SCOPE: &str = "number-verification:verify";
+
+/// The OAuth2 scope the `GET /device-phone-number` endpoint requires (CAMARA NV 1.0.0).
+const DEVICE_PHONE_NUMBER_SCOPE: &str = "number-verification:device-phone-number:read";
+
+/// The simulator's default device line, returned by `GET /device-phone-number`
+/// when the authenticated subject is not itself a phone identifier — e.g. the
+/// synthetic `camarasim-user` minted by the `authorization_code`/CIBA flows.
+const DEFAULT_DEVICE_NUMBER: &str = "+123456789012";
 
 /// Routes for Number Verification v1, mounted at their canonical URLs.
 pub fn routes() -> Router {
-    Router::new().route("/number-verification/v1/verify", post(verify))
+    Router::new()
+        .route("/number-verification/v1/verify", post(verify))
+        .route(
+            "/number-verification/v1/device-phone-number",
+            get(device_phone_number),
+        )
 }
 
 /// `POST /verify` request body: exactly one of `phoneNumber` / `hashedPhoneNumber`
@@ -128,6 +144,47 @@ async fn verify(claims: Claims, headers: HeaderMap, body: Bytes) -> Response {
     )
 }
 
+/// `GET /number-verification/v1/device-phone-number`.
+///
+/// Returns the phone number of the device the access token authenticated
+/// (`NumberVerificationShareResponse`). This endpoint has no request body, so
+/// its functional cases (docs/DESIGN.md §7) are driven by the token **subject**
+/// (`sub`) — the identity the token was issued for:
+///
+/// - **Reserved error suffix** — if the subject's trailing three digits name a
+///   reserved CAMARA status (shared convention, [`crate::scenarios`]), the
+///   endpoint answers with that canonical CAMARA error instead of a number.
+/// - **E.164 subject** — a subject that is itself a valid phone number *is* the
+///   device's number and is returned verbatim (as in a line-authenticated
+///   three-legged token).
+/// - **Default** — any other subject (e.g. the synthetic `camarasim-user` from
+///   an `authorization_code`/CIBA flow) yields the simulator's default line.
+async fn device_phone_number(claims: Claims, headers: HeaderMap) -> Response {
+    // Optional correlation header, echoed on every response (CAMARA Commonalities).
+    let correlator = headers.get("x-correlator").cloned();
+
+    // Endpoint authorisation: the token must carry this API's read scope.
+    if let Err(e) = claims.require_scope(DEVICE_PHONE_NUMBER_SCOPE) {
+        return with_correlator(e.into_response(), &correlator);
+    }
+
+    // The token subject is the control plane (docs/DESIGN.md §7).
+    let subject = claims.subject().unwrap_or("");
+    if let Some(err) = scenarios::reserved_error(subject) {
+        return with_correlator(err.into_response(), &correlator);
+    }
+    let number = if is_valid_e164(subject) {
+        subject
+    } else {
+        DEFAULT_DEVICE_NUMBER
+    };
+
+    with_correlator(
+        (StatusCode::OK, Json(json!({ "devicePhoneNumber": number }))).into_response(),
+        &correlator,
+    )
+}
+
 /// A 400 `INVALID_ARGUMENT` CAMARA error, with the correlator echoed.
 fn invalid_argument(message: &str, correlator: &Option<HeaderValue>) -> Response {
     with_correlator(CamaraError::invalid_argument(message).into_response(), correlator)
@@ -195,7 +252,17 @@ mod tests {
     /// Mint an access token via `client_credentials`, host-pinned so its `aud`
     /// matches the verify route's audience. Scope is granted verbatim.
     async fn mint_token(scope: &str) -> String {
-        let body = format!("grant_type=client_credentials&client_id=nv-client&scope={scope}");
+        mint_token_with_client(scope, "nv-client").await
+    }
+
+    /// As [`mint_token`], but with a caller-chosen `client_id` — which becomes
+    /// the token `sub`/`client_id`. Used to drive the device-phone-number
+    /// endpoint's subject-keyed functional cases. `+` is percent-encoded so an
+    /// E.164 client id survives the urlencoded body.
+    async fn mint_token_with_client(scope: &str, client_id: &str) -> String {
+        let enc = client_id.replace('+', "%2B");
+        let body =
+            format!("grant_type=client_credentials&client_id={enc}&scope={scope}");
         let response = app()
             .oneshot(
                 Request::builder()
@@ -339,6 +406,96 @@ mod tests {
             post_verify(None, r#"{"phoneNumber":"+123456789012"}"#, None).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
         assert_eq!(body["code"], "UNAUTHENTICATED");
+    }
+
+    // --- GET /device-phone-number -----------------------------------------
+
+    /// GET `/device-phone-number` with an optional Bearer token and optional
+    /// `x-correlator`. Returns (status, headers, json-or-null).
+    async fn get_device_phone_number(
+        token: Option<&str>,
+        correlator: Option<&str>,
+    ) -> (StatusCode, HeaderMap, Value) {
+        let mut builder = Request::builder()
+            .method("GET")
+            .uri("/number-verification/v1/device-phone-number")
+            .header("host", HOST);
+        if let Some(t) = token {
+            builder = builder.header("authorization", format!("Bearer {t}"));
+        }
+        if let Some(c) = correlator {
+            builder = builder.header("x-correlator", c);
+        }
+        let response = app()
+            .oneshot(builder.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let headers = response.headers().clone();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, headers, json)
+    }
+
+    #[tokio::test]
+    async fn device_phone_number_defaults_when_subject_is_not_a_number() {
+        // sub = client_id "nv-client" (not E.164) → the simulator's default line.
+        let token = mint_token(DEVICE_PHONE_NUMBER_SCOPE).await;
+        let (status, _, body) = get_device_phone_number(Some(&token), None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["devicePhoneNumber"], DEFAULT_DEVICE_NUMBER);
+    }
+
+    #[tokio::test]
+    async fn device_phone_number_echoes_an_e164_subject() {
+        // sub = an E.164 client id → that number is the device's own number.
+        let token = mint_token_with_client(DEVICE_PHONE_NUMBER_SCOPE, "+123456789012").await;
+        let (status, _, body) = get_device_phone_number(Some(&token), None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["devicePhoneNumber"], "+123456789012");
+    }
+
+    #[tokio::test]
+    async fn device_phone_number_reserved_suffix_selects_a_camara_error() {
+        // A subject whose trailing three digits name a reserved status → that error.
+        let token = mint_token_with_client(DEVICE_PHONE_NUMBER_SCOPE, "+123456789404").await;
+        let (status, _, body) = get_device_phone_number(Some(&token), None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["code"], "NOT_FOUND");
+
+        let token = mint_token_with_client(DEVICE_PHONE_NUMBER_SCOPE, "user-503").await;
+        let (status, _, body) = get_device_phone_number(Some(&token), None).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["code"], "UNAVAILABLE");
+    }
+
+    #[tokio::test]
+    async fn device_phone_number_without_the_scope_is_forbidden() {
+        let token = mint_token(VERIFY_SCOPE).await; // wrong scope for this endpoint
+        let (status, _, body) = get_device_phone_number(Some(&token), None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["code"], "PERMISSION_DENIED");
+    }
+
+    #[tokio::test]
+    async fn device_phone_number_missing_token_is_unauthenticated() {
+        let (status, _, body) = get_device_phone_number(None, None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["code"], "UNAUTHENTICATED");
+    }
+
+    #[tokio::test]
+    async fn device_phone_number_echoes_x_correlator() {
+        let token = mint_token(DEVICE_PHONE_NUMBER_SCOPE).await;
+        let (status, headers, _) =
+            get_device_phone_number(Some(&token), Some("corr-dpn")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-dpn")
+        );
     }
 
     #[tokio::test]

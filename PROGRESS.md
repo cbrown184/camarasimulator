@@ -49,7 +49,13 @@ Phase 1 has begun. **Number Verification v1** `POST /verify` is live at
 `x-correlator` is echoed on every response. New `src/apis/` tree wires business APIs into
 the router and the `/` catalog now lists mounted APIs.
 
-**Next up:** Number Verification v1 `GET /device-phone-number`, then SIM Swap v2.
+Number Verification v1 is now complete: `POST /verify` **and**
+`GET /device-phone-number` (`number-verification:device-phone-number:read`).
+The latter has no request body, so its functional cases key off the token
+**subject** — a reserved error suffix on `sub` → canonical CAMARA error, an
+E.164 `sub` → that number, anything else → the simulator's default line.
+
+**Next up:** SIM Swap v2.
 
 ## In progress (claimed this pass)
 
@@ -71,7 +77,7 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `verify::Claims::require_scope`; Phase 1 APIs wire the specific scope per endpoint.)
 
 ### Phase 1 — Stateless, non-spatial
-- [~] Number Verification v1 — [x] `POST /verify` · [ ] `GET /device-phone-number` (next)
+- [x] Number Verification v1 — [x] `POST /verify` · [x] `GET /device-phone-number`
 - [ ] SIM Swap v2 — `POST /check`, `POST /retrieve-date` (+ full parameter-driven cases)
 - [ ] KYC Match v1 — `POST /match`
 
@@ -104,6 +110,21 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-02 — Phase 1: Number Verification v1 — `GET /device-phone-number` (CAMARA 1.0.0),
+  completing the API. New GET route at `/number-verification/v1/device-phone-number`, protected by
+  the `Claims` extractor (scope `number-verification:device-phone-number:read`; confirmed against
+  the r1.3/v1.0.0 upstream spec, along with operationId `phoneNumberShare` and the
+  `NumberVerificationShareResponse{devicePhoneNumber}` body). No request body, so per DESIGN §7 the
+  control plane is the token **subject** (`sub`): `scenarios::reserved_error(sub)` → canonical CAMARA
+  error (…404/…429/etc., reusing the shared convention); an E.164 `sub` is echoed as the device's own
+  number (line-authenticated three-legged token); any other subject (e.g. synthetic `camarasim-user`)
+  → the simulator's default line `+123456789012`. `x-correlator` echoed on every response. No new deps
+  (reuses existing helpers `with_correlator`/`is_valid_e164`). Spec: added the `/device-phone-number`
+  path + `NumberVerificationShareResponse` schema to the vendored openapi with `x-camarasim-scenarios`
+  documenting the subject-keyed cases (full shared error set exposed, noted as a CamaraSim extension
+  over canonical 1.0.0). 124 tests green (was 118; +6: default/E.164-echo/reserved-error/wrong-scope/
+  no-token/x-correlator). Future: bind `login_hint`→`sub` in authorize/CIBA so three-legged flows can
+  also drive per-device cases. — binary: 956K (978496 B; +3560 B)
 - 2026-08-02 — Phase 1: Number Verification v1 — `POST /verify` (CAMARA 1.0.0). First CAMARA
   business endpoint. New `src/apis/` tree (`apis.rs` → `number_verification.rs` → `v1.rs`),
   mounted at `/number-verification/v1/verify` and merged into the app router; `/` catalog now

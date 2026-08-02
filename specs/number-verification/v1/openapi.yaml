@@ -4,9 +4,7 @@
 # parameter-driven functional cases (docs/DESIGN.md §7, §9). Backed by
 # `src/apis/number_verification/v1.rs`; spec and code must not drift.
 #
-# This pass serves `POST /verify` only. `GET /device-phone-number` is a later
-# pass and will be added here when it ships (so the served spec never describes
-# an unimplemented endpoint).
+# Serves `POST /verify` and `GET /device-phone-number`.
 openapi: 3.0.3
 info:
   title: Number Verification
@@ -125,6 +123,80 @@ paths:
           - input: hashedPhoneNumber (any)
             result: "200 { devicePhoneNumberVerified: true } — hashes can't select cases"
 
+  /device-phone-number:
+    get:
+      operationId: phoneNumberShare
+      summary: Get the device phone number
+      description: |
+        Returns the phone number of the device that obtained the access token —
+        the number the operator holds for the authenticated line.
+
+        This endpoint takes no request parameters, so its functional cases
+        (docs/DESIGN.md §7) are driven by the access token's **subject** (`sub`),
+        i.e. the identity the token authenticated:
+
+        - **Reserved error suffix** — if the subject's trailing three digits name
+          a reserved CAMARA status (the shared convention in the referenced
+          `errors.yaml`: `…400`, `…401`, `…403`, `…404`, `…409`, `…422`, `…429`,
+          `…500`, `…503`), the endpoint answers with that canonical CAMARA error.
+        - **E.164 subject** — a subject that is itself a valid phone number *is*
+          the device's number and is returned verbatim (as in a
+          line-authenticated three-legged token).
+        - **Default** — any other subject (e.g. the simulator's synthetic
+          `camarasim-user` from an `authorization_code`/CIBA flow) yields the
+          simulator's default device line, `+123456789012`.
+      security:
+        - openId:
+            - number-verification:device-phone-number:read
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+      responses:
+        "200":
+          description: The device's phone number.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NumberVerificationShareResponse"
+              examples:
+                shared:
+                  summary: The authenticated device's number
+                  value:
+                    devicePhoneNumber: "+123456789012"
+        "400":
+          $ref: "errors.yaml#/components/responses/InvalidArgument"
+        "401":
+          $ref: "errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "errors.yaml#/components/responses/NotFound"
+        "409":
+          $ref: "errors.yaml#/components/responses/Conflict"
+        "422":
+          $ref: "errors.yaml#/components/responses/ServiceNotApplicable"
+        "429":
+          $ref: "errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          Result selected from the access token subject (docs/DESIGN.md §7).
+          Reserved error suffixes come from the shared convention in errors.yaml.
+          CamaraSim exposes the full shared error set here (canonical CAMARA
+          1.0.0 declares a subset) so every reserved case is reachable.
+        cases:
+          - input: token subject ending in a reserved error suffix (e.g. …404)
+            result: the canonical CAMARA error for that status
+          - input: token subject that is a valid E.164 number
+            result: "200 { devicePhoneNumber: <that number> }"
+          - input: any other token subject (e.g. camarasim-user)
+            result: "200 { devicePhoneNumber: +123456789012 } — default line"
+
 components:
   securitySchemes:
     openId:
@@ -178,3 +250,16 @@ components:
           description: >-
             `true` if the submitted number matches the number the device is
             connected with, `false` otherwise.
+
+    NumberVerificationShareResponse:
+      type: object
+      description: The phone number of the device that obtained the access token.
+      required:
+        - devicePhoneNumber
+      properties:
+        devicePhoneNumber:
+          type: string
+          description: >-
+            The device's phone number in E.164 format (starting with `+`).
+          pattern: '^\+[1-9][0-9]{4,14}$'
+          example: "+123456789012"
