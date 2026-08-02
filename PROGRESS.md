@@ -98,7 +98,17 @@ else the IPv4 `publicAddress`, else ipv6Address) or — when omitted — the tok
 subject. Reserved error suffix → canonical CAMARA error; `…000` → not reachable
 (empty `connectivity`); odd trailing digits → reachable over SMS only; anything
 else → reachable over `["DATA","SMS"]`. `x-correlator` echoed on every response.
-**Next up:** Device Roaming Status (the "roaming" half), then Device Identifier.
+
+**Device Roaming Status v1** `POST /retrieve` is now live at
+`/device-roaming-status/v1/retrieve` (scope `device-roaming-status:read`,
+operationId `getRoamingStatus`) — the "roaming" half of the split. Same
+identifier resolution as reachability (submitted `device` id, else token
+subject). Reserved error suffix → canonical CAMARA error; a `…000` tail (and a
+no-digit subject) → `{roaming:false}` (home network); any other numeric tail →
+`{roaming:true, countryCode, countryName}`, where the visited country is a fixed
+6-entry MCC/ISO-3166 table indexed by `digits % 6`, making the country a second
+control plane. `x-correlator` echoed on every response.
+**Next up:** Device Identifier.
 
 ## In progress (claimed this pass)
 
@@ -127,7 +137,7 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 ### Phase 2 — Stateless device queries
 - [~] Device Status — reachability, roaming (canonical split, DESIGN §9):
   - [x] Device Reachability Status v1 — `POST /retrieve` (`/device-reachability-status/v1`)
-  - [ ] Device Roaming Status — `POST /retrieve`
+  - [x] Device Roaming Status v1 — `POST /retrieve` (`/device-roaming-status/v1`; CAMARA 1.0.0)
 - [ ] Device Identifier
 
 ### Phase 3 — Stateful, non-spatial
@@ -155,6 +165,32 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-02 — Phase 2: Device Roaming Status v1 — `POST /retrieve` (CAMARA Device Roaming
+  Status 1.0.0), the "roaming" half of the Spring25 Device Status split. New
+  `src/apis/device_roaming_status/{,v1}.rs` mounted at `/device-roaming-status/v1/retrieve`,
+  merged into the app router; `/` catalog now lists device-roaming-status v1. Protected by the
+  `Claims` extractor (scope `device-roaming-status:read`, operationId `getRoamingStatus`,
+  confirmed against the 1.0.0 upstream spec). Body `RoamingStatusRequest{device?}` parsed as
+  `Bytes` with `deny_unknown_fields` (nested `Device`/`DeviceIpv4Addr` too) → precise
+  `INVALID_ARGUMENT`; empty body allowed. Identifier resolution mirrors reachability (first
+  present device id [phoneNumber E.164-validated, else NAI, else IPv4 publicAddress, else
+  ipv6Address], else token subject → 422 MISSING_IDENTIFIER; empty `device{}` → 400). Functional
+  cases (§7) from the identifier's trailing three digits: reserved suffix → canonical CAMARA
+  error; `…000` and a no-digit subject → `{roaming:false}` (home); any other numeric tail →
+  `{roaming:true, countryCode, countryName}` with the visited country = fixed 6-entry MCC/ISO-3166
+  table `[(262,DE),(234,GB),(208,FR),(310,US),(440,JP),(505,AU)]` indexed by `digits % 6`, so the
+  country is a genuine second control plane (e.g. `…012`→Germany, `…011`→Australia). Optional
+  `lastStatusTime` not modelled (omitted). `x-correlator` echoed on all responses. No new deps
+  (reuses shared `scenarios`/`errors`, local E.164 validator). Spec: new
+  `specs/device-roaming-status/v1/openapi.yaml` — vendored 1.0.0 `POST /retrieve` +
+  `RoamingStatusRequest`/`Device`/`DeviceIpv4Addr`/`RoamingStatusResponse` schemas, `$ref`-ing
+  shared `errors.yaml` + auth `camaraOAuth`, with `x-camarasim-scenarios` documenting the cases
+  (full shared error set exposed, noted vs canonical 400/401/403/404/422/429/503; three-legged
+  IDENTIFIER_MISMATCH/UNNECESSARY_IDENTIFIER not modelled). 204 tests green (was 187; +17: 3 units
+  [roaming/E.164/device-precedence] + 14 integration covering roaming-country/different-country/
+  not-roaming/reserved-error/non-phone-ids/bad-phone/empty-device/unknown-field/subject-fallback/
+  subject-reserved-error/non-numeric-subject/scope/auth/x-correlator + catalog). — binary: 1012K
+  (1035056 B; +7304 B)
 - 2026-08-02 — Phase 2 (begun): Device Reachability Status v1 — `POST /retrieve` (CAMARA
   Device Reachability Status 1.0.0). The former combined *Device Status* API was split in
   Spring25 into Device Reachability Status + Device Roaming Status, so — like KYC Match's
