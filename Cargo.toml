@@ -10,6 +10,11 @@ axum = "0.7"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Auth signing keys: parse the bundled PKCS#8 RSA key and expose its public
+# components as a JWK. Pure Rust (no OpenSSL); `jsonwebtoken` will reuse this
+# same key to sign tokens in a later pass (see docs/DESIGN.md §4, §6).
+rsa = { version = "0.9", features = ["pem"] }
+base64 = "0.22"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

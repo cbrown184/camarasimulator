@@ -9,10 +9,13 @@ Status keys: `[ ]` todo · `[~]` in-progress (claimed) · `[x]` done · `[!]` bl
 
 ## Current status
 
-Bootstrap skeleton only: non-blocking axum server with `/health` and `/` catalog, size-tuned
-release profile, one passing test. No CAMARA APIs or auth implemented yet.
+Phase 0 auth underway: OIDC discovery + JWKS with signing-key management. The simulator
+holds one fixed, public, simulator-only RSA key (RS256) bundled in the binary; its public
+half is served at `/oauth2/jwks`, derived from the same key so JWKS can't drift from the
+signer. No CAMARA business APIs yet.
 
-**Next up:** Phase 0 — Auth foundation (start with discovery + JWKS + `client_credentials`).
+**Next up:** Phase 0 — `POST /oauth2/token` `client_credentials` grant (sign JWTs with the
+JWKS key, scopes, expiry).
 
 ## In progress (claimed this pass)
 
@@ -22,7 +25,7 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ### Phase 0 — Auth foundation
 - [x] `GET /.well-known/openid-configuration` (discovery) + served metadata
-- [ ] `GET /oauth2/jwks` (JWKS) + signing key management
+- [x] `GET /oauth2/jwks` (JWKS) + signing key management
 - [ ] `POST /oauth2/token` — `client_credentials` grant (signed JWT, scopes, expiry)
 - [ ] Token verification middleware for protected routes (audience/scope/expiry)
 - [ ] `GET /oauth2/authorize` + `POST /oauth2/token` — `authorization_code` + PKCE (auto-consent)
@@ -63,6 +66,12 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-02 — Phase 0: implemented `GET /oauth2/jwks` + signing-key management. New
+  `src/auth/keys.rs`: bundled fixed 2048-bit PKCS#8 RSA key (`assets/signing_key.pem`),
+  parsed once via `OnceLock`, public half published as an RSA JWK (`use:sig`, `alg:RS256`,
+  stable `kid`, base64url `n`/`e`) derived from the same key (anti-drift). Deps: `rsa`
+  (pure Rust, no OpenSSL) + `base64`. Spec: added `/oauth2/jwks` path + `JwkSet`/`Jwk`
+  schemas. 17 tests green. — binary: 804K (819504 B)
 - 2026-08-02 — Phase 0: implemented `GET /.well-known/openid-configuration` (OIDC discovery).
   New `src/auth/` module; base URL from `CAMARASIM_ISSUER` env or `X-Forwarded-Proto`+`Host`.
   Advertises all 3 CAMARA grants (client_credentials/authorization_code/CIBA), RS256, S256 PKCE,

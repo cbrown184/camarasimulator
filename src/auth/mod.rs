@@ -4,16 +4,21 @@
 //! (see docs/DESIGN.md §6). This module grows one endpoint per pass. So far:
 //!
 //! - `GET /.well-known/openid-configuration` — OIDC discovery metadata.
+//! - `GET /oauth2/jwks` — JWK Set for the token signing key.
 //!
-//! Planned (advertised by discovery, filled in by later passes): `/oauth2/jwks`,
+//! Planned (advertised by discovery, filled in by later passes):
 //! `/oauth2/token`, `/oauth2/authorize`, `/bc-authorize`.
+
+mod keys;
 
 use axum::{http::HeaderMap, routing::get, Json, Router};
 use serde_json::{json, Value};
 
 /// Auth routes, merged into the top-level router by `main`.
 pub fn routes() -> Router {
-    Router::new().route("/.well-known/openid-configuration", get(discovery))
+    Router::new()
+        .route("/.well-known/openid-configuration", get(discovery))
+        .route("/oauth2/jwks", get(jwks))
 }
 
 /// Resolve the externally-visible base URL used to build absolute endpoint URLs
@@ -89,6 +94,15 @@ pub fn metadata(base: &str) -> Value {
 /// `GET /.well-known/openid-configuration` — OIDC discovery.
 async fn discovery(headers: HeaderMap) -> Json<Value> {
     Json(metadata(&base_url(&headers)))
+}
+
+/// `GET /oauth2/jwks` — the JWK Set for the token signing key.
+///
+/// Static: the simulator holds a single fixed key (see [`keys`]), so the
+/// document does not depend on the request. The `jwks_uri` in discovery points
+/// here, and later passes sign tokens with the matching private key.
+async fn jwks() -> Json<Value> {
+    Json(keys::jwks())
 }
 
 #[cfg(test)]
@@ -194,5 +208,47 @@ mod tests {
             body["token_endpoint"],
             "http://sim.local:9000/oauth2/token"
         );
+    }
+
+    #[tokio::test]
+    async fn jwks_route_serves_the_signing_key() {
+        let response = routes()
+            .oneshot(
+                Request::builder()
+                    .uri("/oauth2/jwks")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get("content-type")
+                .and_then(|v| v.to_str().ok()),
+            Some("application/json")
+        );
+
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+
+        let keys = body["keys"].as_array().expect("keys array");
+        assert_eq!(keys.len(), 1);
+        assert_eq!(keys[0]["kty"], "RSA");
+        assert_eq!(keys[0]["use"], "sig");
+        assert_eq!(keys[0]["alg"], "RS256");
+        assert!(keys[0]["kid"].is_string());
+    }
+
+    #[test]
+    fn discovery_jwks_uri_points_at_the_jwks_route() {
+        // The advertised jwks_uri must be the path the JWK Set is actually
+        // served at, so a client following discovery reaches the real keys.
+        let m = metadata("https://sim.example");
+        assert_eq!(m["jwks_uri"], "https://sim.example/oauth2/jwks");
     }
 }
