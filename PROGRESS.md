@@ -72,7 +72,21 @@ is inside a fixed 240 h (10-day) monitored period, else `null`; `monitoredPeriod
 `maxAge`, so `+123456789012` yields a date and `+123456789365` yields `null`. A
 self-contained civil-date formatter (no new dependency) renders the timestamp.
 
-**Next up:** KYC Match v1 `POST /match`.
+**KYC Match** is now live at `/kyc-match/v0.3/match` (CAMARA KYC Match 0.3.0 —
+the API's real published version; the backlog's "v1" was loose, so it is mounted
+under its canonical `v0.3` URL). Scope `kyc-match:match`. The caller submits
+identity attributes (name/address/birthdate/email/…) and the response carries a
+`<attribute>Match` verdict per submitted attribute — the CAMARA strings
+`"true"`/`"false"`/`"not_available"` — plus a `<attribute>MatchScore` (fixed 90)
+for score-bearing attributes when the verdict is `"false"`. Two control planes
+(DESIGN §7): a top-level reserved error suffix on the identifier (submitted
+`phoneNumber`, else token subject) → canonical CAMARA error; and a per-attribute
+verdict chosen from each attribute's own value (`unavailable`→not_available,
+`nomatch`→false, else true). At least one non-`phoneNumber` attribute is
+required → 400 `KNOW_YOUR_CUSTOMER.INVALID_PARAM_COMBINATION`.
+
+This completes Phase 1 (stateless, non-spatial). **Next up:** Phase 2 — Device
+Status (reachability / roaming).
 
 ## In progress (claimed this pass)
 
@@ -96,7 +110,7 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 ### Phase 1 — Stateless, non-spatial
 - [x] Number Verification v1 — [x] `POST /verify` · [x] `GET /device-phone-number`
 - [x] SIM Swap v2 — [x] `POST /check` · [x] `POST /retrieve-date`
-- [ ] KYC Match v1 — `POST /match`
+- [x] KYC Match v0.3 — `POST /match` (mounted `/kyc-match/v0.3`; CAMARA 0.3.0)
 
 ### Phase 2 — Stateless device queries
 - [ ] Device Status — reachability, roaming
@@ -127,6 +141,32 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-02 — Phase 1 (complete): KYC Match — `POST /match` (CAMARA Know Your Customer Match
+  0.3.0). New `src/apis/kyc_match/{,v0_3}.rs` mounted at `/kyc-match/v0.3/match`, merged into the
+  app router; `/` catalog now lists kyc-match v0.3. Mounted under the API's real published version
+  `v0.3` (canonical URL, DESIGN §9) rather than the backlog's loose "v1" — KYC Match has never
+  reached 1.0.0. Protected by the `Claims` extractor (scope `kyc-match:match`, confirmed against
+  upstream). Body `KYC_MatchRequestBody` (20 optional string attributes) parsed via serde with
+  `deny_unknown_fields` for precise `INVALID_ARGUMENT` on malformed/unknown-field/non-string input;
+  bad `phoneNumber` E.164 → 400; empty body → 400; only `phoneNumber` (no other attribute) → 400
+  `KNOW_YOUR_CUSTOMER.INVALID_PARAM_COMBINATION` (the API-specific code). Functional cases (§7),
+  two control planes: (1) top-level reserved error suffix on the identifier (submitted `phoneNumber`,
+  else token subject) → canonical CAMARA error (validation first, so the body must be well-formed
+  for it to surface); (2) per-attribute verdict from each attribute's OWN value — `unavailable`
+  →`not_available`, `nomatch`→`false` (+ fixed `MatchScore` 90 for the 13 score-bearing attributes),
+  else `true`; verdicts are the CAMARA enum STRINGS `"true"/"false"/"not_available"`. Only submitted
+  attributes appear in the response; `phoneNumber` scopes but has no verdict. Table-driven field
+  mapping (19 match keys, 13 with scores) keeps it compact. `x-correlator` echoed on all responses.
+  No new deps (reuses shared `scenarios`/`errors`, local E.164 validator like NV/SIM-Swap). Spec:
+  new `specs/kyc-match/v0.3/openapi.yaml` — vendored 0.3.0 `POST /match` + `KYC_MatchRequestBody`/
+  `KYC_MatchResponse`/`MatchResult`/`MatchScoreResult` schemas, `$ref`-ing shared `errors.yaml` +
+  auth `camaraOAuth`, with the 400 documenting both `INVALID_ARGUMENT` and the KYC-specific
+  `INVALID_PARAM_COMBINATION`, and `x-camarasim-scenarios` documenting the value-driven cases (full
+  shared error set exposed, noted vs canonical 400/401/403/404/422). 170 tests green (was 153; +17:
+  3 units [classify/E.164/score-emission] + 14 integration covering all-match/partial-with-score/
+  not-available/phone-scoping/reserved-error-via-phone/reserved-error-via-subject/param-combination/
+  empty-body/unknown-field/non-string/bad-phone/scope/auth/x-correlator). — binary: 990K (1012816 B;
+  +20488 B)
 - 2026-08-02 — Phase 1: SIM Swap v2 — `POST /retrieve-date` (CAMARA sim-swap 2.0.0, r2.2),
   completing the API. New route `/sim-swap/v2/retrieve-date` in `src/apis/sim_swap/v2.rs`,
   protected by the `Claims` extractor (scope `sim-swap:retrieve-date`; confirmed against the
