@@ -27,8 +27,14 @@ auto-consent; the `login_hint` selects approved/pending/denied per DESIGN §7), 
 token endpoint's `ciba` grant polls it, returning the CIBA token-error set
 (`authorization_pending` / `access_denied` / `expired_token`) or an access token.
 
-**Next up:** Phase 0 — Purpose/scope enforcement + shared reserved-identifier scenario
-convention (DESIGN §7).
+The shared **reserved-identifier scenario convention** and the **base CAMARA error
+model** are now in place (`src/scenarios.rs`, `src/errors.rs`): an identifier's trailing
+three digits deterministically select a canonical CAMARA error (`…404`→404 `NOT_FOUND`,
+`…429`→429 `TOO_MANY_REQUESTS`, etc.) so every Phase 1 identifier-keyed API exposes its
+error cases from the input alone; documented once in `specs/shared/errors.yaml`.
+
+**Next up:** Phase 0 — Purpose/scope enforcement (validate/gate CAMARA `dpv:` purpose
+scopes), then Phase 1 stateless APIs.
 
 ## In progress (claimed this pass)
 
@@ -43,7 +49,8 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 - [x] Token verification middleware for protected routes (audience/scope/expiry)
 - [x] `GET /oauth2/authorize` + `POST /oauth2/token` — `authorization_code` + PKCE (auto-consent)
 - [x] `POST /bc-authorize` + CIBA token polling
-- [ ] Purpose/scope enforcement + shared reserved-identifier scenario convention (DESIGN §7)
+- [x] Shared reserved-identifier scenario convention + base CAMARA error model (DESIGN §7, §8)
+- [ ] Purpose/scope enforcement — validate/gate CAMARA `dpv:` purpose scopes (DESIGN §7)
 
 ### Phase 1 — Stateless, non-spatial
 - [ ] Number Verification v1 — `POST /verify`, `GET /device-phone-number`
@@ -68,7 +75,7 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 - [ ] Other CAMARA APIs as capacity allows
 
 ## Cross-cutting (do alongside the item that needs it)
-- [ ] `errors.rs`: CAMARA error model + per-version catalogs (DESIGN §8)
+- [~] `errors.rs`: base CAMARA error model done (`src/errors.rs`, `specs/shared/errors.yaml`); per-version catalogs still TODO (DESIGN §8)
 - [ ] `registry.rs`: canonical URL versioning + `/` catalog wiring (DESIGN §9)
 - [ ] `specs/…`: vendor + annotate OpenAPI per API/version, serve at `/{api}/v{n}/openapi.yaml`
 - [ ] Contract-test harness (validate responses against vendored spec)
@@ -79,6 +86,19 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-02 — Phase 0: shared reserved-identifier scenario convention + base CAMARA error model
+  (DESIGN §7, §8). New `src/errors.rs`: `CamaraError { status, code, message }` with the
+  Commonalities standard code/message set and `CamaraError::for_status(u16)` (400 INVALID_ARGUMENT,
+  401 UNAUTHENTICATED, 403 PERMISSION_DENIED, 404 NOT_FOUND, 409 CONFLICT, 422 SERVICE_NOT_APPLICABLE,
+  429 TOO_MANY_REQUESTS, 500 INTERNAL, 503 UNAVAILABLE; `None` outside the set) + `IntoResponse`.
+  New `src/scenarios.rs`: `reserved_error(id)` maps an identifier's trailing three digits (non-digit
+  formatting ignored) to that canonical CAMARA error, `None` for happy path; codes verified against
+  live CAMARA API Design Guide. Pure/in-memory, no request-path consumer yet (Phase 1 wires it in),
+  so `#![allow(dead_code)]`. No new deps. Spec: new `specs/shared/errors.yaml` — reusable
+  `CamaraError` schema + per-status responses + the reserved-suffix convention table
+  (`x-camarasim-reserved-error-suffixes`), `$ref`-able by every API version. 95 tests green (was 84;
+  +11: every suffix→status, tail-only matching, formatting-ignored, catalog↔convention no-drift,
+  body/IntoResponse shape). — binary: 900K (918424 B; unchanged — dead code stripped by LTO)
 - 2026-08-02 — Phase 0: implemented CIBA — `POST /bc-authorize` + the `ciba` token-polling
   grant. New `src/auth/ciba.rs`: process-global in-memory backchannel-request store
   (`std::sync::Mutex<HashMap>`, lock never held across await), opaque single-use `auth_req_id`

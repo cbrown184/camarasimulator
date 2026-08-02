@@ -1,0 +1,181 @@
+# CamaraSim — shared error model & reserved-identifier scenario convention
+#
+# A reusable OpenAPI 3.0 components fragment, `$ref`-able by every API version's
+# vendored spec so the CAMARA error body and the shared scenario convention are
+# defined once (docs/DESIGN.md §7, §8). Backed by `src/errors.rs` (the base error
+# catalog) and `src/scenarios.rs` (the reserved-identifier convention). Spec and
+# code must not drift.
+openapi: 3.0.3
+info:
+  title: CamaraSim shared error model & scenario convention
+  version: "1.0.0"
+  description: |
+    ## The input is the control plane (reserved-identifier scenarios)
+
+    Every identifier-keyed CamaraSim endpoint lets the **caller** pick which
+    functional case to exercise from the input identifier alone (a phone number,
+    device id, …) — success variants *and* every error case are reachable
+    deterministically, with no hidden config (docs/DESIGN.md §7).
+
+    The one piece shared across all identifier-keyed APIs is the reserved
+    **error** suffixes. Take the identifier's trailing **three digits** (ignoring
+    non-digit formatting such as `+`, spaces, or dashes). If they equal a reserved
+    HTTP status from the CAMARA standard error set, the endpoint answers with that
+    canonical CAMARA error instead of a success:
+
+    | Trailing digits | HTTP | `code` |
+    |-----------------|------|--------|
+    | `…400` | 400 | `INVALID_ARGUMENT` |
+    | `…401` | 401 | `UNAUTHENTICATED` |
+    | `…403` | 403 | `PERMISSION_DENIED` |
+    | `…404` | 404 | `NOT_FOUND` |
+    | `…409` | 409 | `CONFLICT` |
+    | `…422` | 422 | `SERVICE_NOT_APPLICABLE` |
+    | `…429` | 429 | `TOO_MANY_REQUESTS` |
+    | `…500` | 500 | `INTERNAL` |
+    | `…503` | 503 | `UNAVAILABLE` |
+
+    Any other identifier is a normal ("happy path") input, handled by the API's
+    own logic. Per-API **success** variants (e.g. SIM Swap's "recently swapped"
+    numbers) are chosen by each API on top of this shared error floor, and are
+    documented in that API's own spec.
+
+    Example — a `phoneNumber` of `+123456789404` selects `404 NOT_FOUND`;
+    `+123456789429` selects `429 TOO_MANY_REQUESTS`; `+123456789012` is a normal
+    input.
+  x-camarasim-reserved-error-suffixes:
+    description: >-
+      Trailing-three-digit identifier suffixes that deterministically select a
+      canonical CAMARA error, shared across all identifier-keyed APIs.
+    suffixes: [400, 401, 403, 404, 409, 422, 429, 500, 503]
+
+# This fragment carries no paths of its own; it exists to be referenced.
+paths: {}
+
+components:
+  schemas:
+    CamaraError:
+      type: object
+      description: |
+        The CAMARA error body (docs/DESIGN.md §8): the HTTP status echoed as
+        `status`, a machine-readable `code`, and a human-readable `message`.
+      required:
+        - status
+        - code
+        - message
+      properties:
+        status:
+          type: integer
+          description: The HTTP status code, echoed in the body.
+        code:
+          type: string
+          description: >-
+            Machine-readable CAMARA error code. This is the version-agnostic
+            base set; a specific API version may narrow or extend it.
+          enum:
+            - INVALID_ARGUMENT
+            - UNAUTHENTICATED
+            - PERMISSION_DENIED
+            - NOT_FOUND
+            - CONFLICT
+            - SERVICE_NOT_APPLICABLE
+            - TOO_MANY_REQUESTS
+            - INTERNAL
+            - UNAVAILABLE
+        message:
+          type: string
+          description: Human-readable explanation.
+
+  responses:
+    # Reusable responses for the standard CAMARA statuses. Each is selectable via
+    # the reserved-identifier convention above.
+    InvalidArgument:
+      description: 400 — invalid argument, request body, or query parameter.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/CamaraError"
+          example:
+            status: 400
+            code: INVALID_ARGUMENT
+            message: Client specified an invalid argument, request body or query param.
+    Unauthenticated:
+      description: 401 — missing, invalid, or expired credentials.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/CamaraError"
+          example:
+            status: 401
+            code: UNAUTHENTICATED
+            message: Request not authenticated due to missing, invalid, or expired credentials.
+    PermissionDenied:
+      description: 403 — insufficient permissions for this action.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/CamaraError"
+          example:
+            status: 403
+            code: PERMISSION_DENIED
+            message: Client does not have sufficient permissions to perform this action.
+    NotFound:
+      description: 404 — the specified resource is not found.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/CamaraError"
+          example:
+            status: 404
+            code: NOT_FOUND
+            message: The specified resource is not found.
+    Conflict:
+      description: 409 — conflict with the current state of the target resource.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/CamaraError"
+          example:
+            status: 409
+            code: CONFLICT
+            message: A specified resource duplicate entry found.
+    ServiceNotApplicable:
+      description: 422 — the service is not available for the provided identifier.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/CamaraError"
+          example:
+            status: 422
+            code: SERVICE_NOT_APPLICABLE
+            message: The service is not available for the provided identifier.
+    TooManyRequests:
+      description: 429 — rate limit reached.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/CamaraError"
+          example:
+            status: 429
+            code: TOO_MANY_REQUESTS
+            message: Rate limit reached.
+    Internal:
+      description: 500 — unknown server error.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/CamaraError"
+          example:
+            status: 500
+            code: INTERNAL
+            message: Unknown server error. Typically a server bug.
+    Unavailable:
+      description: 503 — service unavailable.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/CamaraError"
+          example:
+            status: 503
+            code: UNAVAILABLE
+            message: Service unavailable.
