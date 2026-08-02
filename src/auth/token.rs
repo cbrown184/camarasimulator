@@ -1,10 +1,15 @@
 //! `POST /oauth2/token` — the OAuth2 token endpoint.
 //!
-//! This pass implements the **`client_credentials`** grant (RFC 6749 §4.4,
-//! CAMARA *Security & Interoperability Profile* — see docs/DESIGN.md §6): a
-//! two-legged flow for APIs that need no end-user context. The other advertised
-//! grants (`authorization_code`, CIBA) are filled in by later passes and, until
-//! then, return `unsupported_grant_type`.
+//! This endpoint implements two of the three CAMARA grants (docs/DESIGN.md §6):
+//!
+//! - **`client_credentials`** (RFC 6749 §4.4): a two-legged flow for APIs that
+//!   need no end-user context.
+//! - **`authorization_code` + PKCE** (RFC 6749 §4.1.3, RFC 7636): the three-legged
+//!   flow, redeeming a code minted by `GET /oauth2/authorize` ([`super::authorize`]).
+//!
+//! The remaining advertised grant, CIBA
+//! (`urn:openid:params:grant-type:ciba`), is filled in by a later pass and until
+//! then returns `unsupported_grant_type`.
 //!
 //! The endpoint issues a **real, signed** RS256 JWT (RFC 9068 `at+jwt`) using
 //! the bundled JWKS key, so a client that fetches `/oauth2/jwks` can verify it.
@@ -39,7 +44,7 @@ use base64::Engine as _;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use super::{base_url, keys};
+use super::{base_url, codes, keys};
 
 /// Lifetime of an issued access token, in seconds (1 hour).
 const EXPIRES_IN: u64 = 3600;
@@ -52,6 +57,10 @@ struct TokenForm {
     grant_type: Option<String>,
     scope: Option<String>,
     client_id: Option<String>,
+    // `authorization_code` grant (RFC 6749 §4.1.3 + PKCE RFC 7636):
+    code: Option<String>,
+    redirect_uri: Option<String>,
+    code_verifier: Option<String>,
 }
 
 /// `POST /oauth2/token`.
@@ -72,8 +81,9 @@ pub async fn handler(headers: HeaderMap, body: String) -> Response {
 
     match form.grant_type.as_deref() {
         Some("client_credentials") => client_credentials(&headers, form),
+        Some("authorization_code") => authorization_code(&headers, form),
         // Advertised in discovery but not yet implemented in this build.
-        Some("authorization_code") | Some("urn:openid:params:grant-type:ciba") => oauth_error(
+        Some("urn:openid:params:grant-type:ciba") => oauth_error(
             StatusCode::BAD_REQUEST,
             "unsupported_grant_type",
             "grant type is advertised by discovery but not yet implemented in this build",
@@ -108,12 +118,107 @@ fn client_credentials(headers: &HeaderMap, form: TokenForm) -> Response {
 
     let scope = form.scope.unwrap_or_default();
     let issuer = base_url(headers);
-    let now = unix_now();
+    // Two-legged: the client is the subject, and iss == aud == this server.
+    issue_access_token(&issuer, &issuer, &client_id, &client_id, &scope)
+}
 
+/// Issue a token for the **`authorization_code`** grant (RFC 6749 §4.1.3 + PKCE
+/// RFC 7636). Redeems a code minted by `GET /oauth2/authorize` ([`super::authorize`]).
+///
+/// Validation, all yielding `invalid_grant` (HTTP 400) on failure so a client
+/// cannot distinguish *why* a code was rejected:
+///   - the code exists and is unexpired (it is **consumed** on lookup — single use);
+///   - `redirect_uri` matches the one bound at authorization;
+///   - `client_id` matches the client the code was issued to;
+///   - the PKCE `code_verifier` satisfies the stored S256 `code_challenge`.
+///
+/// The issued token's `aud` is the audience captured at authorization (the resource
+/// server the user consented against); its `sub` is the simulator's synthetic
+/// resource owner (there is no real end-user login — see [`super::authorize`]).
+fn authorization_code(headers: &HeaderMap, form: TokenForm) -> Response {
+    // Required parameters. Each field is moved out of `form` independently.
+    let code = match form.code.filter(|c| !c.is_empty()) {
+        Some(c) => c,
+        None => {
+            return oauth_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+                "the 'code' parameter is required",
+            )
+        }
+    };
+    // Public client + PKCE: the client still identifies itself (Basic or form).
+    let client_id = match client_id_from_basic(headers).or(form.client_id) {
+        Some(id) => id,
+        None => {
+            return oauth_error(
+                StatusCode::UNAUTHORIZED,
+                "invalid_client",
+                "client authentication required (client_id or client_secret_basic)",
+            )
+        }
+    };
+    let code_verifier = match form.code_verifier.filter(|v| !v.is_empty()) {
+        Some(v) => v,
+        None => {
+            return oauth_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+                "the 'code_verifier' parameter is required (PKCE)",
+            )
+        }
+    };
+    let redirect_uri = match form.redirect_uri.filter(|u| !u.is_empty()) {
+        Some(u) => u,
+        None => {
+            return oauth_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+                "the 'redirect_uri' parameter is required",
+            )
+        }
+    };
+
+    // Consume the code (single use): a replay finds nothing and fails below.
+    let entry = match codes::redeem(&code) {
+        Some(e) => e,
+        None => return invalid_grant("the authorization code is invalid or already used"),
+    };
+    if codes::unix_now() >= entry.expires_at {
+        return invalid_grant("the authorization code has expired");
+    }
+    if redirect_uri != entry.redirect_uri {
+        return invalid_grant("redirect_uri does not match the authorization request");
+    }
+    if client_id != entry.client_id {
+        return invalid_grant("client_id does not match the authorization request");
+    }
+    if !codes::pkce_s256_matches(&code_verifier, &entry.code_challenge) {
+        return invalid_grant("PKCE code_verifier does not match the code_challenge");
+    }
+
+    // iss is this token endpoint; aud is the audience the user authorized against.
+    let issuer = base_url(headers);
+    issue_access_token(&issuer, &entry.audience, &client_id, "camarasim-user", &entry.scope)
+}
+
+/// An `invalid_grant` token-endpoint error (RFC 6749 §5.2), HTTP 400.
+fn invalid_grant(description: &str) -> Response {
+    oauth_error(StatusCode::BAD_REQUEST, "invalid_grant", description)
+}
+
+/// Build and return a signed access-token response. Shared by every grant.
+///
+/// Stamps `iss`/`aud` (kept distinct so a grant can target a resource server other
+/// than the token endpoint's own issuer), `sub`, `client_id`, the granted `scope`,
+/// `iat`, `exp` (`iat` + [`EXPIRES_IN`]), and a unique `jti`. `scope` is echoed in
+/// the response body only when non-empty.
+fn issue_access_token(iss: &str, aud: &str, client_id: &str, subject: &str, scope: &str) -> Response {
+    let now = unix_now();
     let claims = json!({
-        "iss": issuer,
-        "sub": client_id,
-        "aud": issuer,
+        "iss": iss,
+        "sub": subject,
+        "aud": aud,
         "client_id": client_id,
         "scope": scope,
         "jti": next_jti(now),
@@ -127,7 +232,7 @@ fn client_credentials(headers: &HeaderMap, form: TokenForm) -> Response {
         "expires_in": EXPIRES_IN,
     });
     if !scope.is_empty() {
-        body["scope"] = Value::String(scope);
+        body["scope"] = Value::String(scope.to_string());
     }
 
     (StatusCode::OK, no_store(), Json(body)).into_response()
@@ -356,9 +461,177 @@ mod tests {
 
     #[tokio::test]
     async fn advertised_but_unimplemented_grant_is_unsupported() {
-        let (status, _, body) =
-            post_token("grant_type=authorization_code&client_id=client-1&code=x", None).await;
+        // CIBA is advertised by discovery but not yet implemented in this build.
+        let (status, _, body) = post_token(
+            "grant_type=urn:openid:params:grant-type:ciba&client_id=client-1",
+            None,
+        )
+        .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(body["error"], "unsupported_grant_type");
+    }
+
+    // --- authorization_code grant (redeeming a code from /oauth2/authorize) ---
+    //
+    // These tests drive the full three-legged flow through a single router: mint a
+    // code at GET /oauth2/authorize, then redeem it at POST /oauth2/token, so the
+    // shared in-memory code store and PKCE binding are exercised end to end.
+
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
+    use sha2::{Digest, Sha256};
+
+    /// A fixed PKCE pair (RFC 7636 Appendix B): verifier and its S256 challenge.
+    const VERIFIER: &str = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+    const CHALLENGE: &str = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM";
+    const REDIRECT: &str = "https://app.example/cb";
+
+    /// Run the authorize leg and return the issued authorization code.
+    async fn mint_code(scope: &str) -> String {
+        let redirect_enc =
+            serde_urlencoded::to_string([("redirect_uri", REDIRECT)]).unwrap();
+        let query = format!(
+            "response_type=code&client_id=app-1&{redirect_enc}&scope={scope}\
+             &code_challenge={CHALLENGE}&code_challenge_method=S256"
+        );
+        let response = super::super::routes()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/oauth2/authorize?{query}"))
+                    .header("host", "sim.local:8080")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let location = response
+            .headers()
+            .get("location")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        let q = location.split_once('?').unwrap().1;
+        let pairs: Vec<(String, String)> = serde_urlencoded::from_str(q).unwrap();
+        pairs.into_iter().find(|(k, _)| k == "code").unwrap().1
+    }
+
+    #[tokio::test]
+    async fn authorization_code_redeems_for_a_token_carrying_the_authorized_scope() {
+        let code = mint_code("openid").await;
+        let body = format!(
+            "grant_type=authorization_code&code={code}&client_id=app-1\
+             &redirect_uri={REDIRECT}&code_verifier={VERIFIER}"
+        );
+        let (status, _, resp) = post_token(&body, None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(resp["token_type"], "Bearer");
+        assert_eq!(resp["scope"], "openid");
+        let (_, claims) = decode_jwt(resp["access_token"].as_str().unwrap());
+        // aud is the resource server authorized against; sub is the sim end user.
+        assert_eq!(claims["aud"], "http://sim.local:8080");
+        assert_eq!(claims["client_id"], "app-1");
+        assert_eq!(claims["sub"], "camarasim-user");
+        assert_eq!(claims["scope"], "openid");
+    }
+
+    #[tokio::test]
+    async fn authorization_code_is_single_use() {
+        let code = mint_code("openid").await;
+        let body = format!(
+            "grant_type=authorization_code&code={code}&client_id=app-1\
+             &redirect_uri={REDIRECT}&code_verifier={VERIFIER}"
+        );
+        let (first, _, _) = post_token(&body, None).await;
+        assert_eq!(first, StatusCode::OK);
+        // Replaying the same code must be rejected as invalid_grant.
+        let (second, _, resp) = post_token(&body, None).await;
+        assert_eq!(second, StatusCode::BAD_REQUEST);
+        assert_eq!(resp["error"], "invalid_grant");
+    }
+
+    #[tokio::test]
+    async fn authorization_code_rejects_a_wrong_pkce_verifier() {
+        let code = mint_code("openid").await;
+        let wrong = "wrong-verifier-that-does-not-hash-to-the-challenge-value";
+        let body = format!(
+            "grant_type=authorization_code&code={code}&client_id=app-1\
+             &redirect_uri={REDIRECT}&code_verifier={wrong}"
+        );
+        let (status, _, resp) = post_token(&body, None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(resp["error"], "invalid_grant");
+    }
+
+    #[tokio::test]
+    async fn authorization_code_rejects_a_mismatched_redirect_uri() {
+        let code = mint_code("openid").await;
+        let body = format!(
+            "grant_type=authorization_code&code={code}&client_id=app-1\
+             &redirect_uri=https://evil.example/cb&code_verifier={VERIFIER}"
+        );
+        let (status, _, resp) = post_token(&body, None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(resp["error"], "invalid_grant");
+    }
+
+    #[tokio::test]
+    async fn authorization_code_rejects_a_mismatched_client_id() {
+        let code = mint_code("openid").await;
+        let body = format!(
+            "grant_type=authorization_code&code={code}&client_id=other-app\
+             &redirect_uri={REDIRECT}&code_verifier={VERIFIER}"
+        );
+        let (status, _, resp) = post_token(&body, None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(resp["error"], "invalid_grant");
+    }
+
+    #[tokio::test]
+    async fn authorization_code_rejects_an_unknown_code() {
+        let body = format!(
+            "grant_type=authorization_code&code=never-issued&client_id=app-1\
+             &redirect_uri={REDIRECT}&code_verifier={VERIFIER}"
+        );
+        let (status, _, resp) = post_token(&body, None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(resp["error"], "invalid_grant");
+    }
+
+    #[tokio::test]
+    async fn authorization_code_requires_the_code_verifier() {
+        let code = mint_code("openid").await;
+        let body = format!(
+            "grant_type=authorization_code&code={code}&client_id=app-1&redirect_uri={REDIRECT}"
+        );
+        let (status, _, resp) = post_token(&body, None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(resp["error"], "invalid_request");
+    }
+
+    #[tokio::test]
+    async fn authorization_code_token_verifies_against_the_jwks_key() {
+        use rsa::pkcs1v15::{Signature, VerifyingKey};
+        use rsa::signature::Verifier;
+        use rsa::RsaPublicKey;
+
+        // Sanity: the PKCE constants are a real S256 pair.
+        assert_eq!(B64.encode(Sha256::digest(VERIFIER.as_bytes())), CHALLENGE);
+
+        let code = mint_code("openid").await;
+        let body = format!(
+            "grant_type=authorization_code&code={code}&client_id=app-1\
+             &redirect_uri={REDIRECT}&code_verifier={VERIFIER}"
+        );
+        let (_, _, resp) = post_token(&body, None).await;
+        let token = resp["access_token"].as_str().unwrap();
+        let parts: Vec<&str> = token.split('.').collect();
+        let signing_input = format!("{}.{}", parts[0], parts[1]);
+        let signature_bytes = B64.decode(parts[2]).unwrap();
+
+        let verifying_key = VerifyingKey::<Sha256>::new(RsaPublicKey::from(keys::signing_key()));
+        let signature = Signature::try_from(signature_bytes.as_slice()).unwrap();
+        verifying_key
+            .verify(signing_input.as_bytes(), &signature)
+            .expect("authorization_code token verifies under the JWKS public key");
     }
 }

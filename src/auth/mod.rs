@@ -5,16 +5,20 @@
 //!
 //! - `GET /.well-known/openid-configuration` — OIDC discovery metadata.
 //! - `GET /oauth2/jwks` — JWK Set for the token signing key.
-//! - `POST /oauth2/token` — token endpoint (`client_credentials` grant so far).
+//! - `GET /oauth2/authorize` — authorization endpoint (`authorization_code` +
+//!   PKCE, auto-consent).
+//! - `POST /oauth2/token` — token endpoint (`client_credentials` and
+//!   `authorization_code` grants).
 //!
 //! It also provides the resource-server half of the profile: [`verify::Claims`],
 //! the token-verification extractor protected CAMARA endpoints use to require a
 //! valid access token (signature / audience / expiry) and enforce scope.
 //!
 //! Planned (advertised by discovery, filled in by later passes):
-//! `/oauth2/token` (`authorization_code`, CIBA grants), `/oauth2/authorize`,
-//! `/bc-authorize`.
+//! `/oauth2/token` (CIBA grant), `/bc-authorize`.
 
+mod authorize;
+mod codes;
 mod keys;
 mod token;
 pub mod verify;
@@ -34,6 +38,7 @@ pub fn routes() -> Router {
     Router::new()
         .route("/.well-known/openid-configuration", get(discovery))
         .route("/oauth2/jwks", get(jwks))
+        .route("/oauth2/authorize", get(authorize::handler))
         .route("/oauth2/token", post(token::handler))
 }
 

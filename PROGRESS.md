@@ -10,15 +10,18 @@ Status keys: `[ ]` todo · `[~]` in-progress (claimed) · `[x]` done · `[!]` bl
 ## Current status
 
 Phase 0 auth underway: OIDC discovery + JWKS + the token endpoint's
-`client_credentials` grant. The simulator holds one fixed, public, simulator-only RSA key
-(RS256) bundled in the binary; its public half is served at `/oauth2/jwks`, and
-`POST /oauth2/token` now issues real RS256 `at+jwt` JWTs signed with that key, and the
-resource-server half is in place: the `verify::Claims` extractor validates a presented
-Bearer token (RS256 signature against the JWKS, `exp`, `aud`) and enforces scope,
-returning the CAMARA error model (401 `UNAUTHENTICATED` / 403 `PERMISSION_DENIED`) with
-RFC 6750 `WWW-Authenticate`. No CAMARA business APIs yet.
+`client_credentials` **and `authorization_code` + PKCE** grants. The simulator holds one
+fixed, public, simulator-only RSA key (RS256) bundled in the binary; its public half is
+served at `/oauth2/jwks`, and `POST /oauth2/token` issues real RS256 `at+jwt` JWTs signed
+with that key. `GET /oauth2/authorize` now runs the three-legged front leg (auto-consent,
+mandatory S256 PKCE) and mints a single-use in-memory authorization code, which the token
+endpoint redeems (validating redirect_uri / client_id / PKCE). The resource-server half is
+in place: the `verify::Claims` extractor validates a presented Bearer token (RS256
+signature against the JWKS, `exp`, `aud`) and enforces scope, returning the CAMARA error
+model (401 `UNAUTHENTICATED` / 403 `PERMISSION_DENIED`) with RFC 6750 `WWW-Authenticate`.
+No CAMARA business APIs yet.
 
-**Next up:** Phase 0 — `GET /oauth2/authorize` + `authorization_code` + PKCE (auto-consent).
+**Next up:** Phase 0 — `POST /bc-authorize` + CIBA token polling.
 
 ## In progress (claimed this pass)
 
@@ -31,7 +34,7 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 - [x] `GET /oauth2/jwks` (JWKS) + signing key management
 - [x] `POST /oauth2/token` — `client_credentials` grant (signed JWT, scopes, expiry)
 - [x] Token verification middleware for protected routes (audience/scope/expiry)
-- [ ] `GET /oauth2/authorize` + `POST /oauth2/token` — `authorization_code` + PKCE (auto-consent)
+- [x] `GET /oauth2/authorize` + `POST /oauth2/token` — `authorization_code` + PKCE (auto-consent)
 - [ ] `POST /bc-authorize` + CIBA token polling
 - [ ] Purpose/scope enforcement + shared reserved-identifier scenario convention (DESIGN §7)
 
@@ -69,6 +72,21 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-02 — Phase 0: implemented `GET /oauth2/authorize` + the `authorization_code` + PKCE
+  grant at `POST /oauth2/token`. New `src/auth/codes.rs`: process-global in-memory, single-use
+  authorization-code store (`std::sync::Mutex<HashMap>`, lock never held across await),
+  opaque codes (`base64url(SHA-256(counter‖now))`), S256 PKCE verify (RFC 7636 §4.6, constant-
+  time compare). New `src/auth/authorize.rs`: `GET /oauth2/authorize` auto-consents (headless),
+  mandates S256 PKCE, binds redirect_uri/client_id/scope/audience to the code; redirectable vs
+  direct errors per RFC 6749 §4.1.2.1 (302 back with error+state, or direct 400 when
+  client_id/redirect_uri untrusted). `token.rs`: `authorization_code` branch redeems (single-use)
+  and validates redirect_uri / client_id / PKCE → `invalid_grant` on any mismatch; token issuance
+  refactored into shared `issue_access_token` (aud = authorized audience, sub = `camarasim-user`).
+  No new deps (reuses sha2/base64/serde_urlencoded). Spec: added `/oauth2/authorize` path + params
+  + functional cases, extended `/oauth2/token` (TokenRequest code/redirect_uri/code_verifier,
+  invalid_grant, unsupported_response_type). Full 3-legged flow tested end-to-end (mint code →
+  redeem), plus single-use/PKCE/redirect/client mismatch cases. 67 tests green (was 45). —
+  binary: 888K (907680 B)
 - 2026-08-02 — Phase 0: implemented token-verification middleware for protected routes. New
   `src/auth/verify.rs`: `Claims` axum extractor (`FromRequestParts`) that pulls
   `Authorization: Bearer`, pins header `alg` to RS256 (rejects `alg:none`/confusion), verifies

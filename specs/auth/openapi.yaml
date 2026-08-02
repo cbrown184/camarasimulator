@@ -115,6 +115,121 @@ paths:
                     kid: camarasim-rs256-1
                     n: sZF66T5sGVzmmAJcP9oQkfEtklHIsVGAtmmXaYTOX_c5Xde6bX4SrXIgsvr3lJ9gm-6y9IL0_Da69kiMR4iK1AAoNWa2spRTXPbzFTAue3nU0PJ-PR3OT-x7RZOMI0JvgWME3AVkDlWM5kbtaf84RibIqyJqO9xhNAjfkMJDCpkj-qhUz7U_Eync2Gk8GmLBo1LOLYyzGCn6IG5dHUmjIgP7Q2PEoXftB0Z1l7S2yx46i3XvIjSpEixsqEjbLpoEBqH7xlc_UKBZzK5Tm3qjBhOH7W_tcj9CdhrPDjdt9rKo85d8lTpz2Za4hTrtx12eO31hGjmPQVVS4F53MYdosQ
                     e: AQAB
+  /oauth2/authorize:
+    get:
+      operationId: authorize
+      summary: OAuth2 authorization endpoint (authorization_code + PKCE)
+      description: |
+        The front leg of the **`authorization_code` + PKCE** grant (RFC 6749 §3.1,
+        RFC 7636), the CAMARA three-legged flow (docs/DESIGN.md §6). A client
+        redirects the user agent here; the server issues a short-lived
+        authorization `code` and redirects (HTTP 302) back to the client's
+        `redirect_uri`. The client then redeems the code at `POST /oauth2/token`
+        with `grant_type=authorization_code`.
+
+        ### Simulator functional cases (docs/DESIGN.md §7)
+
+        CamaraSim is headless, so this endpoint **auto-consents**: there is no login
+        or consent screen — a well-formed request is granted immediately. The shape
+        of the flow is still enforced faithfully:
+
+        - **PKCE is mandatory and must be S256.** `code_challenge` is required and
+          `code_challenge_method` must equal `S256`; the RFC 7636 `plain` default is
+          rejected. The challenge is bound to the code and checked at redemption.
+        - **`response_type` must be `code`.** Any other value is rejected.
+        - **Scope** is carried through verbatim to the issued token.
+        - **`redirect_uri`** must be an absolute URI; it is bound to the code and
+          must match exactly when the code is redeemed.
+        - **`state`**, if supplied, is echoed back on both success and error
+          redirects (CSRF protection, RFC 6749 §4.1.1).
+
+        ### Error handling (RFC 6749 §4.1.2.1)
+
+        - If `client_id` or `redirect_uri` is missing or invalid, the server cannot
+          safely redirect (that would be an open redirector), so it responds
+          **directly** with an `OAuthError` body (HTTP 400).
+        - Otherwise the error is delivered **by redirect** to `redirect_uri` as
+          `error` / `error_description` (plus `state`): a non-`code`
+          `response_type` yields `unsupported_response_type`; a missing/`plain`
+          PKCE challenge yields `invalid_request`.
+      parameters:
+        - name: response_type
+          in: query
+          required: true
+          schema:
+            type: string
+            enum: [code]
+          description: Must be `code` (authorization code flow).
+        - name: client_id
+          in: query
+          required: true
+          schema:
+            type: string
+          description: The client identifier. Any non-empty value is accepted.
+        - name: redirect_uri
+          in: query
+          required: true
+          schema:
+            type: string
+            format: uri
+          description: |
+            Absolute URI the code is delivered to. Bound to the code and re-checked
+            (exact match) at the token endpoint.
+        - name: scope
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Space-delimited scopes, carried through to the issued token.
+        - name: state
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Opaque value echoed back on the redirect (CSRF protection).
+        - name: code_challenge
+          in: query
+          required: true
+          schema:
+            type: string
+          description: PKCE S256 code challenge (RFC 7636). Required.
+        - name: code_challenge_method
+          in: query
+          required: true
+          schema:
+            type: string
+            enum: [S256]
+          description: Must be `S256`; `plain` is not accepted.
+      responses:
+        "302":
+          description: |
+            Auto-consent granted (success) **or** a redirectable error. The
+            `Location` header carries the client's `redirect_uri` with either
+            `code` (+ `state`) on success, or `error` / `error_description`
+            (+ `state`) on error.
+          headers:
+            Location:
+              schema:
+                type: string
+                format: uri
+              description: |
+                On success: `<redirect_uri>?code=<code>&state=<state>`.
+                On error: `<redirect_uri>?error=<code>&error_description=<text>&state=<state>`.
+            Cache-Control:
+              schema:
+                type: string
+              description: Always `no-store` (the redirect carries a fresh code).
+        "400":
+          description: |
+            The request could not be redirected safely because `client_id` or
+            `redirect_uri` was missing or invalid.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OAuthError"
+              example:
+                error: invalid_request
+                error_description: the 'redirect_uri' parameter is required
   /oauth2/token:
     post:
       operationId: token
@@ -123,12 +238,15 @@ paths:
         Issues access tokens (RFC 6749 §3.2). The request body is
         `application/x-www-form-urlencoded`.
 
-        **Implemented grant:** `client_credentials` (RFC 6749 §4.4) — the CAMARA
-        two-legged flow for APIs that need no end-user context (docs/DESIGN.md §6).
-        The grants `authorization_code` and
-        `urn:openid:params:grant-type:ciba` are advertised by discovery but not
-        yet implemented in this build and currently return
-        `unsupported_grant_type`.
+        **Implemented grants** (docs/DESIGN.md §6):
+
+        - `client_credentials` (RFC 6749 §4.4) — the CAMARA two-legged flow for
+          APIs that need no end-user context.
+        - `authorization_code` + PKCE (RFC 6749 §4.1.3, RFC 7636) — redeems a code
+          minted by `GET /oauth2/authorize` for an access token.
+
+        The `urn:openid:params:grant-type:ciba` grant is advertised by discovery
+        but not yet implemented in this build and returns `unsupported_grant_type`.
 
         **Issued token.** A real, signed **RS256** JWT with an `at+jwt` header
         (RFC 9068) whose `kid` matches the key published at `/oauth2/jwks`, so
@@ -150,11 +268,23 @@ paths:
           Omit `scope` for an empty grant (no `scope` in the response).
         - **Expiry** is fixed at 3600 seconds (`expires_in`).
 
+        For the **`authorization_code`** grant the request carries `code`,
+        `redirect_uri`, `client_id`, and the PKCE `code_verifier`. The code is
+        **single-use** (consumed on redemption); the token's `aud` is the audience
+        the user authorized against and its `sub` is the simulator's synthetic
+        resource owner (`camarasim-user`, as there is no real end-user login).
+        Redemption fails with `invalid_grant` (400) when the code is unknown /
+        expired / already used, the `redirect_uri` or `client_id` does not match the
+        authorization request, or the `code_verifier` does not satisfy the stored
+        S256 `code_challenge`.
+
         Errors use the OAuth2 token-endpoint format (RFC 6749 §5.2) with
         `Cache-Control: no-store`:
-          - missing `grant_type` → `invalid_request` (400)
+          - missing `grant_type`, or a required parameter absent → `invalid_request` (400)
           - unknown / not-yet-implemented `grant_type` → `unsupported_grant_type` (400)
           - no client authentication → `invalid_client` (401)
+          - invalid / expired / reused / mismatched authorization code, or failed
+            PKCE verification → `invalid_grant` (400)
       requestBody:
         required: true
         content:
@@ -179,14 +309,17 @@ paths:
                 expires_in: 3600
                 scope: dpv:FraudPreventionAndDetection#check-sim-swap
         "400":
-          description: Invalid request or unsupported grant type.
+          description: |
+            Invalid request, unsupported grant type, or an authorization code that
+            is invalid / expired / reused / mismatched or fails PKCE verification
+            (`invalid_grant`).
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/OAuthError"
               example:
-                error: unsupported_grant_type
-                error_description: the authorization server does not support this grant type
+                error: invalid_grant
+                error_description: the authorization code is invalid or already used
         "401":
           description: Client authentication failed / missing.
           content:
@@ -273,9 +406,9 @@ components:
         grant_type:
           type: string
           description: |
-            The OAuth2 grant type. Only `client_credentials` is implemented in
-            this build; `authorization_code` and the CIBA grant are advertised by
-            discovery but return `unsupported_grant_type` for now.
+            The OAuth2 grant type. `client_credentials` and `authorization_code`
+            are implemented; the CIBA grant is advertised by discovery but returns
+            `unsupported_grant_type` for now.
           enum:
             - client_credentials
             - authorization_code
@@ -285,16 +418,35 @@ components:
           description: |
             Space-delimited requested scopes (e.g. a CAMARA purpose scope such as
             `dpv:FraudPreventionAndDetection#check-sim-swap`). Granted verbatim by
-            the simulator.
+            the simulator. (`client_credentials` only; for `authorization_code` the
+            scope is fixed by the authorize request.)
         client_id:
           type: string
           description: |
             Client identifier for `client_secret_post` authentication. May instead
             be supplied via HTTP Basic (`client_secret_basic`). Any secret is
-            accepted by the simulator.
+            accepted by the simulator. Required for `authorization_code` and must
+            match the client the code was issued to.
         client_secret:
           type: string
           description: Client secret. Accepted but not validated by the simulator.
+        code:
+          type: string
+          description: |
+            The authorization code from `GET /oauth2/authorize`
+            (`authorization_code` grant). Single-use.
+        redirect_uri:
+          type: string
+          format: uri
+          description: |
+            The redirect URI used in the authorize request (`authorization_code`
+            grant). Must match the value bound to the code exactly.
+        code_verifier:
+          type: string
+          description: |
+            The PKCE code verifier (`authorization_code` grant, RFC 7636). Must
+            satisfy the stored S256 `code_challenge`
+            (`base64url(SHA-256(code_verifier)) == code_challenge`).
     TokenResponse:
       type: object
       required:
@@ -316,7 +468,11 @@ components:
           description: The granted scope. Omitted when no scope was requested.
     OAuthError:
       type: object
-      description: OAuth2 token-endpoint error (RFC 6749 §5.2).
+      description: |
+        OAuth2 error (RFC 6749 §5.2 / §4.1.2.1). Returned as a JSON body by the
+        token endpoint and by the authorize endpoint's non-redirectable errors;
+        the authorize endpoint's redirectable errors use the same `error` codes as
+        query parameters on the `Location` redirect.
       required:
         - error
       properties:
@@ -328,6 +484,7 @@ components:
             - invalid_grant
             - unauthorized_client
             - unsupported_grant_type
+            - unsupported_response_type
             - invalid_scope
         error_description:
           type: string
