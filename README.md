@@ -42,32 +42,55 @@ APIs at `GET /`.
 
 ## API examples
 
-Every business endpoint is protected: obtain a Bearer token from the built-in OAuth2
-server (`client_credentials` shown here — any `client_id`/secret is accepted in sim mode)
-with the endpoint's scope, then call the API. The `phoneNumber` (or `device`) in the
-request is the control plane: the examples below use inputs that select the happy path.
+Every business endpoint is protected. First get a Bearer token from the built-in OAuth2
+server via `client_credentials` (any `client_id`/secret is accepted in sim mode), then
+call the API. The `phoneNumber` (or `device`) in the request is the control plane: the
+examples below use inputs that select the happy path.
+
+**Get a token.** Request the scopes you need — space-delimited; the one below asks for
+all of them at once:
 
 ```bash
-# Mint a token for a given scope (any client_id works in sim mode)
-token() {
-  curl -s -X POST localhost:8080/oauth2/token \
-    -d grant_type=client_credentials -d client_id=demo -d "scope=$1" \
-  | python3 -c 'import sys,json; print(json.load(sys.stdin)["access_token"])'
-}
+curl -s -X POST localhost:8080/oauth2/token \
+  -d grant_type=client_credentials \
+  -d client_id=demo \
+  --data-urlencode 'scope=number-verification:verify number-verification:device-phone-number:read sim-swap:check sim-swap:retrieve-date kyc-match:match device-reachability-status:read device-roaming-status:read device-identifier:retrieve-type device-identifier:retrieve-identifier device-identifier:retrieve-ppid one-time-password-sms:send-validate'
 ```
+
+Response — copy the `access_token` into the calls below (shown as `<access_token>`):
+
+```json
+{"access_token":"eyJhbGciOiJSUzI1NiIsImtpZCI6...","expires_in":3600,"scope":"number-verification:verify ...","token_type":"Bearer"}
+```
+
+**Available scopes**, one per protected endpoint:
+
+| Scope | Endpoint |
+|---|---|
+| `number-verification:verify` | `POST /number-verification/v1/verify` |
+| `number-verification:device-phone-number:read` | `GET /number-verification/v1/device-phone-number` |
+| `sim-swap:check` | `POST /sim-swap/v2/check` |
+| `sim-swap:retrieve-date` | `POST /sim-swap/v2/retrieve-date` |
+| `kyc-match:match` | `POST /kyc-match/v0.3/match` |
+| `device-reachability-status:read` | `POST /device-reachability-status/v1/retrieve` |
+| `device-roaming-status:read` | `POST /device-roaming-status/v1/retrieve` |
+| `device-identifier:retrieve-type` | `POST /device-identifier/v0.3/retrieve-type` |
+| `device-identifier:retrieve-identifier` | `POST /device-identifier/v0.3/retrieve-identifier` |
+| `device-identifier:retrieve-ppid` | `POST /device-identifier/v0.3/retrieve-ppid` |
+| `one-time-password-sms:send-validate` | `POST /one-time-password-sms/v1/{send-code,validate-code}` |
 
 ### Number Verification v1
 
 ```bash
 # Is this the caller's number? -> {"devicePhoneNumberVerified":true}
 curl -s -X POST localhost:8080/number-verification/v1/verify \
-  -H "Authorization: Bearer $(token number-verification:verify)" \
+  -H 'Authorization: Bearer <access_token>' \
   -H 'Content-Type: application/json' \
   -d '{"phoneNumber":"+123456789012"}'
 
 # The caller's own number -> {"devicePhoneNumber":"+123456789012"}
 curl -s localhost:8080/number-verification/v1/device-phone-number \
-  -H "Authorization: Bearer $(token number-verification:device-phone-number:read)"
+  -H 'Authorization: Bearer <access_token>'
 ```
 
 ### SIM Swap v2
@@ -75,13 +98,13 @@ curl -s localhost:8080/number-verification/v1/device-phone-number \
 ```bash
 # Swapped within maxAge hours? -> {"swapped":true}
 curl -s -X POST localhost:8080/sim-swap/v2/check \
-  -H "Authorization: Bearer $(token sim-swap:check)" \
+  -H 'Authorization: Bearer <access_token>' \
   -H 'Content-Type: application/json' \
   -d '{"phoneNumber":"+123456789012","maxAge":240}'
 
 # Timestamp of the last SIM change -> {"latestSimChange":"…","monitoredPeriod":10}
 curl -s -X POST localhost:8080/sim-swap/v2/retrieve-date \
-  -H "Authorization: Bearer $(token sim-swap:retrieve-date)" \
+  -H 'Authorization: Bearer <access_token>' \
   -H 'Content-Type: application/json' \
   -d '{"phoneNumber":"+123456789012"}'
 ```
@@ -91,7 +114,7 @@ curl -s -X POST localhost:8080/sim-swap/v2/retrieve-date \
 ```bash
 # Confirm customer attributes -> {"nameMatch":"true","emailMatch":"true"}
 curl -s -X POST localhost:8080/kyc-match/v0.3/match \
-  -H "Authorization: Bearer $(token kyc-match:match)" \
+  -H 'Authorization: Bearer <access_token>' \
   -H 'Content-Type: application/json' \
   -d '{"phoneNumber":"+123456789012","name":"John Smith","email":"j@example.com"}'
 ```
@@ -101,7 +124,7 @@ curl -s -X POST localhost:8080/kyc-match/v0.3/match \
 ```bash
 # -> {"reachable":true,"connectivity":["DATA","SMS"]}
 curl -s -X POST localhost:8080/device-reachability-status/v1/retrieve \
-  -H "Authorization: Bearer $(token device-reachability-status:read)" \
+  -H 'Authorization: Bearer <access_token>' \
   -H 'Content-Type: application/json' \
   -d '{"device":{"phoneNumber":"+123456789012"}}'
 ```
@@ -111,7 +134,7 @@ curl -s -X POST localhost:8080/device-reachability-status/v1/retrieve \
 ```bash
 # -> {"roaming":true,"countryCode":262,"countryName":["DE"]}
 curl -s -X POST localhost:8080/device-roaming-status/v1/retrieve \
-  -H "Authorization: Bearer $(token device-roaming-status:read)" \
+  -H 'Authorization: Bearer <access_token>' \
   -H 'Content-Type: application/json' \
   -d '{"device":{"phoneNumber":"+123456789012"}}'
 ```
@@ -124,43 +147,42 @@ The `device` may be identified by `phoneNumber`, `networkAccessIdentifier`,
 ```bash
 # Device type/model -> {"manufacturer":"OnePlus","model":"OnePlus 12","tac":"35847104",…}
 curl -s -X POST localhost:8080/device-identifier/v0.3/retrieve-type \
-  -H "Authorization: Bearer $(token device-identifier:retrieve-type)" \
+  -H 'Authorization: Bearer <access_token>' \
   -H 'Content-Type: application/json' \
   -d '{"device":{"phoneNumber":"+123456789001"}}'
 
 # Hardware identifier -> {"imei":"354385090000024","imeisv":"…","model":"Pixel 8 Pro",…}
 curl -s -X POST localhost:8080/device-identifier/v0.3/retrieve-identifier \
-  -H "Authorization: Bearer $(token device-identifier:retrieve-identifier)" \
+  -H 'Authorization: Bearer <access_token>' \
   -H 'Content-Type: application/json' \
   -d '{"device":{"phoneNumber":"+123456789002"}}'
 
 # Pseudonymous, stable device id -> {"ppid":"5dacd245-…",…}
 curl -s -X POST localhost:8080/device-identifier/v0.3/retrieve-ppid \
-  -H "Authorization: Bearer $(token device-identifier:retrieve-ppid)" \
+  -H 'Authorization: Bearer <access_token>' \
   -H 'Content-Type: application/json' \
   -d '{"device":{"phoneNumber":"+123456789001"}}'
 ```
 
 ### One Time Password SMS v1
 
-Both endpoints share the `one-time-password-sms:send-validate` scope. The simulator
-"sends" a deterministic code — the phone number's last 6 digits, zero-padded — so a
-headless caller can compute what to validate (`+123456789012` → `789012`).
+The simulator "sends" a deterministic code — the phone number's last 6 digits,
+zero-padded — so a headless caller can compute what to validate (`+123456789012` →
+`789012`). Take the `authenticationId` from the send-code response and pass it to
+validate-code.
 
 ```bash
-TOK=$(token one-time-password-sms:send-validate)
-
 # Send the code -> {"authenticationId":"…"}; message must contain the {{code}} placeholder
-AID=$(curl -s -X POST localhost:8080/one-time-password-sms/v1/send-code \
-  -H "Authorization: Bearer $TOK" -H 'Content-Type: application/json' \
-  -d '{"phoneNumber":"+123456789012","message":"Your code is {{code}}"}' \
-  | python3 -c 'import sys,json; print(json.load(sys.stdin)["authenticationId"])')
+curl -s -X POST localhost:8080/one-time-password-sms/v1/send-code \
+  -H 'Authorization: Bearer <access_token>' \
+  -H 'Content-Type: application/json' \
+  -d '{"phoneNumber":"+123456789012","message":"Your code is {{code}}"}'
 
-# Validate it -> HTTP 204 No Content
-curl -s -o /dev/null -w '%{http_code}\n' -X POST \
-  localhost:8080/one-time-password-sms/v1/validate-code \
-  -H "Authorization: Bearer $TOK" -H 'Content-Type: application/json' \
-  -d "{\"authenticationId\":\"$AID\",\"code\":\"789012\"}"
+# Validate it (code 789012 for +123456789012) -> HTTP 204 No Content
+curl -s -X POST localhost:8080/one-time-password-sms/v1/validate-code \
+  -H 'Authorization: Bearer <access_token>' \
+  -H 'Content-Type: application/json' \
+  -d '{"authenticationId":"<authenticationId>","code":"789012"}'
 ```
 
 ## Project layout
