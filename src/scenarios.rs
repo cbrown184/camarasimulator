@@ -55,6 +55,17 @@ pub fn is_reserved_error(identifier: &str) -> bool {
 }
 
 /// The trailing three ASCII digits of an identifier as a number (000..=999),
+/// skipping any non-digit formatting (`+`, spaces, dashes, …), or `None` if it
+/// has fewer than three digits.
+///
+/// Public because per-API **success** variants also key off the same trailing
+/// digits (e.g. Number Verification's "no-match" marker) so the whole
+/// convention reads the identifier the same way.
+pub fn trailing_three_digits(identifier: &str) -> Option<u16> {
+    last_three_digits(identifier)
+}
+
+/// The trailing three ASCII digits of an identifier as a number (000..=999),
 /// skipping any non-digit characters, or `None` if it has fewer than three
 /// digits.
 fn last_three_digits(identifier: &str) -> Option<u16> {

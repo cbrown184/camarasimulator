@@ -4,6 +4,7 @@
 //! API catalog. CAMARA APIs, auth, and versioning are added incrementally by the
 //! autonomous build agent — see docs/DESIGN.md and PROGRESS.md.
 
+mod apis;
 mod auth;
 mod errors;
 mod scenarios;
@@ -18,6 +19,7 @@ fn app() -> Router {
         .route("/health", get(health))
         .route("/", get(catalog))
         .merge(auth::routes())
+        .merge(apis::routes())
 }
 
 /// Liveness probe.
@@ -31,7 +33,13 @@ async fn catalog() -> Json<Value> {
     Json(json!({
         "service": "camarasimulator",
         "version": env!("CARGO_PKG_VERSION"),
-        "apis": [],
+        "apis": [
+            {
+                "name": "number-verification",
+                "version": "v1",
+                "base_path": "/number-verification/v1",
+            }
+        ],
         "authorization_servers": [{
             "issuer": "/",
             "openid_configuration": "/.well-known/openid-configuration",
@@ -72,7 +80,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn catalog_lists_no_apis_yet() {
+    async fn catalog_lists_mounted_apis() {
         let response = app()
             .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
             .await
@@ -86,7 +94,10 @@ mod tests {
         let body: Value = serde_json::from_slice(&bytes).unwrap();
 
         assert_eq!(body["service"], "camarasimulator");
-        assert_eq!(body["apis"].as_array().unwrap().len(), 0);
+        let apis = body["apis"].as_array().unwrap();
+        assert!(apis.iter().any(|a| a["name"] == "number-verification"
+            && a["version"] == "v1"
+            && a["base_path"] == "/number-verification/v1"));
         assert_eq!(
             body["authorization_servers"][0]["openid_configuration"],
             "/.well-known/openid-configuration"

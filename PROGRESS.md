@@ -39,8 +39,17 @@ point (token `client_credentials`, `/oauth2/authorize`, `/bc-authorize`) → OAu
 `invalid_scope`; non-`dpv:` technical scopes pass untouched. Endpoint-level gating of the
 required purpose scope is already handled by `verify::Claims::require_scope`.
 
-**Next up:** Phase 0 auth is complete. Begin Phase 1 stateless APIs — Number Verification
-v1 (`POST /verify`, `GET /device-phone-number`).
+Phase 1 has begun. **Number Verification v1** `POST /verify` is live at
+`/number-verification/v1/verify`: the first CAMARA business endpoint, protected by the
+`Claims` extractor (scope `number-verification:verify`). It accepts exactly one of
+`phoneNumber` (E.164) / `hashedPhoneNumber`, and drives its result from the submitted
+`phoneNumber` per DESIGN §7 — reserved error suffix → canonical CAMARA error (shared
+`scenarios::reserved_error`), trailing `000` → `devicePhoneNumberVerified:false`, else
+`true`; a `hashedPhoneNumber` can't be reversed so always verifies `true` (documented).
+`x-correlator` is echoed on every response. New `src/apis/` tree wires business APIs into
+the router and the `/` catalog now lists mounted APIs.
+
+**Next up:** Number Verification v1 `GET /device-phone-number`, then SIM Swap v2.
 
 ## In progress (claimed this pass)
 
@@ -62,7 +71,7 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `verify::Claims::require_scope`; Phase 1 APIs wire the specific scope per endpoint.)
 
 ### Phase 1 — Stateless, non-spatial
-- [ ] Number Verification v1 — `POST /verify`, `GET /device-phone-number`
+- [~] Number Verification v1 — [x] `POST /verify` · [ ] `GET /device-phone-number` (next)
 - [ ] SIM Swap v2 — `POST /check`, `POST /retrieve-date` (+ full parameter-driven cases)
 - [ ] KYC Match v1 — `POST /match`
 
@@ -95,6 +104,24 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-02 — Phase 1: Number Verification v1 — `POST /verify` (CAMARA 1.0.0). First CAMARA
+  business endpoint. New `src/apis/` tree (`apis.rs` → `number_verification.rs` → `v1.rs`),
+  mounted at `/number-verification/v1/verify` and merged into the app router; `/` catalog now
+  lists mounted APIs. Handler is protected by the `Claims` extractor (scope
+  `number-verification:verify`), extracts the body as `Bytes` and parses with
+  `deny_unknown_fields` for precise CAMARA `INVALID_ARGUMENT` (400) on malformed / unknown-field
+  / neither-or-both-identifiers / bad-E.164 input. Functional cases (§7) driven by the submitted
+  `phoneNumber`: `scenarios::reserved_error` → canonical CAMARA error (…404/…429/etc.), trailing
+  `000` → `devicePhoneNumberVerified:false`, else `true`; `hashedPhoneNumber` accepted but always
+  `true` (can't reverse a hash to pick a case — documented). E.164 validated inline against
+  `^\+[1-9][0-9]{4,14}$` (no regex dep). `x-correlator` echoed on all responses. Made
+  `scenarios::last_three_digits` reusable via `pub trailing_three_digits`. No new deps. Spec:
+  new `specs/number-verification/v1/openapi.yaml` — vendored CAMARA 1.0.0 `POST /verify`,
+  `$ref`-ing shared `errors.yaml` responses + auth `camaraOAuth` scheme, with
+  `x-camarasim-scenarios` documenting the cases (device-phone-number deferred to next pass, so
+  the served spec matches the code). 118 tests green (was 105; +13: E.164 unit + 12 integration
+  covering happy/no-match/reserved-error/hashed/all-400-shapes/scope/auth/x-correlator).
+  — binary: 956K (974936 B; +54744 B — first business API + serde derive)
 - 2026-08-02 — Phase 0 (complete): purpose/scope enforcement — validate CAMARA `dpv:`
   purpose-scope grammar. New `src/auth/purpose.rs`: pure `validate_scope(&str) -> Result<(),String>`
   checking each space-delimited token; a `dpv:`-prefixed token must be `dpv:<Purpose>#<action>`
