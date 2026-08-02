@@ -6,13 +6,17 @@
 //! top-level app merges.
 //!
 //! So far:
-//! - **Number Verification v1** — `POST /number-verification/v1/verify`.
+//! - **Number Verification v1** — `/number-verification/v1/…`.
+//! - **SIM Swap v2** — `/sim-swap/v2/…`.
 
 pub mod number_verification;
+pub mod sim_swap;
 
 use axum::Router;
 
 /// Every mounted CAMARA API's routes, merged into one router.
 pub fn routes() -> Router {
-    Router::new().merge(number_verification::routes())
+    Router::new()
+        .merge(number_verification::routes())
+        .merge(sim_swap::routes())
 }

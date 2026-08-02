@@ -55,7 +55,15 @@ The latter has no request body, so its functional cases key off the token
 **subject** — a reserved error suffix on `sub` → canonical CAMARA error, an
 E.164 `sub` → that number, anything else → the simulator's default line.
 
-**Next up:** SIM Swap v2.
+**SIM Swap v2** has begun. `POST /check` is live at `/sim-swap/v2/check`
+(scope `sim-swap:check`): the identifier is the submitted `phoneNumber` or —
+when omitted — the token subject (three-legged fallback). Reserved error suffix
+→ canonical CAMARA error; otherwise the identifier's trailing three digits encode
+**hours since the last swap** and `swapped = hoursAgo < maxAge`, making `maxAge`
+(1–2400, default 240) a real second control plane; out-of-range `maxAge` → 400
+`OUT_OF_RANGE`. `x-correlator` echoed on every response.
+
+**Next up:** SIM Swap v2 `POST /retrieve-date`.
 
 ## In progress (claimed this pass)
 
@@ -78,7 +86,7 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ### Phase 1 — Stateless, non-spatial
 - [x] Number Verification v1 — [x] `POST /verify` · [x] `GET /device-phone-number`
-- [ ] SIM Swap v2 — `POST /check`, `POST /retrieve-date` (+ full parameter-driven cases)
+- [~] SIM Swap v2 — [x] `POST /check` · [ ] `POST /retrieve-date` (+ full parameter-driven cases)
 - [ ] KYC Match v1 — `POST /match`
 
 ### Phase 2 — Stateless device queries
@@ -110,6 +118,25 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-02 — Phase 1: SIM Swap v2 — `POST /check` (CAMARA sim-swap 2.0.0, r2.2). New
+  `src/apis/sim_swap/{,v2}.rs` mounted at `/sim-swap/v2/check`, merged into the app router;
+  `/` catalog now lists sim-swap v2. Protected by the `Claims` extractor (scope
+  `sim-swap:check`, confirmed against upstream). Body `CreateCheckSimSwap {phoneNumber?, maxAge?}`
+  parsed as `Bytes` with `deny_unknown_fields`; empty body allowed (both fields optional per
+  v2). Identifier = submitted `phoneNumber` (validated E.164) or, when omitted, the token
+  subject (three-legged fallback; non-numeric/absent subject → never swapped). Functional cases
+  (§7): `scenarios::reserved_error` → canonical CAMARA error (…404/…429/etc.); otherwise the
+  identifier's trailing three digits encode hours-since-last-swap and `swapped =
+  hoursAgo < maxAge`, so `maxAge` (1–2400, default 240) is a genuine second control plane;
+  `maxAge` out of range → 400 `OUT_OF_RANGE` (canonical v2 code). `x-correlator` echoed on all
+  responses. No new deps (reuses shared `scenarios`/`errors`; small local E.164 validator like
+  NV). Spec: new `specs/sim-swap/v2/openapi.yaml` — vendored `POST /check` + `CreateCheckSimSwap`
+  /`CheckSimSwapInfo` schemas, `$ref`-ing shared `errors.yaml` + auth `camaraOAuth`, with
+  `x-camarasim-scenarios` documenting the identifier- and maxAge-driven cases (retrieve-date
+  deferred, so served spec matches code; full shared error set exposed, noted vs canonical
+  subset). 139 tests green (was 124; +15: 2 recency/E.164 units + 13 integration covering
+  swapped/not-swapped/maxAge-window/out-of-range/reserved-error/subject-fallback/bad-input/
+  scope/auth/x-correlator + catalog). — binary: 964K (986144 B; +7648 B)
 - 2026-08-02 — Phase 1: Number Verification v1 — `GET /device-phone-number` (CAMARA 1.0.0),
   completing the API. New GET route at `/number-verification/v1/device-phone-number`, protected by
   the `Claims` extractor (scope `number-verification:device-phone-number:read`; confirmed against

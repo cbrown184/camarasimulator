@@ -1,0 +1,190 @@
+# CamaraSim — SIM Swap, API version v2 (CAMARA 2.0.0).
+#
+# Vendored from the CAMARA SIM Swap API (release r2.2, sim-swap 2.0.0) and
+# annotated with CamaraSim's parameter-driven functional cases
+# (docs/DESIGN.md §7, §9). Backed by `src/apis/sim_swap/v2.rs`; spec and code
+# must not drift.
+#
+# Serves `POST /check`. (`POST /retrieve-date` is planned — see PROGRESS.md.)
+openapi: 3.0.3
+info:
+  title: SIM Swap
+  description: |
+    Answers whether the SIM card bound to a phone number has been swapped
+    recently — a signal widely used in anti-fraud and account-recovery flows.
+
+    This is the CamaraSim reference double for CAMARA SIM Swap 2.0.0. The device
+    can be identified either by the `phoneNumber` in the request body
+    (two-legged / CIBA) or by the identity a three-legged access token
+    authenticated (in which case `phoneNumber` is omitted). The endpoint
+    requires the `sim-swap:check` scope.
+
+    ## Functional cases — the input is the control plane (docs/DESIGN.md §7)
+
+    The identifier is the submitted `phoneNumber`, or — when it is omitted — the
+    access token's subject (`sub`). The result is chosen deterministically from
+    that identifier:
+
+    - **Reserved error suffix** — if the identifier's trailing three digits name
+      a reserved CAMARA status, the endpoint answers with that canonical CAMARA
+      error instead of a result (shared convention — see the referenced
+      `errors.yaml`): `…400`, `…401`, `…403`, `…404`, `…409`, `…422`, `…429`,
+      `…500`, `…503`.
+    - **Recency of the swap** — otherwise the identifier's trailing three digits
+      encode **how many hours ago** the SIM was last swapped (`000`–`999`). The
+      endpoint reports `swapped = hoursAgo < maxAge`, so the swap is reported
+      only when it falls inside the queried window. `maxAge` is therefore a
+      second control plane.
+    - **No trailing digits** — an identifier with no trailing digits (e.g. the
+      synthetic `camarasim-user` subject of a two-legged token) is treated as
+      never swapped → `swapped: false`.
+
+    Examples (default `maxAge` 240 h): `+123456789012` (12 h ago) → `swapped:
+    true`; `+123456789365` (365 h ago) → `swapped: false`, but the same number
+    with `maxAge: 2400` → `swapped: true`; `+123456789404` → `404 NOT_FOUND`.
+  version: "2.0.0"
+  license:
+    name: Apache-2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0.html
+
+servers:
+  - url: "{apiRoot}/sim-swap/v2"
+    variables:
+      apiRoot:
+        default: http://localhost:8080
+        description: API root, e.g. the CamaraSim base URL.
+
+paths:
+  /check:
+    post:
+      operationId: checkSimSwap
+      summary: Check for a recent SIM swap
+      description: |
+        Checks whether the SIM card bound to a phone number was swapped within
+        the last `maxAge` hours. Supply the `phoneNumber`, or omit it to use the
+        device identified by a three-legged access token.
+
+        See the API description for the parameter-driven functional cases.
+      security:
+        - openId:
+            - sim-swap:check
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateCheckSimSwap"
+      responses:
+        "200":
+          description: Whether a SIM swap occurred within the requested period.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CheckSimSwapInfo"
+              examples:
+                swapped:
+                  summary: SIM swapped within the window (recent-swap tail)
+                  value:
+                    swapped: true
+                notSwapped:
+                  summary: No swap within the window
+                  value:
+                    swapped: false
+        "400":
+          $ref: "../../shared/errors.yaml#/components/responses/InvalidArgument"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "409":
+          $ref: "../../shared/errors.yaml#/components/responses/Conflict"
+        "422":
+          $ref: "../../shared/errors.yaml#/components/responses/ServiceNotApplicable"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          Result selected from the identifier (the submitted `phoneNumber`, else
+          the access token subject) and `maxAge` (docs/DESIGN.md §7). Reserved
+          error suffixes come from the shared convention in errors.yaml. Note:
+          canonical SIM Swap 2.0.0 declares 400/401/403/404/422/429; CamaraSim
+          exposes the full shared error set so every reserved case is reachable.
+        cases:
+          - input: identifier ending in a reserved error suffix (e.g. …404)
+            result: the canonical CAMARA error for that status
+          - input: "identifier whose trailing digits (hoursAgo) < maxAge"
+            result: "200 { swapped: true }"
+          - input: "identifier whose trailing digits (hoursAgo) >= maxAge"
+            result: "200 { swapped: false }"
+          - input: maxAge outside 1..=2400
+            result: "400 OUT_OF_RANGE"
+          - input: no phoneNumber and a non-numeric token subject
+            result: "200 { swapped: false } — treated as never swapped"
+
+components:
+  securitySchemes:
+    openId:
+      $ref: "../../auth/openapi.yaml#/components/securitySchemes/camaraOAuth"
+
+  parameters:
+    XCorrelator:
+      name: x-correlator
+      in: header
+      required: false
+      description: Correlation id for the request, echoed back on the response.
+      schema:
+        type: string
+
+  headers:
+    XCorrelator:
+      description: The `x-correlator` from the request, echoed if one was sent.
+      required: false
+      schema:
+        type: string
+
+  schemas:
+    CreateCheckSimSwap:
+      type: object
+      description: Request to check for a SIM swap on a phone number.
+      properties:
+        phoneNumber:
+          type: string
+          description: >-
+            A phone number in E.164 format (starting with `+`). Optional: omit it
+            to use the device identified by a three-legged access token.
+          pattern: '^\+[1-9][0-9]{4,14}$'
+          example: "+123456789012"
+        maxAge:
+          type: integer
+          format: int32
+          description: >-
+            Period in hours to be checked for a SIM swap. In CamaraSim this is a
+            control plane: `swapped` is `true` when the identifier's encoded
+            hours-since-swap is strictly less than `maxAge`.
+          minimum: 1
+          maximum: 2400
+          default: 240
+          example: 240
+
+    CheckSimSwapInfo:
+      type: object
+      description: Result of a SIM-swap check.
+      required:
+        - swapped
+      properties:
+        swapped:
+          type: boolean
+          description: >-
+            `true` if the SIM card was swapped within the requested `maxAge`
+            period, `false` otherwise.

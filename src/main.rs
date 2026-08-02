@@ -38,6 +38,11 @@ async fn catalog() -> Json<Value> {
                 "name": "number-verification",
                 "version": "v1",
                 "base_path": "/number-verification/v1",
+            },
+            {
+                "name": "sim-swap",
+                "version": "v2",
+                "base_path": "/sim-swap/v2",
             }
         ],
         "authorization_servers": [{
@@ -98,6 +103,9 @@ mod tests {
         assert!(apis.iter().any(|a| a["name"] == "number-verification"
             && a["version"] == "v1"
             && a["base_path"] == "/number-verification/v1"));
+        assert!(apis.iter().any(|a| a["name"] == "sim-swap"
+            && a["version"] == "v2"
+            && a["base_path"] == "/sim-swap/v2"));
         assert_eq!(
             body["authorization_servers"][0]["openid_configuration"],
             "/.well-known/openid-configuration"
