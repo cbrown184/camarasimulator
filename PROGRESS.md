@@ -120,7 +120,16 @@ otherwise the identifier's trailing three digits pick a device type from a fixed
 default Apple entry), so the reported model is a second control plane. The
 response echoes the `device` identifier used (single-property `DeviceResponse`)
 and a current `lastChecked`. `x-correlator` echoed on every response.
-**Next up:** Device Identifier `POST /retrieve-identifier` / `/retrieve-ppid`.
+
+Device Identifier v0.3 `POST /retrieve-identifier` is now live too
+(`device-identifier:retrieve-identifier`, operationId `retrieveIdentifier`).
+Same identifier resolution and reserved-error convention as `retrieve-type`;
+on a happy path it returns the full device identity — a synthesised `imei`
+(15-digit: the selected type's TAC + a 6-digit serial = zero-padded trailing
+three digits + a GSMA Luhn check digit) and `imeisv` (16-digit: TAC + serial +
+fixed `"00"` software version) — alongside `tac`/`manufacturer`/`model`, so both
+the model and the IMEI are deterministic from the input.
+**Next up:** Device Identifier `POST /retrieve-ppid`.
 
 ## In progress (claimed this pass)
 
@@ -152,7 +161,7 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   - [x] Device Roaming Status v1 — `POST /retrieve` (`/device-roaming-status/v1`; CAMARA 1.0.0)
 - [~] Device Identifier v0.3 (`/device-identifier/v0.3`; CAMARA 0.3.0, release r2.2):
   - [x] `POST /retrieve-type` (`device-identifier:retrieve-type`)
-  - [ ] `POST /retrieve-identifier` (`device-identifier:retrieve-identifier`)
+  - [x] `POST /retrieve-identifier` (`device-identifier:retrieve-identifier`)
   - [ ] `POST /retrieve-ppid` (`device-identifier:retrieve-ppid`)
 
 ### Phase 3 — Stateful, non-spatial
@@ -180,6 +189,32 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-02 — Phase 2: Device Identifier v0.3 — `POST /retrieve-identifier` (CAMARA Device
+  Identifier 0.3.0, r2.2), operationId `retrieveIdentifier`, scope
+  `device-identifier:retrieve-identifier`. Added the route + handler to
+  `src/apis/device_identifier/v0_3.rs`, reusing the module's existing request body
+  (`RequestBody`/`Device`), identifier resolution (`resolve_identifier`), `device_type`
+  table, correlator/E.164/rfc3339 helpers — no new files, no new deps. Same identifier
+  resolution and reserved-error convention as retrieve-type (§7): identifier = first present
+  `device` id [phoneNumber E.164-validated, else NAI, else IPv4 publicAddress, else
+  ipv6Address], else token subject → 422 MISSING_IDENTIFIER; empty `device{}`/bad phone → 400;
+  unknown field → 400; reserved suffix → canonical CAMARA error. Happy path returns the full
+  device identity: `imei` (15-digit = the selected type's TAC(8) + serial(6, the zero-padded
+  trailing three digits) + a GSMA **Luhn** check digit) and `imeisv` (16-digit = TAC + serial +
+  fixed "00" SVN), alongside `tac`/`manufacturer`/`model` from the shared 6-entry DEVICE_TYPES
+  table (`digits % 6`; …000/no-digits → default Apple), so both the model and the IMEI are a
+  control plane. Echoes the `device` used (single-property `DeviceResponse`) and current
+  `lastChecked`; `x-correlator` echoed on all responses. New `luhn_check_digit`/`imei_from`/
+  `serial_from` helpers; Luhn verified against the canonical 490154203237518 IMEI. Spec: added
+  `/retrieve-identifier` path + `IdentifierResponse` schema (imei `^[0-9]{15}$`, imeisv
+  `^[0-9]{16}$`) to `specs/device-identifier/v0.3/openapi.yaml`, `$ref`-ing shared `errors.yaml`
+  + auth `camaraOAuth`, with `x-camarasim-scenarios` documenting the cases (full shared error
+  set exposed, noted vs canonical 400/401/403/404/422/429; optional device `name` not modelled;
+  retrieve-ppid still deferred so served spec matches code). 237 tests green (was 222; +15: 4
+  units [luhn-known-imei/imei-15-digit-luhn-valid/serial-default/serial-…001] + 11 integration
+  covering identity+echo/different-tail/default-tail/reserved-error/non-phone-ids/bad-phone+
+  empty-device/subject-fallback/subject-reserved-error/non-numeric-subject/scope [retrieve-type
+  token rejected]/auth/x-correlator). — binary: 1026K (1051056 B; +4872 B)
 - 2026-08-02 — Phase 2 (Device Identifier begun): Device Identifier v0.3 — `POST /retrieve-type`
   (CAMARA Device Identifier 0.3.0, the API version carried by the latest public release r2.2;
   never reached 1.0.0, so mounted under real `v0.3` like KYC Match — DESIGN §9). New

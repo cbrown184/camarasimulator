@@ -11,21 +11,26 @@
 #
 # The full API defines POST /retrieve-identifier, /retrieve-type and
 # /retrieve-ppid. CamaraSim implements them incrementally; this spec currently
-# serves `POST /retrieve-type` (the other operations are not yet mounted, so the
-# served spec matches the code).
+# serves `POST /retrieve-type` and `POST /retrieve-identifier` (retrieve-ppid is
+# not yet mounted, so the served spec matches the code).
 openapi: 3.0.3
 info:
   title: Device Identifier
   description: |
     Obtains details about the physical device a mobile subscription is attached
-    to. This CamaraSim reference double serves the device *type* operation:
-    `POST /retrieve-type` returns the device's manufacturer, model and Type
-    Allocation Code (TAC), without exposing a full device identifier.
+    to. This CamaraSim reference serves two operations:
+
+    - `POST /retrieve-type` returns the device's manufacturer, model and Type
+      Allocation Code (TAC), without exposing a full device identifier
+      (scope `device-identifier:retrieve-type`).
+    - `POST /retrieve-identifier` additionally returns the device's full
+      identity — a synthesised `imei` (15-digit, TAC + serial + Luhn check
+      digit) and `imeisv` (16-digit, TAC + serial + software version)
+      (scope `device-identifier:retrieve-identifier`).
 
     The device can be identified either by the `device` object in the request
     body (two-legged / CIBA) or by the identity a three-legged access token
-    authenticated (in which case `device` is omitted). The endpoint requires the
-    `device-identifier:retrieve-type` scope.
+    authenticated (in which case `device` is omitted).
 
     ## Functional cases — the input is the control plane (docs/DESIGN.md §7)
 
@@ -44,7 +49,10 @@ info:
       digits, such as the synthetic subject) — the endpoint returns a device
       type chosen from the trailing three digits over a fixed 6-entry table
       (`DEVICE_TYPES[digits % 6]`; `…000`/none → the default entry), so the
-      reported device model is itself a control plane.
+      reported device model is itself a control plane. `retrieve-identifier`
+      extends that type with an `imei`/`imeisv` whose TAC is the selected type's
+      TAC and whose serial is the zero-padded trailing three digits, so the full
+      identity is likewise deterministic from the input.
 
     Examples: `+123456789001` → OnePlus 12; `+123456789002` → Google Pixel 8 Pro;
     `+123456789000` → the default (Apple iPhone 15 Pro); `+123456789404` →
@@ -148,6 +156,100 @@ paths:
             result: "200 default type (Apple iPhone 15 Pro)"
           - input: "identifier with any other numeric tail (e.g. …001)"
             result: '200 { tac, manufacturer, model } from DEVICE_TYPES[digits % 6]'
+          - input: "`device` present but carrying no identifier"
+            result: "400 INVALID_ARGUMENT"
+          - input: no `device` and no token subject
+            result: "422 MISSING_IDENTIFIER"
+
+  /retrieve-identifier:
+    post:
+      operationId: retrieveIdentifier
+      summary: Retrieve the identifier of a device
+      description: |
+        Returns the device's full identity — `imei` and `imeisv` — alongside its
+        type (`tac`, `manufacturer`, `model`) and the `lastChecked` timestamp,
+        echoing back the `device` identifier that was used. Supply a `device`, or
+        omit it to use the device identified by a three-legged access token.
+
+        See the API description for the parameter-driven functional cases.
+      security:
+        - openId:
+            - device-identifier:retrieve-identifier
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RequestBody"
+      responses:
+        "200":
+          description: The device's identity.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IdentifierResponse"
+              examples:
+                identifier:
+                  summary: Device identity for a non-error identifier
+                  value:
+                    lastChecked: "2024-01-01T14:27:08Z"
+                    imei: "358471040000011"
+                    imeisv: "3584710400000100"
+                    tac: "35847104"
+                    manufacturer: OnePlus
+                    model: OnePlus 12
+                    device:
+                      phoneNumber: "+123456789001"
+        "400":
+          $ref: "../../shared/errors.yaml#/components/responses/InvalidArgument"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "409":
+          $ref: "../../shared/errors.yaml#/components/responses/Conflict"
+        "422":
+          $ref: "../../shared/errors.yaml#/components/responses/ServiceNotApplicable"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          Identical identifier resolution and reserved-error convention to
+          retrieve-type (docs/DESIGN.md §7): the identifier is the first present
+          device identifier, else the access token subject, and its trailing
+          three digits drive the case. A reserved suffix answers with the
+          canonical CAMARA error. Otherwise the reported type is
+          DEVICE_TYPES[digits % 6] (…000 / no digits → the default Apple entry),
+          and the full identity is synthesised from it: `imei` = TAC (8) + serial
+          (6, the zero-padded trailing three digits) + a Luhn check digit (GSMA
+          IMEI, 15 digits, `^[0-9]{15}$`); `imeisv` = TAC + serial + a fixed "00"
+          software version (16 digits, `^[0-9]{16}$`). So both the model and the
+          IMEI are deterministic from the input. Note: canonical Device
+          Identifier 0.3.0 declares 400/401/403/404/422/429 on this operation;
+          CamaraSim exposes the full shared error set so every reserved suffix is
+          reachable (reserved suffixes use the generic Commonalities codes, and
+          409/500/503 are CamaraSim extensions). `lastChecked` is the current
+          time. The optional device `name` is not modelled. A supplied `device`
+          is used as-is; CamaraSim does not model the three-legged
+          IDENTIFIER_MISMATCH / UNNECESSARY_IDENTIFIER 422 sub-cases.
+        cases:
+          - input: identifier ending in a reserved error suffix (e.g. …404)
+            result: the canonical CAMARA error for that status
+          - input: "identifier ending in …000, or with no trailing digits"
+            result: "200 default identity (Apple, TAC 35692005, serial 000000)"
+          - input: "identifier with any other numeric tail (e.g. …001)"
+            result: '200 { imei, imeisv, tac, manufacturer, model } from DEVICE_TYPES[digits % 6]'
           - input: "`device` present but carrying no identifier"
             result: "400 INVALID_ARGUMENT"
           - input: no `device` and no token subject
@@ -265,6 +367,60 @@ components:
             Date and time the information was last confirmed correct by the
             operator (RFC 3339, UTC). CamaraSim returns the current time.
           example: "2024-01-01T14:27:08Z"
+        tac:
+          type: string
+          description: The device's Type Allocation Code (first 8 digits of the IMEI).
+          pattern: '^[0-9]{8}$'
+          maxLength: 8
+          example: "35847104"
+        manufacturer:
+          type: string
+          description: The device manufacturer.
+          maxLength: 32
+          example: OnePlus
+        model:
+          type: string
+          description: The device model.
+          maxLength: 32
+          example: OnePlus 12
+
+    IdentifierResponse:
+      type: object
+      description: >-
+        The device's full identity (`imei` / `imeisv`) alongside its type. All
+        properties are optional (`minProperties: 1`); CamaraSim always returns
+        `imei`, `imeisv`, `tac`, `manufacturer`, `model` and `lastChecked`, and
+        does not model the optional device `name`.
+      required:
+        - lastChecked
+        - imei
+      properties:
+        device:
+          $ref: "#/components/schemas/DeviceResponse"
+        lastChecked:
+          type: string
+          format: date-time
+          description: >-
+            Date and time the information was last confirmed correct by the
+            operator (RFC 3339, UTC). CamaraSim returns the current time.
+          example: "2024-01-01T14:27:08Z"
+        imei:
+          type: string
+          description: >-
+            The device's IMEI — 15 digits: TAC (8) + serial (6) + Luhn check
+            digit (1). CamaraSim synthesises it from the selected type's TAC and
+            a serial equal to the zero-padded trailing three digits.
+          pattern: '^[0-9]{15}$'
+          maxLength: 15
+          example: "358471040000011"
+        imeisv:
+          type: string
+          description: >-
+            The device's IMEISV — 16 digits: TAC (8) + serial (6) + software
+            version (2). CamaraSim uses a fixed "00" software version.
+          pattern: '^[0-9]{16}$'
+          maxLength: 16
+          example: "3584710400000100"
         tac:
           type: string
           description: The device's Type Allocation Code (first 8 digits of the IMEI).

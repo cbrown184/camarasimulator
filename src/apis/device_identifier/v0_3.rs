@@ -1,21 +1,27 @@
 //! Device Identifier **v0.3** (CAMARA Device Identifier 0.3.0, release r2.2).
 //!
-//! One endpoint so far:
+//! Endpoints so far:
 //! - `POST /device-identifier/v0.3/retrieve-type` — the device's *type*
 //!   (manufacturer / model / Type Allocation Code), with no full identifier.
+//! - `POST /device-identifier/v0.3/retrieve-identifier` — the device's full
+//!   identity (`imei` / `imeisv`) alongside its type (operationId
+//!   `retrieveIdentifier`).
 //!
 //! ## What it does
 //!
 //! The caller asks about a device, identified either by a `device` object in the
 //! request body (`phoneNumber`, `networkAccessIdentifier`, `ipv4Address`, or
 //! `ipv6Address`) or — when `device` is omitted — by the identity a three-legged
-//! access token authenticated. The endpoint answers with the device's
-//! `{ tac, manufacturer, model, lastChecked }` (operationId `retrieveType`),
-//! echoing back the `device` identifier it used.
+//! access token authenticated. `retrieve-type` answers with the device's
+//! `{ tac, manufacturer, model, lastChecked }`; `retrieve-identifier` adds the
+//! synthesised `imei` (15-digit, TAC + serial + Luhn check digit) and `imeisv`
+//! (16-digit, TAC + serial + software-version). Both echo back the `device`
+//! identifier they used.
 //!
-//! The endpoint is protected: it requires a valid access token
-//! ([`crate::auth::verify::Claims`]) carrying the
-//! `device-identifier:retrieve-type` scope.
+//! Each endpoint is protected: it requires a valid access token
+//! ([`crate::auth::verify::Claims`]) carrying, respectively, the
+//! `device-identifier:retrieve-type` and `device-identifier:retrieve-identifier`
+//! scopes.
 //!
 //! ## Functional cases — the input is the control plane (docs/DESIGN.md §7)
 //!
@@ -55,6 +61,10 @@ use crate::scenarios;
 /// Identifier 0.3.0).
 const RETRIEVE_TYPE_SCOPE: &str = "device-identifier:retrieve-type";
 
+/// The OAuth2 scope the `POST /retrieve-identifier` endpoint requires (CAMARA
+/// Device Identifier 0.3.0).
+const RETRIEVE_IDENTIFIER_SCOPE: &str = "device-identifier:retrieve-identifier";
+
 /// Device types the endpoint can report, as `(TAC, manufacturer, model)` triples.
 /// The identifier's trailing three digits index this table (`digits % len`), so
 /// the reported device type is deterministic from the input; `…000` and an
@@ -71,10 +81,15 @@ const DEVICE_TYPES: &[(&str, &str, &str)] = &[
 
 /// Routes for Device Identifier v0.3, mounted at their canonical URLs.
 pub fn routes() -> Router {
-    Router::new().route(
-        "/device-identifier/v0.3/retrieve-type",
-        post(retrieve_type),
-    )
+    Router::new()
+        .route(
+            "/device-identifier/v0.3/retrieve-type",
+            post(retrieve_type),
+        )
+        .route(
+            "/device-identifier/v0.3/retrieve-identifier",
+            post(retrieve_identifier),
+        )
 }
 
 /// `POST /retrieve-type` request body (CAMARA `RequestBody`). `device` is
@@ -168,6 +183,121 @@ async fn retrieve_type(claims: Claims, headers: HeaderMap, body: Bytes) -> Respo
         (StatusCode::OK, Json(response_body)).into_response(),
         &correlator,
     )
+}
+
+/// `POST /device-identifier/v0.3/retrieve-identifier`.
+///
+/// Like `retrieve-type`, but answers with the device's full identity — a
+/// synthesised `imei` and `imeisv` — alongside its type. Same identifier
+/// resolution and reserved-error convention (docs/DESIGN.md §7).
+async fn retrieve_identifier(claims: Claims, headers: HeaderMap, body: Bytes) -> Response {
+    // Optional correlation header, echoed on every response (CAMARA Commonalities).
+    let correlator = headers.get("x-correlator").cloned();
+
+    // Endpoint authorisation: the token must carry this API's scope.
+    if let Err(e) = claims.require_scope(RETRIEVE_IDENTIFIER_SCOPE) {
+        return with_correlator(e.into_response(), &correlator);
+    }
+
+    // An empty body is allowed (device optional); anything present must parse.
+    let req: RequestBody = if body.is_empty() {
+        RequestBody { device: None }
+    } else {
+        match serde_json::from_slice(&body) {
+            Ok(req) => req,
+            Err(_) => {
+                return invalid_argument("Request body is not a valid RequestBody.", &correlator)
+            }
+        }
+    };
+
+    // The identifier is the submitted device identifier, else the token subject
+    // (three-legged fallback). Missing both → 422 MISSING_IDENTIFIER.
+    let resolved = match resolve_identifier(req.device, &claims, &correlator) {
+        Ok(r) => r,
+        Err(resp) => return resp,
+    };
+
+    // Reserved error suffix on the identifier selects a canonical CAMARA error.
+    if let Some(err) = scenarios::reserved_error(&resolved.id) {
+        return with_correlator(err.into_response(), &correlator);
+    }
+
+    // The type (and its TAC) is the same control plane as retrieve-type; the
+    // full IMEI is synthesised from the selected TAC plus a serial derived from
+    // the identifier, with a valid Luhn check digit (GSMA IMEI).
+    let (tac, manufacturer, model) = device_type(&resolved.id);
+    let serial = serial_from(&resolved.id);
+    let imei = imei_from(tac, &serial);
+    let imeisv = format!("{tac}{serial}{SOFTWARE_VERSION}");
+    let mut response_body = json!({
+        "lastChecked": rfc3339_utc(now_unix_secs()),
+        "imei": imei,
+        "imeisv": imeisv,
+        "tac": tac,
+        "manufacturer": manufacturer,
+        "model": model,
+    });
+    // Echo the device identifier that was used, when we can represent it as a
+    // single-property `DeviceResponse` (CommonResponseBody, maxProperties: 1).
+    if let Some(echo) = resolved.echo {
+        response_body["device"] = echo;
+    }
+
+    with_correlator(
+        (StatusCode::OK, Json(response_body)).into_response(),
+        &correlator,
+    )
+}
+
+/// The two-digit Software Version Number (SVN) appended to a TAC + serial to form
+/// the 16-digit IMEISV. Fixed for the simulator's single-node, in-memory model.
+const SOFTWARE_VERSION: &str = "00";
+
+/// The 6-digit serial number (SNR) portion of the synthesised IMEI/IMEISV,
+/// derived from the identifier's trailing three digits so the identity is
+/// deterministic from the input (`…000` and an identifier with no trailing
+/// digits → `"000000"`). Reserved suffixes never reach here — they are answered
+/// as errors first.
+fn serial_from(identifier: &str) -> String {
+    let digits = scenarios::trailing_three_digits(identifier).unwrap_or(0);
+    format!("{digits:06}")
+}
+
+/// Synthesise a 15-digit IMEI = TAC (8) + serial (6) + Luhn check digit (1),
+/// matching the GSMA IMEI structure and the CAMARA `^[0-9]{15}$` pattern.
+fn imei_from(tac: &str, serial: &str) -> String {
+    let base = format!("{tac}{serial}"); // 14 digits: TAC + SNR
+    let check = luhn_check_digit(&base);
+    format!("{base}{check}")
+}
+
+/// The Luhn (mod-10) check digit for a numeric string, as used by the GSMA to
+/// close an IMEI. Doubles every second digit counting from the right of the
+/// (check-digit-less) base, then returns the digit that makes the total a
+/// multiple of ten.
+fn luhn_check_digit(digits: &str) -> u32 {
+    let sum: u32 = digits
+        .bytes()
+        .rev()
+        .enumerate()
+        .map(|(i, b)| {
+            let d = (b - b'0') as u32;
+            if i % 2 == 0 {
+                // This digit sits one place left of the future check digit, so
+                // it is doubled (9 → 18 → 1+8 = 9, i.e. subtract 9 when > 9).
+                let doubled = d * 2;
+                if doubled > 9 {
+                    doubled - 9
+                } else {
+                    doubled
+                }
+            } else {
+                d
+            }
+        })
+        .sum();
+    (10 - (sum % 10)) % 10
 }
 
 /// The device type reported for `identifier`, driven by its trailing three digits
@@ -396,6 +526,45 @@ mod tests {
             rfc3339_utc(1_704_067_200 + 14 * 3600 + 27 * 60 + 8),
             "2024-01-01T14:27:08Z"
         );
+    }
+
+    #[test]
+    fn luhn_check_digit_closes_a_known_imei() {
+        // 490154203237518 is a well-known Luhn-valid IMEI (check digit 8).
+        assert_eq!(luhn_check_digit("49015420323751"), 8);
+    }
+
+    #[test]
+    fn imei_is_15_digits_and_luhn_valid() {
+        // …001 → OnePlus TAC 35847104, serial 000001.
+        let serial = serial_from("+123456789001");
+        assert_eq!(serial, "000001");
+        let imei = imei_from("35847104", &serial);
+        assert_eq!(imei.len(), 15);
+        assert!(imei.bytes().all(|b| b.is_ascii_digit()));
+        assert!(imei.starts_with("35847104000001"));
+        // A Luhn-valid number: doubling from the rightmost digit sums to 0 mod 10.
+        let sum: u32 = imei
+            .bytes()
+            .rev()
+            .enumerate()
+            .map(|(i, b)| {
+                let d = (b - b'0') as u32;
+                if i % 2 == 1 {
+                    let x = d * 2;
+                    if x > 9 { x - 9 } else { x }
+                } else {
+                    d
+                }
+            })
+            .sum();
+        assert_eq!(sum % 10, 0, "IMEI {imei} must satisfy the Luhn check");
+    }
+
+    #[test]
+    fn serial_defaults_to_zeros_without_trailing_digits() {
+        assert_eq!(serial_from("camarasim-user"), "000000");
+        assert_eq!(serial_from("+123456789000"), "000000");
     }
 
     // --- Integration through the real router -------------------------------
@@ -636,6 +805,187 @@ mod tests {
         assert_eq!(
             headers.get("x-correlator").and_then(|v| v.to_str().ok()),
             Some("corr-err")
+        );
+    }
+
+    // --- retrieve-identifier -----------------------------------------------
+
+    /// POST a JSON body to `/retrieve-identifier` with an optional Bearer token
+    /// and `x-correlator`.
+    async fn post_retrieve_identifier(
+        token: Option<&str>,
+        body: &str,
+        correlator: Option<&str>,
+    ) -> (StatusCode, HeaderMap, Value) {
+        let mut builder = Request::builder()
+            .method("POST")
+            .uri("/device-identifier/v0.3/retrieve-identifier")
+            .header("host", HOST)
+            .header("content-type", "application/json");
+        if let Some(t) = token {
+            builder = builder.header("authorization", format!("Bearer {t}"));
+        }
+        if let Some(c) = correlator {
+            builder = builder.header("x-correlator", c);
+        }
+        let response = app()
+            .oneshot(builder.body(Body::from(body.to_string())).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let headers = response.headers().clone();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, headers, json)
+    }
+
+    /// Mint a scoped token and call retrieve-identifier with the given body.
+    async fn retrieve_identifier_ok(body: &str) -> (StatusCode, HeaderMap, Value) {
+        let token = mint_token(RETRIEVE_IDENTIFIER_SCOPE).await;
+        post_retrieve_identifier(Some(&token), body, None).await
+    }
+
+    #[tokio::test]
+    async fn returns_imei_imeisv_and_type_and_echoes_the_device() {
+        // …001 → OnePlus TAC 35847104, serial 000001.
+        let (status, _, body) =
+            retrieve_identifier_ok(r#"{"device":{"phoneNumber":"+123456789001"}}"#).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["tac"], "35847104");
+        assert_eq!(body["manufacturer"], "OnePlus");
+        assert_eq!(body["model"], "OnePlus 12");
+        // IMEI = TAC + serial + Luhn check digit (15 digits), IMEISV 16 digits.
+        let imei = body["imei"].as_str().unwrap();
+        assert_eq!(imei.len(), 15);
+        assert!(imei.starts_with("35847104000001"));
+        assert_eq!(body["imeisv"], "3584710400000100");
+        assert!(body["lastChecked"].as_str().unwrap().ends_with('Z'));
+        assert_eq!(body["device"]["phoneNumber"], "+123456789001");
+    }
+
+    #[tokio::test]
+    async fn a_different_tail_reports_a_different_identity() {
+        let (status, _, body) =
+            retrieve_identifier_ok(r#"{"device":{"phoneNumber":"+123456789002"}}"#).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["manufacturer"], "Google");
+        assert_eq!(body["tac"], "35438509");
+        assert!(body["imei"].as_str().unwrap().starts_with("35438509000002"));
+        assert_eq!(body["imeisv"], "3543850900000200");
+    }
+
+    #[tokio::test]
+    async fn triple_zero_tail_reports_the_default_identity() {
+        let (status, _, body) =
+            retrieve_identifier_ok(r#"{"device":{"phoneNumber":"+123456789000"}}"#).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["manufacturer"], "Apple");
+        assert_eq!(body["tac"], "35692005");
+        assert!(body["imei"].as_str().unwrap().starts_with("35692005000000"));
+        assert_eq!(body["imeisv"], "3569200500000000");
+    }
+
+    #[tokio::test]
+    async fn identifier_reserved_suffix_selects_a_canonical_camara_error() {
+        let (status, _, body) =
+            retrieve_identifier_ok(r#"{"device":{"phoneNumber":"+123456789404"}}"#).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn identifier_non_phone_ids_are_accepted_and_echoed() {
+        let (status, _, body) =
+            retrieve_identifier_ok(r#"{"device":{"networkAccessIdentifier":"user002@nai"}}"#).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["manufacturer"], "Google");
+        assert_eq!(body["device"]["networkAccessIdentifier"], "user002@nai");
+        assert!(body["imei"].as_str().unwrap().starts_with("35438509000002"));
+    }
+
+    #[tokio::test]
+    async fn identifier_invalid_phone_and_empty_device_are_rejected() {
+        let (status, _, body) =
+            retrieve_identifier_ok(r#"{"device":{"phoneNumber":"0123"}}"#).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "INVALID_ARGUMENT");
+
+        let (status, _, body) = retrieve_identifier_ok(r#"{"device":{}}"#).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "INVALID_ARGUMENT");
+    }
+
+    #[tokio::test]
+    async fn identifier_no_device_falls_back_to_the_token_subject() {
+        // Subject E.164 …002 → Google identity, empty body; echoed.
+        let token = mint_token_with_client(RETRIEVE_IDENTIFIER_SCOPE, "+123456789002").await;
+        let (status, _, body) = post_retrieve_identifier(Some(&token), "", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["manufacturer"], "Google");
+        assert_eq!(body["device"]["phoneNumber"], "+123456789002");
+        assert!(body["imei"].as_str().unwrap().starts_with("35438509000002"));
+    }
+
+    #[tokio::test]
+    async fn identifier_subject_reserved_suffix_selects_a_camara_error() {
+        let token = mint_token_with_client(RETRIEVE_IDENTIFIER_SCOPE, "+123456789503").await;
+        let (status, _, body) = post_retrieve_identifier(Some(&token), "{}", None).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["code"], "UNAVAILABLE");
+    }
+
+    #[tokio::test]
+    async fn identifier_non_numeric_subject_reports_the_default_and_no_echo() {
+        // Default synthetic subject "di-client" has no digits → default identity,
+        // and — not being a phone number — is not echoed as a device.
+        let (status, _, body) = retrieve_identifier_ok("{}").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["manufacturer"], "Apple");
+        assert_eq!(body["imeisv"], "3569200500000000");
+        assert!(body.get("device").is_none());
+    }
+
+    #[tokio::test]
+    async fn identifier_token_without_the_scope_is_forbidden() {
+        // A retrieve-type token must not reach retrieve-identifier.
+        let token = mint_token(RETRIEVE_TYPE_SCOPE).await;
+        let (status, _, body) = post_retrieve_identifier(
+            Some(&token),
+            r#"{"device":{"phoneNumber":"+123456789001"}}"#,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["code"], "PERMISSION_DENIED");
+    }
+
+    #[tokio::test]
+    async fn identifier_missing_token_is_unauthenticated() {
+        let (status, _, body) = post_retrieve_identifier(
+            None,
+            r#"{"device":{"phoneNumber":"+123456789001"}}"#,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["code"], "UNAUTHENTICATED");
+    }
+
+    #[tokio::test]
+    async fn identifier_x_correlator_is_echoed() {
+        let token = mint_token(RETRIEVE_IDENTIFIER_SCOPE).await;
+        let (status, headers, _) = post_retrieve_identifier(
+            Some(&token),
+            r#"{"device":{"phoneNumber":"+123456789001"}}"#,
+            Some("corr-di-id"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-di-id")
         );
     }
 }
