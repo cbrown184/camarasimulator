@@ -1,39 +1,51 @@
 //! SIM Swap **v2** (CAMARA SIM Swap 2.0.0).
 //!
-//! One endpoint so far:
+//! Two endpoints so far:
 //! - `POST /sim-swap/v2/check` — has the SIM behind a phone number been swapped
 //!   within the last `maxAge` hours?
+//! - `POST /sim-swap/v2/retrieve-date` — when was the SIM behind a phone number
+//!   last swapped?
 //!
 //! ## What it does
 //!
-//! The caller asks whether the SIM card bound to a phone number was swapped
-//! within a recent window. The number is supplied either in the body
-//! (`phoneNumber`, E.164) or — when omitted — taken from the identity the access
-//! token authenticated (a three-legged token), matching the two ways CAMARA
-//! SIM Swap 2.0.0 identifies the device. The answer is
-//! `{ "swapped": true|false }`.
+//! The caller asks about the SIM card bound to a phone number. The number is
+//! supplied either in the body (`phoneNumber`, E.164) or — when omitted — taken
+//! from the identity the access token authenticated (a three-legged token),
+//! matching the two ways CAMARA SIM Swap 2.0.0 identifies the device. `check`
+//! answers `{ "swapped": true|false }`; `retrieve-date` answers with the
+//! timestamp of the last swap (`{ "latestSimChange": …, "monitoredPeriod": … }`).
 //!
-//! The endpoint is protected: it requires a valid access token
-//! ([`crate::auth::verify::Claims`]) carrying the `sim-swap:check` scope.
+//! Both endpoints are protected: they require a valid access token
+//! ([`crate::auth::verify::Claims`]) carrying the endpoint's scope
+//! (`sim-swap:check` / `sim-swap:retrieve-date`).
 //!
 //! ## Functional cases — the input is the control plane (docs/DESIGN.md §7)
 //!
 //! The identifier is the `phoneNumber` when supplied, otherwise the access
-//! token's subject (`sub`). The result is chosen deterministically from it:
+//! token's subject (`sub`). Its trailing three digits encode **how many hours
+//! ago** the SIM was last swapped (`000`–`999`) — one coherent swap history that
+//! both endpoints read the same way:
 //!
-//! - **Reserved error suffix** — if the identifier's trailing three digits name a
-//!   reserved CAMARA status (`…400`, `…401`, `…403`, `…404`, `…409`, `…422`,
-//!   `…429`, `…500`, `…503`), the endpoint answers with that canonical CAMARA
-//!   error instead of a result (shared convention, [`crate::scenarios`]).
-//! - **Recency of the swap** — otherwise the identifier's trailing three digits
-//!   encode **how many hours ago** the SIM was last swapped (`000`–`999`). The
-//!   endpoint reports `swapped = hoursAgo < maxAge`, i.e. the swap falls inside
+//! - **Reserved error suffix** — if those trailing three digits name a reserved
+//!   CAMARA status (`…400`, `…401`, `…403`, `…404`, `…409`, `…422`, `…429`,
+//!   `…500`, `…503`), the endpoint answers with that canonical CAMARA error
+//!   instead of a result (shared convention, [`crate::scenarios`]).
+//! - **`check`** reports `swapped = hoursAgo < maxAge`, i.e. the swap falls inside
 //!   the queried window. So `maxAge` is a real second control plane:
 //!   `+123456789012` (12 h ago) is `swapped: true` under the default window
 //!   (240 h) but `+123456789365` (365 h ago) is `swapped: false` — unless the
 //!   caller widens `maxAge` past 365.
+//! - **`retrieve-date`** reports `latestSimChange` = *now − hoursAgo hours* when
+//!   the swap is inside the fixed monitored period ([`MONITORED_PERIOD_HOURS`],
+//!   240 h = 10 days), or `null` when the last swap is older than that period or
+//!   the identifier carries no digits; `monitoredPeriod` (10 days) is always
+//!   reported. The 240 h boundary lines up with `check`'s default window, so
+//!   `+123456789012` yields a non-null date and `+123456789365` yields `null`.
 //! - **No digits** — an identifier with no trailing digits (e.g. the synthetic
-//!   `camarasim-user` subject) is treated as never swapped → `swapped: false`.
+//!   `camarasim-user` subject) is treated as never swapped → `check` false,
+//!   `retrieve-date` `null`.
+
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::body::Bytes;
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
@@ -49,6 +61,8 @@ use crate::scenarios;
 
 /// The OAuth2 scope the `POST /check` endpoint requires (CAMARA SIM Swap 2.0.0).
 const CHECK_SCOPE: &str = "sim-swap:check";
+/// The OAuth2 scope the `POST /retrieve-date` endpoint requires (CAMARA SIM Swap 2.0.0).
+const RETRIEVE_DATE_SCOPE: &str = "sim-swap:retrieve-date";
 
 /// Default `maxAge` window in hours when the caller omits it (CAMARA default).
 const DEFAULT_MAX_AGE: u16 = 240;
@@ -56,9 +70,19 @@ const DEFAULT_MAX_AGE: u16 = 240;
 const MAX_AGE_MIN: u16 = 1;
 const MAX_AGE_MAX: u16 = 2400;
 
+/// The simulator's fixed SIM-swap supervision window, in **hours**. A swap older
+/// than this is beyond what the operator monitors, so `retrieve-date` reports
+/// `latestSimChange: null`. Chosen to equal `check`'s default `maxAge` (240 h)
+/// so the two endpoints tell one coherent story.
+const MONITORED_PERIOD_HOURS: u16 = 240;
+/// The same monitored window expressed in **days** (CAMARA `monitoredPeriod` unit).
+const MONITORED_PERIOD_DAYS: u16 = MONITORED_PERIOD_HOURS / 24;
+
 /// Routes for SIM Swap v2, mounted at their canonical URLs.
 pub fn routes() -> Router {
-    Router::new().route("/sim-swap/v2/check", post(check))
+    Router::new()
+        .route("/sim-swap/v2/check", post(check))
+        .route("/sim-swap/v2/retrieve-date", post(retrieve_date))
 }
 
 /// `POST /check` request body (CAMARA `CreateCheckSimSwap`). Both fields are
@@ -112,31 +136,9 @@ async fn check(claims: Claims, headers: HeaderMap, body: Bytes) -> Response {
 
     // The identifier is the submitted phoneNumber, else the token subject
     // (three-legged token). Missing both → 422 MISSING_IDENTIFIER.
-    let identifier = match req.phone_number {
-        Some(phone) => {
-            if !is_valid_e164(&phone) {
-                return invalid_argument(
-                    "`phoneNumber` must be in E.164 format (e.g. +123456789).",
-                    &correlator,
-                );
-            }
-            phone
-        }
-        None => {
-            let subject = claims.subject().unwrap_or("");
-            if subject.is_empty() {
-                return with_correlator(
-                    CamaraError::new(
-                        StatusCode::UNPROCESSABLE_ENTITY,
-                        "MISSING_IDENTIFIER",
-                        "No `phoneNumber` supplied and the access token identifies no device.",
-                    )
-                    .into_response(),
-                    &correlator,
-                );
-            }
-            subject.to_string()
-        }
+    let identifier = match resolve_identifier(req.phone_number, &claims, &correlator) {
+        Ok(id) => id,
+        Err(resp) => return resp,
     };
 
     // Reserved error suffix on the identifier selects a canonical CAMARA error.
@@ -158,6 +160,154 @@ async fn check(claims: Claims, headers: HeaderMap, body: Bytes) -> Response {
 /// swapped (docs/DESIGN.md §7).
 fn is_swapped(identifier: &str, max_age: u16) -> bool {
     scenarios::trailing_three_digits(identifier).is_some_and(|hours_ago| hours_ago < max_age)
+}
+
+/// `POST /retrieve-date` request body (CAMARA `CreateSimSwapDate`). `phoneNumber`
+/// is optional — omit it when a three-legged token identifies the device. Unlike
+/// `check`, there is no `maxAge` control plane.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RetrieveDateRequest {
+    #[serde(rename = "phoneNumber")]
+    phone_number: Option<String>,
+}
+
+/// `POST /sim-swap/v2/retrieve-date` — the timestamp of the last SIM swap.
+async fn retrieve_date(claims: Claims, headers: HeaderMap, body: Bytes) -> Response {
+    let correlator = headers.get("x-correlator").cloned();
+
+    if let Err(e) = claims.require_scope(RETRIEVE_DATE_SCOPE) {
+        return with_correlator(e.into_response(), &correlator);
+    }
+
+    // An empty body is allowed (phoneNumber optional); anything present must parse.
+    let req: RetrieveDateRequest = if body.is_empty() {
+        RetrieveDateRequest { phone_number: None }
+    } else {
+        match serde_json::from_slice(&body) {
+            Ok(req) => req,
+            Err(_) => {
+                return invalid_argument(
+                    "Request body is not a valid CreateSimSwapDate.",
+                    &correlator,
+                )
+            }
+        }
+    };
+
+    let identifier = match resolve_identifier(req.phone_number, &claims, &correlator) {
+        Ok(id) => id,
+        Err(resp) => return resp,
+    };
+
+    // Reserved error suffix on the identifier selects a canonical CAMARA error.
+    if let Some(err) = scenarios::reserved_error(&identifier) {
+        return with_correlator(err.into_response(), &correlator);
+    }
+
+    // `latestSimChange` is `null` when the last swap is outside the monitored
+    // period (or the identifier has no digits); `serde_json` maps `None` to JSON
+    // `null`. `monitoredPeriod` (days) is always reported.
+    let latest_sim_change = last_swap_timestamp(&identifier);
+
+    with_correlator(
+        (
+            StatusCode::OK,
+            Json(json!({
+                "latestSimChange": latest_sim_change,
+                "monitoredPeriod": MONITORED_PERIOD_DAYS,
+            })),
+        )
+            .into_response(),
+        &correlator,
+    )
+}
+
+/// The timestamp of the last SIM swap behind `identifier`, as RFC 3339 UTC, or
+/// `None` when the last swap is older than the monitored period ([`MONITORED_PERIOD_HOURS`])
+/// or the identifier carries no digits. The trailing three digits encode
+/// hours-since-swap (docs/DESIGN.md §7), so the swap timestamp is *now* minus
+/// that many hours — consistent with `check`'s recency semantics.
+fn last_swap_timestamp(identifier: &str) -> Option<String> {
+    let hours_ago = scenarios::trailing_three_digits(identifier)?;
+    if hours_ago >= MONITORED_PERIOD_HOURS {
+        return None;
+    }
+    Some(rfc3339_utc(now_unix_secs() - hours_ago as i64 * 3600))
+}
+
+/// Seconds since the Unix epoch, UTC. `SystemTime` never blocks; a clock before
+/// the epoch (impossible in practice) falls back to `0`.
+fn now_unix_secs() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// Format a Unix timestamp (seconds, UTC) as RFC 3339, e.g.
+/// `2026-08-02T14:27:08Z`. Second precision — the CAMARA schema requires RFC
+/// 3339 with a time zone but not sub-second digits. Self-contained (no date-time
+/// dependency) via the civil-from-days algorithm below.
+fn rfc3339_utc(unix_secs: i64) -> String {
+    let days = unix_secs.div_euclid(86_400);
+    let secs_of_day = unix_secs.rem_euclid(86_400);
+    let (y, m, d) = civil_from_days(days);
+    let (hh, mm, ss) = (secs_of_day / 3600, (secs_of_day % 3600) / 60, secs_of_day % 60);
+    format!("{y:04}-{m:02}-{d:02}T{hh:02}:{mm:02}:{ss:02}Z")
+}
+
+/// Convert a day count since 1970-01-01 into a `(year, month, day)` civil date
+/// (Howard Hinnant's `civil_from_days`, proleptic Gregorian, valid for any date
+/// in `i64` range). Month and day are 1-based.
+fn civil_from_days(z: i64) -> (i64, u32, u32) {
+    let z = z + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097; // day-of-era [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365; // [0, 399]
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // day-of-year [0, 365]
+    let mp = (5 * doy + 2) / 153; // month, shifted so March = 0 [0, 11]
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32; // [1, 31]
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32; // [1, 12]
+    (if m <= 2 { y + 1 } else { y }, m, d)
+}
+
+/// Resolve the device identifier for a request: the validated `phoneNumber` when
+/// supplied, else the token subject (three-legged fallback). On failure returns
+/// the CAMARA error `Response` to send — 400 `INVALID_ARGUMENT` for a malformed
+/// `phoneNumber`, 422 `MISSING_IDENTIFIER` when neither is present.
+fn resolve_identifier(
+    phone_number: Option<String>,
+    claims: &Claims,
+    correlator: &Option<HeaderValue>,
+) -> Result<String, Response> {
+    match phone_number {
+        Some(phone) => {
+            if !is_valid_e164(&phone) {
+                return Err(invalid_argument(
+                    "`phoneNumber` must be in E.164 format (e.g. +123456789).",
+                    correlator,
+                ));
+            }
+            Ok(phone)
+        }
+        None => {
+            let subject = claims.subject().unwrap_or("");
+            if subject.is_empty() {
+                return Err(with_correlator(
+                    CamaraError::new(
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        "MISSING_IDENTIFIER",
+                        "No `phoneNumber` supplied and the access token identifies no device.",
+                    )
+                    .into_response(),
+                    correlator,
+                ));
+            }
+            Ok(subject.to_string())
+        }
+    }
 }
 
 /// A 400 `INVALID_ARGUMENT` CAMARA error, with the correlator echoed.
@@ -275,9 +425,28 @@ mod tests {
         body: &str,
         correlator: Option<&str>,
     ) -> (StatusCode, HeaderMap, Value) {
+        post_json("/sim-swap/v2/check", token, body, correlator).await
+    }
+
+    /// POST a body to `/retrieve-date` with an optional Bearer token and `x-correlator`.
+    async fn post_retrieve_date(
+        token: Option<&str>,
+        body: &str,
+        correlator: Option<&str>,
+    ) -> (StatusCode, HeaderMap, Value) {
+        post_json("/sim-swap/v2/retrieve-date", token, body, correlator).await
+    }
+
+    /// POST a JSON body to `path` with an optional Bearer token and `x-correlator`.
+    async fn post_json(
+        path: &str,
+        token: Option<&str>,
+        body: &str,
+        correlator: Option<&str>,
+    ) -> (StatusCode, HeaderMap, Value) {
         let mut builder = Request::builder()
             .method("POST")
-            .uri("/sim-swap/v2/check")
+            .uri(path)
             .header("host", HOST)
             .header("content-type", "application/json");
         if let Some(t) = token {
@@ -429,6 +598,155 @@ mod tests {
         assert_eq!(
             headers.get("x-correlator").and_then(|v| v.to_str().ok()),
             Some("corr-err")
+        );
+    }
+
+    // --- retrieve-date: pure time helpers ----------------------------------
+
+    #[test]
+    fn rfc3339_utc_formats_known_epochs() {
+        assert_eq!(rfc3339_utc(0), "1970-01-01T00:00:00Z");
+        assert_eq!(rfc3339_utc(946_684_800), "2000-01-01T00:00:00Z");
+        // 2000 is a leap year: the 60th day (index 59) is Feb 29.
+        assert_eq!(rfc3339_utc(951_782_400), "2000-02-29T00:00:00Z");
+        assert_eq!(rfc3339_utc(1_704_067_200), "2024-01-01T00:00:00Z");
+        // Time-of-day components.
+        assert_eq!(rfc3339_utc(1_704_067_200 + 14 * 3600 + 27 * 60 + 8), "2024-01-01T14:27:08Z");
+    }
+
+    #[test]
+    fn civil_from_days_handles_leap_boundaries() {
+        assert_eq!(civil_from_days(0), (1970, 1, 1));
+        assert_eq!(civil_from_days(11016), (2000, 2, 29)); // 951_782_400 / 86_400
+        assert_eq!(civil_from_days(19723), (2024, 1, 1)); // 1_704_067_200 / 86_400
+    }
+
+    #[test]
+    fn last_swap_timestamp_is_none_outside_the_monitored_period() {
+        // hoursAgo == monitored period is not inside it (strict <).
+        assert!(last_swap_timestamp("+123456789240").is_none());
+        // 365 h ago is well outside the 240 h window.
+        assert!(last_swap_timestamp("+123456789365").is_none());
+        // No trailing digits → never swapped.
+        assert!(last_swap_timestamp("camarasim-user").is_none());
+    }
+
+    #[test]
+    fn last_swap_timestamp_is_now_minus_hours_ago() {
+        // hoursAgo == 0 → the swap is "now". Bracket the wall clock so the
+        // assertion is robust across a second/minute tick.
+        let before = now_unix_secs();
+        let ts = last_swap_timestamp("+123456789000").expect("inside the monitored period");
+        let after = now_unix_secs();
+        assert!(
+            ts == rfc3339_utc(before) || ts == rfc3339_utc(after),
+            "…000 should be ~now, got {ts}"
+        );
+        // More hours ago → strictly earlier timestamp. Fixed-width RFC 3339 UTC
+        // strings sort chronologically, so a lexical compare is a time compare.
+        let recent = last_swap_timestamp("+123456789006").unwrap(); // 6 h ago
+        let older = last_swap_timestamp("+123456789012").unwrap(); // 12 h ago
+        assert!(older < recent, "12 h ago ({older}) should precede 6 h ago ({recent})");
+    }
+
+    // --- retrieve-date: integration through the real router ----------------
+
+    /// Mint a `retrieve-date`-scoped token and call the endpoint.
+    async fn retrieve_ok_token(body: &str) -> (StatusCode, HeaderMap, Value) {
+        let token = mint_token(RETRIEVE_DATE_SCOPE).await;
+        post_retrieve_date(Some(&token), body, None).await
+    }
+
+    #[tokio::test]
+    async fn recent_swap_returns_a_timestamp_and_monitored_period() {
+        let (status, _, body) = retrieve_ok_token(r#"{"phoneNumber":"+123456789012"}"#).await;
+        assert_eq!(status, StatusCode::OK);
+        let ts = body["latestSimChange"].as_str().expect("a non-null timestamp");
+        assert!(ts.ends_with('Z') && ts.contains('T'), "RFC 3339 UTC, got {ts}");
+        assert_eq!(body["monitoredPeriod"], MONITORED_PERIOD_DAYS);
+    }
+
+    #[tokio::test]
+    async fn swap_older_than_monitored_period_is_null() {
+        // …365 h ago is outside the 240 h monitored window → latestSimChange null.
+        let (status, _, body) = retrieve_ok_token(r#"{"phoneNumber":"+123456789365"}"#).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body["latestSimChange"].is_null());
+        assert_eq!(body["monitoredPeriod"], MONITORED_PERIOD_DAYS);
+    }
+
+    #[tokio::test]
+    async fn retrieve_date_reserved_suffix_selects_a_canonical_camara_error() {
+        let (status, _, body) = retrieve_ok_token(r#"{"phoneNumber":"+123456789404"}"#).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn retrieve_date_does_not_accept_max_age() {
+        // `maxAge` is a `check`-only field; retrieve-date rejects unknown fields.
+        let (status, _, body) =
+            retrieve_ok_token(r#"{"phoneNumber":"+123456789012","maxAge":240}"#).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "INVALID_ARGUMENT");
+    }
+
+    #[tokio::test]
+    async fn retrieve_date_invalid_phone_is_rejected() {
+        let (status, _, body) = retrieve_ok_token(r#"{"phoneNumber":"0123"}"#).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "INVALID_ARGUMENT");
+    }
+
+    #[tokio::test]
+    async fn retrieve_date_falls_back_to_the_token_subject() {
+        // Subject is an E.164 number with a recent-swap tail → non-null timestamp,
+        // with an empty body (phoneNumber optional).
+        let token = mint_token_with_client(RETRIEVE_DATE_SCOPE, "+123456789012").await;
+        let (status, _, body) = post_retrieve_date(Some(&token), "", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body["latestSimChange"].as_str().is_some());
+    }
+
+    #[tokio::test]
+    async fn retrieve_date_non_numeric_subject_is_null() {
+        // Default synthetic subject "ss-client" has no digits → never swapped.
+        let (status, _, body) = retrieve_ok_token("{}").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body["latestSimChange"].is_null());
+    }
+
+    #[tokio::test]
+    async fn retrieve_date_wrong_scope_is_forbidden() {
+        // A token scoped only for `check` may not call retrieve-date.
+        let token = mint_token(CHECK_SCOPE).await;
+        let (status, _, body) =
+            post_retrieve_date(Some(&token), r#"{"phoneNumber":"+123456789012"}"#, None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["code"], "PERMISSION_DENIED");
+    }
+
+    #[tokio::test]
+    async fn retrieve_date_missing_token_is_unauthenticated() {
+        let (status, _, body) =
+            post_retrieve_date(None, r#"{"phoneNumber":"+123456789012"}"#, None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["code"], "UNAUTHENTICATED");
+    }
+
+    #[tokio::test]
+    async fn retrieve_date_echoes_x_correlator() {
+        let token = mint_token(RETRIEVE_DATE_SCOPE).await;
+        let (status, headers, _) = post_retrieve_date(
+            Some(&token),
+            r#"{"phoneNumber":"+123456789012"}"#,
+            Some("corr-rd"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-rd")
         );
     }
 }

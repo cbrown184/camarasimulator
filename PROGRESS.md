@@ -63,7 +63,16 @@ when omitted — the token subject (three-legged fallback). Reserved error suffi
 (1–2400, default 240) a real second control plane; out-of-range `maxAge` → 400
 `OUT_OF_RANGE`. `x-correlator` echoed on every response.
 
-**Next up:** SIM Swap v2 `POST /retrieve-date`.
+SIM Swap v2 is now complete: `POST /check` **and** `POST /retrieve-date`
+(scope `sim-swap:retrieve-date`). Retrieve-date reads the **same** swap history
+as check — the identifier's trailing three digits are hours-since-last-swap — and
+reports `latestSimChange` = *now − hoursAgo hours* (RFC 3339 UTC) when that swap
+is inside a fixed 240 h (10-day) monitored period, else `null`; `monitoredPeriod`
+(10 days) is always returned. The 240 h boundary lines up with check's default
+`maxAge`, so `+123456789012` yields a date and `+123456789365` yields `null`. A
+self-contained civil-date formatter (no new dependency) renders the timestamp.
+
+**Next up:** KYC Match v1 `POST /match`.
 
 ## In progress (claimed this pass)
 
@@ -86,7 +95,7 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ### Phase 1 — Stateless, non-spatial
 - [x] Number Verification v1 — [x] `POST /verify` · [x] `GET /device-phone-number`
-- [~] SIM Swap v2 — [x] `POST /check` · [ ] `POST /retrieve-date` (+ full parameter-driven cases)
+- [x] SIM Swap v2 — [x] `POST /check` · [x] `POST /retrieve-date`
 - [ ] KYC Match v1 — `POST /match`
 
 ### Phase 2 — Stateless device queries
@@ -118,6 +127,25 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-02 — Phase 1: SIM Swap v2 — `POST /retrieve-date` (CAMARA sim-swap 2.0.0, r2.2),
+  completing the API. New route `/sim-swap/v2/retrieve-date` in `src/apis/sim_swap/v2.rs`,
+  protected by the `Claims` extractor (scope `sim-swap:retrieve-date`; confirmed against the
+  r2.2 upstream spec, operationId `retrieveSimSwapDate`, body `CreateSimSwapDate{phoneNumber?}`
+  — no `maxAge` — response `SimSwapInfo{latestSimChange nullable, monitoredPeriod}`). Identifier
+  resolution (validated `phoneNumber`, else token subject → 422 `MISSING_IDENTIFIER`) factored
+  into a shared `resolve_identifier` reused by `check`. Functional cases (§7): reserved suffix →
+  canonical CAMARA error; otherwise the identifier's trailing three digits = hours-since-last-swap
+  (the SAME history `check` reads), and `latestSimChange` = *now − hoursAgo h* (RFC 3339 UTC) when
+  `hoursAgo < 240` (the fixed monitored period = 240 h = 10 days, chosen to equal check's default
+  `maxAge`), else `null`; `monitoredPeriod: 10` always returned. `x-correlator` echoed. No new deps
+  — a self-contained `rfc3339_utc`/`civil_from_days` (Howard Hinnant) renders the timestamp from
+  `SystemTime::now()` (non-blocking), avoiding a chrono/time dependency. Spec: added `/retrieve-date`
+  path + `CreateSimSwapDate`/`SimSwapInfo` schemas to `specs/sim-swap/v2/openapi.yaml`, `$ref`-ing
+  shared `errors.yaml` + auth `camaraOAuth`, with `x-camarasim-scenarios` documenting the
+  identifier-driven cases (full shared error set exposed, noted vs the canonical 400/401/403/404/
+  422/429 subset). 153 tests green (was 139; +14: 4 time-helper/last-swap units + 10 integration
+  covering recent-date/null-outside-period/reserved-error/no-maxAge/bad-input/subject-fallback/
+  non-numeric-subject/scope/auth/x-correlator). — binary: 972K (992328 B; +6184 B)
 - 2026-08-02 — Phase 1: SIM Swap v2 — `POST /check` (CAMARA sim-swap 2.0.0, r2.2). New
   `src/apis/sim_swap/{,v2}.rs` mounted at `/sim-swap/v2/check`, merged into the app router;
   `/` catalog now lists sim-swap v2. Protected by the `Claims` extractor (scope

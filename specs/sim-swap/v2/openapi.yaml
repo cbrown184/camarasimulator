@@ -5,7 +5,7 @@
 # (docs/DESIGN.md §7, §9). Backed by `src/apis/sim_swap/v2.rs`; spec and code
 # must not drift.
 #
-# Serves `POST /check`. (`POST /retrieve-date` is planned — see PROGRESS.md.)
+# Serves `POST /check` and `POST /retrieve-date`.
 openapi: 3.0.3
 info:
   title: SIM Swap
@@ -132,6 +132,91 @@ paths:
           - input: no phoneNumber and a non-numeric token subject
             result: "200 { swapped: false } — treated as never swapped"
 
+  /retrieve-date:
+    post:
+      operationId: retrieveSimSwapDate
+      summary: Retrieve the date of the last SIM swap
+      description: |
+        Returns the timestamp of the last SIM swap for a mobile account, given
+        the `phoneNumber` — or, when it is omitted, the device identified by a
+        three-legged access token.
+
+        `latestSimChange` is the RFC 3339 timestamp of the last swap, or `null`
+        when the last swap is older than the operator's monitored period (or no
+        swap is known). `monitoredPeriod` reports that supervision window in days.
+
+        See the API description for the parameter-driven functional cases.
+      security:
+        - openId:
+            - sim-swap:retrieve-date
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateSimSwapDate"
+      responses:
+        "200":
+          description: The timestamp of the last SIM swap (or `null` if none in period).
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimSwapInfo"
+              examples:
+                recentSwap:
+                  summary: Swap within the monitored period (recent-swap tail)
+                  value:
+                    latestSimChange: "2024-01-01T14:27:08Z"
+                    monitoredPeriod: 10
+                noSwapInPeriod:
+                  summary: No swap within the monitored period
+                  value:
+                    latestSimChange: null
+                    monitoredPeriod: 10
+        "400":
+          $ref: "../../shared/errors.yaml#/components/responses/InvalidArgument"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "409":
+          $ref: "../../shared/errors.yaml#/components/responses/Conflict"
+        "422":
+          $ref: "../../shared/errors.yaml#/components/responses/ServiceNotApplicable"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          Result selected from the identifier (the submitted `phoneNumber`, else
+          the access token subject) whose trailing three digits encode
+          hours-since-last-swap (docs/DESIGN.md §7) — the same swap history
+          `POST /check` reads. Reserved error suffixes come from the shared
+          convention in errors.yaml. The monitored period is fixed at 240 hours
+          (10 days), matching `check`'s default `maxAge`. Note: canonical SIM Swap
+          2.0.0 declares 400/401/403/404/422/429; CamaraSim exposes the full
+          shared error set so every reserved case is reachable.
+        cases:
+          - input: identifier ending in a reserved error suffix (e.g. …404)
+            result: the canonical CAMARA error for that status
+          - input: "identifier whose trailing digits (hoursAgo) < 240"
+            result: >-
+              "200 { latestSimChange: <now − hoursAgo hours>, monitoredPeriod: 10 }"
+          - input: "identifier whose trailing digits (hoursAgo) >= 240"
+            result: "200 { latestSimChange: null, monitoredPeriod: 10 }"
+          - input: no phoneNumber and a non-numeric token subject
+            result: "200 { latestSimChange: null, monitoredPeriod: 10 }"
+
 components:
   securitySchemes:
     openId:
@@ -188,3 +273,40 @@ components:
           description: >-
             `true` if the SIM card was swapped within the requested `maxAge`
             period, `false` otherwise.
+
+    CreateSimSwapDate:
+      type: object
+      description: Request to retrieve the date of the last SIM swap on a phone number.
+      properties:
+        phoneNumber:
+          type: string
+          description: >-
+            A phone number in E.164 format (starting with `+`). Optional: omit it
+            to use the device identified by a three-legged access token.
+          pattern: '^\+[1-9][0-9]{4,14}$'
+          example: "+123456789012"
+
+    SimSwapInfo:
+      type: object
+      description: The date of the last SIM swap on a phone number.
+      required:
+        - latestSimChange
+      properties:
+        latestSimChange:
+          type: string
+          format: date-time
+          nullable: true
+          description: >-
+            Timestamp (RFC 3339, with time zone) of the last SIM swap performed,
+            or `null` when no swap is known within the monitored period. In
+            CamaraSim this is *now* minus the identifier's encoded
+            hours-since-swap when that is inside `monitoredPeriod`, else `null`.
+          example: "2024-01-01T14:27:08Z"
+        monitoredPeriod:
+          type: integer
+          format: int32
+          description: >-
+            Timeframe in days for which SIM-card changes are supervised. CamaraSim
+            reports a fixed 10 days (240 hours), matching `check`'s default
+            `maxAge`; a swap older than this yields `latestSimChange: null`.
+          example: 10
