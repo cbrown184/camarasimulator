@@ -8,8 +8,8 @@
 //!
 //! The endpoint issues a **real, signed** RS256 JWT (RFC 9068 `at+jwt`) using
 //! the bundled JWKS key, so a client that fetches `/oauth2/jwks` can verify it.
-//! The token-verification middleware (next pass) validates these on protected
-//! routes.
+//! The token-verification middleware ([`super::verify`]) validates these on
+//! protected routes (signature / audience / expiry / scope).
 //!
 //! ## Simulator behaviour (functional cases)
 //!

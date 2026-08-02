@@ -20,9 +20,9 @@ use std::sync::OnceLock;
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
-use rsa::pkcs1v15::SigningKey;
+use rsa::pkcs1v15::{Signature, SigningKey, VerifyingKey};
 use rsa::pkcs8::DecodePrivateKey;
-use rsa::signature::{SignatureEncoding, Signer};
+use rsa::signature::{SignatureEncoding, Signer, Verifier};
 use rsa::traits::PublicKeyParts;
 use rsa::{RsaPrivateKey, RsaPublicKey};
 use serde_json::{json, Value};
@@ -65,6 +65,27 @@ pub fn sign_rs256(message: &[u8]) -> Vec<u8> {
     static SIGNER: OnceLock<SigningKey<Sha256>> = OnceLock::new();
     let signer = SIGNER.get_or_init(|| SigningKey::<Sha256>::new(signing_key().clone()));
     signer.sign(message).to_vec()
+}
+
+/// Verify an `RS256` signature (`SignatureEncoding` big-endian bytes) over
+/// `message` using the bundled key's public half — the counterpart of
+/// [`sign_rs256`], used by the token-verification middleware to authenticate
+/// JWTs it issued. Returns `false` for a malformed signature or a mismatch;
+/// never panics.
+///
+/// The `VerifyingKey` is derived once from the same parsed key that signs and
+/// that the JWKS publishes, so verification can never drift from issuance.
+// Consumed by the verify middleware (and its tests); not yet reached from a
+// product route, so allow dead code until Phase 1 mounts a protected endpoint.
+#[allow(dead_code)]
+pub fn verify_rs256(message: &[u8], signature: &[u8]) -> bool {
+    static VERIFIER: OnceLock<VerifyingKey<Sha256>> = OnceLock::new();
+    let verifier =
+        VERIFIER.get_or_init(|| VerifyingKey::<Sha256>::new(RsaPublicKey::from(signing_key())));
+    match Signature::try_from(signature) {
+        Ok(sig) => verifier.verify(message, &sig).is_ok(),
+        Err(_) => false,
+    }
 }
 
 /// base64url (no padding) of a big-endian byte slice, as required for JWK
@@ -165,6 +186,21 @@ mod tests {
         assert!(verifying_key
             .verify(b"tampered", &signature)
             .is_err());
+    }
+
+    #[test]
+    fn verify_rs256_accepts_own_signature_and_rejects_tampering() {
+        let message = b"header.payload";
+        let sig = sign_rs256(message);
+        assert!(verify_rs256(message, &sig), "own signature must verify");
+        assert!(
+            !verify_rs256(b"other.payload", &sig),
+            "signature over a different message must be rejected"
+        );
+        assert!(
+            !verify_rs256(message, b"not-a-signature"),
+            "a malformed signature must be rejected, not panic"
+        );
     }
 
     #[test]

@@ -7,12 +7,20 @@
 //! - `GET /oauth2/jwks` — JWK Set for the token signing key.
 //! - `POST /oauth2/token` — token endpoint (`client_credentials` grant so far).
 //!
+//! It also provides the resource-server half of the profile: [`verify::Claims`],
+//! the token-verification extractor protected CAMARA endpoints use to require a
+//! valid access token (signature / audience / expiry) and enforce scope.
+//!
 //! Planned (advertised by discovery, filled in by later passes):
 //! `/oauth2/token` (`authorization_code`, CIBA grants), `/oauth2/authorize`,
 //! `/bc-authorize`.
 
 mod keys;
 mod token;
+pub mod verify;
+
+#[allow(unused_imports)] // consumed by CAMARA API modules from Phase 1 onward.
+pub use verify::{AuthError, Claims};
 
 use axum::{
     http::HeaderMap,
@@ -258,5 +266,146 @@ mod tests {
         // served at, so a client following discovery reaches the real keys.
         let m = metadata("https://sim.example");
         assert_eq!(m["jwks_uri"], "https://sim.example/oauth2/jwks");
+    }
+
+    // --- Token-verification middleware, exercised through a real router. ---
+    //
+    // These tests mint a genuine access token at the token endpoint and present
+    // it to a protected route guarded by the `verify::Claims` extractor, so the
+    // full issue-then-verify loop (signature, audience, expiry, scope) is
+    // covered end to end, not just the pure verifier.
+
+    use axum::response::{IntoResponse, Response};
+    use axum::routing::get;
+    use axum::Router;
+
+    /// A protected handler requiring the `test:scope` scope; echoes the caller's
+    /// client id on success.
+    async fn protected(claims: super::Claims) -> Response {
+        match claims.require_scope("test:scope") {
+            Ok(()) => (
+                StatusCode::OK,
+                Json(json!({ "client_id": claims.client_id() })),
+            )
+                .into_response(),
+            Err(e) => e.into_response(),
+        }
+    }
+
+    fn protected_app() -> Router {
+        // Merged with the auth routes so the token endpoint is reachable too.
+        Router::new().route("/protected", get(protected)).merge(routes())
+    }
+
+    /// Mint an access token via `POST /oauth2/token`, host-pinned so its `aud`
+    /// matches the protected route's audience.
+    async fn mint_token(scope: &str) -> String {
+        let body = format!("grant_type=client_credentials&client_id=client-9&scope={scope}");
+        let response = protected_app()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/oauth2/token")
+                    .header("host", "sim.local:8080")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&bytes).unwrap();
+        json["access_token"].as_str().unwrap().to_string()
+    }
+
+    /// Call the protected route with an optional `Authorization` header.
+    async fn call_protected(auth: Option<&str>) -> (StatusCode, HeaderMap, Value) {
+        let mut builder = Request::builder()
+            .uri("/protected")
+            .header("host", "sim.local:8080");
+        if let Some(a) = auth {
+            builder = builder.header("authorization", a);
+        }
+        let response = protected_app()
+            .oneshot(builder.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let headers = response.headers().clone();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, headers, json)
+    }
+
+    #[tokio::test]
+    async fn protected_route_accepts_a_freshly_issued_token() {
+        let token = mint_token("test:scope").await;
+        let (status, _, body) = call_protected(Some(&format!("Bearer {token}"))).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["client_id"], "client-9");
+    }
+
+    #[tokio::test]
+    async fn protected_route_rejects_a_missing_token() {
+        let (status, headers, body) = call_protected(None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["code"], "UNAUTHENTICATED");
+        assert_eq!(body["status"], 401);
+        // RFC 6750: an authentication challenge must be offered.
+        assert_eq!(
+            headers.get("www-authenticate").unwrap().to_str().unwrap(),
+            "Bearer"
+        );
+    }
+
+    #[tokio::test]
+    async fn protected_route_rejects_a_garbage_token() {
+        let (status, headers, body) = call_protected(Some("Bearer not.a.jwt")).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["code"], "UNAUTHENTICATED");
+        assert!(headers
+            .get("www-authenticate")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .contains("invalid_token"));
+    }
+
+    #[tokio::test]
+    async fn protected_route_rejects_a_token_lacking_the_scope() {
+        let token = mint_token("some:other-scope").await;
+        let (status, headers, body) = call_protected(Some(&format!("Bearer {token}"))).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["code"], "PERMISSION_DENIED");
+        assert_eq!(body["status"], 403);
+        assert!(headers
+            .get("www-authenticate")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .contains("insufficient_scope"));
+    }
+
+    #[tokio::test]
+    async fn protected_route_rejects_a_token_minted_for_another_audience() {
+        // Token minted for sim.local:8080 …
+        let token = mint_token("test:scope").await;
+        // … presented to the same route but as though served on a different host.
+        let response = protected_app()
+            .oneshot(
+                Request::builder()
+                    .uri("/protected")
+                    .header("host", "other.host:8080")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 }

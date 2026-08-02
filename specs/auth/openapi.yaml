@@ -9,6 +9,28 @@ info:
     the simulator's own auth server rather than a CAMARA business API. It grows one
     endpoint per pass; endpoints advertised in the discovery document but not yet
     listed here are implemented in later passes.
+
+    ## Protecting CAMARA endpoints (resource-server verification)
+
+    CAMARA business endpoints are protected: the caller presents the access token
+    issued here as an HTTP Bearer credential (RFC 6750), and the simulator verifies
+    it before serving the request. The verification middleware checks:
+
+      - **Signature** — the JWT header `alg` must be exactly `RS256` (an `alg: none`
+        or HMAC token is rejected outright) and the signature must verify under the
+        public key published at `/oauth2/jwks`.
+      - **Expiry** — `exp` is required and must be in the future.
+      - **Audience** — `aud` must contain the resource server's identifier (the
+        issuer base URL), so a token minted for one host is not accepted by another.
+      - **Scope** — each endpoint additionally requires its own CAMARA purpose
+        scope (e.g. `dpv:FraudPreventionAndDetection#check-sim-swap`).
+
+    On failure the response is the CAMARA error body (`CamaraError`) with an
+    RFC 6750 `WWW-Authenticate` challenge: a missing / malformed / bad-signature /
+    expired / wrong-audience token yields **401 `UNAUTHENTICATED`**; a valid token
+    lacking the required scope yields **403 `PERMISSION_DENIED`**. The reusable
+    `securitySchemes.camaraOAuth`, `responses.Unauthenticated`, and
+    `responses.PermissionDenied` below are referenced by the individual API specs.
   version: 0.0.1
   license:
     name: Apache-2.0
@@ -175,7 +197,74 @@ paths:
                 error: invalid_client
                 error_description: client authentication required (client_secret_basic or client_secret_post)
 components:
+  securitySchemes:
+    camaraOAuth:
+      type: openIdConnect
+      description: |
+        CAMARA OpenID Connect. Clients obtain an access token from `/oauth2/token`
+        (see the token endpoint) and present it as `Authorization: Bearer <jwt>`.
+        The token is an RS256 JWT verifiable against `/oauth2/jwks`; the resource
+        server enforces signature, `exp`, `aud`, and the endpoint's required scope.
+      openIdConnectUrl: /.well-known/openid-configuration
+  responses:
+    Unauthenticated:
+      description: |
+        The access token is missing, malformed, badly signed, expired, or intended
+        for a different audience. Carries an RFC 6750 `WWW-Authenticate: Bearer`
+        challenge (with `error="invalid_token"` when a token was presented).
+      headers:
+        WWW-Authenticate:
+          schema:
+            type: string
+          description: RFC 6750 Bearer challenge.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/CamaraError"
+          example:
+            status: 401
+            code: UNAUTHENTICATED
+            message: "Request not authenticated: the access token has expired."
+    PermissionDenied:
+      description: |
+        The access token is valid but was not granted the scope this endpoint
+        requires. Carries `WWW-Authenticate: Bearer error="insufficient_scope"`.
+      headers:
+        WWW-Authenticate:
+          schema:
+            type: string
+          description: RFC 6750 Bearer challenge with `insufficient_scope`.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/CamaraError"
+          example:
+            status: 403
+            code: PERMISSION_DENIED
+            message: "Access token does not have the required scope 'dpv:FraudPreventionAndDetection#check-sim-swap'."
   schemas:
+    CamaraError:
+      type: object
+      description: |
+        The CAMARA error body (docs/DESIGN.md §8): the HTTP status echoed as
+        `status`, a machine-readable `code`, and a human-readable `message`.
+      required:
+        - status
+        - code
+        - message
+      properties:
+        status:
+          type: integer
+          description: The HTTP status code, echoed in the body.
+        code:
+          type: string
+          description: Machine-readable CAMARA error code.
+          enum:
+            - UNAUTHENTICATED
+            - PERMISSION_DENIED
+        message:
+          type: string
+          description: Human-readable explanation.
     TokenRequest:
       type: object
       required:

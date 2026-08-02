@@ -12,11 +12,13 @@ Status keys: `[ ]` todo · `[~]` in-progress (claimed) · `[x]` done · `[!]` bl
 Phase 0 auth underway: OIDC discovery + JWKS + the token endpoint's
 `client_credentials` grant. The simulator holds one fixed, public, simulator-only RSA key
 (RS256) bundled in the binary; its public half is served at `/oauth2/jwks`, and
-`POST /oauth2/token` now issues real RS256 `at+jwt` JWTs signed with that key. No CAMARA
-business APIs yet.
+`POST /oauth2/token` now issues real RS256 `at+jwt` JWTs signed with that key, and the
+resource-server half is in place: the `verify::Claims` extractor validates a presented
+Bearer token (RS256 signature against the JWKS, `exp`, `aud`) and enforces scope,
+returning the CAMARA error model (401 `UNAUTHENTICATED` / 403 `PERMISSION_DENIED`) with
+RFC 6750 `WWW-Authenticate`. No CAMARA business APIs yet.
 
-**Next up:** Phase 0 — token verification middleware for protected routes (audience/scope/
-expiry), then `authorization_code` + PKCE.
+**Next up:** Phase 0 — `GET /oauth2/authorize` + `authorization_code` + PKCE (auto-consent).
 
 ## In progress (claimed this pass)
 
@@ -28,7 +30,7 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 - [x] `GET /.well-known/openid-configuration` (discovery) + served metadata
 - [x] `GET /oauth2/jwks` (JWKS) + signing key management
 - [x] `POST /oauth2/token` — `client_credentials` grant (signed JWT, scopes, expiry)
-- [ ] Token verification middleware for protected routes (audience/scope/expiry)
+- [x] Token verification middleware for protected routes (audience/scope/expiry)
 - [ ] `GET /oauth2/authorize` + `POST /oauth2/token` — `authorization_code` + PKCE (auto-consent)
 - [ ] `POST /bc-authorize` + CIBA token polling
 - [ ] Purpose/scope enforcement + shared reserved-identifier scenario convention (DESIGN §7)
@@ -67,6 +69,18 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-02 — Phase 0: implemented token-verification middleware for protected routes. New
+  `src/auth/verify.rs`: `Claims` axum extractor (`FromRequestParts`) that pulls
+  `Authorization: Bearer`, pins header `alg` to RS256 (rejects `alg:none`/confusion), verifies
+  the signature against the bundled JWKS key, requires `exp` (unexpired) and `aud` == this
+  server's issuer URL; `Claims::require_scope` gates per-endpoint authorisation. Failures map
+  to the CAMARA error body (`{status,code,message}`) — 401 `UNAUTHENTICATED` / 403
+  `PERMISSION_DENIED` — with RFC 6750 `WWW-Authenticate`. Added `keys::verify_rs256`
+  (cached `VerifyingKey`, anti-drift with signing). No new deps (reuses `rsa`/`sha2`). Spec:
+  auth openapi now documents resource-server verification + reusable `camaraOAuth`
+  securityScheme, `CamaraError` schema, `Unauthenticated`/`PermissionDenied` responses.
+  End-to-end tests mint a real token and drive it through a protected route (accept / missing /
+  garbage / wrong-scope / wrong-audience). 45 tests green. — binary: 868K (884808 B)
 - 2026-08-02 — Phase 0: implemented `POST /oauth2/token` `client_credentials` grant. New
   `src/auth/token.rs`: parses the urlencoded body, requires client auth via
   `client_secret_basic` or `client_secret_post` (any secret accepted), grants the requested
