@@ -10,15 +10,13 @@
 # than a loose "v1".
 #
 # The full API defines POST /retrieve-identifier, /retrieve-type and
-# /retrieve-ppid. CamaraSim implements them incrementally; this spec currently
-# serves `POST /retrieve-type` and `POST /retrieve-identifier` (retrieve-ppid is
-# not yet mounted, so the served spec matches the code).
+# /retrieve-ppid. All three are now served, so the served spec matches the code.
 openapi: 3.0.3
 info:
   title: Device Identifier
   description: |
     Obtains details about the physical device a mobile subscription is attached
-    to. This CamaraSim reference serves two operations:
+    to. This CamaraSim reference serves three operations:
 
     - `POST /retrieve-type` returns the device's manufacturer, model and Type
       Allocation Code (TAC), without exposing a full device identifier
@@ -27,6 +25,9 @@ info:
       identity — a synthesised `imei` (15-digit, TAC + serial + Luhn check
       digit) and `imeisv` (16-digit, TAC + serial + software version)
       (scope `device-identifier:retrieve-identifier`).
+    - `POST /retrieve-ppid` returns a stable, pseudonymous device identifier
+      (`ppid`) that does not reveal the real IMEI
+      (scope `device-identifier:retrieve-ppid`).
 
     The device can be identified either by the `device` object in the request
     body (two-legged / CIBA) or by the identity a three-legged access token
@@ -255,6 +256,95 @@ paths:
           - input: no `device` and no token subject
             result: "422 MISSING_IDENTIFIER"
 
+  /retrieve-ppid:
+    post:
+      operationId: retrievePPID
+      summary: Get a pseudonymous identifier for the device
+      description: |
+        Returns a stable **PPID** (Pairwise Pseudonymous Identifier) — an opaque
+        device identifier that does *not* reveal the device's real identity
+        (IMEI) — plus the `lastChecked` timestamp, echoing back the `device`
+        identifier that was used. Supply a `device`, or omit it to use the device
+        identified by a three-legged access token.
+
+        See the API description for the parameter-driven functional cases.
+      security:
+        - openId:
+            - device-identifier:retrieve-ppid
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RequestBody"
+      responses:
+        "200":
+          description: The device's PPID.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PpidResponse"
+              examples:
+                ppid:
+                  summary: PPID for a non-error identifier
+                  value:
+                    lastChecked: "2024-01-01T14:27:08Z"
+                    ppid: "b1d5781d-1141-df9d-6d76-2f8e70edb19c"
+                    device:
+                      phoneNumber: "+123456789001"
+        "400":
+          $ref: "../../shared/errors.yaml#/components/responses/InvalidArgument"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "409":
+          $ref: "../../shared/errors.yaml#/components/responses/Conflict"
+        "422":
+          $ref: "../../shared/errors.yaml#/components/responses/ServiceNotApplicable"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          Identical identifier resolution and reserved-error convention to the
+          other two operations (docs/DESIGN.md §7): the identifier is the first
+          present device identifier, else the access token subject, and a
+          reserved trailing-three-digit suffix answers with the canonical CAMARA
+          error. Otherwise the PPID is deterministic from the identifier — the
+          SHA-256 of the identifier rendered as a UUID-shaped opaque token — so it
+          is irreversible (a one-way hash never reveals the real IMEI) yet stable
+          (the same identifier always yields the same PPID, and different
+          identifiers differ). Unlike the type/identity operations the model tail
+          is not a control plane here: the PPID must not leak the device type or
+          IMEI, so every happy-path identifier simply hashes to its own PPID.
+          Note: canonical Device Identifier 0.3.0 declares 400/401/403/404/422/429
+          on this operation; CamaraSim exposes the full shared error set so every
+          reserved suffix is reachable (reserved suffixes use the generic
+          Commonalities codes, and 409/500/503 are CamaraSim extensions).
+          `lastChecked` is the current time. A supplied `device` is used as-is;
+          CamaraSim does not model the three-legged IDENTIFIER_MISMATCH /
+          UNNECESSARY_IDENTIFIER 422 sub-cases.
+        cases:
+          - input: identifier ending in a reserved error suffix (e.g. …404)
+            result: the canonical CAMARA error for that status
+          - input: "any non-error identifier (device id or token subject)"
+            result: "200 { ppid } — SHA-256(identifier) as a UUID-shaped token"
+          - input: "`device` present but carrying no identifier"
+            result: "400 INVALID_ARGUMENT"
+          - input: no `device` and no token subject
+            result: "422 MISSING_IDENTIFIER"
+
 components:
   securitySchemes:
     openId:
@@ -437,3 +527,32 @@ components:
           description: The device model.
           maxLength: 32
           example: OnePlus 12
+
+    PpidResponse:
+      type: object
+      description: >-
+        A stable, pseudonymous device identifier (PPID) that does not reveal the
+        device's real identity. All properties are optional (`minProperties: 1`);
+        CamaraSim always returns `ppid` and `lastChecked`, plus the echoed
+        `device`.
+      required:
+        - lastChecked
+        - ppid
+      properties:
+        device:
+          $ref: "#/components/schemas/DeviceResponse"
+        lastChecked:
+          type: string
+          format: date-time
+          description: >-
+            Date and time the information was last confirmed correct by the
+            operator (RFC 3339, UTC). CamaraSim returns the current time.
+          example: "2024-01-01T14:27:08Z"
+        ppid:
+          type: string
+          description: >-
+            A Pairwise Pseudonymous Identifier for the physical device — an
+            opaque token that does not reveal the real IMEI. CamaraSim derives it
+            deterministically as the SHA-256 of the identifier, rendered as a
+            UUID-shaped string, so it is irreversible yet stable per device.
+          example: "b1d5781d-1141-df9d-6d76-2f8e70edb19c"

@@ -129,7 +129,15 @@ on a happy path it returns the full device identity — a synthesised `imei`
 three digits + a GSMA Luhn check digit) and `imeisv` (16-digit: TAC + serial +
 fixed `"00"` software version) — alongside `tac`/`manufacturer`/`model`, so both
 the model and the IMEI are deterministic from the input.
-**Next up:** Device Identifier `POST /retrieve-ppid`.
+
+Device Identifier v0.3 is now complete: `POST /retrieve-ppid`
+(`device-identifier:retrieve-ppid`, operationId `retrievePPID`) is live too.
+Same identifier resolution and reserved-error convention as the other two
+operations; on a happy path it returns a stable, **pseudonymous** `ppid` —
+`SHA-256(identifier)` rendered as a UUID-shaped opaque token (irreversible, so
+it never leaks the real IMEI, yet deterministic per device). Unlike the
+type/identity operations the model tail is deliberately **not** a control plane
+here, so a PPID reveals no device type. **This completes Phase 2.**
 
 ## In progress (claimed this pass)
 
@@ -159,10 +167,10 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 - [~] Device Status — reachability, roaming (canonical split, DESIGN §9):
   - [x] Device Reachability Status v1 — `POST /retrieve` (`/device-reachability-status/v1`)
   - [x] Device Roaming Status v1 — `POST /retrieve` (`/device-roaming-status/v1`; CAMARA 1.0.0)
-- [~] Device Identifier v0.3 (`/device-identifier/v0.3`; CAMARA 0.3.0, release r2.2):
+- [x] Device Identifier v0.3 (`/device-identifier/v0.3`; CAMARA 0.3.0, release r2.2):
   - [x] `POST /retrieve-type` (`device-identifier:retrieve-type`)
   - [x] `POST /retrieve-identifier` (`device-identifier:retrieve-identifier`)
-  - [ ] `POST /retrieve-ppid` (`device-identifier:retrieve-ppid`)
+  - [x] `POST /retrieve-ppid` (`device-identifier:retrieve-ppid`)
 
 ### Phase 3 — Stateful, non-spatial
 - [ ] One-Time-Password SMS — `POST /send-code`, `POST /validate-code` (in-memory store)
@@ -189,6 +197,27 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-02 — Phase 2 (Device Identifier complete → Phase 2 complete): Device Identifier v0.3
+  — `POST /retrieve-ppid` (CAMARA Device Identifier 0.3.0, r2.2), operationId `retrievePPID`
+  (confirmed against the r2.2 upstream spec), scope `device-identifier:retrieve-ppid`. Added the
+  route + `retrieve_ppid` handler to `src/apis/device_identifier/v0_3.rs`, reusing the module's
+  existing `RequestBody`/`Device`, `resolve_identifier`, correlator/E.164/rfc3339 helpers — no new
+  files, no new deps (sha2 already a dependency). Same identifier resolution and reserved-error
+  convention as retrieve-type/-identifier (§7): identifier = first present `device` id [phoneNumber
+  E.164-validated, else NAI, else IPv4 publicAddress, else ipv6Address], else token subject → 422
+  MISSING_IDENTIFIER; empty `device{}`/bad phone/unknown field → 400; reserved suffix → canonical
+  CAMARA error. Happy path returns a stable, **pseudonymous** `ppid` = `SHA-256(identifier)` first
+  16 bytes rendered as a UUID-shaped opaque token (irreversible one-way hash — never leaks the real
+  IMEI — yet deterministic per device); `lastChecked` current; echoes the `device` used. Unlike the
+  type/identity ops the model tail is deliberately NOT a control plane here (a PPID must not reveal
+  the device type). Spec: added `/retrieve-ppid` path (operationId `retrievePPID`) + `PpidResponse`
+  schema to `specs/device-identifier/v0.3/openapi.yaml`, `$ref`-ing shared `errors.yaml` + auth
+  `camaraOAuth`, `x-camarasim-scenarios` documenting the cases (full shared error set exposed, noted
+  vs canonical 400/401/403/404/422/429; header now says all three ops served). 249 tests green (was
+  237; +12: 1 unit [ppid deterministic/UUID-shaped/pseudonymous] + 11 integration covering
+  ppid+echo/different-identifier-differs/reserved-error/non-phone-ids/bad-phone+empty-device/subject-
+  fallback/subject-reserved-error/non-numeric-subject/scope [retrieve-type token rejected]/auth/
+  x-correlator). — binary: 1030K (1055272 B; +4216 B)
 - 2026-08-02 — Phase 2: Device Identifier v0.3 — `POST /retrieve-identifier` (CAMARA Device
   Identifier 0.3.0, r2.2), operationId `retrieveIdentifier`, scope
   `device-identifier:retrieve-identifier`. Added the route + handler to

@@ -6,6 +6,9 @@
 //! - `POST /device-identifier/v0.3/retrieve-identifier` — the device's full
 //!   identity (`imei` / `imeisv`) alongside its type (operationId
 //!   `retrieveIdentifier`).
+//! - `POST /device-identifier/v0.3/retrieve-ppid` — a stable, pseudonymous
+//!   device identifier (`ppid`) that does not reveal the real IMEI
+//!   (operationId `retrievePPID`).
 //!
 //! ## What it does
 //!
@@ -51,6 +54,7 @@ use axum::routing::post;
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::auth::verify::Claims;
@@ -64,6 +68,10 @@ const RETRIEVE_TYPE_SCOPE: &str = "device-identifier:retrieve-type";
 /// The OAuth2 scope the `POST /retrieve-identifier` endpoint requires (CAMARA
 /// Device Identifier 0.3.0).
 const RETRIEVE_IDENTIFIER_SCOPE: &str = "device-identifier:retrieve-identifier";
+
+/// The OAuth2 scope the `POST /retrieve-ppid` endpoint requires (CAMARA Device
+/// Identifier 0.3.0).
+const RETRIEVE_PPID_SCOPE: &str = "device-identifier:retrieve-ppid";
 
 /// Device types the endpoint can report, as `(TAC, manufacturer, model)` triples.
 /// The identifier's trailing three digits index this table (`digits % len`), so
@@ -89,6 +97,10 @@ pub fn routes() -> Router {
         .route(
             "/device-identifier/v0.3/retrieve-identifier",
             post(retrieve_identifier),
+        )
+        .route(
+            "/device-identifier/v0.3/retrieve-ppid",
+            post(retrieve_ppid),
         )
 }
 
@@ -247,6 +259,76 @@ async fn retrieve_identifier(claims: Claims, headers: HeaderMap, body: Bytes) ->
     with_correlator(
         (StatusCode::OK, Json(response_body)).into_response(),
         &correlator,
+    )
+}
+
+/// `POST /device-identifier/v0.3/retrieve-ppid`.
+///
+/// Returns a stable **PPID** (Pairwise Pseudonymous Identifier) — an opaque
+/// device identifier that does *not* reveal the real IMEI. Same identifier
+/// resolution and reserved-error convention as the other two operations
+/// (docs/DESIGN.md §7): the PPID is deterministic from the identifier, so the
+/// same input always yields the same PPID and different inputs differ.
+async fn retrieve_ppid(claims: Claims, headers: HeaderMap, body: Bytes) -> Response {
+    // Optional correlation header, echoed on every response (CAMARA Commonalities).
+    let correlator = headers.get("x-correlator").cloned();
+
+    // Endpoint authorisation: the token must carry this API's scope.
+    if let Err(e) = claims.require_scope(RETRIEVE_PPID_SCOPE) {
+        return with_correlator(e.into_response(), &correlator);
+    }
+
+    // An empty body is allowed (device optional); anything present must parse.
+    let req: RequestBody = if body.is_empty() {
+        RequestBody { device: None }
+    } else {
+        match serde_json::from_slice(&body) {
+            Ok(req) => req,
+            Err(_) => {
+                return invalid_argument("Request body is not a valid RequestBody.", &correlator)
+            }
+        }
+    };
+
+    // The identifier is the submitted device identifier, else the token subject
+    // (three-legged fallback). Missing both → 422 MISSING_IDENTIFIER.
+    let resolved = match resolve_identifier(req.device, &claims, &correlator) {
+        Ok(r) => r,
+        Err(resp) => return resp,
+    };
+
+    // Reserved error suffix on the identifier selects a canonical CAMARA error.
+    if let Some(err) = scenarios::reserved_error(&resolved.id) {
+        return with_correlator(err.into_response(), &correlator);
+    }
+
+    let mut response_body = json!({
+        "lastChecked": rfc3339_utc(now_unix_secs()),
+        "ppid": ppid_from(&resolved.id),
+    });
+    // Echo the device identifier that was used, when we can represent it as a
+    // single-property `DeviceResponse` (CommonResponseBody, maxProperties: 1).
+    if let Some(echo) = resolved.echo {
+        response_body["device"] = echo;
+    }
+
+    with_correlator(
+        (StatusCode::OK, Json(response_body)).into_response(),
+        &correlator,
+    )
+}
+
+/// Synthesise a stable, pseudonymous **PPID** for a device identifier. A PPID
+/// must not reveal the device's real identity, so — unlike the IMEI — it is the
+/// SHA-256 of the identifier rendered as a UUID-shaped opaque token: irreversible
+/// (a one-way hash) yet deterministic from the input, so the same identifier
+/// always yields the same PPID. Reserved suffixes never reach here — they are
+/// answered as errors first.
+fn ppid_from(identifier: &str) -> String {
+    let h = Sha256::digest(identifier.as_bytes());
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7], h[8], h[9], h[10], h[11], h[12], h[13], h[14], h[15]
     )
 }
 
@@ -565,6 +647,21 @@ mod tests {
     fn serial_defaults_to_zeros_without_trailing_digits() {
         assert_eq!(serial_from("camarasim-user"), "000000");
         assert_eq!(serial_from("+123456789000"), "000000");
+    }
+
+    #[test]
+    fn ppid_is_deterministic_uuid_shaped_and_pseudonymous() {
+        let a = ppid_from("+123456789001");
+        // Deterministic: same identifier → same PPID.
+        assert_eq!(a, ppid_from("+123456789001"));
+        // Different identifier → different PPID.
+        assert_ne!(a, ppid_from("+123456789002"));
+        // UUID-shaped: 8-4-4-4-12 lowercase hex.
+        let parts: Vec<&str> = a.split('-').collect();
+        assert_eq!(parts.iter().map(|p| p.len()).collect::<Vec<_>>(), vec![8, 4, 4, 4, 12]);
+        assert!(a.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-'));
+        // Pseudonymous: it must NOT be (or contain) the real device identifier.
+        assert!(!a.contains("123456789001"));
     }
 
     // --- Integration through the real router -------------------------------
@@ -986,6 +1083,162 @@ mod tests {
         assert_eq!(
             headers.get("x-correlator").and_then(|v| v.to_str().ok()),
             Some("corr-di-id")
+        );
+    }
+
+    // --- retrieve-ppid -----------------------------------------------------
+
+    /// POST a JSON body to `/retrieve-ppid` with an optional Bearer token and
+    /// `x-correlator`.
+    async fn post_retrieve_ppid(
+        token: Option<&str>,
+        body: &str,
+        correlator: Option<&str>,
+    ) -> (StatusCode, HeaderMap, Value) {
+        let mut builder = Request::builder()
+            .method("POST")
+            .uri("/device-identifier/v0.3/retrieve-ppid")
+            .header("host", HOST)
+            .header("content-type", "application/json");
+        if let Some(t) = token {
+            builder = builder.header("authorization", format!("Bearer {t}"));
+        }
+        if let Some(c) = correlator {
+            builder = builder.header("x-correlator", c);
+        }
+        let response = app()
+            .oneshot(builder.body(Body::from(body.to_string())).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let headers = response.headers().clone();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, headers, json)
+    }
+
+    /// Mint a scoped token and call retrieve-ppid with the given body.
+    async fn retrieve_ppid_ok(body: &str) -> (StatusCode, HeaderMap, Value) {
+        let token = mint_token(RETRIEVE_PPID_SCOPE).await;
+        post_retrieve_ppid(Some(&token), body, None).await
+    }
+
+    #[tokio::test]
+    async fn returns_a_pseudonymous_ppid_and_echoes_the_device() {
+        let (status, _, body) =
+            retrieve_ppid_ok(r#"{"device":{"phoneNumber":"+123456789001"}}"#).await;
+        assert_eq!(status, StatusCode::OK);
+        let ppid = body["ppid"].as_str().unwrap();
+        // Deterministic — matches the pure helper.
+        assert_eq!(ppid, ppid_from("+123456789001"));
+        // Pseudonymous: must not leak the real identifier.
+        assert!(!ppid.contains("123456789001"));
+        assert!(body["lastChecked"].as_str().unwrap().ends_with('Z'));
+        assert_eq!(body["device"]["phoneNumber"], "+123456789001");
+        // A PPID carries no type/identity fields.
+        assert!(body.get("imei").is_none());
+        assert!(body.get("tac").is_none());
+    }
+
+    #[tokio::test]
+    async fn a_different_identifier_yields_a_different_ppid() {
+        let (_, _, a) = retrieve_ppid_ok(r#"{"device":{"phoneNumber":"+123456789001"}}"#).await;
+        let (_, _, b) = retrieve_ppid_ok(r#"{"device":{"phoneNumber":"+123456789002"}}"#).await;
+        assert_ne!(a["ppid"], b["ppid"]);
+    }
+
+    #[tokio::test]
+    async fn ppid_reserved_suffix_selects_a_canonical_camara_error() {
+        let (status, _, body) =
+            retrieve_ppid_ok(r#"{"device":{"phoneNumber":"+123456789404"}}"#).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn ppid_non_phone_ids_are_accepted_and_echoed() {
+        let (status, _, body) =
+            retrieve_ppid_ok(r#"{"device":{"networkAccessIdentifier":"user002@nai"}}"#).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["ppid"], ppid_from("user002@nai"));
+        assert_eq!(body["device"]["networkAccessIdentifier"], "user002@nai");
+    }
+
+    #[tokio::test]
+    async fn ppid_invalid_phone_and_empty_device_are_rejected() {
+        let (status, _, body) = retrieve_ppid_ok(r#"{"device":{"phoneNumber":"0123"}}"#).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "INVALID_ARGUMENT");
+
+        let (status, _, body) = retrieve_ppid_ok(r#"{"device":{}}"#).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "INVALID_ARGUMENT");
+    }
+
+    #[tokio::test]
+    async fn ppid_no_device_falls_back_to_the_token_subject() {
+        let token = mint_token_with_client(RETRIEVE_PPID_SCOPE, "+123456789002").await;
+        let (status, _, body) = post_retrieve_ppid(Some(&token), "", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["ppid"], ppid_from("+123456789002"));
+        assert_eq!(body["device"]["phoneNumber"], "+123456789002");
+    }
+
+    #[tokio::test]
+    async fn ppid_subject_reserved_suffix_selects_a_camara_error() {
+        let token = mint_token_with_client(RETRIEVE_PPID_SCOPE, "+123456789503").await;
+        let (status, _, body) = post_retrieve_ppid(Some(&token), "{}", None).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["code"], "UNAVAILABLE");
+    }
+
+    #[tokio::test]
+    async fn ppid_non_numeric_subject_reports_a_ppid_and_no_echo() {
+        // Default synthetic subject "di-client" has no digits → still a valid
+        // PPID (a hash), and — not being a phone number — no `device` echo.
+        let (status, _, body) = retrieve_ppid_ok("{}").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["ppid"], ppid_from("di-client"));
+        assert!(body.get("device").is_none());
+    }
+
+    #[tokio::test]
+    async fn ppid_token_without_the_scope_is_forbidden() {
+        // A retrieve-type token must not reach retrieve-ppid.
+        let token = mint_token(RETRIEVE_TYPE_SCOPE).await;
+        let (status, _, body) = post_retrieve_ppid(
+            Some(&token),
+            r#"{"device":{"phoneNumber":"+123456789001"}}"#,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["code"], "PERMISSION_DENIED");
+    }
+
+    #[tokio::test]
+    async fn ppid_missing_token_is_unauthenticated() {
+        let (status, _, body) =
+            post_retrieve_ppid(None, r#"{"device":{"phoneNumber":"+123456789001"}}"#, None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["code"], "UNAUTHENTICATED");
+    }
+
+    #[tokio::test]
+    async fn ppid_x_correlator_is_echoed() {
+        let token = mint_token(RETRIEVE_PPID_SCOPE).await;
+        let (status, headers, _) = post_retrieve_ppid(
+            Some(&token),
+            r#"{"device":{"phoneNumber":"+123456789001"}}"#,
+            Some("corr-ppid"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-ppid")
         );
     }
 }
