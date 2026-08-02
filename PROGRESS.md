@@ -157,6 +157,23 @@ until the attempt budget exhausts, then `…VERIFICATION_FAILED`; unknown/consum
 expired id → `…VERIFICATION_EXPIRED` (all 400). `x-correlator` echoed on every
 response, including the `204`.
 
+**Quality on Demand v1** has begun (CamaraSim's first **resource-oriented**
+stateful API). `POST /sessions` is live at `/quality-on-demand/v1/sessions`
+(scope `quality-on-demand:sessions:create`, `createSession`): it mints an
+opaque, UUID-shaped `sessionId` (`src/apis/quality_on_demand/store.rs`;
+`Mutex<HashMap>`, lock never held across await, no uuid/rand dep), renders the
+`SessionInfo`, remembers it, and returns 201. `GET /sessions/{sessionId}`
+(`quality-on-demand:sessions:read`, `getSession`) reads the stored `SessionInfo`
+back (200) or 404 `NOT_FOUND`. Three control planes (DESIGN §7): the identifier
+(submitted `device` id, else token subject) — reserved suffix → canonical CAMARA
+error (so `…409` drives the QoD 409 CONFLICT), else tail `…000`/no-digits →
+`qosStatus:REQUESTED` (no times) and any other tail → `qosStatus:AVAILABLE`
+(startedAt=now, expiresAt=now+duration); `duration` — `<1`→400 INVALID_ARGUMENT,
+`>86400`→400 `QUALITY_ON_DEMAND.DURATION_OUT_OF_RANGE`; `qosProfile` — a name
+containing `unavailable`→422 `QUALITY_ON_DEMAND.QOS_PROFILE_NOT_APPLICABLE`.
+`x-correlator` echoed on every response. DELETE/extend/retrieve-sessions and
+CloudEvents notifications are deferred.
+
 ## In progress (claimed this pass)
 
 _None._  <!-- agent: put the claimed item + run timestamp here, clear it when done -->
@@ -193,7 +210,14 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 ### Phase 3 — Stateful, non-spatial
 - [x] One Time Password SMS v1 — [x] `POST /send-code` · [x] `POST /validate-code`
   (`/one-time-password-sms/v1`; CAMARA 1.1.1, r3.2; in-memory OTP store)
-- [ ] Quality on Demand (QoD) — session lifecycle + CloudEvents notifications
+- [~] Quality on Demand (QoD) v1 — session lifecycle + CloudEvents notifications
+  (`/quality-on-demand/v1`; CAMARA 1.1.0, r3.2; in-memory session store):
+  - [x] `POST /sessions` (`quality-on-demand:sessions:create`, `createSession`)
+  - [x] `GET /sessions/{sessionId}` (`quality-on-demand:sessions:read`, `getSession`)
+  - [ ] `DELETE /sessions/{sessionId}` (`quality-on-demand:sessions:delete`)
+  - [ ] `POST /sessions/{sessionId}/extend` (`quality-on-demand:sessions:update`)
+  - [ ] `POST /retrieve-sessions` (`quality-on-demand:sessions:retrieve-by-device`)
+  - [ ] CloudEvents notifications on `sink` (qosStatus changes / expiry)
 
 ### Phase 4 — Spatial
 - [ ] Device Location Verification
@@ -216,6 +240,48 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-02 — Phase 3: Quality on Demand v1 (begun) — `POST /sessions` **and**
+  `GET /sessions/{sessionId}` (CAMARA quality-on-demand 1.1.0, release r3.2 — the
+  latest stable; major v1, so mounted at `/quality-on-demand/v1`, confirmed against
+  the r3.2 upstream spec: `createSession`/`getSession`, scopes
+  `quality-on-demand:sessions:create`/`:read`). CamaraSim's first **resource-oriented**
+  stateful API (a created `sessionId` is addressed by later requests). New
+  `src/apis/quality_on_demand/{,store,v1}.rs` merged into the app router; `/` catalog now
+  lists quality-on-demand v1. New in-memory store `store.rs` (process-global
+  `Mutex<HashMap<String,Value>>`, lock never held across await, mirrors otp/store.rs):
+  `new_session_id()` mints an opaque UUID-**v4-shaped** `sessionId` (`SHA-256(counter‖now)`
+  first 16 bytes with version/variant nibbles set — matches CAMARA `format:uuid`, no
+  uuid/rand dep), `insert`/`get` hold the rendered `SessionInfo`. `create_session`: body
+  `CreateSession{device?,applicationServer,qosProfile,duration,devicePorts?,
+  applicationServerPorts?,sink?,sinkCredential?}` parsed with `deny_unknown_fields` →
+  precise 400 INVALID_ARGUMENT (missing/empty applicationServer, bad qosProfile pattern
+  `^[a-zA-Z0-9_.-]+$` len 3–256, missing duration, bad E.164, unknown field). Three
+  control planes (§7): (1) identifier (submitted `device` id [phoneNumber E.164-valid,
+  else NAI, else IPv4 publicAddress, else ipv6Address], else token subject → 422
+  MISSING_IDENTIFIER) — reserved suffix → canonical CAMARA error (so `…409`→409 CONFLICT,
+  the QoD duplicate-session case), else tail `…000`/no-digits → `qosStatus:REQUESTED`
+  (no startedAt/expiresAt) and any other tail → `qosStatus:AVAILABLE` (startedAt=now,
+  expiresAt=now+duration, self-contained rfc3339 like sim_swap/device_identifier);
+  (2) `duration` — `<1`→400 INVALID_ARGUMENT, `>86400`(24h fixed profile ceiling)→400
+  `QUALITY_ON_DEMAND.DURATION_OUT_OF_RANGE`; (3) `qosProfile` — name containing
+  `unavailable` (ci)→422 `QUALITY_ON_DEMAND.QOS_PROFILE_NOT_APPLICABLE`. Response echoes
+  device (single id)/applicationServer/ports/sink; `sinkCredential` accepted but never
+  echoed (secret) and unused — notifications deferred. `get_session`: `Path(sessionId)`
+  → stored SessionInfo (200) or 404 NOT_FOUND. `x-correlator` echoed on every response.
+  No new deps (reuses sha2/serde/shared scenarios+errors, local E.164/qosProfile/rfc3339).
+  Spec: new `specs/quality-on-demand/v1/openapi.yaml` — vendored 1.1.0 `POST /sessions` +
+  `GET /sessions/{sessionId}` with `CreateSession`/`SessionInfo`/`Device`/`DeviceIpv4Addr`/
+  `ApplicationServer`/`PortsSpec` schemas, `$ref`-ing shared `errors.yaml` + auth
+  `camaraOAuth`, `x-camarasim-scenarios` documenting the three control planes; noted the
+  documented cuts (UNNECESSARY/UNSUPPORTED_IDENTIFIER + INVALID_SINK declared-not-selected;
+  500/503 CamaraSim extension so every reserved suffix is reachable; DELETE/extend/
+  retrieve-sessions/CloudEvents deferred so served spec matches code). 288 tests green
+  (was 268; +20: 2 store units [unique-uuid-v4-shape/insert-get-unknown] + 3 handler units
+  [qosProfile/E.164/rfc3339] + 15 integration covering available/requested-…000/
+  create-then-get/unknown-404/reserved-…409+…404/duration-<1/duration->max/unavailable-
+  profile/missing-fields+empty-appserver+unknown-field/bad-phone/subject-fallback/
+  subject-reserved/create↔read-scope-isolation/auth/x-correlator + catalog). — binary:
+  1080K (1104888 B; +32400 B)
 - 2026-08-02 21:46Z — Phase 3 (begun): One Time Password SMS v1 — `POST /send-code` **and**
   `POST /validate-code` (CAMARA one-time-password-sms 1.1.1, release r3.2 — the latest stable;
   major v1, so mounted at `/one-time-password-sms/v1`, scope `one-time-password-sms:send-validate`

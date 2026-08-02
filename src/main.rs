@@ -68,6 +68,11 @@ async fn catalog() -> Json<Value> {
                 "name": "one-time-password-sms",
                 "version": "v1",
                 "base_path": "/one-time-password-sms/v1",
+            },
+            {
+                "name": "quality-on-demand",
+                "version": "v1",
+                "base_path": "/quality-on-demand/v1",
             }
         ],
         "authorization_servers": [{
@@ -146,6 +151,9 @@ mod tests {
         assert!(apis.iter().any(|a| a["name"] == "one-time-password-sms"
             && a["version"] == "v1"
             && a["base_path"] == "/one-time-password-sms/v1"));
+        assert!(apis.iter().any(|a| a["name"] == "quality-on-demand"
+            && a["version"] == "v1"
+            && a["base_path"] == "/quality-on-demand/v1"));
         assert_eq!(
             body["authorization_servers"][0]["openid_configuration"],
             "/.well-known/openid-configuration"
