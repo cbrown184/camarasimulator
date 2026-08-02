@@ -1,0 +1,299 @@
+# CamaraSim — One Time Password SMS, API version v1 (CAMARA 1.1.1).
+#
+# Vendored from the CAMARA One Time Password SMS API (release r3.2,
+# one-time-password-sms 1.1.1) and annotated with CamaraSim's parameter-driven
+# functional cases (docs/DESIGN.md §7, §9). Backed by
+# `src/apis/one_time_password_sms/v1.rs` and its in-memory store; spec and code
+# must not drift.
+#
+# Serves `POST /send-code` and `POST /validate-code`.
+openapi: 3.0.3
+info:
+  title: One Time Password SMS
+  description: |
+    Sends a one-time password (OTP) to a phone number over SMS and validates the
+    code the user reads back — the phone-ownership check behind sign-up and
+    step-up authentication.
+
+    This is the CamaraSim reference double for CAMARA One Time Password SMS
+    1.1.1. It is CamaraSim's first **stateful** API: `POST /send-code` mints an
+    `authenticationId` and remembers the code it "sent"; `POST /validate-code`
+    redeems that `authenticationId` against a submitted `code`. Both endpoints
+    require the `one-time-password-sms:send-validate` scope.
+
+    ## Functional cases — the input is the control plane (docs/DESIGN.md §7)
+
+    There is no real SMS, so the code CamaraSim "sends" is **deterministic from
+    the phone number**: the last six digits of `phoneNumber`, right-aligned and
+    zero-padded to six (e.g. `+123456789012` → `789012`). A headless caller can
+    therefore compute exactly what to submit to `validate-code`.
+
+    - **`send-code`** is keyed on the submitted `phoneNumber`. If its trailing
+      three digits name a reserved CAMARA status (`…400`, `…401`, `…403`, `…404`,
+      `…409`, `…422`, `…429`, `…500`, `…503`) the endpoint answers with that
+      canonical CAMARA error (see the referenced `errors.yaml`); otherwise it
+      issues an OTP and returns its `authenticationId`.
+    - **`validate-code`** is keyed on the live state behind the
+      `authenticationId`: the matching code → `204`; a wrong code →
+      `ONE_TIME_PASSWORD_SMS.INVALID_OTP` until the attempt budget (3) is
+      exhausted, then `ONE_TIME_PASSWORD_SMS.VERIFICATION_FAILED`; an unknown,
+      already-consumed, or expired id → `ONE_TIME_PASSWORD_SMS.VERIFICATION_EXPIRED`.
+      A successful validation consumes the `authenticationId` (single use), and an
+      entry expires 300 seconds after it is issued.
+  version: "1.1.1"
+  license:
+    name: Apache-2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0.html
+
+servers:
+  - url: "{apiRoot}/one-time-password-sms/v1"
+    variables:
+      apiRoot:
+        default: http://localhost:8080
+        description: API root, e.g. the CamaraSim base URL.
+
+paths:
+  /send-code:
+    post:
+      operationId: sendCode
+      summary: Send an OTP by SMS
+      description: |
+        "Sends" a one-time password to the given `phoneNumber` and returns the
+        `authenticationId` that identifies it. In CamaraSim no SMS is sent; the
+        code is deterministic from the phone number (see the API description),
+        so a caller can validate it directly.
+      security:
+        - openId:
+            - one-time-password-sms:send-validate
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SendCodeRequest"
+      responses:
+        "200":
+          description: The OTP was accepted for delivery; use the returned id to validate.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SendCodeResponse"
+              examples:
+                issued:
+                  summary: OTP issued
+                  value:
+                    authenticationId: "ZmFrZS1hdXRoZW50aWNhdGlvbi1pZA"
+        "400":
+          $ref: "../../shared/errors.yaml#/components/responses/InvalidArgument"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "409":
+          $ref: "../../shared/errors.yaml#/components/responses/Conflict"
+        "422":
+          $ref: "../../shared/errors.yaml#/components/responses/ServiceNotApplicable"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          Result selected from the submitted `phoneNumber` (docs/DESIGN.md §7).
+          Reserved error suffixes come from the shared convention in errors.yaml.
+          Note: canonical One Time Password SMS 1.1.1 declares
+          400/401/403/404/429 for this operation, and at 403 additionally the
+          API-specific codes ONE_TIME_PASSWORD_SMS.MAX_OTP_CODES_EXCEEDED /
+          PHONE_NUMBER_NOT_ALLOWED / PHONE_NUMBER_BLOCKED. CamaraSim exposes the
+          full shared error set so every reserved suffix is reachable, but a `…403`
+          suffix yields the generic PERMISSION_DENIED; the three API-specific 403
+          codes are declared here but not selected by an input pattern (documented
+          cut, DESIGN §7).
+        cases:
+          - input: phoneNumber ending in a reserved error suffix (e.g. …404)
+            result: the canonical CAMARA error for that status
+          - input: valid phoneNumber + message containing "{{code}}"
+            result: "200 { authenticationId } — OTP code = last 6 digits of phoneNumber"
+          - input: missing/invalid phoneNumber, or message missing "{{code}}" or over 160 chars
+            result: "400 INVALID_ARGUMENT"
+
+  /validate-code:
+    post:
+      operationId: validateCode
+      summary: Validate an OTP
+      description: |
+        Validates a `code` against a previously issued `authenticationId`. A
+        matching code returns `204`; the CAMARA OTP error codes describe the
+        failure modes (see the functional cases).
+      security:
+        - openId:
+            - one-time-password-sms:send-validate
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ValidateCodeRequest"
+      responses:
+        "204":
+          description: The code was valid; the authenticationId is consumed.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+        "400":
+          description: |
+            Invalid request, or an OTP validation failure. The `code` is one of
+            the generic `INVALID_ARGUMENT` or the API-specific
+            `ONE_TIME_PASSWORD_SMS.INVALID_OTP` (wrong code, attempts remain),
+            `ONE_TIME_PASSWORD_SMS.VERIFICATION_FAILED` (attempt budget exhausted),
+            or `ONE_TIME_PASSWORD_SMS.VERIFICATION_EXPIRED` (unknown / consumed /
+            expired authenticationId).
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "../../shared/errors.yaml#/components/schemas/CamaraError"
+              examples:
+                invalidArgument:
+                  summary: Malformed request body
+                  value:
+                    status: 400
+                    code: INVALID_ARGUMENT
+                    message: "`authenticationId` is required."
+                invalidOtp:
+                  summary: Wrong code, attempts remain
+                  value:
+                    status: 400
+                    code: ONE_TIME_PASSWORD_SMS.INVALID_OTP
+                    message: The provided OTP is not valid for this authenticationId.
+                verificationFailed:
+                  summary: Too many wrong attempts
+                  value:
+                    status: 400
+                    code: ONE_TIME_PASSWORD_SMS.VERIFICATION_FAILED
+                    message: The maximum number of validation attempts has been exceeded.
+                verificationExpired:
+                  summary: Unknown, consumed, or expired authenticationId
+                  value:
+                    status: 400
+                    code: ONE_TIME_PASSWORD_SMS.VERIFICATION_EXPIRED
+                    message: The authenticationId is unknown or has expired.
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "409":
+          $ref: "../../shared/errors.yaml#/components/responses/Conflict"
+        "422":
+          $ref: "../../shared/errors.yaml#/components/responses/ServiceNotApplicable"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          Result selected from the live state behind the `authenticationId`
+          (docs/DESIGN.md §7). The OTP code is the last six digits of the
+          `phoneNumber` used at `send-code`. The attempt budget is 3 and an entry
+          lives 300 seconds. All OTP failure codes are HTTP 400.
+        cases:
+          - input: code matching the issued OTP for a live authenticationId
+            result: "204 (no content); the authenticationId is consumed"
+          - input: wrong code while attempts remain
+            result: "400 ONE_TIME_PASSWORD_SMS.INVALID_OTP"
+          - input: wrong code that exhausts the 3-attempt budget
+            result: "400 ONE_TIME_PASSWORD_SMS.VERIFICATION_FAILED"
+          - input: unknown, already-consumed, or expired authenticationId
+            result: "400 ONE_TIME_PASSWORD_SMS.VERIFICATION_EXPIRED"
+          - input: missing authenticationId/code, or code over 10 characters
+            result: "400 INVALID_ARGUMENT"
+
+components:
+  securitySchemes:
+    openId:
+      $ref: "../../auth/openapi.yaml#/components/securitySchemes/camaraOAuth"
+
+  parameters:
+    XCorrelator:
+      name: x-correlator
+      in: header
+      required: false
+      description: Correlation id for the request, echoed back on the response.
+      schema:
+        type: string
+
+  headers:
+    XCorrelator:
+      description: The `x-correlator` from the request, echoed if one was sent.
+      required: false
+      schema:
+        type: string
+
+  schemas:
+    SendCodeRequest:
+      type: object
+      description: Request to send a one-time password to a phone number.
+      required:
+        - phoneNumber
+        - message
+      properties:
+        phoneNumber:
+          type: string
+          description: The phone number to send the OTP to, in E.164 format (starting with `+`).
+          pattern: '^\+[1-9][0-9]{4,14}$'
+          example: "+123456789012"
+        message:
+          type: string
+          description: >-
+            The SMS text. Must contain the `{{code}}` placeholder, which the
+            operator replaces with the generated OTP. At most 160 characters.
+          maxLength: 160
+          pattern: '.*\{\{code\}\}.*'
+          example: "{{code}} is your verification code"
+
+    SendCodeResponse:
+      type: object
+      description: The identifier of the OTP that was sent.
+      required:
+        - authenticationId
+      properties:
+        authenticationId:
+          type: string
+          description: >-
+            Opaque identifier of the sent OTP, supplied to `validate-code`. In
+            CamaraSim it is a base64url token, unique per `send-code` call.
+          example: "ZmFrZS1hdXRoZW50aWNhdGlvbi1pZA"
+
+    ValidateCodeRequest:
+      type: object
+      description: Request to validate a code against a previously sent OTP.
+      required:
+        - authenticationId
+        - code
+      properties:
+        authenticationId:
+          type: string
+          description: The `authenticationId` returned by `send-code`.
+          example: "ZmFrZS1hdXRoZW50aWNhdGlvbi1pZA"
+        code:
+          type: string
+          description: The OTP code to validate. At most 10 characters.
+          maxLength: 10
+          example: "789012"

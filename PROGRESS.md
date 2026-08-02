@@ -139,6 +139,24 @@ it never leaks the real IMEI, yet deterministic per device). Unlike the
 type/identity operations the model tail is deliberately **not** a control plane
 here, so a PPID reveals no device type. **This completes Phase 2.**
 
+**Phase 3 has begun.** **One Time Password SMS v1** is CamaraSim's first
+**stateful** API, mounted at `/one-time-password-sms/v1` (CAMARA
+one-time-password-sms 1.1.1, release r3.2). Both `POST /send-code` and
+`POST /validate-code` are live under the single scope
+`one-time-password-sms:send-validate`. `send-code` mints an opaque
+`authenticationId`, remembers the code it "sent" in a process-global in-memory
+store (`src/apis/one_time_password_sms/store.rs`; `Mutex<HashMap>`, lock never
+held across await, 300 s TTL, 3-attempt budget), and returns the id; there is no
+real SMS, so the code is **deterministic from the phone number** — the last six
+digits, zero-padded (`+123456789012` → `789012`) — so a headless caller can
+compute what to validate (documented). Control planes (DESIGN §7): `send-code`
+keys off the submitted `phoneNumber` (reserved suffix → canonical CAMARA error;
+else issue an OTP); `validate-code` keys off the live store state — matching code
+→ `204` (single-use consume); wrong code → `ONE_TIME_PASSWORD_SMS.INVALID_OTP`
+until the attempt budget exhausts, then `…VERIFICATION_FAILED`; unknown/consumed/
+expired id → `…VERIFICATION_EXPIRED` (all 400). `x-correlator` echoed on every
+response, including the `204`.
+
 ## In progress (claimed this pass)
 
 _None._  <!-- agent: put the claimed item + run timestamp here, clear it when done -->
@@ -173,7 +191,8 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   - [x] `POST /retrieve-ppid` (`device-identifier:retrieve-ppid`)
 
 ### Phase 3 — Stateful, non-spatial
-- [ ] One-Time-Password SMS — `POST /send-code`, `POST /validate-code` (in-memory store)
+- [x] One Time Password SMS v1 — [x] `POST /send-code` · [x] `POST /validate-code`
+  (`/one-time-password-sms/v1`; CAMARA 1.1.1, r3.2; in-memory OTP store)
 - [ ] Quality on Demand (QoD) — session lifecycle + CloudEvents notifications
 
 ### Phase 4 — Spatial
@@ -197,6 +216,36 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-02 21:46Z — Phase 3 (begun): One Time Password SMS v1 — `POST /send-code` **and**
+  `POST /validate-code` (CAMARA one-time-password-sms 1.1.1, release r3.2 — the latest stable;
+  major v1, so mounted at `/one-time-password-sms/v1`, scope `one-time-password-sms:send-validate`
+  for both ops, confirmed against the r3.2 upstream spec). CamaraSim's **first stateful API**. New
+  `src/apis/one_time_password_sms/{,store,v1}.rs` merged into the app router; `/` catalog now lists
+  one-time-password-sms v1. New in-memory store `store.rs` (process-global `Mutex<HashMap>`, lock
+  never held across await, mirrors auth/codes.rs): `issue(code)` mints an opaque `authenticationId`
+  (`base64url(SHA-256(counter‖now))`, no uuid/rand dep) with a 300 s TTL and a 3-wrong-attempt
+  budget; `validate(id, code) -> Verdict{Ok|InvalidOtp|Failed|Expired}` — matching code consumes
+  the entry (single use), an exhausting wrong attempt or an expiry evicts it, an unknown/consumed
+  id is Expired. `send-code`: body `SendCodeRequest{phoneNumber,message}` (both required) parsed
+  with `deny_unknown_fields` → precise 400 INVALID_ARGUMENT (missing/bad-E.164 phone, message
+  missing `{{code}}` or >160 chars, unknown field); reserved suffix on `phoneNumber` → canonical
+  CAMARA error (§7); else "sends" the deterministic code `otp_code(phone)` = last 6 digits
+  zero-padded (so a headless caller can validate without a real SMS — documented) and returns
+  `{authenticationId}`. `validate-code`: body `ValidateCodeRequest{authenticationId,code}` (both
+  required, code ≤10 chars) → maps the store Verdict onto 204 / `ONE_TIME_PASSWORD_SMS.INVALID_OTP`
+  / `…VERIFICATION_FAILED` / `…VERIFICATION_EXPIRED` (all 400). `x-correlator` echoed on all
+  responses incl. the 204. No new deps (reuses sha2/base64/serde, local E.164 validator). Spec:
+  new `specs/one-time-password-sms/v1/openapi.yaml` — vendored 1.1.1 `POST /send-code` +
+  `/validate-code` with `SendCodeRequest`/`SendCodeResponse`/`ValidateCodeRequest` schemas,
+  `$ref`-ing shared `errors.yaml` + auth `camaraOAuth`, `x-camarasim-scenarios` documenting the
+  state-driven cases and the OTP-code derivation; noted the documented cut — a `…403` suffix
+  yields generic PERMISSION_DENIED, so the three API-specific 403 codes (MAX_OTP_CODES_EXCEEDED/
+  PHONE_NUMBER_NOT_ALLOWED/PHONE_NUMBER_BLOCKED) are declared but not input-selected. 268 tests
+  green (was 249; +19: 4 store units [unique-id/correct-consume/unknown-expired/wrong→invalid→
+  failed] + 2 handler units [otp_code/E.164] + 13 integration covering send/full-happy-path/
+  single-use/invalid→failed/unknown-expired/reserved-error/bad-phone/message-placeholder+length/
+  unknown-field/validate-missing-fields+long-code/scope/auth/x-correlator]). — binary: 1048K
+  (1072488 B; +17216 B)
 - 2026-08-02 — Phase 2 (Device Identifier complete → Phase 2 complete): Device Identifier v0.3
   — `POST /retrieve-ppid` (CAMARA Device Identifier 0.3.0, r2.2), operationId `retrievePPID`
   (confirmed against the r2.2 upstream spec), scope `device-identifier:retrieve-ppid`. Added the
