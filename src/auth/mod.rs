@@ -5,13 +5,20 @@
 //!
 //! - `GET /.well-known/openid-configuration` — OIDC discovery metadata.
 //! - `GET /oauth2/jwks` — JWK Set for the token signing key.
+//! - `POST /oauth2/token` — token endpoint (`client_credentials` grant so far).
 //!
 //! Planned (advertised by discovery, filled in by later passes):
-//! `/oauth2/token`, `/oauth2/authorize`, `/bc-authorize`.
+//! `/oauth2/token` (`authorization_code`, CIBA grants), `/oauth2/authorize`,
+//! `/bc-authorize`.
 
 mod keys;
+mod token;
 
-use axum::{http::HeaderMap, routing::get, Json, Router};
+use axum::{
+    http::HeaderMap,
+    routing::{get, post},
+    Json, Router,
+};
 use serde_json::{json, Value};
 
 /// Auth routes, merged into the top-level router by `main`.
@@ -19,6 +26,7 @@ pub fn routes() -> Router {
     Router::new()
         .route("/.well-known/openid-configuration", get(discovery))
         .route("/oauth2/jwks", get(jwks))
+        .route("/oauth2/token", post(token::handler))
 }
 
 /// Resolve the externally-visible base URL used to build absolute endpoint URLs

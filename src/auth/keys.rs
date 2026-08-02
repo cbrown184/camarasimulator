@@ -20,10 +20,13 @@ use std::sync::OnceLock;
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
+use rsa::pkcs1v15::SigningKey;
 use rsa::pkcs8::DecodePrivateKey;
+use rsa::signature::{SignatureEncoding, Signer};
 use rsa::traits::PublicKeyParts;
 use rsa::{RsaPrivateKey, RsaPublicKey};
 use serde_json::{json, Value};
+use sha2::Sha256;
 
 /// The bundled simulator signing key (PKCS#8 PEM). Fixed and public by design.
 const SIGNING_KEY_PEM: &str = include_str!("assets/signing_key.pem");
@@ -48,6 +51,20 @@ pub fn signing_key() -> &'static RsaPrivateKey {
     KEY.get_or_init(|| {
         RsaPrivateKey::from_pkcs8_pem(SIGNING_KEY_PEM).expect("bundled signing key is valid PKCS#8")
     })
+}
+
+/// Sign `message` with the bundled key using RSASSA-PKCS1-v1_5 over SHA-256 —
+/// the JWS `RS256` algorithm (RFC 7518 §3.3). Returns the raw signature bytes,
+/// which the token endpoint base64url-encodes as the JWT's third segment.
+///
+/// The `SigningKey` is built once (cloning the parsed private key) and cached,
+/// so per-token signing does no key parsing. Signing a valid key never fails;
+/// `Signer::sign` panics only on an internal RSA error, which for this fixed,
+/// test-suite-checked key cannot occur on the request path.
+pub fn sign_rs256(message: &[u8]) -> Vec<u8> {
+    static SIGNER: OnceLock<SigningKey<Sha256>> = OnceLock::new();
+    let signer = SIGNER.get_or_init(|| SigningKey::<Sha256>::new(signing_key().clone()));
+    signer.sign(message).to_vec()
 }
 
 /// base64url (no padding) of a big-endian byte slice, as required for JWK
@@ -126,6 +143,28 @@ mod tests {
         assert_eq!(k["e"], expected_e);
         // RSA F4 public exponent 65537 => bytes [0x01, 0x00, 0x01] => "AQAB".
         assert_eq!(k["e"], "AQAB");
+    }
+
+    #[test]
+    fn sign_rs256_verifies_against_the_public_key() {
+        // A signature from `sign_rs256` must verify under the published key, so
+        // clients that fetch the JWKS can validate issued tokens.
+        use rsa::pkcs1v15::{Signature, VerifyingKey};
+        use rsa::signature::Verifier;
+
+        let message = b"eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJjbGllbnQtMSJ9";
+        let sig_bytes = sign_rs256(message);
+
+        let verifying_key = VerifyingKey::<Sha256>::new(RsaPublicKey::from(signing_key()));
+        let signature = Signature::try_from(sig_bytes.as_slice()).expect("signature bytes");
+        verifying_key
+            .verify(message, &signature)
+            .expect("signature verifies under the JWKS public key");
+
+        // A tampered message must fail verification.
+        assert!(verifying_key
+            .verify(b"tampered", &signature)
+            .is_err());
     }
 
     #[test]

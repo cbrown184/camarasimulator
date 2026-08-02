@@ -15,6 +15,15 @@ serde_json = "1"
 # same key to sign tokens in a later pass (see docs/DESIGN.md §4, §6).
 rsa = { version = "0.9", features = ["pem"] }
 base64 = "0.22"
+# RS256 JWT signing: SHA-256 for the RSASSA-PKCS1-v1_5 signature over the token's
+# signing input. Pure Rust (RustCrypto), shares `digest`/`signature` traits with
+# `rsa`, and is far smaller than pulling in `jsonwebtoken` + `ring`/OpenSSL. The
+# `oid` feature supplies the DigestInfo prefix RS256 requires (see DESIGN §6, §11).
+sha2 = { version = "0.10", features = ["oid"] }
+# Parse the token endpoint's `application/x-www-form-urlencoded` body with full
+# control over OAuth2 error responses. Already compiled transitively by axum's
+# `Form`, so this adds no binary size — it only makes the dependency direct.
+serde_urlencoded = "0.7"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

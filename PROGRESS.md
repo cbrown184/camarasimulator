@@ -9,13 +9,14 @@ Status keys: `[ ]` todo · `[~]` in-progress (claimed) · `[x]` done · `[!]` bl
 
 ## Current status
 
-Phase 0 auth underway: OIDC discovery + JWKS with signing-key management. The simulator
-holds one fixed, public, simulator-only RSA key (RS256) bundled in the binary; its public
-half is served at `/oauth2/jwks`, derived from the same key so JWKS can't drift from the
-signer. No CAMARA business APIs yet.
+Phase 0 auth underway: OIDC discovery + JWKS + the token endpoint's
+`client_credentials` grant. The simulator holds one fixed, public, simulator-only RSA key
+(RS256) bundled in the binary; its public half is served at `/oauth2/jwks`, and
+`POST /oauth2/token` now issues real RS256 `at+jwt` JWTs signed with that key. No CAMARA
+business APIs yet.
 
-**Next up:** Phase 0 — `POST /oauth2/token` `client_credentials` grant (sign JWTs with the
-JWKS key, scopes, expiry).
+**Next up:** Phase 0 — token verification middleware for protected routes (audience/scope/
+expiry), then `authorization_code` + PKCE.
 
 ## In progress (claimed this pass)
 
@@ -26,7 +27,7 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 ### Phase 0 — Auth foundation
 - [x] `GET /.well-known/openid-configuration` (discovery) + served metadata
 - [x] `GET /oauth2/jwks` (JWKS) + signing key management
-- [ ] `POST /oauth2/token` — `client_credentials` grant (signed JWT, scopes, expiry)
+- [x] `POST /oauth2/token` — `client_credentials` grant (signed JWT, scopes, expiry)
 - [ ] Token verification middleware for protected routes (audience/scope/expiry)
 - [ ] `GET /oauth2/authorize` + `POST /oauth2/token` — `authorization_code` + PKCE (auto-consent)
 - [ ] `POST /bc-authorize` + CIBA token polling
@@ -66,6 +67,17 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-02 — Phase 0: implemented `POST /oauth2/token` `client_credentials` grant. New
+  `src/auth/token.rs`: parses the urlencoded body, requires client auth via
+  `client_secret_basic` or `client_secret_post` (any secret accepted), grants the requested
+  scope verbatim, and issues a real RS256 `at+jwt` JWT (iss/aud/sub/client_id/scope/iat/exp
+  +3600s/jti) signed with the JWKS key. `keys::sign_rs256` added (RSASSA-PKCS1-v1_5+SHA-256),
+  reusing the bundled RSA key. OAuth2 errors (RFC 6749 §5.2): invalid_request /
+  unsupported_grant_type / invalid_client; `authorization_code`+CIBA advertised but return
+  unsupported_grant_type for now. Deps: `sha2` (oid) + `serde_urlencoded` (already transitive
+  via axum). Spec: added `/oauth2/token` path + TokenRequest/TokenResponse/OAuthError schemas
+  with functional cases. 28 tests green (incl. signature-verifies-against-JWKS). — binary:
+  868K (884808 B)
 - 2026-08-02 — Phase 0: implemented `GET /oauth2/jwks` + signing-key management. New
   `src/auth/keys.rs`: bundled fixed 2048-bit PKCS#8 RSA key (`assets/signing_key.pem`),
   parsed once via `OnceLock`, public half published as an RSA JWK (`use:sig`, `alg:RS256`,
