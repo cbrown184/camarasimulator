@@ -137,7 +137,12 @@ paths:
           `code_challenge_method` must equal `S256`; the RFC 7636 `plain` default is
           rejected. The challenge is bound to the code and checked at redemption.
         - **`response_type` must be `code`.** Any other value is rejected.
-        - **Scope** is carried through verbatim to the issued token.
+        - **Scope** is carried through verbatim to the issued token. Any requested
+          CAMARA **purpose scope** (a token of the form
+          `dpv:<Purpose>#<action>`, e.g. `dpv:FraudPreventionAndDetection#check-sim-swap`)
+          must be well-formed; a malformed `dpv:` token (missing purpose or
+          action, or more than one `#`) is rejected with `invalid_scope`.
+          Non-`dpv:` technical scopes (`openid`, …) pass untouched.
         - **`redirect_uri`** must be an absolute URI; it is bound to the code and
           must match exactly when the code is redeemed.
         - **`state`**, if supplied, is echoed back on both success and error
@@ -151,7 +156,8 @@ paths:
         - Otherwise the error is delivered **by redirect** to `redirect_uri` as
           `error` / `error_description` (plus `state`): a non-`code`
           `response_type` yields `unsupported_response_type`; a missing/`plain`
-          PKCE challenge yields `invalid_request`.
+          PKCE challenge yields `invalid_request`; a malformed purpose scope
+          yields `invalid_scope`.
       parameters:
         - name: response_type
           in: query
@@ -180,7 +186,10 @@ paths:
           required: false
           schema:
             type: string
-          description: Space-delimited scopes, carried through to the issued token.
+          description: |
+            Space-delimited scopes, carried through to the issued token. A CAMARA
+            purpose scope (`dpv:<Purpose>#<action>`) must be well-formed or the
+            request is rejected with `invalid_scope`.
         - name: state
           in: query
           required: false
@@ -265,6 +274,8 @@ paths:
 
         Errors use the OAuth2 format (RFC 6749 §5.2) with `Cache-Control: no-store`:
           - missing `login_hint` or `scope` → `invalid_request` (400)
+          - a malformed requested purpose scope (`dpv:<Purpose>#<action>`) →
+            `invalid_scope` (400)
           - no client authentication → `invalid_client` (401)
       requestBody:
         required: true
@@ -289,7 +300,9 @@ paths:
                 expires_in: 120
                 interval: 5
         "400":
-          description: Missing `login_hint` or `scope`.
+          description: |
+            Missing `login_hint` or `scope` (`invalid_request`), or a malformed
+            requested purpose scope (`invalid_scope`).
           content:
             application/json:
               schema:
@@ -340,7 +353,14 @@ paths:
           `invalid_client` (HTTP 401).
         - **Scope selection.** The requested `scope` (space-delimited) is granted
           verbatim: it becomes the token's `scope` claim and the response `scope`.
-          Omit `scope` for an empty grant (no `scope` in the response).
+          Omit `scope` for an empty grant (no `scope` in the response). Any
+          requested CAMARA **purpose scope** (`dpv:<Purpose>#<action>`, e.g.
+          `dpv:FraudPreventionAndDetection#check-sim-swap`) must be well-formed; a
+          malformed `dpv:` token — missing purpose or action, or more than one
+          `#` — is rejected with `invalid_scope` (400) before any token is issued.
+          Non-`dpv:` technical scopes pass untouched. (`client_credentials` only;
+          for `authorization_code` and CIBA the scope is fixed and validated at the
+          `/oauth2/authorize` / `/bc-authorize` request.)
         - **Expiry** is fixed at 3600 seconds (`expires_in`).
 
         For the **`authorization_code`** grant the request carries `code`,
@@ -372,6 +392,7 @@ paths:
         `Cache-Control: no-store`:
           - missing `grant_type`, or a required parameter absent → `invalid_request` (400)
           - unknown / unsupported `grant_type` → `unsupported_grant_type` (400)
+          - a malformed requested purpose scope → `invalid_scope` (400)
           - no client authentication → `invalid_client` (401)
           - invalid / expired / reused / mismatched authorization code, failed PKCE
             verification, or an unknown/mismatched `auth_req_id` → `invalid_grant` (400)
@@ -402,8 +423,9 @@ paths:
                 scope: dpv:FraudPreventionAndDetection#check-sim-swap
         "400":
           description: |
-            Invalid request, unsupported grant type, or an authorization code that
-            is invalid / expired / reused / mismatched or fails PKCE verification
+            Invalid request, unsupported grant type, a malformed requested purpose
+            scope (`invalid_scope`), or an authorization code that is invalid /
+            expired / reused / mismatched or fails PKCE verification
             (`invalid_grant`).
           content:
             application/json:
@@ -510,8 +532,9 @@ components:
           description: |
             Space-delimited requested scopes (e.g. a CAMARA purpose scope such as
             `dpv:FraudPreventionAndDetection#check-sim-swap`). Granted verbatim by
-            the simulator. (`client_credentials` only; for `authorization_code` the
-            scope is fixed by the authorize request.)
+            the simulator, but a malformed `dpv:` purpose scope is rejected with
+            `invalid_scope`. (`client_credentials` only; for `authorization_code`
+            the scope is fixed by the authorize request.)
         client_id:
           type: string
           description: |
@@ -566,7 +589,8 @@ components:
           type: string
           description: |
             Space-delimited requested scopes (e.g. a CAMARA purpose scope). Copied
-            verbatim into the issued token. Required.
+            verbatim into the issued token. Required. A malformed `dpv:` purpose
+            scope (`dpv:<Purpose>#<action>`) is rejected with `invalid_scope`.
         client_id:
           type: string
           description: |

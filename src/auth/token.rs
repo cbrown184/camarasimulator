@@ -44,7 +44,7 @@ use base64::Engine as _;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use super::{base_url, ciba, codes, keys};
+use super::{base_url, ciba, codes, keys, purpose};
 
 /// Lifetime of an issued access token, in seconds (1 hour).
 const EXPIRES_IN: u64 = 3600;
@@ -114,6 +114,10 @@ fn client_credentials(headers: &HeaderMap, form: TokenForm) -> Response {
     };
 
     let scope = form.scope.unwrap_or_default();
+    // A requested `dpv:` purpose scope must be well-formed (docs/DESIGN.md §7).
+    if let Err(bad) = purpose::validate_scope(&scope) {
+        return invalid_scope(&bad);
+    }
     let issuer = base_url(headers);
     // Two-legged: the client is the subject, and iss == aud == this server.
     issue_access_token(&issuer, &issuer, &client_id, &client_id, &scope)
@@ -265,6 +269,17 @@ fn ciba_grant(headers: &HeaderMap, form: TokenForm) -> Response {
 /// An `invalid_grant` token-endpoint error (RFC 6749 §5.2), HTTP 400.
 fn invalid_grant(description: &str) -> Response {
     oauth_error(StatusCode::BAD_REQUEST, "invalid_grant", description)
+}
+
+/// An `invalid_scope` error (RFC 6749 §5.2) naming the malformed purpose scope
+/// (`bad`), HTTP 400. `pub(super)` so `/bc-authorize` ([`super::ciba`]) can raise
+/// the same error for a malformed requested scope.
+pub(super) fn invalid_scope(bad: &str) -> Response {
+    oauth_error(
+        StatusCode::BAD_REQUEST,
+        "invalid_scope",
+        &format!("the requested scope '{bad}' is not a valid CAMARA purpose scope"),
+    )
 }
 
 /// Build and return a signed access-token response. Shared by every grant.
@@ -480,6 +495,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn client_credentials_rejects_a_malformed_purpose_scope() {
+        // `dpv:Foo` has no `#action`, so it is not a valid CAMARA purpose scope.
+        let (status, headers, body) = post_token(
+            "grant_type=client_credentials&client_id=client-1&scope=dpv%3AFoo",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"], "invalid_scope");
+        assert!(body["error_description"]
+            .as_str()
+            .unwrap()
+            .contains("dpv:Foo"));
+        // Error responses must not be cached either.
+        assert_eq!(
+            headers.get("cache-control").unwrap().to_str().unwrap(),
+            "no-store"
+        );
+    }
+
+    #[tokio::test]
+    async fn client_credentials_accepts_a_well_formed_purpose_scope() {
+        let (status, _, body) = post_token(
+            "grant_type=client_credentials&client_id=client-1\
+             &scope=dpv%3AFraudPreventionAndDetection%23check-sim-swap",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["scope"], "dpv:FraudPreventionAndDetection#check-sim-swap");
+    }
+
+    #[tokio::test]
     async fn scope_is_omitted_from_response_when_not_requested() {
         let (_, _, body) =
             post_token("grant_type=client_credentials&client_id=client-1", None).await;
@@ -685,6 +733,35 @@ mod tests {
             .unwrap();
         let resp: Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(resp["error"], "invalid_request");
+    }
+
+    #[tokio::test]
+    async fn bc_authorize_rejects_a_malformed_purpose_scope() {
+        let response = super::super::routes()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/bc-authorize")
+                    .header("host", "sim.local:8080")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    // `dpv:Foo` lacks the `#action`, so it is an invalid purpose scope.
+                    .body(Body::from(
+                        "client_id=app-1&scope=dpv:Foo&login_hint=tel:%2B34600000001",
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let resp: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(resp["error"], "invalid_scope");
+        assert!(resp["error_description"]
+            .as_str()
+            .unwrap()
+            .contains("dpv:Foo"));
     }
 
     #[tokio::test]

@@ -45,7 +45,7 @@ use serde::Deserialize;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
-use super::{base_url, codes, token};
+use super::{base_url, codes, purpose, token};
 
 /// Lifetime of a backchannel authentication request, in seconds. Returned as
 /// `expires_in`; a poll after this window yields `expired_token`.
@@ -230,6 +230,10 @@ pub async fn handler(headers: HeaderMap, body: String) -> Response {
             )
         }
     };
+    // A requested `dpv:` purpose scope must be well-formed (docs/DESIGN.md §7).
+    if let Err(bad) = purpose::validate_scope(&scope) {
+        return token::invalid_scope(&bad);
+    }
 
     let auth_req_id = issue(CibaRequest {
         client_id,

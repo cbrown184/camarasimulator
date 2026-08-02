@@ -19,6 +19,7 @@ mod authorize;
 mod ciba;
 mod codes;
 mod keys;
+mod purpose;
 mod token;
 pub mod verify;
 

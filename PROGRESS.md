@@ -33,8 +33,14 @@ three digits deterministically select a canonical CAMARA error (`…404`→404 `
 `…429`→429 `TOO_MANY_REQUESTS`, etc.) so every Phase 1 identifier-keyed API exposes its
 error cases from the input alone; documented once in `specs/shared/errors.yaml`.
 
-**Next up:** Phase 0 — Purpose/scope enforcement (validate/gate CAMARA `dpv:` purpose
-scopes), then Phase 1 stateless APIs.
+Purpose-scope validation is now in place (`src/auth/purpose.rs`): a requested scope's
+`dpv:<Purpose>#<action>` tokens must be well-formed, checked at every scope-request entry
+point (token `client_credentials`, `/oauth2/authorize`, `/bc-authorize`) → OAuth2
+`invalid_scope`; non-`dpv:` technical scopes pass untouched. Endpoint-level gating of the
+required purpose scope is already handled by `verify::Claims::require_scope`.
+
+**Next up:** Phase 0 auth is complete. Begin Phase 1 stateless APIs — Number Verification
+v1 (`POST /verify`, `GET /device-phone-number`).
 
 ## In progress (claimed this pass)
 
@@ -50,7 +56,10 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 - [x] `GET /oauth2/authorize` + `POST /oauth2/token` — `authorization_code` + PKCE (auto-consent)
 - [x] `POST /bc-authorize` + CIBA token polling
 - [x] Shared reserved-identifier scenario convention + base CAMARA error model (DESIGN §7, §8)
-- [ ] Purpose/scope enforcement — validate/gate CAMARA `dpv:` purpose scopes (DESIGN §7)
+- [x] Purpose/scope enforcement — validate CAMARA `dpv:` purpose-scope grammar at the
+  token / authorize / bc-authorize scope-request entry points → `invalid_scope` (DESIGN §7).
+  (Endpoint-level *gating* of the required purpose scope is already handled by
+  `verify::Claims::require_scope`; Phase 1 APIs wire the specific scope per endpoint.)
 
 ### Phase 1 — Stateless, non-spatial
 - [ ] Number Verification v1 — `POST /verify`, `GET /device-phone-number`
@@ -86,6 +95,21 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-02 — Phase 0 (complete): purpose/scope enforcement — validate CAMARA `dpv:`
+  purpose-scope grammar. New `src/auth/purpose.rs`: pure `validate_scope(&str) -> Result<(),String>`
+  checking each space-delimited token; a `dpv:`-prefixed token must be `dpv:<Purpose>#<action>`
+  (exactly one `#`, non-empty alphanumeric purpose, non-empty action in `[A-Za-z0-9._:-]`),
+  non-`dpv:` technical scopes pass untouched, empty scope valid, first offending token reported.
+  Wired into all three client-facing scope-request entry points → OAuth2 `invalid_scope`
+  (RFC 6749 §5.2/§4.1.2.1): token `client_credentials` (400), `/oauth2/authorize` (redirectable
+  error, honours state), `/bc-authorize` (400); shared `token::invalid_scope` helper made
+  `pub(super)`. `authorization_code`/CIBA token grants take scope from the stored code/request,
+  so they're validated at authorize/bc-authorize time. Gating of the required scope stays with
+  `verify::Claims::require_scope` (Phase 1 wires the per-endpoint scope). No new deps. Spec:
+  documented the purpose-scope grammar + `invalid_scope` functional case on all three endpoints
+  (`invalid_scope` was already in the `OAuthError` enum — now exercised). 105 tests green (was 95;
+  +10: 5 grammar unit + 5 endpoint integration incl. happy-path + malformed for each entry point).
+  — binary: 900K (920192 B; +1768 B)
 - 2026-08-02 — Phase 0: shared reserved-identifier scenario convention + base CAMARA error model
   (DESIGN §7, §8). New `src/errors.rs`: `CamaraError { status, code, message }` with the
   Commonalities standard code/message set and `CamaraError::for_status(u16)` (400 INVALID_ARGUMENT,

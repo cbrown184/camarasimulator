@@ -35,6 +35,7 @@ use serde_json::json;
 
 use super::base_url;
 use super::codes::{self, AuthCode};
+use super::purpose;
 
 /// Parsed `GET /oauth2/authorize` query parameters. All optional so validation
 /// (and the resulting redirect-or-direct error) is handled explicitly rather than
@@ -111,6 +112,19 @@ pub async fn handler(headers: HeaderMap, RawQuery(query): RawQuery) -> Response 
             "'code_challenge_method' must be S256",
             state,
         );
+    }
+
+    // A requested `dpv:` purpose scope must be well-formed (docs/DESIGN.md §7);
+    // a malformed one is a redirectable `invalid_scope` (RFC 6749 §4.1.2.1).
+    if let Some(scope) = params.scope.as_deref() {
+        if let Err(bad) = purpose::validate_scope(scope) {
+            return redirect_error(
+                &redirect_uri,
+                "invalid_scope",
+                &format!("the requested scope '{bad}' is not a valid CAMARA purpose scope"),
+                state,
+            );
+        }
     }
 
     // Auto-consent: mint a code bound to this client / redirect_uri / scope /
@@ -319,6 +333,35 @@ mod tests {
         assert!(location_query(&location.unwrap())
             .iter()
             .any(|(k, v)| k == "error" && v == "invalid_request"));
+    }
+
+    #[tokio::test]
+    async fn malformed_purpose_scope_redirects_with_invalid_scope() {
+        // `dpv:Foo` is not a valid purpose scope (no `#action`). Because
+        // client_id/redirect_uri are valid, the error is delivered by redirect.
+        let q = VALID.replace("scope=openid", "scope=dpv:Foo");
+        let (status, location, _) = authorize(&q).await;
+        assert_eq!(status, StatusCode::FOUND);
+        let q = location_query(&location.unwrap());
+        assert!(q
+            .iter()
+            .any(|(k, v)| k == "error" && v == "invalid_scope"));
+        // The client's state is echoed on the error redirect.
+        assert!(q.iter().any(|(k, v)| k == "state" && v == "xyz"));
+    }
+
+    #[tokio::test]
+    async fn well_formed_purpose_scope_is_accepted() {
+        let q = VALID.replace(
+            "scope=openid",
+            "scope=dpv:FraudPreventionAndDetection%23check-sim-swap",
+        );
+        let (status, location, _) = authorize(&q).await;
+        assert_eq!(status, StatusCode::FOUND);
+        let q = location_query(&location.unwrap());
+        // Happy path: a code is issued, no error delivered.
+        assert!(q.iter().any(|(k, v)| k == "code" && !v.is_empty()));
+        assert!(!q.iter().any(|(k, _)| k == "error"));
     }
 
     #[tokio::test]
