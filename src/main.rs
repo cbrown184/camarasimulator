@@ -88,6 +88,12 @@ async fn catalog() -> Json<Value> {
                 "version": "v3",
                 "base_path": "/location-verification/v3",
                 "spec_url": "/location-verification/v3/openapi.yaml",
+            },
+            {
+                "name": "location-retrieval",
+                "version": "v0.4",
+                "base_path": "/location-retrieval/v0.4",
+                "spec_url": "/location-retrieval/v0.4/openapi.yaml",
             }
         ],
         "authorization_servers": [{
@@ -176,6 +182,10 @@ mod tests {
             && a["version"] == "v3"
             && a["base_path"] == "/location-verification/v3"
             && a["spec_url"] == "/location-verification/v3/openapi.yaml"));
+        assert!(apis.iter().any(|a| a["name"] == "location-retrieval"
+            && a["version"] == "v0.4"
+            && a["base_path"] == "/location-retrieval/v0.4"
+            && a["spec_url"] == "/location-retrieval/v0.4/openapi.yaml"));
         assert_eq!(
             body["authorization_servers"][0]["openid_configuration"],
             "/.well-known/openid-configuration"

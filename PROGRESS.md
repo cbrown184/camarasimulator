@@ -247,6 +247,22 @@ minimum of 2000 m (radius `[1, 2000)` → 422 `LOCATION_VERIFICATION.INVALID_ARE
 (location data always treated as fresh). A supplied `device` is echoed back
 (`VerifyLocationResponse.device`). `x-correlator` echoed on every response.
 
+**Device Location Retrieval v0.4** `POST /retrieve` is now live at
+`/location-retrieval/v0.4/retrieve` (scope `location-retrieval:read`, operationId
+`retrieveLocation`; CAMARA Location Retrieval 0.4.0, release r3.2 — the latest
+published version, mounted at its real `v0.4` like KYC Match / Device Identifier).
+The companion to Location Verification: where Verification answers a verdict
+against a supplied area, Retrieval **returns the device's position** as a CIRCLE
+`area` (`{lastLocationTime, area:{areaType:CIRCLE, center, radius}}`). Same
+DeviceLocation-family identifier resolution as Verification (submitted `device`
+id — phoneNumber E.164, else IPv4 publicAddress, else ipv6Address, no NAI — else
+token subject). Two control planes (DESIGN §7): the identifier — reserved suffix →
+canonical CAMARA error; otherwise the trailing three digits fix the returned
+circle deterministically (`center` = base point offset by `digits*0.001°`, `radius`
+= `((digits%10)+1)*100` m, 100–1000 m accuracy) — and `maxAge` (validated
+`[60, int32]`; out-of-range → 400 OUT_OF_RANGE, else ignored as location is always
+fresh). `x-correlator` echoed on every response.
+
 ## In progress (claimed this pass)
 
 _None._  <!-- agent: put the claimed item + run timestamp here, clear it when done -->
@@ -304,7 +320,8 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 ### Phase 4 — Spatial
 - [x] Device Location Verification v3 — `POST /verify` (`/location-verification/v3`;
   CAMARA 3.0.0, r3.2; verdict TRUE/FALSE/PARTIAL, identifier + circle-radius control planes)
-- [ ] Device Location Retrieval
+- [x] Device Location Retrieval v0.4 — `POST /retrieve` (`/location-retrieval/v0.4`;
+  CAMARA 0.4.0, r3.2; returns a CIRCLE area, identifier + maxAge control planes)
 - [ ] Geofencing (subscriptions/notifications)
 
 ### Phase 5 — Remaining
@@ -326,6 +343,47 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 ## Scan journal
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
+
+- 2026-08-03 — Phase 4 (spatial): **Device Location Retrieval v0.4** — `POST
+  /retrieve` (CAMARA Location Retrieval 0.4.0, release r3.2 — the latest published
+  version; the API has one endpoint, so this completes it). CamaraSim's second
+  spatial API and the companion to Location Verification: Verification answers a
+  verdict against a supplied area, Retrieval **returns the device's position** as a
+  CIRCLE area. New `src/apis/location_retrieval/{,v0_4}.rs` merged into the app
+  router; `/` catalog + openapi server now list location-retrieval v0.4. Mounted at
+  `/location-retrieval/v0.4/retrieve` (real published sub-1.0 version, mirroring KYC
+  Match / Device Identifier), scope `location-retrieval:read`, operationId
+  `retrieveLocation`. Body `RetrievalLocationRequest{device?, maxAge?}` parsed with
+  `deny_unknown_fields`; empty body accepted as `{}` (both fields optional).
+  Response `Location{lastLocationTime, area:{areaType:CIRCLE, center{latitude,
+  longitude}, radius}}`. Same DeviceLocation-family identifier resolution as
+  Verification (submitted `device` id [phoneNumber E.164, else IPv4 publicAddress,
+  else ipv6Address — no NAI, disallowed here], else token subject → 422
+  MISSING_IDENTIFIER). Two control planes (§7): (1) the identifier — reserved suffix
+  → canonical CAMARA error; otherwise the trailing three digits fix the circle
+  deterministically (`center` = base point 51.5/-0.12 offset by digits*0.001°,
+  `radius` = ((digits%10)+1)*100 m in 100–1000 m, the location accuracy), so the
+  reported position is reproducible from the input; (2) `maxAge` — validated
+  [60, 2147483647] (else 400 OUT_OF_RANGE), otherwise ignored (location always fresh,
+  lastLocationTime=now via the self-contained rfc3339/civil_from_days formatter
+  reused from location_verification — no date-time dep). Precedence: body 400 →
+  maxAge OUT_OF_RANGE → identifier resolution + reserved error → location. Documented
+  cuts: always returns a CIRCLE; `maxAge` never triggers an "unable to fulfil"
+  case; CamaraSim doesn't distinguish 2- vs 3-legged tokens; 409/500 are CamaraSim
+  extensions so every reserved suffix is reachable. `x-correlator` echoed on every
+  response. **No new deps** (serde_json + shared scenarios/errors + local
+  E.164/rfc3339). Spec: new `specs/location-retrieval/v0.4/openapi.yaml` — vendored
+  0.4.0 `POST /retrieve` with RetrievalLocationRequest/Device/DeviceIpv4Addr/
+  Location/Area(CIRCLE)/Point schemas, `$ref`-ing shared `errors.yaml` + auth
+  `camaraOAuth`, Generic400 (INVALID_ARGUMENT|OUT_OF_RANGE) + Generic422
+  (MISSING_IDENTIFIER), `x-camarasim-scenarios` documenting both control planes +
+  precedence + cuts. 378 tests green (was 360; +18: 4 units [location determinism /
+  radius-100-1000-band / E.164 / device-precedence] + 14 integration covering
+  happy-path-deterministic-circle / different-ids-different-locations / reserved-
+  404+429 / ipv4+ipv6 / empty-body-subject-fallback / subject-reserved-503 / maxAge-
+  below-min-400 / valid-maxAge-200 / bad-phone-400 / empty-device-400 / NAI-rejected-
+  400 / no-scope-403 / no-token-401 / x-correlator; also extended the catalog +
+  openapi-server tests). — binary: 1388704 B (+23088 B)
 
 - 2026-08-03 — Phase 4 (spatial) begun: **Device Location Verification v3** — `POST
   /verify` (CAMARA Location Verification 3.0.0, release r3.2 — the latest published

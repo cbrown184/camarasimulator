@@ -83,6 +83,10 @@ const SPECS: &[(&str, &str)] = &[
         include_str!("../../specs/location-verification/v3/openapi.yaml"),
     ),
     (
+        "/location-retrieval/v0.4/openapi.yaml",
+        include_str!("../../specs/location-retrieval/v0.4/openapi.yaml"),
+    ),
+    (
         "/auth/openapi.yaml",
         include_str!("../../specs/auth/openapi.yaml"),
     ),
@@ -154,6 +158,7 @@ mod tests {
             "/one-time-password-sms/v1/openapi.yaml",
             "/quality-on-demand/v1/openapi.yaml",
             "/location-verification/v3/openapi.yaml",
+            "/location-retrieval/v0.4/openapi.yaml",
         ] {
             let (status, content_type, body) = fetch(path).await;
             assert_eq!(status, StatusCode::OK, "spec {path} should be served");

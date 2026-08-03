@@ -1,0 +1,348 @@
+# CamaraSim — Device Location Retrieval, API version v0.4 (CAMARA 0.4.0).
+#
+# Vendored from the CAMARA Location Retrieval API (location-retrieval 0.4.0,
+# release r3.2 — the latest published version; the API has never reached 1.0.0,
+# so — mirroring KYC Match / Device Identifier — it is mounted at its real
+# published version `/location-retrieval/v0.4`, DESIGN §9) and annotated with
+# CamaraSim's parameter-driven functional cases (docs/DESIGN.md §7, §9). Backed
+# by `src/apis/location_retrieval/v0_4.rs`; spec and code must not drift.
+#
+# This is the second CamaraSim *spatial* API (docs/DESIGN.md §12, Phase 4). Unlike
+# its companion Location Verification (which answers a verdict against a supplied
+# area), Retrieval returns the device's estimated position as a circular area.
+#
+# Serves `POST /retrieve`.
+openapi: 3.0.3
+info:
+  title: Device Location Retrieval
+  description: |
+    Retrieves the current location of a device as an area — a circle defined by a
+    `center` point and a `radius`, where the `radius` expresses the accuracy /
+    uncertainty of the estimate.
+
+    This is the CamaraSim reference double for CAMARA Location Retrieval 0.4.0.
+    The device can be identified either by the `device` object in the request
+    body (two-legged / CIBA) or by the identity a three-legged access token
+    authenticated (in which case `device` is omitted). The endpoint requires the
+    `location-retrieval:read` scope.
+
+    ## Functional cases — the input is the control plane (docs/DESIGN.md §7)
+
+    Two control planes:
+
+    **1. The identifier** — the submitted device identifier (`phoneNumber`, else
+    the IPv4 `publicAddress`, else `ipv6Address`), or — when no `device` is
+    supplied — the access token's subject (`sub`). Its trailing three digits
+    drive the result:
+
+    - **Reserved error suffix** — if those digits name a reserved CAMARA status,
+      the endpoint answers with that canonical CAMARA error instead of a location
+      (shared convention — see the referenced `errors.yaml`): `…400`, `…401`,
+      `…403`, `…404`, `…409`, `…422`, `…429`, `…500`, `…503`.
+    - **any other input** (the happy-path default, including a non-numeric subject
+      such as the synthetic `lr-client`) — `200` with a CIRCLE `area` whose
+      `center` is a fixed base point offset by those digits (`digits * 0.001°`
+      north/east) and whose `radius` (the location accuracy, in metres) is
+      `((digits % 10) + 1) * 100` (100–1000 m). The reported position is therefore
+      deterministic from the input.
+
+    **2. `maxAge`** — the maximum acceptable age (seconds) of the location data.
+    CamaraSim validates its range (`[60, 2147483647]`; a value outside → `400
+    OUT_OF_RANGE`) but always treats its location data as fresh
+    (`lastLocationTime` = now), so a valid `maxAge` never changes the result.
+
+    Examples: `+123456789012` → a circle centred `(51.512, -0.108)` with `radius`
+    `300` m; `+123456789034` → a different centre with `radius` `500` m;
+    `+123456789404` → `404 NOT_FOUND`; `maxAge: 30` → `400 OUT_OF_RANGE`.
+  version: "0.4.0"
+  license:
+    name: Apache-2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0.html
+
+servers:
+  - url: "{apiRoot}/location-retrieval/v0.4"
+    variables:
+      apiRoot:
+        default: http://localhost:8080
+        description: API root, e.g. the CamaraSim base URL.
+
+paths:
+  /retrieve:
+    post:
+      operationId: retrieveLocation
+      summary: Retrieve the current location of a device
+      description: |
+        Returns the device's current location as a circular `area` (a `center`
+        point plus a `radius` expressing the location's accuracy). Supply a
+        `device`, or omit it to use the device identified by a three-legged
+        access token.
+
+        See the API description for the parameter-driven functional cases.
+      security:
+        - openId:
+            - location-retrieval:read
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RetrievalLocationRequest"
+      responses:
+        "200":
+          description: The device's current location.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Location"
+              examples:
+                located:
+                  summary: Device located (happy path)
+                  value:
+                    lastLocationTime: "2026-08-03T14:27:08Z"
+                    area:
+                      areaType: CIRCLE
+                      center:
+                        latitude: 51.512
+                        longitude: -0.108
+                      radius: 300
+        "400":
+          $ref: "#/components/responses/Generic400"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "409":
+          $ref: "../../shared/errors.yaml#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/Generic422"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          Two control planes (docs/DESIGN.md §7). The location is selected from
+          the identifier (the first present device identifier, else the access
+          token subject) whose trailing three digits fix the returned circle's
+          centre and radius; reserved error suffixes come from the shared
+          convention in errors.yaml. `maxAge` is a second control plane, validated
+          for range only. Precedence: body validation (400) → `maxAge` range (400
+          OUT_OF_RANGE) → identifier resolution + reserved error → the location.
+          Documented cuts: the location is always treated as fresh
+          (`lastLocationTime` = now), so a valid `maxAge` never triggers an
+          "unable to fulfil max age" case; CamaraSim always returns a CIRCLE area
+          and does not distinguish two- vs three-legged tokens. 409/500 are
+          CamaraSim extensions of the shared error set so every reserved suffix is
+          reachable.
+        cases:
+          - input: identifier ending in a reserved error suffix (e.g. …404)
+            result: the canonical CAMARA error for that status
+          - input: any other identifier (happy-path default)
+            result: >-
+              200 { area: CIRCLE with centre offset by the trailing digits and
+              radius ((digits % 10) + 1) * 100 metres }
+          - input: "maxAge < 60 or > 2147483647"
+            result: "400 OUT_OF_RANGE"
+          - input: "device present but carrying no identifier, or a malformed phoneNumber"
+            result: "400 INVALID_ARGUMENT"
+          - input: no `device` and no token subject
+            result: "422 MISSING_IDENTIFIER"
+
+components:
+  securitySchemes:
+    openId:
+      $ref: "../../auth/openapi.yaml#/components/securitySchemes/camaraOAuth"
+
+  parameters:
+    XCorrelator:
+      name: x-correlator
+      in: header
+      required: false
+      description: Correlation id for the request, echoed back on the response.
+      schema:
+        type: string
+
+  headers:
+    XCorrelator:
+      description: The `x-correlator` from the request, echoed if one was sent.
+      required: false
+      schema:
+        type: string
+
+  responses:
+    # 400 for this API carries either INVALID_ARGUMENT (bad syntax / device with
+    # no identifier / malformed phoneNumber) or OUT_OF_RANGE (maxAge out of range).
+    Generic400:
+      description: Invalid request — `INVALID_ARGUMENT` or `OUT_OF_RANGE`.
+      headers:
+        x-correlator:
+          $ref: "#/components/headers/XCorrelator"
+      content:
+        application/json:
+          schema:
+            $ref: "../../shared/errors.yaml#/components/schemas/CamaraError"
+          examples:
+            invalidArgument:
+              value:
+                status: 400
+                code: INVALID_ARGUMENT
+                message: "`phoneNumber` must be in E.164 format (e.g. +123456789)."
+            outOfRange:
+              value:
+                status: 400
+                code: OUT_OF_RANGE
+                message: "`maxAge` must be between 60 and 2147483647 seconds."
+    # 422 for this API carries the shared MISSING_IDENTIFIER (no device and no
+    # token subject) or SERVICE_NOT_APPLICABLE (via a …422 identifier suffix).
+    Generic422:
+      description: >-
+        Unprocessable request — `MISSING_IDENTIFIER` (no device supplied and the
+        token identifies none) or the shared `SERVICE_NOT_APPLICABLE` (via a …422
+        identifier suffix).
+      headers:
+        x-correlator:
+          $ref: "#/components/headers/XCorrelator"
+      content:
+        application/json:
+          schema:
+            $ref: "../../shared/errors.yaml#/components/schemas/CamaraError"
+          examples:
+            missingIdentifier:
+              value:
+                status: 422
+                code: MISSING_IDENTIFIER
+                message: "No `device` supplied and the access token identifies no device."
+
+  schemas:
+    RetrievalLocationRequest:
+      type: object
+      description: Request for the current location of a device.
+      properties:
+        device:
+          $ref: "#/components/schemas/Device"
+        maxAge:
+          type: integer
+          format: int32
+          minimum: 60
+          maximum: 2147483647
+          description: >-
+            Maximum acceptable age (seconds) of the location data. CamaraSim
+            validates the range but always treats its location data as fresh
+            (`lastLocationTime` = now), so a valid `maxAge` never changes the
+            result.
+          example: 60
+
+    Device:
+      type: object
+      description: >-
+        Identifies the device. At least one identifier must be present. Optional
+        at the request level: omit `device` to use the device identified by a
+        three-legged access token. This API does not accept
+        `networkAccessIdentifier` (CAMARA location guidelines disallow it here).
+        CamaraSim keys its cases off the first present identifier, in the order
+        phoneNumber → ipv4Address.publicAddress → ipv6Address.
+      minProperties: 1
+      properties:
+        phoneNumber:
+          type: string
+          description: A phone number in E.164 format (starting with `+`).
+          pattern: '^\+[1-9][0-9]{4,14}$'
+          example: "+123456789012"
+        ipv4Address:
+          $ref: "#/components/schemas/DeviceIpv4Addr"
+        ipv6Address:
+          type: string
+          format: ipv6
+          description: The device's IPv6 address.
+          example: "2001:db8::11"
+
+    DeviceIpv4Addr:
+      type: object
+      description: >-
+        The device's IPv4 address information. CamaraSim reads `publicAddress` as
+        the identifier; `privateAddress`/`publicPort` are accepted for fidelity.
+      properties:
+        publicAddress:
+          type: string
+          example: "203.0.113.12"
+        privateAddress:
+          type: string
+          example: "192.0.2.25"
+        publicPort:
+          type: integer
+          format: int32
+          minimum: 0
+          maximum: 65535
+          example: 59765
+
+    Location:
+      type: object
+      description: The device's current location.
+      required:
+        - lastLocationTime
+        - area
+      properties:
+        lastLocationTime:
+          type: string
+          format: date-time
+          description: >-
+            RFC 3339 timestamp of when the returned location was last determined.
+          example: "2026-08-03T14:27:08Z"
+        area:
+          $ref: "#/components/schemas/Area"
+
+    Area:
+      type: object
+      description: >-
+        The area the device is located within. The discriminator is `areaType`;
+        CamaraSim always returns a `CIRCLE`.
+      required:
+        - areaType
+      discriminator:
+        propertyName: areaType
+      properties:
+        areaType:
+          type: string
+          description: The kind of area. CamaraSim returns only `CIRCLE`.
+          enum:
+            - CIRCLE
+        center:
+          $ref: "#/components/schemas/Point"
+        radius:
+          type: number
+          format: double
+          minimum: 1
+          description: >-
+            Circle radius in metres — the accuracy / uncertainty of the returned
+            location. CamaraSim returns `((digits % 10) + 1) * 100` (100–1000 m),
+            derived from the identifier's trailing three digits.
+          example: 300
+
+    Point:
+      type: object
+      description: A WGS-84 point (decimal degrees).
+      required:
+        - latitude
+        - longitude
+      properties:
+        latitude:
+          type: number
+          format: double
+          minimum: -90
+          maximum: 90
+          example: 51.512
+        longitude:
+          type: number
+          format: double
+          minimum: -180
+          maximum: 180
+          example: -0.108
