@@ -16,6 +16,7 @@
 //!   Location Retrieval). First slice: `POST /subscriptions` +
 //!   `GET /subscriptions/{subscriptionId}`.
 
+pub mod notifications;
 pub mod store;
 pub mod v0_4;
 

@@ -66,7 +66,7 @@ use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use super::store;
+use super::{notifications, store};
 use crate::auth::verify::Claims;
 use crate::errors::CamaraError;
 use crate::scenarios;
@@ -120,7 +120,8 @@ struct CreateSubscription {
     protocol: Option<String>,
     sink: Option<String>,
     // Accepted for schema fidelity; carries a secret, so it is never echoed and
-    // (until notification delivery lands) not applied — a documented cut.
+    // not applied to notification callbacks — a documented cut (unlike QoD, this
+    // API sends the initial-event callback unauthenticated).
     #[serde(rename = "sinkCredential")]
     #[allow(dead_code)]
     sink_credential: Option<Value>,
@@ -323,6 +324,33 @@ async fn create_subscription(claims: Claims, headers: HeaderMap, body: Bytes) ->
         status,
     );
     store::insert(id.clone(), info.clone());
+
+    // Initial event (config.initialEvent): if the subscription is ACTIVE and the
+    // caller asked for the device's current in/out state, deliver a single
+    // `area-entered`/`area-left` CloudEvent to the sink (fire-and-forget, off the
+    // request path). The event type is chosen from the identifier's trailing three
+    // digits and filtered to the subscribed `types` (see notifications module).
+    if let Some(event_type) = notifications::initial_event_type(
+        config.initial_event,
+        status,
+        scenarios::trailing_three_digits(&identifier),
+        types,
+    ) {
+        if let Some(sink) = req.sink.as_deref() {
+            let detail = &info["config"]["subscriptionDetail"];
+            let device = detail.get("device").cloned();
+            let area_json = detail["area"].clone();
+            let event = notifications::geofencing_event(
+                store::new_event_id(),
+                rfc3339_utc(now_unix_secs()),
+                event_type,
+                &id,
+                device.as_ref(),
+                &area_json,
+            );
+            notifications::spawn_delivery(sink.to_string(), event);
+        }
+    }
 
     with_correlator((StatusCode::CREATED, Json(info)).into_response(), &correlator)
 }
@@ -631,6 +659,7 @@ mod tests {
     const AREA: &str =
         r#""area":{"areaType":"CIRCLE","center":{"latitude":51.5,"longitude":-0.12},"radius":5000}"#;
     const TYPE_ENTERED: &str = "org.camaraproject.geofencing-subscriptions.v0.area-entered";
+    const TYPE_LEFT: &str = "org.camaraproject.geofencing-subscriptions.v0.area-left";
 
     // --- Pure scenario units ----------------------------------------------
 
@@ -1184,5 +1213,97 @@ mod tests {
             headers.get("x-correlator").and_then(|v| v.to_str().ok()),
             Some("corr-del-404")
         );
+    }
+
+    // --- initialEvent CloudEvent delivery ----------------------------------
+
+    /// Build a create body with an http `sink`, both event types, and
+    /// `initialEvent: true`, keyed off the given phone number.
+    fn body_with_initial_event(sink: &str, phone: &str) -> String {
+        json!({
+            "protocol": "HTTP",
+            "sink": sink,
+            "types": [TYPE_ENTERED, TYPE_LEFT],
+            "config": {
+                "subscriptionDetail": {
+                    "device": { "phoneNumber": phone },
+                    "area": {
+                        "areaType": "CIRCLE",
+                        "center": { "latitude": 51.5, "longitude": -0.12 },
+                        "radius": 5000,
+                    },
+                },
+                "initialEvent": true,
+            },
+        })
+        .to_string()
+    }
+
+    #[tokio::test]
+    async fn initial_event_even_tail_delivers_area_entered_to_the_sink() {
+        use tokio::io::AsyncReadExt;
+        use tokio::net::TcpListener;
+
+        // A loopback receiver stands in for the consumer's `sink`.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let sink = format!("http://{addr}/geo-initial");
+
+        // …012 is an even ACTIVE tail → the device is currently inside → area-entered.
+        let token = mint_token(CREATE_SCOPE).await;
+        let (status, _, created) =
+            post_subscriptions(Some(&token), &body_with_initial_event(&sink, "+123456789012"), None)
+                .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(created["status"], "ACTIVE");
+        let id = created["id"].as_str().unwrap().to_string();
+
+        // Receive the fire-and-forget notification the handler spawned.
+        let (mut sock, _) = listener.accept().await.unwrap();
+        let mut buf = Vec::new();
+        sock.read_to_end(&mut buf).await.unwrap();
+        let raw = String::from_utf8(buf).unwrap();
+        let (head, event_body) = raw.split_once("\r\n\r\n").expect("headers then body");
+        assert!(
+            head.starts_with("POST /geo-initial HTTP/1.1\r\n"),
+            "request line: {head}"
+        );
+        assert!(head.contains("Content-Type: application/cloudevents+json"));
+
+        let event: Value = serde_json::from_str(event_body).expect("body is JSON");
+        assert_eq!(event["type"], TYPE_ENTERED);
+        assert_eq!(event["specversion"], "1.0");
+        assert!(event["id"].is_string() && event["time"].is_string());
+        assert_eq!(event["data"]["subscriptionId"], json!(id));
+        assert_eq!(event["data"]["device"]["phoneNumber"], "+123456789012");
+        assert_eq!(event["data"]["area"]["radius"].as_f64(), Some(5000.0));
+    }
+
+    #[tokio::test]
+    async fn initial_event_odd_tail_delivers_area_left_to_the_sink() {
+        use tokio::io::AsyncReadExt;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let sink = format!("http://{addr}/geo-initial-left");
+
+        // …013 is an odd ACTIVE tail → the device is currently outside → area-left.
+        let token = mint_token(CREATE_SCOPE).await;
+        let (status, _, created) =
+            post_subscriptions(Some(&token), &body_with_initial_event(&sink, "+123456789013"), None)
+                .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(created["status"], "ACTIVE");
+        let id = created["id"].as_str().unwrap().to_string();
+
+        let (mut sock, _) = listener.accept().await.unwrap();
+        let mut buf = Vec::new();
+        sock.read_to_end(&mut buf).await.unwrap();
+        let raw = String::from_utf8(buf).unwrap();
+        let (_, event_body) = raw.split_once("\r\n\r\n").expect("headers then body");
+        let event: Value = serde_json::from_str(event_body).expect("body is JSON");
+        assert_eq!(event["type"], TYPE_LEFT);
+        assert_eq!(event["data"]["subscriptionId"], json!(id));
     }
 }

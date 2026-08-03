@@ -17,10 +17,13 @@
 # This slice serves the full subscription CRUD: `POST /subscriptions` (create),
 # `GET /subscriptions` (list), `GET /subscriptions/{subscriptionId}` (read-back),
 # and `DELETE /subscriptions/{subscriptionId}` (delete). The subscriptions are
-# held in an in-memory store (single node). Event delivery to the `sink`
-# (`area-entered` / `area-left` CloudEvents), the `subscription-ended` event on
-# deletion, and subscription expiry/maxEvents are deferred to later passes; the
-# served spec covers only what is implemented.
+# held in an in-memory store (single node). `createSubscription` also delivers the
+# **initial event** (`config.initialEvent: true`): a single `area-entered` /
+# `area-left` CloudEvent reporting the device's current in/out state at
+# subscription time, POSTed to the `sink`. The remaining movement-triggered
+# `area-entered` / `area-left` events, the `subscription-ended` event on deletion,
+# `sinkCredential` auth on the callback, and subscription expiry/maxEvents are
+# deferred to later passes; the served spec covers only what is implemented.
 openapi: 3.0.3
 info:
   title: Geofencing Subscriptions
@@ -83,6 +86,21 @@ info:
     Examples: `+123456789012` in a 5000 m circle → `201 { status: ACTIVE }`;
     `+123456789000` → `201 { status: ACTIVATION_REQUESTED }`; `+123456789404` →
     `404 NOT_FOUND`; a 500 m circle → `400 OUT_OF_RANGE`.
+
+    ### Initial event delivery (`config.initialEvent`)
+
+    In a headless simulator there is no real device movement, so the only
+    request-triggered notification is the **initial event**. When
+    `config.initialEvent` is `true` and the subscription becomes `ACTIVE`,
+    CamaraSim POSTs a single CloudEvent to the `sink` reporting the device's
+    *current* position relative to the area, derived from the identifier's
+    trailing three digits: an **even** tail → the device is inside →
+    `area-entered`; an **odd** tail → the device is outside → `area-left`. The
+    event is delivered only when that event type is among the subscription's
+    `types` (a consumer receives only the events it subscribed to), and only to an
+    `http://` sink (no TLS client — a documented cut). An `ACTIVATION_REQUESTED`
+    subscription reports no state (it is not yet active), so no initial event
+    fires. See the `createSubscription` `callbacks`.
   version: "0.4.0"
   license:
     name: Apache-2.0
@@ -176,25 +194,64 @@ paths:
           The circle `radius` is a second control plane (2000–200000 m). Precedence:
           envelope validation (protocol/sink/types) and area validation (400) →
           identifier resolution (400/422) + reserved error → the created
-          subscription. Documented cuts: only `protocol: HTTP` is supported; the
-          `sinkCredential` is accepted but not applied and never echoed; event
-          delivery to the sink (`area-entered`/`area-left` CloudEvents), listing,
-          `DELETE`, and expiry are deferred, so no notification fires yet. 409/500
-          are CamaraSim extensions of the shared error set so every reserved suffix
-          is reachable.
+          subscription. When the created subscription is ACTIVE and the caller set
+          `config.initialEvent: true`, a single initial CloudEvent is POSTed to the
+          `sink` (see the `callbacks`): the identifier's trailing three digits pick
+          the device's current position — even → inside → `area-entered`, odd →
+          outside → `area-left` — filtered to the subscribed `types`. Documented
+          cuts: only `protocol: HTTP` is supported; the `sinkCredential` is accepted
+          but not applied and never echoed (the callback is unauthenticated); only
+          `http://` sinks are delivered to (no TLS client); movement-triggered
+          events, `subscription-ended` on DELETE, and expiry/maxEvents are deferred.
+          409/500 are CamaraSim extensions of the shared error set so every reserved
+          suffix is reachable.
         cases:
           - input: identifier ending in a reserved error suffix (e.g. …404)
             result: the canonical CAMARA error for that status
           - input: identifier ending …000, or with no trailing digits
-            result: "201 { status: ACTIVATION_REQUESTED }"
+            result: "201 { status: ACTIVATION_REQUESTED } (no initial event — not yet active)"
           - input: any other identifier (happy-path default)
             result: "201 { status: ACTIVE }"
+          - input: ACTIVE subscription, initialEvent=true, even identifier tail, area-entered subscribed
+            result: "201; area-entered CloudEvent POSTed to the sink"
+          - input: ACTIVE subscription, initialEvent=true, odd identifier tail, area-left subscribed
+            result: "201; area-left CloudEvent POSTed to the sink"
           - input: "circle radius < 2000 or > 200000, or center out of range"
             result: "400 OUT_OF_RANGE"
           - input: "areaType not CIRCLE, missing area/center/radius, protocol not HTTP, missing/unknown types, or a device carrying no identifier / malformed phoneNumber"
             result: "400 INVALID_ARGUMENT"
           - input: no `device` and no token subject
             result: "422 MISSING_IDENTIFIER"
+      callbacks:
+        notifications:
+          "{$request.body#/sink}":
+            post:
+              summary: Geofencing area transition notification
+              description: |
+                Delivered by the API provider to the `sink` URL supplied at
+                subscription creation when the device enters or leaves the watched
+                area. The body is a CloudEvents 1.0 `area-entered` / `area-left`
+                event whose `data` carries the `subscriptionId`, the `device`, and
+                the `area`.
+
+                CamaraSim currently emits only the **initial event**: when the
+                subscription is created with `config.initialEvent: true` and becomes
+                `ACTIVE`, one CloudEvent reporting the device's current in/out state
+                is POSTed (`area-entered` for an even identifier tail, `area-left`
+                for an odd one, filtered to the subscribed `types`). Delivery is
+                best-effort, fire-and-forget, and only to an `http://` sink (no TLS
+                client). The callback is unauthenticated — the `sinkCredential` is
+                accepted but not applied (a documented cut). Movement-triggered
+                events and expiry/maxEvents are deferred to later passes.
+              requestBody:
+                required: true
+                content:
+                  application/cloudevents+json:
+                    schema:
+                      $ref: "#/components/schemas/CloudEvent"
+              responses:
+                "204":
+                  description: Notification received.
     get:
       operationId: retrieveSubscriptionList
       summary: List geofencing subscriptions
@@ -481,7 +538,13 @@ components:
           type: boolean
           description: >-
             Whether to emit an event for the device's current in/out state at
-            subscription time. Echoed back if supplied; not yet acted on.
+            subscription time. When `true` and the subscription becomes `ACTIVE`,
+            CamaraSim POSTs one `area-entered` / `area-left` CloudEvent to the
+            `sink` (see the `createSubscription` `callbacks`): the identifier's
+            trailing three digits pick the current position — even → inside →
+            `area-entered`, odd → outside → `area-left` — filtered to the
+            subscribed `types`, and delivered only to an `http://` sink. Echoed
+            back if supplied.
           example: false
 
     SubscriptionDetail:
@@ -634,3 +697,62 @@ components:
             - ACTIVATION_REQUESTED
             - ACTIVE
           example: ACTIVE
+
+    CloudEvent:
+      type: object
+      description: >-
+        A CloudEvents 1.0 event delivered to a subscription's `sink`. CamaraSim
+        emits an `area-entered` / `area-left` event; its `data` carries the
+        `subscriptionId`, the `device`, and the `area`.
+      required:
+        - id
+        - source
+        - type
+        - specversion
+        - time
+        - data
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Unique event id within the `source`.
+          example: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+        source:
+          type: string
+          format: uri-reference
+          description: The provider context that emitted the event.
+          example: "//camarasimulator/geofencing-subscriptions"
+        type:
+          type: string
+          description: The geofencing event type.
+          enum:
+            - org.camaraproject.geofencing-subscriptions.v0.area-entered
+            - org.camaraproject.geofencing-subscriptions.v0.area-left
+        specversion:
+          type: string
+          enum:
+            - "1.0"
+        datacontenttype:
+          type: string
+          enum:
+            - application/json
+        time:
+          type: string
+          format: date-time
+          description: RFC 3339 time the event occurred.
+          example: "2026-08-03T14:27:08Z"
+        data:
+          type: object
+          description: The geofencing event payload.
+          required:
+            - subscriptionId
+            - area
+          properties:
+            subscriptionId:
+              type: string
+              format: uuid
+              description: The subscription this event belongs to.
+            device:
+              $ref: "#/components/schemas/Device"
+            area:
+              $ref: "#/components/schemas/Area"

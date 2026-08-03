@@ -289,8 +289,17 @@ and `DELETE /subscriptions/{subscriptionId}` (`deleteSubscription`,
 `…:subscriptions:delete`) evicts a stored subscription → `204 No Content`
 (single-use) or `404 NOT_FOUND` for an unknown/already-deleted id; deletion is
 synchronous with no `subscription-ended` CloudEvent (204, not the template's
-async 202 — a documented cut). Only notification delivery
-(`area-entered`/`area-left` CloudEvents) + expiry/maxEvents remain.
+async 202 — a documented cut). CloudEvents delivery has now begun:
+`createSubscription` delivers the **initial event** (`config.initialEvent: true`)
+— a single `area-entered`/`area-left` CloudEvent reporting the device's current
+in/out state at subscription time, POSTed to an `http://` `sink` fire-and-forget
+over raw TCP (`src/apis/geofencing_subscriptions/notifications.rs`; no HTTP-client
+dep, mirroring QoD). The position is deterministic from the identifier's trailing
+three digits (even → inside → `area-entered`; odd → outside → `area-left`), fired
+only for an `ACTIVE` subscription and filtered to the subscribed `types`. The
+`sinkCredential` is still not applied (callback unauthenticated — a documented
+cut). Only movement-triggered events + `sinkCredential` auth + expiry/maxEvents
+remain.
 
 ## In progress (claimed this pass)
 
@@ -356,7 +365,13 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   - [x] `POST /subscriptions` (`geofencing-subscriptions:subscriptions:create`, `createSubscription`)
   - [x] `GET /subscriptions/{subscriptionId}` (`geofencing-subscriptions:subscriptions:read`, `retrieveSubscription`)
   - [x] `GET /subscriptions` (list, `retrieveSubscriptionList`) + `DELETE /subscriptions/{subscriptionId}` (`…:subscriptions:delete`, `deleteSubscription`)
-  - [ ] CloudEvents delivery on `sink` (`area-entered` / `area-left`) + expiry/maxEvents
+  - [~] CloudEvents delivery on `sink` (`area-entered` / `area-left`) + expiry/maxEvents:
+    - [x] initial event (`config.initialEvent`) — an `area-entered`/`area-left`
+      CloudEvent for the device's current in/out state at creation of an ACTIVE
+      subscription (http sink, fire-and-forget over raw TCP; no HTTP-client dep)
+    - [ ] movement-triggered `area-entered`/`area-left` events
+    - [ ] `sinkCredential` auth on the callback (currently unauthenticated)
+    - [ ] expiry (`subscriptionExpireTime`) / `subscriptionMaxEvents` + `subscription-ended`
 
 ### Phase 5 — Remaining
 - [ ] Carrier Billing / Payments
@@ -377,6 +392,40 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 ## Scan journal
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
+
+- 2026-08-03 — Phase 4 (spatial): **Geofencing Subscriptions v0.4** — CloudEvents
+  delivery begun: `createSubscription` now delivers the **initial event**
+  (`config.initialEvent: true`). In a headless simulator there is no real device
+  movement, so the initial event is the only request-triggered geofencing
+  notification (CAMARA's own mechanism for reporting the device's current in/out
+  state at subscription time) — the natural first delivery slice, mirroring QoD's
+  request-triggered `DELETE_REQUESTED`. New
+  `src/apis/geofencing_subscriptions/notifications.rs`: a pure
+  `initial_event_type(initialEvent, status, digits, types)` decision (fires only
+  when initialEvent=true AND status ACTIVE AND the computed position's event type
+  is among the subscribed `types`; even trailing-three-digits → inside →
+  `area-entered`, odd → outside → `area-left`), a pure `geofencing_event(...)`
+  CloudEvents-1.0 builder (`data`: subscriptionId/device/area), and a
+  fire-and-forget `spawn_delivery`/`deliver` raw-TCP POST over `tokio`
+  (`application/cloudevents+json`, `http://` sinks only — no TLS client, a
+  documented cut) — no HTTP-client dep, structurally mirroring
+  `quality_on_demand::notifications`. New `store::new_event_id()` mints
+  UUID-shaped CloudEvent ids off the shared counter. `create_subscription` spawns
+  the delivery after storing the SubscriptionInfo (off the request path; 201
+  returns immediately). `sinkCredential` still accepted-but-not-applied → the
+  callback is unauthenticated (a documented cut; ACCESSTOKEN auth deferred).
+  Spec: updated `specs/geofencing-subscriptions/v0.4/openapi.yaml` — added the
+  `createSubscription` `callbacks.notifications` block + a `CloudEvent` schema,
+  refreshed the `initialEvent` property + header/info prose + the
+  `x-camarasim-scenarios` (two new initial-event cases + delivery/cuts). 422 tests
+  green (was 412; +10: 1 store unit [event-ids unique / never collide with
+  subscription ids] + 7 notifications units [initial_event_type: true/false/absent
+  · ACTIVE-vs-ACTIVATION_REQUESTED · even→entered/odd→left · no-digits→none ·
+  types-filtering; event-shape; device-omitted-when-none; parse_http_sink;
+  deliver-posts-a-cloudevent; non-http-noop] + 2 v0_4 integration [even-tail →
+  area-entered to loopback sink w/ subscriptionId+device+area · odd-tail →
+  area-left]). **No new deps.** — binary: 1467560 B (+14520 B; the delta over the
+  code-only growth is the ~6 KB of new vendored spec text embedded via include_str!)
 
 - 2026-08-03 — Phase 4 (spatial): **Geofencing Subscriptions v0.4** — completed the
   subscription CRUD with `GET /subscriptions` (list, operationId

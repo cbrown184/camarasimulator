@@ -83,6 +83,13 @@ pub fn new_subscription_id() -> String {
     mint_uuid()
 }
 
+/// Mint a fresh, opaque, UUID-shaped CloudEvent `id` (CloudEvents requires `id`
+/// to be unique within its `source`). Shares [`mint_uuid`]'s monotonic counter
+/// with subscription ids, so the two never collide.
+pub fn new_event_id() -> String {
+    mint_uuid()
+}
+
 /// Mint a fresh, opaque, UUID-v4-shaped identifier.
 ///
 /// The 16 bytes come from `SHA-256(counter ‖ now)` — the monotonic counter alone
@@ -134,6 +141,15 @@ mod tests {
         // Version nibble is 4; variant nibble is one of 8/9/a/b.
         assert_eq!(parts[2].as_bytes()[0], b'4', "version 4");
         assert!(matches!(parts[3].as_bytes()[0], b'8' | b'9' | b'a' | b'b'));
+    }
+
+    #[test]
+    fn event_ids_are_unique_and_never_collide_with_subscription_ids() {
+        let e1 = new_event_id();
+        let e2 = new_event_id();
+        assert_ne!(e1, e2, "each event id must be unique");
+        // Shares the counter with subscription ids, so the two never collide.
+        assert_ne!(e1, new_subscription_id());
     }
 
     #[test]
