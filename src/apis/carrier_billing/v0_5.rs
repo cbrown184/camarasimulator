@@ -67,13 +67,14 @@
 //!
 //! - The one-step `createPayment`, read-back `retrievePayment`, list
 //!   `retrievePayments`, and the two-step flow's reserve `preparePayment`,
-//!   validate `validatePayment` + confirm `confirmPayment` steps are implemented;
-//!   the remaining two-step `cancelPayment` operation is a later slice.
+//!   validate `validatePayment`, confirm `confirmPayment` + cancel `cancelPayment`
+//!   steps are all implemented — the two-step flow is now complete.
 //!   `preparePayment` lands a `…888`-tail reservation in `pending_validation`
 //!   (with `validationInfo`) for `validatePayment` to clear, and `reserved`
-//!   otherwise; `confirmPayment` charges a `reserved` payment → `succeeded`. The
-//!   409 `ALREADY_EXISTS` duplicate-session case on `preparePayment` (a
-//!   `clientCorrelator` already in flight) is not modelled.
+//!   otherwise; `confirmPayment` charges a `reserved` payment → `succeeded` and
+//!   `cancelPayment` releases one → `cancelled`. The 409 `ALREADY_EXISTS`
+//!   duplicate-session case on `preparePayment` (a `clientCorrelator` already in
+//!   flight) is not modelled.
 //! - `retrievePayments` returns the full list unpaginated and unfiltered: its
 //!   `page`/`perPage`, `paymentCreationDate.gte`/`.lte`, `paymentStatus`,
 //!   `merchantIdentifier`, and `order` query parameters are accepted but not
@@ -110,8 +111,8 @@ const CREATE_SCOPE: &str = "carrier-billing:payments:create";
 const READ_SCOPE: &str = "carrier-billing:payments:read";
 
 /// The OAuth2 scope the two-step write operations require (CAMARA Carrier
-/// Billing 0.5.0). `validatePayment` (and, in later slices, confirm / cancel)
-/// carry it.
+/// Billing 0.5.0). `validatePayment`, `confirmPayment`, and `cancelPayment`
+/// all carry it.
 const WRITE_SCOPE: &str = "carrier-billing:payments:write";
 
 /// A reservation whose resolved phone number ends in this tail requires OTP
@@ -168,6 +169,13 @@ pub fn routes() -> Router {
             "/carrier-billing/v0.5/payments/:payment_id/confirm",
             post(confirm_payment),
         )
+        // The two-step cancel step — releases a reserved payment. `matchit`
+        // disambiguates it from the sibling `/confirm` and `/validate` suffixes
+        // on the same param and from `/payments/:payment_id`.
+        .route(
+            "/carrier-billing/v0.5/payments/:payment_id/cancel",
+            post(cancel_payment),
+        )
 }
 
 /// `POST /payments` request body (CAMARA `CreatePayment`).
@@ -206,6 +214,20 @@ struct ValidatePayment {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ConfirmPayment {
+    #[serde(rename = "phoneNumber")]
+    #[allow(dead_code)]
+    phone_number: Option<String>,
+}
+
+/// `POST /payments/{paymentId}/cancel` request body (CAMARA `CancelPayment` —
+/// the CAMARA `PhoneNumber` shape, mirroring `ConfirmPayment`). As with confirm,
+/// the optional `phoneNumber` re-identifies the account for a two-legged
+/// cancellation, but CamaraSim addresses the reservation by its opaque
+/// `paymentId`, so the field is accepted for schema fidelity but **not applied**
+/// (a documented cut). The whole body is optional — an empty body is accepted.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CancelPayment {
     #[serde(rename = "phoneNumber")]
     #[allow(dead_code)]
     phone_number: Option<String>,
@@ -561,6 +583,80 @@ async fn confirm_payment(
         )
         .into_response(),
         store::ConfirmOutcome::Unknown => {
+            CamaraError::not_found("No payment found for the provided paymentId.").into_response()
+        }
+    };
+
+    with_correlator(resp, &correlator)
+}
+
+/// `POST /carrier-billing/v0.5/payments/{paymentId}/cancel` — cancel (release)
+/// a reserved payment (operationId `cancelPayment`), the final step of the
+/// two-step reserve → validate → confirm / cancel flow.
+///
+/// A `preparePayment` (optionally cleared by `validatePayment`) leaves a payment
+/// in `reserved`. This endpoint releases it: on success the payment moves to
+/// `cancelled` and the endpoint answers `202 Accepted` (no body, per CAMARA).
+/// Nothing is charged, so — unlike `confirmPayment` — no `paymentDate` is set.
+/// Requires the `carrier-billing:payments:write` scope.
+///
+/// ## Functional cases — the store state is the control plane
+///
+/// Keyed only on the in-memory store (no reserved-identifier plane — the
+/// `paymentId` is opaque):
+///
+/// - a `reserved` payment → `202` (reservation → `cancelled`);
+/// - an already-`cancelled` payment → `409 CARRIER_BILLING.PAYMENT_CANCELLED`;
+/// - an already-`succeeded` (charged) payment → `409
+///   CARRIER_BILLING.PAYMENT_CONFIRMED` (a charged payment cannot be cancelled);
+/// - a payment in any other state (`pending_validation` — its OTP has not been
+///   validated — or `denied`) → `409 CONFLICT` (not cancellable);
+/// - an unknown `paymentId` → `404 NOT_FOUND`.
+///
+/// **Documented cut:** the optional `phoneNumber` body field (CAMARA
+/// `CancelPayment`) is accepted but not applied — the reservation is addressed
+/// by its opaque `paymentId`, so CamaraSim does not re-check the identifier.
+async fn cancel_payment(
+    claims: Claims,
+    headers: HeaderMap,
+    Path(payment_id): Path<String>,
+    body: Bytes,
+) -> Response {
+    // Optional correlation header, echoed on every response (CAMARA Commonalities).
+    let correlator = headers.get("x-correlator").cloned();
+
+    // Endpoint authorisation: the token must carry this API's write scope.
+    if let Err(e) = claims.require_scope(WRITE_SCOPE) {
+        return with_correlator(e.into_response(), &correlator);
+    }
+
+    // The `CancelPayment` body is optional (the CAMARA `PhoneNumber` shape): an
+    // empty body is accepted; a present but malformed body → 400.
+    if !body.is_empty() && serde_json::from_slice::<CancelPayment>(&body).is_err() {
+        return invalid_argument("Request body is not a valid CancelPayment.", &correlator);
+    }
+
+    let resp = match store::cancel(&payment_id) {
+        store::CancelOutcome::Cancelled => StatusCode::ACCEPTED.into_response(),
+        store::CancelOutcome::AlreadyCancelled => CamaraError::new(
+            StatusCode::CONFLICT,
+            "CARRIER_BILLING.PAYMENT_CANCELLED",
+            "Payment has been cancelled.",
+        )
+        .into_response(),
+        store::CancelOutcome::AlreadyConfirmed => CamaraError::new(
+            StatusCode::CONFLICT,
+            "CARRIER_BILLING.PAYMENT_CONFIRMED",
+            "Payment has been confirmed.",
+        )
+        .into_response(),
+        store::CancelOutcome::NotCancellable => CamaraError::new(
+            StatusCode::CONFLICT,
+            "CONFLICT",
+            "The payment cannot be cancelled in its current state.",
+        )
+        .into_response(),
+        store::CancelOutcome::Unknown => {
             CamaraError::not_found("No payment found for the provided paymentId.").into_response()
         }
     };
@@ -1830,6 +1926,218 @@ mod tests {
         assert_eq!(
             headers.get("x-correlator").and_then(|v| v.to_str().ok()),
             Some("corr-conf-err")
+        );
+    }
+
+    // --- cancelPayment (POST /payments/{paymentId}/cancel) -----------------
+
+    /// POST an (optional) JSON body to `/payments/{paymentId}/cancel`.
+    async fn post_cancel(
+        token: Option<&str>,
+        payment_id: &str,
+        body: &str,
+        correlator: Option<&str>,
+    ) -> (StatusCode, HeaderMap, Value) {
+        let mut builder = Request::builder()
+            .method("POST")
+            .uri(format!("/carrier-billing/v0.5/payments/{payment_id}/cancel"))
+            .header("host", HOST)
+            .header("content-type", "application/json");
+        if let Some(t) = token {
+            builder = builder.header("authorization", format!("Bearer {t}"));
+        }
+        if let Some(c) = correlator {
+            builder = builder.header("x-correlator", c);
+        }
+        let response = app()
+            .oneshot(builder.body(Body::from(body.to_string())).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let headers = response.headers().clone();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, headers, json)
+    }
+
+    #[tokio::test]
+    async fn cancel_reserved_releases_and_moves_to_cancelled() {
+        let id = prepare_reserved("+123456789012").await;
+        let write = mint_token(WRITE_SCOPE).await;
+        let (status, _, _) = post_cancel(Some(&write), &id, "", None).await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+
+        // The reservation is now released: `cancelled`, and — since nothing was
+        // charged — carrying no `paymentDate`.
+        let read = mint_token(READ_SCOPE).await;
+        let (status, _, fetched) = get_payment(Some(&read), &id, None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(fetched["paymentStatus"], "cancelled");
+        assert!(fetched.get("paymentDate").is_none());
+    }
+
+    #[tokio::test]
+    async fn cancel_accepts_an_optional_phone_number_body() {
+        // A `{ phoneNumber }` body is accepted (though not applied).
+        let id = prepare_reserved("+123456789012").await;
+        let write = mint_token(WRITE_SCOPE).await;
+        let (status, _, _) = post_cancel(
+            Some(&write),
+            &id,
+            r#"{"phoneNumber":"+123456789012"}"#,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+    }
+
+    #[tokio::test]
+    async fn cancel_malformed_body_is_invalid_argument() {
+        let id = prepare_reserved("+123456789012").await;
+        let write = mint_token(WRITE_SCOPE).await;
+        let (status, _, body) =
+            post_cancel(Some(&write), &id, r#"{"unknownField":1}"#, None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "INVALID_ARGUMENT");
+    }
+
+    #[tokio::test]
+    async fn cancel_already_cancelled_is_payment_cancelled_conflict() {
+        // Cancel a reservation, then cancel again → 409 PAYMENT_CANCELLED.
+        let id = prepare_reserved("+123456789012").await;
+        let write = mint_token(WRITE_SCOPE).await;
+        let (status, _, _) = post_cancel(Some(&write), &id, "", None).await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+
+        let (status, _, body) = post_cancel(Some(&write), &id, "", None).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["code"], "CARRIER_BILLING.PAYMENT_CANCELLED");
+    }
+
+    #[tokio::test]
+    async fn cancel_a_confirmed_reservation_is_payment_confirmed_conflict() {
+        // Confirm (charge) a reservation, then cancel → 409 PAYMENT_CONFIRMED
+        // (a charged payment can no longer be cancelled).
+        let id = prepare_reserved("+123456789012").await;
+        let write = mint_token(WRITE_SCOPE).await;
+        let (status, _, _) = post_confirm(Some(&write), &id, "", None).await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+
+        let (status, _, body) = post_cancel(Some(&write), &id, "", None).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["code"], "CARRIER_BILLING.PAYMENT_CONFIRMED");
+    }
+
+    #[tokio::test]
+    async fn cancel_a_one_step_payment_is_payment_confirmed_conflict() {
+        // A one-step `createPayment` is already `succeeded`, so it cannot be cancelled.
+        let (_, _, created) = create_ok_token(&payment_body("+123456789012", 9.99)).await;
+        let id = created["paymentId"].as_str().unwrap().to_string();
+        let write = mint_token(WRITE_SCOPE).await;
+        let (status, _, body) = post_cancel(Some(&write), &id, "", None).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["code"], "CARRIER_BILLING.PAYMENT_CONFIRMED");
+    }
+
+    #[tokio::test]
+    async fn cancel_then_confirm_is_payment_cancelled_conflict() {
+        // Cancel a reservation, then try to confirm it → 409 PAYMENT_CANCELLED.
+        let id = prepare_reserved("+123456789012").await;
+        let write = mint_token(WRITE_SCOPE).await;
+        let (status, _, _) = post_cancel(Some(&write), &id, "", None).await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+
+        let (status, _, body) = post_confirm(Some(&write), &id, "", None).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["code"], "CARRIER_BILLING.PAYMENT_CANCELLED");
+    }
+
+    #[tokio::test]
+    async fn cancel_a_pending_validation_reservation_is_conflict() {
+        // A `…888` reservation is `pending_validation` (OTP not cleared) → 409 CONFLICT.
+        let (id, _auth) = prepare_pending("+123456789888").await;
+        let write = mint_token(WRITE_SCOPE).await;
+        let (status, _, body) = post_cancel(Some(&write), &id, "", None).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["code"], "CONFLICT");
+    }
+
+    #[tokio::test]
+    async fn cancel_a_denied_reservation_is_conflict() {
+        // Exhaust the OTP budget so the reservation is `denied`, then cancel → 409 CONFLICT.
+        let (id, auth) = prepare_pending("+123456789888").await;
+        let write = mint_token(WRITE_SCOPE).await;
+        for _ in 0..VALIDATION_ATTEMPTS {
+            let (status, _, _) =
+                post_validate(Some(&write), &id, &validate_body(&auth, "000000"), None).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+        }
+        let (status, _, body) = post_cancel(Some(&write), &id, "", None).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["code"], "CONFLICT");
+    }
+
+    #[tokio::test]
+    async fn cancel_unknown_payment_is_not_found() {
+        let write = mint_token(WRITE_SCOPE).await;
+        let (status, _, body) = post_cancel(
+            Some(&write),
+            "22222222-2222-4222-8222-222222222222",
+            "",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn cancel_without_the_write_scope_is_forbidden() {
+        let id = prepare_reserved("+123456789012").await;
+        let create_only = mint_token(CREATE_SCOPE).await;
+        let (status, _, body) = post_cancel(Some(&create_only), &id, "", None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["code"], "PERMISSION_DENIED");
+    }
+
+    #[tokio::test]
+    async fn cancel_without_a_token_is_unauthenticated() {
+        let (status, _, body) = post_cancel(
+            None,
+            "22222222-2222-4222-8222-222222222222",
+            "",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["code"], "UNAUTHENTICATED");
+    }
+
+    #[tokio::test]
+    async fn cancel_echoes_x_correlator_on_success_and_error() {
+        let write = mint_token(WRITE_SCOPE).await;
+        let id = prepare_reserved("+123456789012").await;
+        let (status, headers, _) =
+            post_cancel(Some(&write), &id, "", Some("corr-can-ok")).await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-can-ok")
+        );
+
+        let (status, headers, _) = post_cancel(
+            Some(&write),
+            "22222222-2222-4222-8222-222222222222",
+            "",
+            Some("corr-can-err"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-can-err")
         );
     }
 }

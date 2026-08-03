@@ -406,7 +406,21 @@ plane): `reserved` → 202; already `succeeded` → 409
 `CARRIER_BILLING.PAYMENT_CANCELLED`; other non-`reserved`
 (`pending_validation`/`denied`) → 409 `CONFLICT`; unknown → 404. The transition
 runs atomically in a new `store::confirm`; the optional `phoneNumber` body is
-accepted-not-applied. Only `cancelPayment` remains to complete the two-step flow.
+accepted-not-applied.
+
+The two-step flow's **cancel** step is now live too, **completing the two-step
+flow**: `POST /payments/{paymentId}/cancel` (`cancelPayment`,
+`carrier-billing:payments:write`) releases a `reserved` payment → `cancelled`
+(no `paymentDate`, since nothing is charged) and answers `202 Accepted` (no
+body). Keyed only on the store state (opaque `paymentId`, no reserved-identifier
+plane): `reserved` → 202; already `cancelled` → 409
+`CARRIER_BILLING.PAYMENT_CANCELLED`; already `succeeded` → 409
+`CARRIER_BILLING.PAYMENT_CONFIRMED` (a charged payment can no longer be
+cancelled); other non-`reserved` (`pending_validation`/`denied`) → 409
+`CONFLICT`; unknown → 404. The transition runs atomically in a new
+`store::cancel` (mirroring `store::confirm`); the optional `phoneNumber` body is
+accepted-not-applied. Only charging notifications on `sink` remain before Carrier
+Billing v0.5 is complete.
 
 ## In progress (claimed this pass)
 
@@ -501,7 +515,7 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     every stored payment (`200`, empty array when none; store state the only
     control plane). Query-param pagination/filtering (`page`/`perPage`/`order`/
     date+status filters) accepted but not applied — documented cut, later slice.
-  - [~] two-step flow: reserve → validate → confirm / cancel
+  - [x] two-step flow: reserve → validate → confirm / cancel
     - [x] `POST /payments/prepare` (`preparePayment`,
       `carrier-billing:payments:create`) — reserve step; happy path →
       `201 { paymentStatus: "reserved" }` (no `paymentDate`), persisted so it
@@ -529,8 +543,15 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
       `CARRIER_BILLING.PAYMENT_CANCELLED`; other non-`reserved`
       (`pending_validation`/`denied`) → 409 `CONFLICT`; unknown → 404. Optional
       `phoneNumber` body accepted-not-applied.
-    - [ ] `POST /payments/{paymentId}/cancel` (`cancelPayment`,
-      `carrier-billing:payments:write`)
+    - [x] `POST /payments/{paymentId}/cancel` (`cancelPayment`,
+      `carrier-billing:payments:write`) — releases a `reserved` payment
+      → `cancelled` (no `paymentDate`), `202 Accepted` (no body). Store state
+      the only control plane: `reserved` → 202; already `cancelled` → 409
+      `CARRIER_BILLING.PAYMENT_CANCELLED`; already `succeeded` → 409
+      `CARRIER_BILLING.PAYMENT_CONFIRMED` (a charged payment can't be cancelled);
+      other non-`reserved` (`pending_validation`/`denied`) → 409 `CONFLICT`;
+      unknown → 404. New `store::cancel`; optional `phoneNumber` body
+      accepted-not-applied. **Completes the two-step flow.**
   - [ ] charging notifications on `sink` (accepted-but-not-applied for now)
 - [ ] Other CAMARA APIs as capacity allows
 
@@ -549,6 +570,39 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 ## Scan journal
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
+
+- 2026-08-03 — Phase 5 (payments): **Carrier Billing v0.5** — **two-step
+  `cancelPayment`** (`POST /payments/{paymentId}/cancel`, scope
+  `carrier-billing:payments:write`), the cancel step — **completes the two-step
+  reserve → validate → confirm / cancel flow**. Fully symmetric with the
+  verified r3.2 `confirmPayment`: op `cancelPayment`, body `CancelPayment` (the
+  `PhoneNumber` shape — optional `phoneNumber`, no required fields), responses
+  `202` (no body) + 400/401/403/404/409/429, 409 codes
+  `CARRIER_BILLING.PAYMENT_CANCELLED` (already cancelled) /
+  `CARRIER_BILLING.PAYMENT_CONFIRMED` (already charged — can't cancel), 404
+  NOT_FOUND. Implemented: releases a `reserved` payment → `cancelled` (no
+  `paymentDate`, nothing is charged) → `202 Accepted`; already `cancelled` →
+  409 `PAYMENT_CANCELLED`; already `succeeded` → 409 `PAYMENT_CONFIRMED`; other
+  non-`reserved` (`pending_validation`/`denied`) → 409 `CONFLICT`; unknown id →
+  404. New `store::cancel(id)` → `CancelOutcome` drives the transition
+  atomically under the store lock (never across await), mirroring
+  `store::confirm`. Store state is the only control plane (opaque `paymentId`);
+  the optional `phoneNumber` body is accepted-not-applied. Only charging
+  notifications on `sink` remain for Carrier Billing v0.5. **No new deps.**
+  Spec: updated `specs/carrier-billing/v0.5/openapi.yaml` — new
+  `POST /payments/{paymentId}/cancel` operation (`x-camarasim-scenarios`, full
+  202/400/401/403/404/409/429/500/503 set with the three 409 examples), new
+  `CancelPayment` schema (reused the existing PAYMENT_CANCELLED/PAYMENT_CONFIRMED
+  error codes), new "Cancel" description section + refreshed header/cuts. 519
+  tests green (was 505; +14: 1 unit [store::cancel drives every state branch:
+  reserved→cancelled/no-paymentDate, →AlreadyCancelled, succeeded→AlreadyConfirmed,
+  denied→NotCancellable, unknown→Unknown] + 13 integration [reserved→202/cancelled
+  · optional phoneNumber body · malformed body→400 · cancel twice→PAYMENT_CANCELLED
+  · confirmed→PAYMENT_CONFIRMED · one-step payment→PAYMENT_CONFIRMED · cancel→confirm
+  →PAYMENT_CANCELLED · pending_validation→CONFLICT · denied→CONFLICT · unknown→404
+  · no write scope→403 · no token→401 · x-correlator on 202+404]). — binary:
+  1617600 B (+11576 B; the cancel handler + store::cancel + the new vendored spec
+  text embedded via include_str!)
 
 - 2026-08-03 — Phase 5 (payments): **Carrier Billing v0.5** — **two-step
   `confirmPayment`** (`POST /payments/{paymentId}/confirm`, scope

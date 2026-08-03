@@ -109,6 +109,56 @@ pub fn confirm(id: &str, payment_date: &str) -> ConfirmOutcome {
     }
 }
 
+/// The outcome of a [`cancel`] attempt on a payment.
+pub enum CancelOutcome {
+    /// The reservation was `reserved` and is now `cancelled` (released).
+    Cancelled,
+    /// The payment was already `cancelled` — `PAYMENT_CANCELLED`.
+    AlreadyCancelled,
+    /// The payment was already `succeeded` (charged) — `PAYMENT_CONFIRMED`. A
+    /// charged payment can no longer be cancelled.
+    AlreadyConfirmed,
+    /// The payment exists but is not in a cancellable (`reserved`) state — e.g.
+    /// `pending_validation` (its OTP has not been cleared) or `denied`.
+    NotCancellable,
+    /// No such payment.
+    Unknown,
+}
+
+/// Cancel (release) the reserved payment `id`, moving it `reserved → cancelled`.
+/// Nothing is charged, so — unlike [`confirm`] — no `paymentDate` is stamped.
+/// Driven atomically under the store lock (never held across an `.await`):
+///
+/// - `reserved` → `cancelled` → [`Cancelled`];
+/// - already `cancelled` → [`AlreadyCancelled`] (409 `PAYMENT_CANCELLED`);
+/// - already `succeeded` → [`AlreadyConfirmed`] (409 `PAYMENT_CONFIRMED`);
+/// - any other existing state (`pending_validation`, `denied`, …) →
+///   [`NotCancellable`] (409 `CONFLICT`);
+/// - no such payment → [`Unknown`] (404).
+///
+/// [`Cancelled`]: CancelOutcome::Cancelled
+/// [`AlreadyCancelled`]: CancelOutcome::AlreadyCancelled
+/// [`AlreadyConfirmed`]: CancelOutcome::AlreadyConfirmed
+/// [`NotCancellable`]: CancelOutcome::NotCancellable
+/// [`Unknown`]: CancelOutcome::Unknown
+pub fn cancel(id: &str) -> CancelOutcome {
+    let mut map = store()
+        .lock()
+        .expect("carrier-billing payment store not poisoned");
+    match map.get_mut(id) {
+        None => CancelOutcome::Unknown,
+        Some(payment) => match payment["paymentStatus"].as_str() {
+            Some("reserved") => {
+                payment["paymentStatus"] = Value::String("cancelled".to_string());
+                CancelOutcome::Cancelled
+            }
+            Some("cancelled") => CancelOutcome::AlreadyCancelled,
+            Some("succeeded") => CancelOutcome::AlreadyConfirmed,
+            _ => CancelOutcome::NotCancellable,
+        },
+    }
+}
+
 // --- Pending-validation side-store (two-step OTP flow) --------------------
 //
 // A reservation created by `preparePayment` for a phone number that requires
@@ -319,6 +369,47 @@ mod tests {
         assert!(matches!(
             confirm("cb-store-confirm-unit-no-such", "2024-01-01T00:00:00Z"),
             ConfirmOutcome::Unknown
+        ));
+    }
+
+    #[test]
+    fn cancel_drives_every_state_branch() {
+        // A reserved payment → cancelled (no paymentDate), then a second cancel
+        // sees `cancelled` → AlreadyCancelled.
+        let id = "cb-store-cancel-unit-res".to_string();
+        insert(
+            id.clone(),
+            json!({ "paymentId": id, "paymentStatus": "reserved" }),
+        );
+        assert!(matches!(cancel(&id), CancelOutcome::Cancelled));
+        let released = get(&id).unwrap();
+        assert_eq!(released["paymentStatus"], "cancelled");
+        assert!(
+            released.get("paymentDate").is_none(),
+            "a cancelled payment is never charged, so gains no paymentDate"
+        );
+        assert!(matches!(cancel(&id), CancelOutcome::AlreadyCancelled));
+
+        // A succeeded (charged) payment can no longer be cancelled.
+        let sid = "cb-store-cancel-unit-suc".to_string();
+        insert(
+            sid.clone(),
+            json!({ "paymentId": sid, "paymentStatus": "succeeded" }),
+        );
+        assert!(matches!(cancel(&sid), CancelOutcome::AlreadyConfirmed));
+
+        // A denied (or pending_validation) payment is not cancellable.
+        let did = "cb-store-cancel-unit-den".to_string();
+        insert(
+            did.clone(),
+            json!({ "paymentId": did, "paymentStatus": "denied" }),
+        );
+        assert!(matches!(cancel(&did), CancelOutcome::NotCancellable));
+
+        // An unknown id → Unknown.
+        assert!(matches!(
+            cancel("cb-store-cancel-unit-no-such"),
+            CancelOutcome::Unknown
         ));
     }
 }
