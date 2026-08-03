@@ -10,9 +10,10 @@
 # `/carrier-billing/v0.5` rather than a loose "v1" (DESIGN §9).
 #
 # This slice serves `POST /payments` (the one-step `createPayment`),
-# `GET /payments/{paymentId}` (`retrievePayment`, read-back), and
-# `GET /payments` (`retrievePayments`, list). The two-step prepare / validate /
-# confirm / cancel operations are later slices.
+# `GET /payments/{paymentId}` (`retrievePayment`, read-back), `GET /payments`
+# (`retrievePayments`, list), and `POST /payments/prepare` (`preparePayment`, the
+# two-step flow's reserve step). The remaining two-step validate / confirm /
+# cancel operations are later slices.
 openapi: 3.0.3
 info:
   title: Carrier Billing
@@ -78,12 +79,26 @@ info:
     `order` query parameters are accepted but not applied in this slice (a later
     slice); payments are not scoped per client.
 
+    ## Reserve — `POST /payments/prepare` (`preparePayment`)
+
+    First step of the two-step flow: reserves the amount against the account
+    **without charging it**. A happy path returns `201` with
+    `paymentStatus: "reserved"` and no `paymentDate`; the reservation is
+    persisted (so `retrievePayment` reads it back) and, in later slices, is
+    confirmed (`confirmPayment` → `succeeded`) or cancelled (`cancelPayment` →
+    `cancelled`). It requires the `carrier-billing:payments:create` scope and
+    shares `createPayment`'s two control planes (charged/reserved phone number
+    and requested `amount`).
+
     ## Documented cuts (this slice)
 
     - `POST /payments` (`createPayment`), `GET /payments/{paymentId}`
-      (`retrievePayment`), and `GET /payments` (`retrievePayments`, list) are
-      implemented; the two-step prepare / validate / confirm / cancel operations
-      are later slices.
+      (`retrievePayment`), `GET /payments` (`retrievePayments`, list), and
+      `POST /payments/prepare` (`preparePayment`) are implemented; the remaining
+      two-step validate / confirm / cancel operations are later slices.
+      `preparePayment` always reserves into the `reserved` state — the
+      `pending_validation` / `validationInfo` (OTP) path and the 409
+      `ALREADY_EXISTS` duplicate-session case are deferred to `validatePayment`.
     - `retrievePayments` returns the full list unpaginated and unfiltered — its
       `page`/`perPage`, `paymentCreationDate.gte`/`.lte`, `paymentStatus`,
       `merchantIdentifier`, and `order` query parameters are accepted but not
@@ -318,6 +333,127 @@ paths:
             result: "200 with a `PaymentArray` containing every stored payment"
           - input: any read-scoped token, with no payments in the store
             result: "200 []"
+
+  /payments/prepare:
+    post:
+      operationId: preparePayment
+      summary: Reserve (do not yet charge) a payment
+      description: |
+        First step of the two-step flow: **reserves** the amount against the end
+        user's mobile account without charging it. A happy path returns `201`
+        with `paymentStatus: "reserved"` and no `paymentDate` (nothing has been
+        billed yet). The reservation is persisted, so it can be read back by
+        `retrievePayment` and — in later slices — confirmed (`confirmPayment` →
+        `succeeded`) or cancelled (`cancelPayment` → `cancelled`).
+
+        It shares `createPayment`'s two control planes (see the API description):
+        the reserved phone number (submitted `amountTransaction.phoneNumber`,
+        else the token subject) and the requested `amount`.
+      security:
+        - openId:
+            - carrier-billing:payments:create
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReservePayment"
+      responses:
+        "201":
+          description: The payment was reserved (not yet charged).
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PaymentReserved"
+              examples:
+                reserved:
+                  summary: Amount reserved, awaiting confirmation
+                  value:
+                    paymentId: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+                    amountTransaction:
+                      phoneNumber: "+123456789012"
+                      paymentAmount:
+                        chargingInformation:
+                          amount: 9.99
+                          currency: EUR
+                          description: A digital good
+                      referenceCode: ref-001
+                    paymentStatus: reserved
+                    paymentCreationDate: "2024-01-01T14:27:08Z"
+        "400":
+          description: |
+            400 — invalid request. CamaraSim returns `INVALID_ARGUMENT` for a
+            malformed body, a malformed `phoneNumber`, or an `amount` below the
+            schema minimum `0.001`, plus the reserved-suffix `…400` case.
+          content:
+            application/json:
+              schema:
+                $ref: "../../shared/errors.yaml#/components/schemas/CamaraError"
+              example:
+                status: 400
+                code: INVALID_ARGUMENT
+                message: Client specified an invalid argument, request body or query param.
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "409":
+          $ref: "../../shared/errors.yaml#/components/responses/Conflict"
+        "422":
+          description: |
+            422 — unprocessable. CamaraSim returns `MISSING_IDENTIFIER` when the
+            account cannot be identified, `CARRIER_BILLING.UNAUTHORIZED_AMOUNT`
+            when the `amount` exceeds the authorised ceiling, or the reserved
+            shared `SERVICE_NOT_APPLICABLE` for the `…422` suffix.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CarrierBillingError"
+              examples:
+                unauthorizedAmount:
+                  summary: Amount above the authorised ceiling
+                  value:
+                    status: 422
+                    code: CARRIER_BILLING.UNAUTHORIZED_AMOUNT
+                    message: Unauthorized amount requested.
+                missingIdentifier:
+                  summary: The account cannot be identified
+                  value:
+                    status: 422
+                    code: MISSING_IDENTIFIER
+                    message: The phone number cannot be identified.
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          Same two control planes as `createPayment` (docs/DESIGN.md §7): the
+          reserved phone number and the requested `amount`; the identifier plane
+          is checked first. The happy path reserves into the `reserved` state
+          (nothing is charged). The `pending_validation` / `validationInfo` (OTP)
+          path and the 409 `ALREADY_EXISTS` duplicate-session case are later
+          slices (with `validatePayment`).
+        cases:
+          - input: phone number ending in a reserved error suffix (e.g. …404)
+            result: the canonical CAMARA error for that status
+          - input: valid phone number, amount in `[0.001, 1000]`
+            result: '201 { paymentStatus: "reserved" } (persisted, no paymentDate)'
+          - input: amount below `0.001`
+            result: "400 INVALID_ARGUMENT"
+          - input: amount above `1000`
+            result: "422 CARRIER_BILLING.UNAUTHORIZED_AMOUNT"
+          - input: no `phoneNumber` and a non-E.164 token subject
+            result: "422 MISSING_IDENTIFIER"
 
   /payments/{paymentId}:
     get:
@@ -665,6 +801,64 @@ components:
         CamaraSim never applies a `sink`, so items omit it).
       items:
         $ref: "#/components/schemas/Payment"
+
+    ReservePayment:
+      type: object
+      description: |
+        Request to **reserve** a payment (`preparePayment`), the first step of the
+        two-step flow. Structurally identical to `CreatePayment` in CamaraSim:
+        the same `amountTransaction` (what to reserve and, for a two-legged / CIBA
+        token, to whom), plus the accepted-not-applied `sink` / `sinkCredential`.
+      required:
+        - amountTransaction
+      properties:
+        amountTransaction:
+          $ref: "#/components/schemas/AmountTransactionInput"
+        sink:
+          type: string
+          format: uri
+          pattern: '^https://.+$'
+          description: >-
+            Optional HTTPS callback for charging notifications. Accepted for
+            schema fidelity but not acted on in this slice.
+        sinkCredential:
+          $ref: "#/components/schemas/SinkCredential"
+
+    PaymentReserved:
+      type: object
+      description: |
+        A reserved payment, returned by `preparePayment`. Like `PaymentCreated`
+        but with `paymentStatus: "reserved"` and no `paymentDate` — nothing has
+        been charged yet (a later `confirmPayment` charges it → `succeeded`, a
+        `cancelPayment` releases it → `cancelled`).
+      required:
+        - paymentId
+        - amountTransaction
+        - paymentStatus
+        - paymentCreationDate
+      properties:
+        paymentId:
+          type: string
+          description: Server-assigned, opaque, UUID-shaped payment id.
+          example: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+        amountTransaction:
+          $ref: "#/components/schemas/AmountTransaction"
+        paymentStatus:
+          type: string
+          description: >-
+            The reservation's status. In this slice a happy path is always
+            `reserved`.
+          enum:
+            - processing
+            - pending_validation
+            - denied
+            - reserved
+            - succeeded
+            - cancelled
+        paymentCreationDate:
+          type: string
+          format: date-time
+          description: When the reservation was created (RFC 3339, `Z` offset).
 
     AmountTransaction:
       type: object

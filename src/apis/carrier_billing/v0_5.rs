@@ -17,6 +17,13 @@
 //!   `carrier-billing:payments:read`). Returns every stored payment as a JSON
 //!   array (`200`, empty array when none). The store state is its only control
 //!   plane; query-parameter pagination/filtering is a documented cut (below).
+//! - `POST /carrier-billing/v0.5/payments/prepare` — **reserve** (not yet
+//!   charge) a payment (operationId `preparePayment`, scope
+//!   `carrier-billing:payments:create`), the first step of the two-step
+//!   reserve → validate → confirm / cancel flow. A happy path returns `201` with
+//!   `paymentStatus: "reserved"` (no `paymentDate` — nothing is charged yet) and
+//!   persists the reservation so it can be read back / later confirmed. It shares
+//!   `createPayment`'s identifier + amount control planes (below).
 //!
 //! ## What it does
 //!
@@ -58,10 +65,13 @@
 //!
 //! ## Documented cuts (this slice)
 //!
-//! - The one-step `createPayment`, read-back `retrievePayment`, and list
-//!   `retrievePayments` are implemented; the two-step `preparePayment` /
-//!   `validatePayment` / `confirmPayment` / `cancelPayment` operations are later
-//!   slices.
+//! - The one-step `createPayment`, read-back `retrievePayment`, list
+//!   `retrievePayments`, and the two-step flow's first step `preparePayment` are
+//!   implemented; the remaining two-step `validatePayment` / `confirmPayment` /
+//!   `cancelPayment` operations are later slices. `preparePayment` always
+//!   reserves into the `reserved` state — the `pending_validation` /
+//!   `validationInfo` (OTP) path and the 409 `ALREADY_EXISTS` duplicate-session
+//!   case are deferred to the `validatePayment` slice.
 //! - `retrievePayments` returns the full list unpaginated and unfiltered: its
 //!   `page`/`perPage`, `paymentCreationDate.gte`/`.lte`, `paymentStatus`,
 //!   `merchantIdentifier`, and `order` query parameters are accepted but not
@@ -112,6 +122,14 @@ pub fn routes() -> Router {
         .route(
             "/carrier-billing/v0.5/payments",
             post(create_payment).get(retrieve_payments),
+        )
+        // Static `/payments/prepare` coexists with the `/payments/:payment_id`
+        // param route below — axum's router (matchit) prioritises the static
+        // segment, so a `POST /payments/prepare` never collides with the
+        // parameterised read.
+        .route(
+            "/carrier-billing/v0.5/payments/prepare",
+            post(prepare_payment),
         )
         .route(
             "/carrier-billing/v0.5/payments/:payment_id",
@@ -205,36 +223,13 @@ async fn create_payment(claims: Claims, headers: HeaderMap, body: Bytes) -> Resp
 
     // Control plane 2 — the requested amount.
     let amount = req.amount_transaction.payment_amount.charging_information.amount;
-    if !(amount >= MIN_AMOUNT) {
-        // `!(>=)` also rejects NaN.
-        return invalid_argument(
-            "`amount` must be at least 0.001.",
-            &correlator,
-        );
-    }
-    if amount > UNAUTHORIZED_AMOUNT_THRESHOLD {
-        return with_correlator(
-            CamaraError::new(
-                StatusCode::UNPROCESSABLE_ENTITY,
-                "CARRIER_BILLING.UNAUTHORIZED_AMOUNT",
-                "Unauthorized amount requested.",
-            )
-            .into_response(),
-            &correlator,
-        );
+    if let Err(resp) = check_amount(amount, &correlator) {
+        return resp;
     }
 
     // Happy path — one-step charge succeeds immediately.
     let now = rfc3339_utc(now_unix_secs());
-    let mut amount_tx = json!({
-        "phoneNumber": phone,
-        "paymentAmount": serde_json::to_value(&req.amount_transaction.payment_amount)
-            .unwrap_or(Value::Null),
-        "referenceCode": req.amount_transaction.reference_code,
-    });
-    if let Some(cc) = &req.amount_transaction.client_correlator {
-        amount_tx["clientCorrelator"] = json!(cc);
-    }
+    let amount_tx = build_amount_tx(&req.amount_transaction, &phone);
     let payment_id = mint_uuid();
     let created = json!({
         "paymentId": payment_id,
@@ -248,6 +243,121 @@ async fn create_payment(claims: Claims, headers: HeaderMap, body: Bytes) -> Resp
     store::insert(payment_id, created.clone());
 
     with_correlator((StatusCode::CREATED, Json(created)).into_response(), &correlator)
+}
+
+/// `POST /carrier-billing/v0.5/payments/prepare` — **reserve** (do not yet
+/// charge) a payment (operationId `preparePayment`), the first step of the
+/// two-step reserve → validate → confirm / cancel flow.
+///
+/// Unlike `createPayment`, which charges in a single call, `preparePayment` only
+/// *reserves* the amount against the account: on the happy path it mints a
+/// `paymentId`, records a payment with `paymentStatus: "reserved"` (no
+/// `paymentDate` — nothing has been charged) and returns `201`. The reserved
+/// payment is persisted in the shared in-memory [`super::store`], so it can be
+/// read back by `retrievePayment` and — in later slices — driven to `succeeded`
+/// by `confirmPayment` or to `cancelled` by `cancelPayment`.
+///
+/// It shares `createPayment`'s two control planes (docs/DESIGN.md §7): the
+/// reserved phone number (submitted `amountTransaction.phoneNumber`, else the
+/// token subject) — reserved suffix → canonical CAMARA error, malformed → 400
+/// `INVALID_ARGUMENT`, unidentifiable → 422 `MISSING_IDENTIFIER` — and the
+/// requested `amount` (`< 0.001` → 400 `INVALID_ARGUMENT`; above the authorised
+/// ceiling → 422 `CARRIER_BILLING.UNAUTHORIZED_AMOUNT`). Requires the
+/// `carrier-billing:payments:create` scope.
+///
+/// **Documented cuts (this slice):** the reserved payment always lands in the
+/// `reserved` state — the `pending_validation` / `validationInfo` (OTP) path and
+/// the 409 `ALREADY_EXISTS` duplicate-session case are later slices, delivered
+/// with `validatePayment`. `sink` / `sinkCredential` are accepted but not acted
+/// on (mirroring `createPayment`).
+async fn prepare_payment(claims: Claims, headers: HeaderMap, body: Bytes) -> Response {
+    // Optional correlation header, echoed on every response (CAMARA Commonalities).
+    let correlator = headers.get("x-correlator").cloned();
+
+    // Endpoint authorisation: the token must carry this API's create scope.
+    if let Err(e) = claims.require_scope(CREATE_SCOPE) {
+        return with_correlator(e.into_response(), &correlator);
+    }
+
+    // The body is required and must parse as a ReservePayment (structurally the
+    // same input CamaraSim accepts for `createPayment`).
+    let req: CreatePayment = match serde_json::from_slice(&body) {
+        Ok(req) => req,
+        Err(_) => {
+            return invalid_argument("Request body is not a valid ReservePayment.", &correlator)
+        }
+    };
+
+    // Control plane 1 — the reserved phone number (submitted, else token subject).
+    let phone = match resolve_phone_number(&req.amount_transaction, &claims, &correlator) {
+        Ok(phone) => phone,
+        Err(resp) => return resp,
+    };
+    if let Some(err) = scenarios::reserved_error(&phone) {
+        return with_correlator(err.into_response(), &correlator);
+    }
+
+    // Control plane 2 — the requested amount.
+    let amount = req.amount_transaction.payment_amount.charging_information.amount;
+    if let Err(resp) = check_amount(amount, &correlator) {
+        return resp;
+    }
+
+    // Happy path — the amount is reserved, not charged: `reserved` status and no
+    // `paymentDate` (nothing has been billed yet).
+    let now = rfc3339_utc(now_unix_secs());
+    let amount_tx = build_amount_tx(&req.amount_transaction, &phone);
+    let payment_id = mint_uuid();
+    let reserved = json!({
+        "paymentId": payment_id,
+        "amountTransaction": amount_tx,
+        "paymentStatus": "reserved",
+        "paymentCreationDate": now,
+    });
+
+    // Persist so the reservation can be read back and later confirmed/cancelled.
+    store::insert(payment_id, reserved.clone());
+
+    with_correlator((StatusCode::CREATED, Json(reserved)).into_response(), &correlator)
+}
+
+/// Build the echoed `amountTransaction` JSON for a resolved `phone`: the charge
+/// (`paymentAmount`), `referenceCode`, and — when supplied — `clientCorrelator`.
+/// Shared by `createPayment` and `preparePayment`.
+fn build_amount_tx(tx: &AmountTransactionInput, phone: &str) -> Value {
+    let mut amount_tx = json!({
+        "phoneNumber": phone,
+        "paymentAmount": serde_json::to_value(&tx.payment_amount).unwrap_or(Value::Null),
+        "referenceCode": tx.reference_code,
+    });
+    if let Some(cc) = &tx.client_correlator {
+        amount_tx["clientCorrelator"] = json!(cc);
+    }
+    amount_tx
+}
+
+/// Validate the requested charge `amount` against the two amount control-plane
+/// rules shared by `createPayment` and `preparePayment`: below the schema
+/// minimum `0.001` (or NaN) → `400 INVALID_ARGUMENT`; above the authorised
+/// ceiling → `422 CARRIER_BILLING.UNAUTHORIZED_AMOUNT`. On failure returns the
+/// CAMARA error `Response` (correlator echoed).
+fn check_amount(amount: f64, correlator: &Option<HeaderValue>) -> Result<(), Response> {
+    if !(amount >= MIN_AMOUNT) {
+        // `!(>=)` also rejects NaN.
+        return Err(invalid_argument("`amount` must be at least 0.001.", correlator));
+    }
+    if amount > UNAUTHORIZED_AMOUNT_THRESHOLD {
+        return Err(with_correlator(
+            CamaraError::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "CARRIER_BILLING.UNAUTHORIZED_AMOUNT",
+                "Unauthorized amount requested.",
+            )
+            .into_response(),
+            correlator,
+        ));
+    }
+    Ok(())
 }
 
 /// `GET /carrier-billing/v0.5/payments/{paymentId}` — read a created payment
@@ -544,6 +654,42 @@ mod tests {
             .unwrap();
         let json: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
         (status, headers, json)
+    }
+
+    /// POST a JSON body to `/payments/prepare` with an optional Bearer token and correlator.
+    async fn post_prepare(
+        token: Option<&str>,
+        body: &str,
+        correlator: Option<&str>,
+    ) -> (StatusCode, HeaderMap, Value) {
+        let mut builder = Request::builder()
+            .method("POST")
+            .uri("/carrier-billing/v0.5/payments/prepare")
+            .header("host", HOST)
+            .header("content-type", "application/json");
+        if let Some(t) = token {
+            builder = builder.header("authorization", format!("Bearer {t}"));
+        }
+        if let Some(c) = correlator {
+            builder = builder.header("x-correlator", c);
+        }
+        let response = app()
+            .oneshot(builder.body(Body::from(body.to_string())).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let headers = response.headers().clone();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, headers, json)
+    }
+
+    /// Mint a create-scoped token and prepare (reserve) a payment with the given body.
+    async fn prepare_ok_token(body: &str) -> (StatusCode, HeaderMap, Value) {
+        let token = mint_token(CREATE_SCOPE).await;
+        post_prepare(Some(&token), body, None).await
     }
 
     /// GET `/payments/{paymentId}` with an optional Bearer token and correlator.
@@ -899,6 +1045,113 @@ mod tests {
         assert_eq!(
             headers.get("x-correlator").and_then(|v| v.to_str().ok()),
             Some("corr-get-404")
+        );
+    }
+
+    // --- preparePayment (POST /payments/prepare) ---------------------------
+
+    #[tokio::test]
+    async fn prepare_reserves_without_charging() {
+        let (status, _, body) = prepare_ok_token(&payment_body("+123456789012", 9.99)).await;
+        assert_eq!(status, StatusCode::CREATED);
+        // Reserved, not charged: `reserved` status and NO `paymentDate`.
+        assert_eq!(body["paymentStatus"], "reserved");
+        assert!(body["paymentDate"].is_null(), "nothing is charged yet");
+        assert!(body["paymentId"].as_str().is_some_and(|s| !s.is_empty()));
+        assert_eq!(body["amountTransaction"]["phoneNumber"], "+123456789012");
+        assert_eq!(body["amountTransaction"]["referenceCode"], "ref-001");
+        assert_eq!(
+            body["amountTransaction"]["paymentAmount"]["chargingInformation"]["amount"],
+            9.99
+        );
+        assert!(body["paymentCreationDate"].as_str().unwrap().ends_with('Z'));
+    }
+
+    #[tokio::test]
+    async fn prepare_reserved_suffix_selects_a_camara_error() {
+        let (status, _, body) = prepare_ok_token(&payment_body("+123456789404", 9.99)).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn prepare_amount_above_threshold_is_unauthorized() {
+        let (status, _, body) = prepare_ok_token(&payment_body("+123456789012", 5000.0)).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["code"], "CARRIER_BILLING.UNAUTHORIZED_AMOUNT");
+    }
+
+    #[tokio::test]
+    async fn prepare_amount_below_minimum_is_invalid_argument() {
+        let (status, _, body) = prepare_ok_token(&payment_body("+123456789012", 0.0)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "INVALID_ARGUMENT");
+    }
+
+    #[tokio::test]
+    async fn prepare_no_phone_and_non_e164_subject_is_missing_identifier() {
+        let body = r#"{"amountTransaction":{"paymentAmount":{"chargingInformation":{"amount":2.5,"currency":"EUR","description":"x"}},"referenceCode":"ref-sub"}}"#;
+        let (status, _, resp) = prepare_ok_token(body).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(resp["code"], "MISSING_IDENTIFIER");
+    }
+
+    #[tokio::test]
+    async fn prepared_payment_can_be_retrieved_verbatim() {
+        // A reservation is persisted, so it reads back through `retrievePayment`.
+        let (status, _, reserved) = prepare_ok_token(&payment_body("+123456789012", 9.99)).await;
+        assert_eq!(status, StatusCode::CREATED);
+        let id = reserved["paymentId"].as_str().unwrap().to_string();
+
+        let read = mint_token(READ_SCOPE).await;
+        let (status, _, fetched) = get_payment(Some(&read), &id, None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(fetched, reserved);
+        assert_eq!(fetched["paymentStatus"], "reserved");
+    }
+
+    #[tokio::test]
+    async fn prepare_without_the_create_scope_is_forbidden() {
+        let token = mint_token("some:other-scope").await;
+        let (status, _, body) =
+            post_prepare(Some(&token), &payment_body("+123456789012", 9.99), None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["code"], "PERMISSION_DENIED");
+    }
+
+    #[tokio::test]
+    async fn prepare_without_a_token_is_unauthenticated() {
+        let (status, _, body) =
+            post_prepare(None, &payment_body("+123456789012", 9.99), None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["code"], "UNAUTHENTICATED");
+    }
+
+    #[tokio::test]
+    async fn prepare_echoes_x_correlator_on_success_and_error() {
+        let token = mint_token(CREATE_SCOPE).await;
+        let (status, headers, _) = post_prepare(
+            Some(&token),
+            &payment_body("+123456789012", 9.99),
+            Some("corr-prep-ok"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-prep-ok")
+        );
+
+        let (status, headers, _) = post_prepare(
+            Some(&token),
+            &payment_body("+123456789404", 9.99),
+            Some("corr-prep-err"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-prep-err")
         );
     }
 }

@@ -367,6 +367,22 @@ op's `page`/`perPage`/`order`/`paymentCreationDate.gte|lte`/`paymentStatus`/
 `merchantIdentifier` query parameters are accepted but not applied, and payments
 aren't scoped per client (documented cuts, mirroring the Geofencing list).
 
+Carrier Billing's **two-step flow has begun** (contrary to an earlier note, 0.5.0
+*does* cover it): `POST /payments/prepare` (`preparePayment`, scope
+`carrier-billing:payments:create`) is now live — the **reserve** step. Unlike the
+one-step `createPayment`, it reserves (does not charge) the amount: a happy path
+returns `201` with `paymentStatus: "reserved"` and **no** `paymentDate`, and the
+reservation is persisted in the same in-memory store so `retrievePayment` reads it
+back and — in later slices — `confirmPayment` (→ `succeeded`) / `cancelPayment`
+(→ `cancelled`) can act on it. It shares `createPayment`'s two control planes
+(DESIGN §7): the reserved phone number (submitted `amountTransaction.phoneNumber`,
+else token subject — reserved suffix → canonical CAMARA error, malformed → 400,
+unidentifiable → 422 `MISSING_IDENTIFIER`) and the requested `amount` (`< 0.001` →
+400, `> 1000` → 422 `CARRIER_BILLING.UNAUTHORIZED_AMOUNT`). The
+`pending_validation`/`validationInfo` (OTP) path and the 409 `ALREADY_EXISTS`
+duplicate-session case are deferred to the `validatePayment` slice. `x-correlator`
+echoed on every response.
+
 ## In progress (claimed this pass)
 
 _None._  <!-- agent: put the claimed item + run timestamp here, clear it when done -->
@@ -460,9 +476,19 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     every stored payment (`200`, empty array when none; store state the only
     control plane). Query-param pagination/filtering (`page`/`perPage`/`order`/
     date+status filters) accepted but not applied — documented cut, later slice.
-  - [ ] two-step flow: `POST /payments/prepare` (`preparePayment`) ·
-    `.../{paymentId}/validate` · `.../confirm` · `.../cancel`
-    (`carrier-billing:payments:write`)
+  - [~] two-step flow: reserve → validate → confirm / cancel
+    - [x] `POST /payments/prepare` (`preparePayment`,
+      `carrier-billing:payments:create`) — reserve step; happy path →
+      `201 { paymentStatus: "reserved" }` (no `paymentDate`), persisted so it
+      reads back via `retrievePayment`. Shares `createPayment`'s identifier +
+      amount control planes. `pending_validation`/`validationInfo` (OTP) + 409
+      `ALREADY_EXISTS` deferred to `validatePayment`.
+    - [ ] `POST /payments/{paymentId}/validate` (`validatePayment`,
+      `carrier-billing:payments:write`)
+    - [ ] `POST /payments/{paymentId}/confirm` (`confirmPayment`,
+      `carrier-billing:payments:write`)
+    - [ ] `POST /payments/{paymentId}/cancel` (`cancelPayment`,
+      `carrier-billing:payments:write`)
   - [ ] charging notifications on `sink` (accepted-but-not-applied for now)
 - [ ] Other CAMARA APIs as capacity allows
 
@@ -481,6 +507,35 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 ## Scan journal
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
+
+- 2026-08-03 — Phase 5 (payments): **Carrier Billing v0.5** — **two-step flow
+  begun**: `POST /payments/prepare` (`preparePayment`, scope
+  `carrier-billing:payments:create`), the reserve step. Verified the real CAMARA
+  CarrierBillingCheckOut r3.2 spec — 0.5.0 **does** cover the two-step flow
+  (`preparePayment` · `validatePayment` · `confirmPayment` · `cancelPayment`),
+  correcting an earlier journal note that called one-step "the only flow". Scoped
+  this pass to `preparePayment` only: it **reserves** (does not charge) —
+  happy path `201 { paymentStatus: "reserved" }` with no `paymentDate`, persisted
+  in the existing `store` so `retrievePayment` reads it back and later
+  confirm/cancel can act on it. Reuses `createPayment`'s two control planes
+  (identifier: reserved suffix → canonical error, malformed → 400, unidentifiable
+  → 422 MISSING_IDENTIFIER; amount: `<0.001` → 400, `>1000` → 422
+  UNAUTHORIZED_AMOUNT) via two new shared helpers (`build_amount_tx`,
+  `check_amount`) refactored out of `create_payment` (no behaviour change there).
+  `pending_validation`/`validationInfo` (OTP) + 409 ALREADY_EXISTS deferred to
+  `validatePayment`; `sink`/`sinkCredential` accepted-not-applied (mirrors
+  create). Static `/payments/prepare` route coexists with `/payments/:id` (matchit
+  prioritises the static segment). **No new deps.** Spec: updated
+  `specs/carrier-billing/v0.5/openapi.yaml` — new `POST /payments/prepare`
+  operation (`x-camarasim-scenarios`, full 400/401/403/404/409/422/429/500/503
+  set, `reserved` example), new `ReservePayment` + `PaymentReserved` schemas, new
+  "Reserve" description section + refreshed header/cuts. 482 tests green (was 473;
+  +9 v0_5 integration: reserve→201 reserved/no paymentDate · reserved suffix →
+  error · amount>1000 → UNAUTHORIZED_AMOUNT · amount<0.001 → INVALID_ARGUMENT ·
+  no-phone+non-E.164 subject → MISSING_IDENTIFIER · reserved payment retrieved
+  verbatim · no create scope → 403 · no token → 401 · x-correlator echoed on
+  201 + error). — binary: 1567808 B (+12632 B; the prepare handler + ~4 KB of
+  vendored spec text embedded via include_str!)
 
 - 2026-08-03 — Phase 5 (payments): **Carrier Billing v0.5** — `GET /payments`
   (`retrievePayments`, scope `carrier-billing:payments:read`), the list op.
