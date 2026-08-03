@@ -8,11 +8,14 @@
 //!   (operationId `getSession`, scope `quality-on-demand:sessions:read`).
 //! - `DELETE /quality-on-demand/v1/sessions/{sessionId}` — delete a session by id
 //!   (operationId `deleteSession`, scope `quality-on-demand:sessions:delete`).
+//! - `POST /quality-on-demand/v1/sessions/{sessionId}/extend` — extend a session's
+//!   duration (operationId `extendQosSession`, scope
+//!   `quality-on-demand:sessions:update`).
 //!
-//! `extend`, `retrieve-sessions`, and the CloudEvents notifications on `sink` are
-//! deferred to later passes (see `PROGRESS.md`); `sink`/`sinkCredential` are
-//! accepted for schema fidelity but no notification is emitted yet — so a
-//! `deleteSession` fires no `DELETE_REQUESTED` CloudEvent.
+//! `retrieve-sessions` and the CloudEvents notifications on `sink` are deferred to
+//! later passes (see `PROGRESS.md`); `sink`/`sinkCredential` are accepted for
+//! schema fidelity but no notification is emitted yet — so a `deleteSession` fires
+//! no `DELETE_REQUESTED` CloudEvent.
 //!
 //! ## What it does
 //!
@@ -20,7 +23,10 @@
 //! renders the `SessionInfo` for the request, remembers it, and returns `201`;
 //! `getSession` returns the stored `SessionInfo` (`200`) or `404 NOT_FOUND`;
 //! `deleteSession` evicts the session from the store and returns `204 No Content`,
-//! or `404 NOT_FOUND` when no session exists for the id.
+//! or `404 NOT_FOUND` when no session exists for the id; `extendQosSession` bumps a
+//! stored session's `duration` (and, for an `AVAILABLE` session, its `expiresAt`) by
+//! the requested seconds in place and returns the updated `SessionInfo` (`200`), or
+//! `404 NOT_FOUND` for an unknown id.
 //!
 //! ## Functional cases — the input is the control plane (docs/DESIGN.md §7)
 //!
@@ -66,6 +72,8 @@ const CREATE_SCOPE: &str = "quality-on-demand:sessions:create";
 const READ_SCOPE: &str = "quality-on-demand:sessions:read";
 /// Scope required to delete a session (CAMARA quality-on-demand 1.1.0).
 const DELETE_SCOPE: &str = "quality-on-demand:sessions:delete";
+/// Scope required to extend a session (CAMARA quality-on-demand 1.1.0).
+const UPDATE_SCOPE: &str = "quality-on-demand:sessions:update";
 
 /// The simulator's fixed QoS-profile maximum duration, in seconds (24 h). A
 /// requested `duration` beyond this is out of range for the (single, simulated)
@@ -79,6 +87,10 @@ pub fn routes() -> Router {
         .route(
             "/quality-on-demand/v1/sessions/:session_id",
             get(get_session).delete(delete_session),
+        )
+        .route(
+            "/quality-on-demand/v1/sessions/:session_id/extend",
+            post(extend_session),
         )
 }
 
@@ -190,17 +202,7 @@ async fn create_session(claims: Claims, headers: HeaderMap, body: Bytes) -> Resp
         Some(d) if d < 1 => {
             return invalid_argument("`duration` must be at least 1 second.", &correlator)
         }
-        Some(d) if d > MAX_DURATION_SECS => {
-            return with_correlator(
-                CamaraError::new(
-                    StatusCode::BAD_REQUEST,
-                    "QUALITY_ON_DEMAND.DURATION_OUT_OF_RANGE",
-                    "The requested duration is out of the allowed range for the QoS profile.",
-                )
-                .into_response(),
-                &correlator,
-            )
-        }
+        Some(d) if d > MAX_DURATION_SECS => return duration_out_of_range(&correlator),
         Some(d) => d,
         None => return invalid_argument("`duration` is required.", &correlator),
     };
@@ -289,6 +291,89 @@ async fn delete_session(
             CamaraError::not_found("No session found for the provided sessionId.").into_response(),
             &correlator,
         ),
+    }
+}
+
+/// `ExtendSessionDuration` request body (CAMARA 1.1.0): the extra seconds to add
+/// to the session's granted duration.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExtendSessionDuration {
+    #[serde(rename = "requestedAdditionalDuration")]
+    requested_additional_duration: Option<i64>,
+}
+
+/// `POST /quality-on-demand/v1/sessions/{sessionId}/extend`.
+///
+/// Extends the duration of an existing session by `requestedAdditionalDuration`
+/// seconds and returns the updated `SessionInfo` (`200`). Two control planes
+/// (docs/DESIGN.md §7): the stored session (unknown/deleted id → `404 NOT_FOUND`)
+/// and the requested seconds — `< 1` → `400 INVALID_ARGUMENT`, greater than the
+/// profile ceiling of [`MAX_DURATION_SECS`], **or** a new total duration beyond
+/// that ceiling → `400 QUALITY_ON_DEMAND.DURATION_OUT_OF_RANGE` (so the ceiling
+/// case depends on the session's current duration — a genuine stateful control
+/// plane). The update is written back to the store, so a later `getSession`
+/// reflects the longer duration; for an `AVAILABLE` session `expiresAt` is pushed
+/// forward by the same amount.
+async fn extend_session(
+    claims: Claims,
+    headers: HeaderMap,
+    Path(session_id): Path<String>,
+    body: Bytes,
+) -> Response {
+    let correlator = headers.get("x-correlator").cloned();
+
+    if let Err(e) = claims.require_scope(UPDATE_SCOPE) {
+        return with_correlator(e.into_response(), &correlator);
+    }
+
+    let req: ExtendSessionDuration = match serde_json::from_slice(&body) {
+        Ok(req) => req,
+        Err(_) => {
+            return invalid_argument(
+                "Request body is not a valid ExtendSessionDuration.",
+                &correlator,
+            )
+        }
+    };
+    let additional = match req.requested_additional_duration {
+        Some(d) if d < 1 => {
+            return invalid_argument(
+                "`requestedAdditionalDuration` must be at least 1 second.",
+                &correlator,
+            )
+        }
+        Some(d) if d > MAX_DURATION_SECS => return duration_out_of_range(&correlator),
+        Some(d) => d,
+        None => return invalid_argument("`requestedAdditionalDuration` is required.", &correlator),
+    };
+
+    // The session must exist to be extended, and the resulting total duration
+    // must stay within the profile ceiling (a state-dependent case).
+    let current = match store::get(&session_id) {
+        Some(info) => info,
+        None => return session_not_found(&correlator),
+    };
+    let current_duration = current["duration"].as_i64().unwrap_or(0);
+    if current_duration + additional > MAX_DURATION_SECS {
+        return duration_out_of_range(&correlator);
+    }
+
+    // Apply the extension in place. A concurrent delete between the read above
+    // and this update leaves nothing to extend → 404.
+    let updated = store::update(&session_id, |info| {
+        let new_duration = info["duration"].as_i64().unwrap_or(0) + additional;
+        info["duration"] = json!(new_duration);
+        // An AVAILABLE session has a concrete expiry; push it out by `additional`.
+        if info["qosStatus"] == "AVAILABLE" {
+            if let Some(exp) = info["expiresAt"].as_str().and_then(parse_rfc3339_utc) {
+                info["expiresAt"] = json!(rfc3339_utc(exp + additional));
+            }
+        }
+    });
+    match updated {
+        Some(info) => with_correlator((StatusCode::OK, Json(info)).into_response(), &correlator),
+        None => session_not_found(&correlator),
     }
 }
 
@@ -467,6 +552,28 @@ fn invalid_argument(message: &str, correlator: &Option<HeaderValue>) -> Response
     )
 }
 
+/// A 400 `QUALITY_ON_DEMAND.DURATION_OUT_OF_RANGE` error — the requested (or
+/// resulting total) duration exceeds the QoS profile's ceiling. Correlator echoed.
+fn duration_out_of_range(correlator: &Option<HeaderValue>) -> Response {
+    with_correlator(
+        CamaraError::new(
+            StatusCode::BAD_REQUEST,
+            "QUALITY_ON_DEMAND.DURATION_OUT_OF_RANGE",
+            "The requested duration is out of the allowed range for the QoS profile.",
+        )
+        .into_response(),
+        correlator,
+    )
+}
+
+/// A 404 `NOT_FOUND` for an unknown/deleted `sessionId`, with the correlator echoed.
+fn session_not_found(correlator: &Option<HeaderValue>) -> Response {
+    with_correlator(
+        CamaraError::not_found("No session found for the provided sessionId.").into_response(),
+        correlator,
+    )
+}
+
 /// Echo the request's `x-correlator` onto a response, if one was supplied.
 fn with_correlator(mut response: Response, correlator: &Option<HeaderValue>) -> Response {
     if let Some(value) = correlator {
@@ -524,6 +631,41 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
     (if m <= 2 { y + 1 } else { y }, m, d)
 }
 
+/// Parse an RFC 3339 UTC instant in exactly the shape [`rfc3339_utc`] produces
+/// (`YYYY-MM-DDTHH:MM:SSZ`) back to a Unix timestamp (seconds). Returns `None` for
+/// anything else — used only on strings the simulator itself wrote, so the strict
+/// shape is sufficient (no offset/fraction handling needed).
+fn parse_rfc3339_utc(s: &str) -> Option<i64> {
+    let b = s.as_bytes();
+    if b.len() != 20 || b[4] != b'-' || b[7] != b'-' || b[10] != b'T' || b[13] != b':'
+        || b[16] != b':' || b[19] != b'Z'
+    {
+        return None;
+    }
+    let y: i64 = s.get(0..4)?.parse().ok()?;
+    let mo: u32 = s.get(5..7)?.parse().ok()?;
+    let d: u32 = s.get(8..10)?.parse().ok()?;
+    let hh: i64 = s.get(11..13)?.parse().ok()?;
+    let mm: i64 = s.get(14..16)?.parse().ok()?;
+    let ss: i64 = s.get(17..19)?.parse().ok()?;
+    if !(1..=12).contains(&mo) || !(1..=31).contains(&d) || hh > 23 || mm > 59 || ss > 59 {
+        return None;
+    }
+    Some(days_from_civil(y, mo, d) * 86_400 + hh * 3600 + mm * 60 + ss)
+}
+
+/// Days since 1970-01-01 for a civil `(year, month, day)` — the inverse of
+/// [`civil_from_days`] (Howard Hinnant's `days_from_civil`, proleptic Gregorian).
+fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = (if y >= 0 { y } else { y - 399 }) / 400;
+    let yoe = (y - era * 400) as u64; // [0, 399]
+    let m = m as u64;
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + (d as u64 - 1); // [0, 365]
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy; // [0, 146096]
+    era * 146_097 + doe as i64 - 719_468
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -566,6 +708,17 @@ mod tests {
     fn rfc3339_utc_formats_known_epochs() {
         assert_eq!(rfc3339_utc(0), "1970-01-01T00:00:00Z");
         assert_eq!(rfc3339_utc(1_704_067_200), "2024-01-01T00:00:00Z");
+    }
+
+    #[test]
+    fn parse_rfc3339_utc_is_the_inverse_of_rfc3339_utc() {
+        for epoch in [0, 1_704_067_200, 1_704_070_808, 253_402_300_799] {
+            assert_eq!(parse_rfc3339_utc(&rfc3339_utc(epoch)), Some(epoch));
+        }
+        // Rejects anything not in the exact `YYYY-MM-DDTHH:MM:SSZ` shape.
+        assert_eq!(parse_rfc3339_utc("2024-01-01T00:00:00+01:00"), None);
+        assert_eq!(parse_rfc3339_utc("2024-13-01T00:00:00Z"), None);
+        assert_eq!(parse_rfc3339_utc("not-a-date"), None);
     }
 
     // --- Integration through the real router -------------------------------
@@ -633,6 +786,22 @@ mod tests {
     ) -> (StatusCode, HeaderMap, Value) {
         let path = format!("{SESSIONS}/{session_id}");
         request("DELETE", &path, token, None, correlator).await
+    }
+
+    /// POST an extend body for `session_id` with an optional Bearer token/correlator.
+    async fn extend_session_req(
+        token: Option<&str>,
+        session_id: &str,
+        body: &str,
+        correlator: Option<&str>,
+    ) -> (StatusCode, HeaderMap, Value) {
+        let path = format!("{SESSIONS}/{session_id}/extend");
+        request("POST", &path, token, Some(body), correlator).await
+    }
+
+    /// A well-formed ExtendSessionDuration body for `additional` seconds.
+    fn extend_body(additional: i64) -> String {
+        json!({ "requestedAdditionalDuration": additional }).to_string()
     }
 
     async fn request(
@@ -940,6 +1109,173 @@ mod tests {
         assert_eq!(
             headers.get("x-correlator").and_then(|v| v.to_str().ok()),
             Some("corr-del-404")
+        );
+    }
+
+    #[tokio::test]
+    async fn extend_available_session_grows_duration_and_pushes_expiry() {
+        // Create an AVAILABLE session (…012) for 3600 s.
+        let create = mint_token(CREATE_SCOPE).await;
+        let (_, _, created) =
+            post_sessions(Some(&create), &create_body("+123456789012", "QOS_L", 3600), None).await;
+        let id = created["sessionId"].as_str().unwrap().to_string();
+        let expiry_before = parse_rfc3339_utc(created["expiresAt"].as_str().unwrap()).unwrap();
+
+        // Extend by 60 s → duration grows, expiry moves out by exactly 60 s.
+        let upd = mint_token(UPDATE_SCOPE).await;
+        let (status, _, body) = extend_session_req(Some(&upd), &id, &extend_body(60), None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["duration"], 3660);
+        assert_eq!(body["qosStatus"], "AVAILABLE");
+        let expiry_after = parse_rfc3339_utc(body["expiresAt"].as_str().unwrap()).unwrap();
+        assert_eq!(expiry_after - expiry_before, 60);
+
+        // The extension persists: a later GET reflects the longer duration.
+        let read = mint_token(READ_SCOPE).await;
+        let (status, _, fetched) = get_session_req(Some(&read), &id, None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(fetched["duration"], 3660);
+    }
+
+    #[tokio::test]
+    async fn extend_requested_session_grows_duration_without_times() {
+        // A …000 identifier creates a REQUESTED session (no startedAt/expiresAt).
+        let create = mint_token(CREATE_SCOPE).await;
+        let (_, _, created) =
+            post_sessions(Some(&create), &create_body("+123456789000", "QOS_L", 60), None).await;
+        let id = created["sessionId"].as_str().unwrap().to_string();
+
+        let upd = mint_token(UPDATE_SCOPE).await;
+        let (status, _, body) = extend_session_req(Some(&upd), &id, &extend_body(30), None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["duration"], 90);
+        assert_eq!(body["qosStatus"], "REQUESTED");
+        assert!(body.get("expiresAt").is_none());
+    }
+
+    #[tokio::test]
+    async fn extend_unknown_session_is_not_found() {
+        let upd = mint_token(UPDATE_SCOPE).await;
+        let (status, _, body) = extend_session_req(
+            Some(&upd),
+            "11111111-1111-4111-8111-111111111111",
+            &extend_body(60),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn extend_below_one_is_invalid_argument() {
+        let create = mint_token(CREATE_SCOPE).await;
+        let (_, _, created) =
+            post_sessions(Some(&create), &create_body("+123456789012", "QOS_L", 60), None).await;
+        let id = created["sessionId"].as_str().unwrap().to_string();
+
+        let upd = mint_token(UPDATE_SCOPE).await;
+        let (status, _, body) = extend_session_req(Some(&upd), &id, &extend_body(0), None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "INVALID_ARGUMENT");
+    }
+
+    #[tokio::test]
+    async fn extend_above_the_maximum_is_out_of_range() {
+        let create = mint_token(CREATE_SCOPE).await;
+        let (_, _, created) =
+            post_sessions(Some(&create), &create_body("+123456789012", "QOS_L", 60), None).await;
+        let id = created["sessionId"].as_str().unwrap().to_string();
+
+        let upd = mint_token(UPDATE_SCOPE).await;
+        let (status, _, body) =
+            extend_session_req(Some(&upd), &id, &extend_body(MAX_DURATION_SECS + 1), None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "QUALITY_ON_DEMAND.DURATION_OUT_OF_RANGE");
+    }
+
+    #[tokio::test]
+    async fn extend_beyond_the_ceiling_is_out_of_range_and_depends_on_current_duration() {
+        // Create at the ceiling itself; any positive extension overflows it.
+        let create = mint_token(CREATE_SCOPE).await;
+        let (_, _, created) = post_sessions(
+            Some(&create),
+            &create_body("+123456789012", "QOS_L", MAX_DURATION_SECS),
+            None,
+        )
+        .await;
+        let id = created["sessionId"].as_str().unwrap().to_string();
+
+        let upd = mint_token(UPDATE_SCOPE).await;
+        let (status, _, body) = extend_session_req(Some(&upd), &id, &extend_body(1), None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "QUALITY_ON_DEMAND.DURATION_OUT_OF_RANGE");
+    }
+
+    #[tokio::test]
+    async fn extend_missing_field_or_unknown_field_is_invalid_argument() {
+        let create = mint_token(CREATE_SCOPE).await;
+        let (_, _, created) =
+            post_sessions(Some(&create), &create_body("+123456789012", "QOS_L", 60), None).await;
+        let id = created["sessionId"].as_str().unwrap().to_string();
+        let upd = mint_token(UPDATE_SCOPE).await;
+
+        // Missing requestedAdditionalDuration.
+        let (status, _, body) = extend_session_req(Some(&upd), &id, "{}", None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "INVALID_ARGUMENT");
+        // Unknown field.
+        let b = json!({ "requestedAdditionalDuration": 60, "x": 1 }).to_string();
+        let (status, _, body) = extend_session_req(Some(&upd), &id, &b, None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "INVALID_ARGUMENT");
+    }
+
+    #[tokio::test]
+    async fn extend_requires_the_update_scope() {
+        // A read token must not satisfy the update scope.
+        let read = mint_token(READ_SCOPE).await;
+        let (status, _, body) =
+            extend_session_req(Some(&read), "any-id", &extend_body(60), None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["code"], "PERMISSION_DENIED");
+        // An update token must not satisfy the read scope.
+        let upd = mint_token(UPDATE_SCOPE).await;
+        let (status, _, body) = get_session_req(Some(&upd), "any-id", None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["code"], "PERMISSION_DENIED");
+    }
+
+    #[tokio::test]
+    async fn extend_without_a_token_is_unauthenticated() {
+        let (status, _, body) =
+            extend_session_req(None, "any-id", &extend_body(60), None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["code"], "UNAUTHENTICATED");
+    }
+
+    #[tokio::test]
+    async fn x_correlator_is_echoed_on_extend_200_and_404() {
+        let create = mint_token(CREATE_SCOPE).await;
+        let (_, _, created) =
+            post_sessions(Some(&create), &create_body("+123456789012", "QOS_L", 60), None).await;
+        let id = created["sessionId"].as_str().unwrap().to_string();
+        let upd = mint_token(UPDATE_SCOPE).await;
+        // Echoed on the 200…
+        let (status, headers, _) =
+            extend_session_req(Some(&upd), &id, &extend_body(60), Some("corr-ext")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-ext")
+        );
+        // …and on the 404 (unknown id).
+        let (status, headers, _) =
+            extend_session_req(Some(&upd), "no-such-id", &extend_body(60), Some("corr-ext-404")).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-ext-404")
         );
     }
 

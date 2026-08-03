@@ -175,8 +175,18 @@ containing `unavailable`→422 `QUALITY_ON_DEMAND.QOS_PROFILE_NOT_APPLICABLE`.
 (`quality-on-demand:sessions:delete`, `deleteSession`) is now live too: keyed
 only on the store state, it evicts an existing session → `204 No Content`
 (single-use) or returns `404 NOT_FOUND` for an unknown/already-deleted id; no
-`DELETE_REQUESTED` CloudEvent is emitted (notifications deferred). extend/
-retrieve-sessions and CloudEvents notifications are still deferred.
+`DELETE_REQUESTED` CloudEvent is emitted (notifications deferred).
+`POST /sessions/{sessionId}/extend` (`quality-on-demand:sessions:update`,
+`extendQosSession`) is now live: it adds `requestedAdditionalDuration` seconds
+to a stored session's `duration` in place (via a new atomic `store::update`)
+and — for an `AVAILABLE` session — pushes `expiresAt` out by the same amount,
+returning the updated `SessionInfo` (`200`); the change persists (a later
+`getSession` sees it). Two control planes (DESIGN §7): the stored session
+(unknown id → `404 NOT_FOUND`) and the requested seconds (`<1` → 400
+`INVALID_ARGUMENT`; `>86400`, **or** a resulting total duration `>86400`, → 400
+`QUALITY_ON_DEMAND.DURATION_OUT_OF_RANGE` — so the ceiling case is
+state-dependent). retrieve-sessions and CloudEvents notifications are still
+deferred.
 
 ## In progress (claimed this pass)
 
@@ -219,7 +229,7 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   - [x] `POST /sessions` (`quality-on-demand:sessions:create`, `createSession`)
   - [x] `GET /sessions/{sessionId}` (`quality-on-demand:sessions:read`, `getSession`)
   - [x] `DELETE /sessions/{sessionId}` (`quality-on-demand:sessions:delete`, `deleteSession`)
-  - [ ] `POST /sessions/{sessionId}/extend` (`quality-on-demand:sessions:update`)
+  - [x] `POST /sessions/{sessionId}/extend` (`quality-on-demand:sessions:update`, `extendQosSession`)
   - [ ] `POST /retrieve-sessions` (`quality-on-demand:sessions:retrieve-by-device`)
   - [ ] CloudEvents notifications on `sink` (qosStatus changes / expiry)
 
@@ -244,6 +254,36 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-03 — Phase 3: Quality on Demand v1 — `POST /sessions/{sessionId}/extend`
+  (CAMARA quality-on-demand 1.1.0, r3.2), operationId `extendQosSession`, scope
+  `quality-on-demand:sessions:update` (confirmed against the r3.2 upstream spec).
+  Added the route + `extend_session` handler to `src/apis/quality_on_demand/v1.rs`
+  and an atomic `store::update(id, f) -> Option<Value>` to `store.rs` (lock held
+  only for the map access + pure closure, never across await). Body
+  `ExtendSessionDuration{requestedAdditionalDuration}` parsed with
+  `deny_unknown_fields` → precise 400 INVALID_ARGUMENT (missing/`<1`/unknown
+  field). Two control planes (§7): the stored session (unknown/deleted id → 404
+  NOT_FOUND) and the requested seconds — `>86400`, **or** current duration +
+  requested `>86400`, → 400 `QUALITY_ON_DEMAND.DURATION_OUT_OF_RANGE` (the ceiling
+  case is state-dependent on the stored session's current duration). On success it
+  bumps `duration` in place and, for an `AVAILABLE` session, pushes `expiresAt` out
+  by the same amount (new `parse_rfc3339_utc`/`days_from_civil`, the inverse of the
+  existing `rfc3339_utc`/`civil_from_days` — no date/time dep), persists it, and
+  returns the updated `SessionInfo` (200); a later `getSession` reflects the
+  change. Factored the shared `duration_out_of_range`/`session_not_found` error
+  helpers. `x-correlator` echoed on every response. No new deps. Spec: added the
+  `/sessions/{sessionId}/extend` path (operationId `extendQosSession`) +
+  `ExtendSessionDuration` schema to `specs/quality-on-demand/v1/openapi.yaml` — 200
+  (SessionInfo) + 400 (both INVALID_ARGUMENT and DURATION_OUT_OF_RANGE) + shared
+  401/403/404/429/500/503, `$ref`-ing auth `camaraOAuth`, `x-camarasim-scenarios`
+  documenting the two control planes (incl. the state-dependent ceiling); header/
+  description prose updated (extend no longer deferred). 307 tests green (was 295;
+  +12: 1 store unit [update-in-place-then-none] + 1 handler unit [parse↔format
+  roundtrip + rejects] + 10 integration covering available-grows-duration+expiry+
+  persists / requested-grows-duration-only / unknown-404 / below-1-400 / above-max-
+  out-of-range / ceiling-state-dependent-out-of-range / missing+unknown-field-400 /
+  update-scope-isolation / no-token-401 / x-correlator-on-200+404). — binary:
+  1116656 B (+8224 B)
 - 2026-08-02 — Phase 3: Quality on Demand v1 — `DELETE /sessions/{sessionId}`
   (CAMARA quality-on-demand 1.1.0, r3.2), operationId `deleteSession`, scope
   `quality-on-demand:sessions:delete` (confirmed against the r3.2 upstream spec).

@@ -6,9 +6,9 @@
 # `src/apis/quality_on_demand/v1.rs` and its in-memory session store; spec and
 # code must not drift.
 #
-# This slice serves `POST /sessions`, `GET /sessions/{sessionId}`, and
-# `DELETE /sessions/{sessionId}`. `POST /sessions/{sessionId}/extend`,
-# `POST /retrieve-sessions`, and the CloudEvents notifications on `sink` are
+# This slice serves `POST /sessions`, `GET /sessions/{sessionId}`,
+# `DELETE /sessions/{sessionId}`, and `POST /sessions/{sessionId}/extend`.
+# `POST /retrieve-sessions` and the CloudEvents notifications on `sink` are
 # deferred to later passes; the served spec covers only what is implemented.
 openapi: 3.0.3
 info:
@@ -52,6 +52,12 @@ info:
     when no session exists for the id. `deleteSession` evicts the session and
     returns `204 No Content`, or `404 NOT_FOUND` for an unknown id; it emits no
     CloudEvents `DELETE_REQUESTED` notification (notifications are deferred).
+    `extendQosSession` adds `requestedAdditionalDuration` seconds to a stored
+    session's `duration` in place (and, for an `AVAILABLE` session, pushes
+    `expiresAt` out by the same amount), returning the updated `SessionInfo`
+    (`200`); the request seconds `< 1` → `400 INVALID_ARGUMENT`, and seconds — or
+    the resulting total duration — beyond the profile ceiling of 86400 s →
+    `400 QUALITY_ON_DEMAND.DURATION_OUT_OF_RANGE`; an unknown id → `404 NOT_FOUND`.
   version: "1.1.0"
   license:
     name: Apache-2.0
@@ -313,6 +319,102 @@ paths:
           - input: an unknown or already-deleted sessionId
             result: "404 NOT_FOUND"
 
+  /sessions/{sessionId}/extend:
+    post:
+      operationId: extendQosSession
+      summary: Extend the duration of a QoS session
+      description: |
+        Adds `requestedAdditionalDuration` seconds to the session's granted
+        `duration` and returns the updated `SessionInfo`. For an `AVAILABLE`
+        session `expiresAt` is pushed out by the same amount; the change is
+        persisted, so a later `getSession` reflects it. See the API description
+        for the parameter-driven functional cases.
+      security:
+        - openId:
+            - quality-on-demand:sessions:update
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+        - name: sessionId
+          in: path
+          required: true
+          description: The `sessionId` returned by `createSession`.
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ExtendSessionDuration"
+      responses:
+        "200":
+          description: The session duration was extended.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionInfo"
+        "400":
+          description: |
+            Invalid request. The `code` is one of the generic `INVALID_ARGUMENT`
+            (malformed body, missing/invalid field, `requestedAdditionalDuration`
+            `< 1`) or the API-specific `QUALITY_ON_DEMAND.DURATION_OUT_OF_RANGE`
+            (the requested seconds — or the resulting total duration — exceed the
+            QoS profile's maximum).
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "../../shared/errors.yaml#/components/schemas/CamaraError"
+              examples:
+                invalidArgument:
+                  summary: Malformed or missing field
+                  value:
+                    status: 400
+                    code: INVALID_ARGUMENT
+                    message: "`requestedAdditionalDuration` is required."
+                durationOutOfRange:
+                  summary: Extension beyond the profile maximum
+                  value:
+                    status: 400
+                    code: QUALITY_ON_DEMAND.DURATION_OUT_OF_RANGE
+                    message: The requested duration is out of the allowed range for the QoS profile.
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          Two control planes (docs/DESIGN.md §7): the stored session (keyed on the
+          `sessionId` path parameter) and the requested `requestedAdditionalDuration`.
+          The out-of-range ceiling case is state-dependent — it fires when the
+          session's *current* duration plus the requested seconds exceed 86400 s.
+          Canonical Quality-On-Demand 1.1.0 declares 400/401/403/404/429 for this
+          operation; CamaraSim also exposes 500/503 for parity with the other
+          operations (documented extension).
+        cases:
+          - input: a valid extension on an existing session
+            result: "200 SessionInfo with the increased duration (and, if AVAILABLE, a later expiresAt)"
+          - input: requestedAdditionalDuration < 1, missing, or an unknown field
+            result: "400 INVALID_ARGUMENT"
+          - input: requestedAdditionalDuration > 86400, or current duration + requested > 86400
+            result: "400 QUALITY_ON_DEMAND.DURATION_OUT_OF_RANGE"
+          - input: an unknown or already-deleted sessionId
+            result: "404 NOT_FOUND"
+
 components:
   securitySchemes:
     openId:
@@ -379,6 +481,23 @@ components:
           description: >-
             Credential the notification callback expects. Accepted for schema
             fidelity but never echoed back (it carries a secret) and not yet used.
+
+    ExtendSessionDuration:
+      type: object
+      description: Request to extend an existing QoS session's duration.
+      required:
+        - requestedAdditionalDuration
+      properties:
+        requestedAdditionalDuration:
+          type: integer
+          format: int32
+          minimum: 1
+          maximum: 86400
+          description: >-
+            Seconds to add to the session's granted duration. CamaraSim rejects a
+            value beyond 86400 s — or one that pushes the resulting total duration
+            beyond 86400 s — with QUALITY_ON_DEMAND.DURATION_OUT_OF_RANGE.
+          example: 60
 
     SessionInfo:
       type: object

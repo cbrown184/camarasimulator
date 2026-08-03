@@ -64,6 +64,19 @@ pub fn remove(id: &str) -> Option<Value> {
         .remove(id)
 }
 
+/// Atomically update the session stored under `id`: apply `f` to a mutable
+/// reference to its `SessionInfo`, then return the updated value — or `None` if
+/// no such session exists. `extendQosSession` uses this to bump a session's
+/// `duration`/`expiresAt` in place. The lock is held only for the map access and
+/// the pure closure (never across an `.await`), so read-then-write can't race
+/// against a concurrent delete.
+pub fn update<F: FnOnce(&mut Value)>(id: &str, f: F) -> Option<Value> {
+    let mut guard = store().lock().expect("qod session store not poisoned");
+    let info = guard.get_mut(id)?;
+    f(info);
+    Some(info.clone())
+}
+
 /// Mint a fresh, opaque, UUID-shaped `sessionId`.
 ///
 /// The 16 bytes come from `SHA-256(counter ‖ now)` — the monotonic counter alone
@@ -125,6 +138,21 @@ mod tests {
         insert(id.clone(), info.clone());
         assert_eq!(get(&id), Some(info));
         assert!(get("no-such-session").is_none());
+    }
+
+    #[test]
+    fn update_mutates_in_place_and_unknown_is_none() {
+        let id = new_session_id();
+        // No session yet → the closure never runs and update is None.
+        assert!(update(&id, |_| panic!("must not run")).is_none());
+        insert(id.clone(), json!({ "sessionId": id, "duration": 60 }));
+        // Applying the closure bumps the stored value and returns the new one…
+        let updated = update(&id, |info| {
+            info["duration"] = json!(120);
+        });
+        assert_eq!(updated.unwrap()["duration"], 120);
+        // …and the mutation persists for a later read.
+        assert_eq!(get(&id).unwrap()["duration"], 120);
     }
 
     #[test]
