@@ -296,10 +296,14 @@ in/out state at subscription time, POSTed to an `http://` `sink` fire-and-forget
 over raw TCP (`src/apis/geofencing_subscriptions/notifications.rs`; no HTTP-client
 dep, mirroring QoD). The position is deterministic from the identifier's trailing
 three digits (even → inside → `area-entered`; odd → outside → `area-left`), fired
-only for an `ACTIVE` subscription and filtered to the subscribed `types`. The
-`sinkCredential` is still not applied (callback unauthenticated — a documented
-cut). Only movement-triggered events + `sinkCredential` auth + expiry/maxEvents
-remain.
+only for an `ACTIVE` subscription and filtered to the subscribed `types`.
+**`sinkCredential` (ACCESSTOKEN bearer) auth** is now applied: a subscription
+created with a `credentialType: ACCESSTOKEN` `sinkCredential` has its bearer token
+applied to the initial-event callback as an `Authorization: Bearer <accessToken>`
+header (RFC 6750), derived at creation-time (`notifications::sink_authorization`,
+mirroring QoD) and never echoed in the `SubscriptionInfo` (it is a secret);
+PLAIN/REFRESHTOKEN are accepted but not applied (a documented cut). Only
+movement-triggered events + expiry/maxEvents remain.
 
 ## In progress (claimed this pass)
 
@@ -370,7 +374,8 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
       CloudEvent for the device's current in/out state at creation of an ACTIVE
       subscription (http sink, fire-and-forget over raw TCP; no HTTP-client dep)
     - [ ] movement-triggered `area-entered`/`area-left` events
-    - [ ] `sinkCredential` auth on the callback (currently unauthenticated)
+    - [x] `sinkCredential` auth on the callback (ACCESSTOKEN bearer on the
+      initial-event callback; PLAIN/REFRESHTOKEN deferred)
     - [ ] expiry (`subscriptionExpireTime`) / `subscriptionMaxEvents` + `subscription-ended`
 
 ### Phase 5 — Remaining
@@ -392,6 +397,29 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 ## Scan journal
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
+
+- 2026-08-03 — Phase 4 (spatial): **Geofencing Subscriptions v0.4** — `sinkCredential`
+  (ACCESSTOKEN bearer) **auth on the initial-event callback**. A subscription created
+  with a `credentialType: ACCESSTOKEN` `sinkCredential` now has its bearer token applied
+  to the fire-and-forget initial-event CloudEvent as an `Authorization: Bearer
+  <accessToken>` header (RFC 6750), matching the resource-server scheme and mirroring
+  QoD. Because geofencing delivers the initial event synchronously at creation, the
+  credential is derived right there (`notifications::sink_authorization`, a new pure fn
+  identical to QoD's) and passed straight into `spawn_delivery` — no side-store needed
+  (unlike QoD's deferred deletion path). The secret is never echoed in the
+  `SubscriptionInfo`. PLAIN/REFRESHTOKEN accepted but not applied (documented cut);
+  `sinkCredential` field lost its `#[allow(dead_code)]`. `spawn_delivery`/`deliver`
+  gained an `auth: Option<…>` arg (emits the `Authorization` header when Some), mirroring
+  QoD's signature. Only movement-triggered events + expiry/maxEvents now remain for the
+  API. **No new deps.** Spec: updated `specs/geofencing-subscriptions/v0.4/openapi.yaml`
+  — refreshed the header prose, the `createSubscription` `x-camarasim-scenarios`
+  (ACCESSTOKEN-applied case + PLAIN/REFRESHTOKEN cut), the `callbacks.notifications`
+  description, and the `sinkCredential` schema description. 426 tests green (was 422; +4:
+  2 notifications units [sink_authorization: ACCESSTOKEN→Bearer, empty/other types→None ·
+  deliver emits the Authorization header when Some] + 2 v0_4 integration [ACCESSTOKEN
+  credential → `Authorization: Bearer` on the callback, secret not echoed · no credential
+  → callback unauthenticated]; the existing unauth deliver test now also asserts no
+  Authorization header). — binary: 1466792 B (−768 B)
 
 - 2026-08-03 — Phase 4 (spatial): **Geofencing Subscriptions v0.4** — CloudEvents
   delivery begun: `createSubscription` now delivers the **initial event**

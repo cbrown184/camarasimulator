@@ -119,11 +119,11 @@ pub fn routes() -> Router {
 struct CreateSubscription {
     protocol: Option<String>,
     sink: Option<String>,
-    // Accepted for schema fidelity; carries a secret, so it is never echoed and
-    // not applied to notification callbacks — a documented cut (unlike QoD, this
-    // API sends the initial-event callback unauthenticated).
+    // Carries a secret, so it is never echoed. An ACCESSTOKEN credential is applied
+    // to the initial-event callback as an RFC 6750 `Authorization: Bearer` header
+    // (see [`notifications::sink_authorization`]); PLAIN/REFRESHTOKEN are accepted
+    // but not applied — a documented cut.
     #[serde(rename = "sinkCredential")]
-    #[allow(dead_code)]
     sink_credential: Option<Value>,
     types: Option<Vec<String>>,
     config: Option<Config>,
@@ -329,7 +329,8 @@ async fn create_subscription(claims: Claims, headers: HeaderMap, body: Bytes) ->
     // caller asked for the device's current in/out state, deliver a single
     // `area-entered`/`area-left` CloudEvent to the sink (fire-and-forget, off the
     // request path). The event type is chosen from the identifier's trailing three
-    // digits and filtered to the subscribed `types` (see notifications module).
+    // digits and filtered to the subscribed `types` (see notifications module). An
+    // ACCESSTOKEN `sinkCredential` is applied to the callback as a bearer token.
     if let Some(event_type) = notifications::initial_event_type(
         config.initial_event,
         status,
@@ -348,7 +349,11 @@ async fn create_subscription(claims: Claims, headers: HeaderMap, body: Bytes) ->
                 device.as_ref(),
                 &area_json,
             );
-            notifications::spawn_delivery(sink.to_string(), event);
+            let auth = req
+                .sink_credential
+                .as_ref()
+                .and_then(notifications::sink_authorization);
+            notifications::spawn_delivery(sink.to_string(), event, auth);
         }
     }
 
@@ -1305,5 +1310,83 @@ mod tests {
         let event: Value = serde_json::from_str(event_body).expect("body is JSON");
         assert_eq!(event["type"], TYPE_LEFT);
         assert_eq!(event["data"]["subscriptionId"], json!(id));
+    }
+
+    #[tokio::test]
+    async fn initial_event_applies_the_accesstoken_sink_credential() {
+        use tokio::io::AsyncReadExt;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let sink = format!("http://{addr}/geo-auth");
+
+        // A create body with an ACCESSTOKEN sinkCredential and initialEvent: true.
+        let body = json!({
+            "protocol": "HTTP",
+            "sink": sink,
+            "sinkCredential": {
+                "credentialType": "ACCESSTOKEN",
+                "accessToken": "sink-secret-token",
+                "accessTokenType": "bearer",
+            },
+            "types": [TYPE_ENTERED, TYPE_LEFT],
+            "config": {
+                "subscriptionDetail": {
+                    "device": { "phoneNumber": "+123456789012" },
+                    "area": {
+                        "areaType": "CIRCLE",
+                        "center": { "latitude": 51.5, "longitude": -0.12 },
+                        "radius": 5000,
+                    },
+                },
+                "initialEvent": true,
+            },
+        })
+        .to_string();
+
+        let token = mint_token(CREATE_SCOPE).await;
+        let (status, _, created) = post_subscriptions(Some(&token), &body, None).await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(created["status"], "ACTIVE");
+        // The secret is never echoed back.
+        assert!(created.get("sinkCredential").is_none());
+
+        // The fire-and-forget callback carries the RFC 6750 bearer header.
+        let (mut sock, _) = listener.accept().await.unwrap();
+        let mut buf = Vec::new();
+        sock.read_to_end(&mut buf).await.unwrap();
+        let raw = String::from_utf8(buf).unwrap();
+        let (head, event_body) = raw.split_once("\r\n\r\n").expect("headers then body");
+        assert!(
+            head.contains("Authorization: Bearer sink-secret-token\r\n"),
+            "authorization header present: {head}"
+        );
+        let event: Value = serde_json::from_str(event_body).expect("body is JSON");
+        assert_eq!(event["type"], TYPE_ENTERED);
+    }
+
+    #[tokio::test]
+    async fn initial_event_without_a_credential_is_unauthenticated() {
+        use tokio::io::AsyncReadExt;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let sink = format!("http://{addr}/geo-noauth");
+
+        let token = mint_token(CREATE_SCOPE).await;
+        let (status, _, _) =
+            post_subscriptions(Some(&token), &body_with_initial_event(&sink, "+123456789012"), None)
+                .await;
+        assert_eq!(status, StatusCode::CREATED);
+
+        let (mut sock, _) = listener.accept().await.unwrap();
+        let mut buf = Vec::new();
+        sock.read_to_end(&mut buf).await.unwrap();
+        let raw = String::from_utf8(buf).unwrap();
+        let (head, _) = raw.split_once("\r\n\r\n").expect("headers then body");
+        // No sinkCredential → callback sent unauthenticated.
+        assert!(!head.contains("Authorization:"), "unauthenticated: {head}");
     }
 }
