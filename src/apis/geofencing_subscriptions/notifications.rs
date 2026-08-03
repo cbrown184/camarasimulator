@@ -9,15 +9,23 @@
 //!
 //! ## What fires in the simulator (docs/DESIGN.md §7)
 //!
-//! There is no real device movement in a headless simulator, so the only
-//! request-triggered, deterministic transition is the **initial event**: when a
-//! subscription is created with `config.initialEvent: true` and it becomes
-//! `ACTIVE`, CAMARA reports the device's *current* position relative to the area.
-//! CamaraSim derives that current position from the identifier's trailing three
-//! digits — **even → inside** (`area-entered`), **odd → outside** (`area-left`) —
-//! and delivers the matching event, but only when that event type is among the
-//! subscription's `types` (a consumer only receives events it subscribed to).
-//! See [`initial_event_type`].
+//! There is no real device movement in a headless simulator, so CamaraSim
+//! derives its geofencing events deterministically from the identifier:
+//!
+//! - The **initial event** (`config.initialEvent: true`): when a subscription is
+//!   created and becomes `ACTIVE`, CAMARA reports the device's *current* position
+//!   relative to the area. CamaraSim derives that from the identifier's trailing
+//!   three digits — **even → inside** (`area-entered`), **odd → outside**
+//!   (`area-left`). See [`initial_event_type`].
+//! - A **movement event** (a simulated boundary crossing): two reserved
+//!   identifier tails instruct the simulator to report a crossing shortly after
+//!   creation — **`…001` → the device enters** (`area-entered`), **`…002` → it
+//!   leaves** (`area-left`) — mirroring QoD's `…001` `NETWORK_TERMINATED`
+//!   transition. See [`movement_event_type`].
+//!
+//! Both fire only for an `ACTIVE` subscription and only when the resulting event
+//! type is among the subscription's `types` (a consumer only receives events it
+//! subscribed to).
 //!
 //! ## Simulator constraints & documented cuts
 //!
@@ -90,6 +98,48 @@ pub fn initial_event_type(
         EVENT_TYPE_ENTERED
     } else {
         EVENT_TYPE_LEFT
+    };
+    if types.iter().any(|t| t == event_type) {
+        Some(event_type)
+    } else {
+        None
+    }
+}
+
+/// Decide which movement CloudEvent (if any) a subscription should deliver as a
+/// simulated boundary crossing shortly after creation.
+///
+/// A headless simulator has no real device movement, so — mirroring QoD's `…001`
+/// `NETWORK_TERMINATED` transition (docs/DESIGN.md §7) — CamaraSim treats two
+/// reserved identifier tails as an instruction to simulate a crossing:
+/// - **`…001`** → the device *enters* the area → `area-entered`;
+/// - **`…002`** → the device *leaves* the area → `area-left`.
+///
+/// Returns the event `type` to send, or `None` when no movement should fire. A
+/// movement event fires only when **all** of these hold:
+/// - the subscription became `ACTIVE` (an `ACTIVATION_REQUESTED` subscription is
+///   not yet active, so it reports no transitions);
+/// - the identifier's trailing three digits are exactly `001` (enter) or `002`
+///   (leave) — any other tail simulates no movement;
+/// - the crossing's event type is among the subscription's `types` (a consumer
+///   receives only the events it subscribed to).
+///
+/// The movement marker is independent of the initial-event even/odd position: a
+/// `…001` device (odd → currently outside) entering, and a `…002` device (even →
+/// currently inside) leaving, are each a coherent crossing. Pure and directly
+/// testable.
+pub fn movement_event_type(
+    status: &str,
+    digits: Option<u16>,
+    types: &[String],
+) -> Option<&'static str> {
+    if status != "ACTIVE" {
+        return None;
+    }
+    let event_type = match digits? {
+        1 => EVENT_TYPE_ENTERED,
+        2 => EVENT_TYPE_LEFT,
+        _ => return None,
     };
     if types.iter().any(|t| t == event_type) {
         Some(event_type)
@@ -309,6 +359,49 @@ mod tests {
             initial_event_type(Some(true), "ACTIVE", Some(13), &entered_only),
             None
         );
+    }
+
+    #[test]
+    fn movement_fires_only_for_the_001_002_tails_when_active() {
+        let both = types(&[EVENT_TYPE_ENTERED, EVENT_TYPE_LEFT]);
+
+        // …001 → enter, …002 → leave (an ACTIVE subscription).
+        assert_eq!(
+            movement_event_type("ACTIVE", Some(1), &both),
+            Some(EVENT_TYPE_ENTERED)
+        );
+        assert_eq!(
+            movement_event_type("ACTIVE", Some(2), &both),
+            Some(EVENT_TYPE_LEFT)
+        );
+        // Any other tail simulates no movement.
+        assert_eq!(movement_event_type("ACTIVE", Some(12), &both), None);
+        assert_eq!(movement_event_type("ACTIVE", Some(101), &both), None);
+        assert_eq!(movement_event_type("ACTIVE", None, &both), None);
+        // ACTIVATION_REQUESTED reports no transitions, even with a marker tail.
+        assert_eq!(
+            movement_event_type("ACTIVATION_REQUESTED", Some(1), &both),
+            None
+        );
+    }
+
+    #[test]
+    fn movement_is_filtered_to_subscribed_types() {
+        let entered_only = types(&[EVENT_TYPE_ENTERED]);
+        let left_only = types(&[EVENT_TYPE_LEFT]);
+
+        // …001 wants area-entered: delivered iff subscribed.
+        assert_eq!(
+            movement_event_type("ACTIVE", Some(1), &entered_only),
+            Some(EVENT_TYPE_ENTERED)
+        );
+        assert_eq!(movement_event_type("ACTIVE", Some(1), &left_only), None);
+        // …002 wants area-left: delivered iff subscribed.
+        assert_eq!(
+            movement_event_type("ACTIVE", Some(2), &left_only),
+            Some(EVENT_TYPE_LEFT)
+        );
+        assert_eq!(movement_event_type("ACTIVE", Some(2), &entered_only), None);
     }
 
     #[test]

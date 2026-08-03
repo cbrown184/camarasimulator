@@ -310,8 +310,15 @@ waits until that instant, then evicts the subscription and delivers a
 `subscription-ended` CloudEvent (`terminationReason: SUBSCRIPTION_EXPIRED`) to the
 `sink` — with the ACCESSTOKEN `sinkCredential` bearer applied. A concurrent
 `deleteSubscription` wins the eviction (exactly-once); a non-`Z` offset time is
-echoed but arms no timer (documented cut). Only movement-triggered events +
-`subscriptionMaxEvents` remain.
+echoed but arms no timer (documented cut). **Movement-triggered events** are now
+delivered too: a `…001` identifier tail on an `ACTIVE`, sink-bearing subscription
+simulates the device *entering* the area (`area-entered`) and a `…002` tail
+simulates it *leaving* (`area-left`), delivered by a short (1 s) fire-and-forget
+timer (`v0_4::spawn_movement`, off the request path, mirroring QoD's `…001`
+NETWORK_TERMINATED), filtered to the subscribed `types`, with the ACCESSTOKEN
+`sinkCredential` bearer applied; the subscription stays `ACTIVE` and a crossing is
+suppressed if a delete/expiry already ended it. Only `subscriptionMaxEvents`
+enforcement now remains for the API.
 
 ## In progress (claimed this pass)
 
@@ -381,7 +388,8 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     - [x] initial event (`config.initialEvent`) — an `area-entered`/`area-left`
       CloudEvent for the device's current in/out state at creation of an ACTIVE
       subscription (http sink, fire-and-forget over raw TCP; no HTTP-client dep)
-    - [ ] movement-triggered `area-entered`/`area-left` events
+    - [x] movement-triggered `area-entered`/`area-left` events (`…001` tail →
+      enter, `…002` tail → leave; simulated crossing via a 1 s fire-and-forget timer)
     - [x] `sinkCredential` auth on the callback (ACCESSTOKEN bearer on the
       initial-event callback; PLAIN/REFRESHTOKEN deferred)
     - [x] expiry (`subscriptionExpireTime`) → `subscription-ended`
@@ -407,6 +415,33 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 ## Scan journal
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
+
+- 2026-08-03 — Phase 4 (spatial): **Geofencing Subscriptions v0.4** —
+  **movement-triggered `area-entered`/`area-left` events** (simulated boundary
+  crossing). A headless simulator has no real device motion, so — mirroring QoD's
+  `…001` `NETWORK_TERMINATED` — two reserved identifier tails now instruct the
+  simulator to report a crossing: `…001` → the device *enters* (`area-entered`),
+  `…002` → it *leaves* (`area-left`). New pure `notifications::movement_event_type`
+  (fires only for an ACTIVE subscription whose trailing-three-digits are exactly
+  `001`/`002` and whose crossing type is among the subscribed `types`); new
+  `v0_4::spawn_movement`, a short (1 s, `MOVEMENT_GRACE_SECS`) fire-and-forget timer
+  (off the request path, mirroring QoD's `spawn_network_termination`) that — if the
+  subscription is still live (a `store::get` guard suppresses the crossing when a
+  delete/expiry already ended it) — builds the `geofencing_event` and delivers it,
+  with the ACCESSTOKEN `sinkCredential` bearer applied. The marker is independent of
+  the initial-event even/odd position, so both events can fire for one subscription;
+  the subscription stays `ACTIVE` (bounding the count via `subscriptionMaxEvents` is
+  the only remaining API item). **No new deps** (reuses `geofencing_event` /
+  `spawn_delivery` / `sink_authorization`). Spec: updated
+  `specs/geofencing-subscriptions/v0.4/openapi.yaml` — new "Movement events" section,
+  refreshed header/initial-event prose, the `createSubscription`
+  `x-camarasim-scenarios` (3 movement cases + refreshed cuts) and `callbacks`
+  description (now three event kinds). 436 tests green (was 431; +5: 2 notifications
+  units [`…001`→entered/`…002`→leave, ACTIVE-only, other-tail/None → none · type
+  filtering] + 3 v0_4 integration [`…001` → area-entered to loopback sink w/
+  subscriptionId+device+area · `…002` → area-left · ACCESSTOKEN → `Authorization:
+  Bearer` on the movement callback]). — binary: 1485200 B (+8328 B; mostly the new
+  vendored spec text embedded via include_str!)
 
 - 2026-08-03 — Phase 4 (spatial): **Geofencing Subscriptions v0.4** — **subscription
   expiry** (`config.subscriptionExpireTime` → `subscription-ended`). A subscription

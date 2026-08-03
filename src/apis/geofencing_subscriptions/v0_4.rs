@@ -93,6 +93,12 @@ const MAX_RADIUS_METRES: f64 = 200_000.0;
 /// cut).
 const SUPPORTED_PROTOCOL: &str = "HTTP";
 
+/// How long after creation a simulated boundary crossing (`…001`/`…002` tail) is
+/// delivered, in seconds — a short, fixed grace so a headless caller can observe
+/// the movement event just after the `201`. Mirrors QoD's
+/// `NETWORK_TERMINATION_GRACE_SECS`.
+const MOVEMENT_GRACE_SECS: u64 = 1;
+
 /// The geofencing event types CamaraSim accepts in `types` (CAMARA
 /// geofencing-subscriptions 0.4.0 → major version `v0`).
 const KNOWN_EVENT_TYPES: &[&str] = &[
@@ -357,6 +363,38 @@ async fn create_subscription(claims: Claims, headers: HeaderMap, body: Bytes) ->
         }
     }
 
+    // Movement (simulated boundary crossing): a `…001`/`…002` identifier tail on an
+    // ACTIVE, sink-bearing subscription instructs the (simulated) network to report
+    // a crossing shortly after creation — `…001` → the device enters (`area-entered`),
+    // `…002` → it leaves (`area-left`) — filtered to the subscribed `types` and
+    // delivered off the request path by a short fire-and-forget timer (mirroring
+    // QoD's `…001` NETWORK_TERMINATED). The subscription stays ACTIVE (bounding the
+    // event count via `subscriptionMaxEvents` is a later pass). An ACCESSTOKEN
+    // `sinkCredential` is applied to the callback.
+    if let Some(event_type) = notifications::movement_event_type(
+        status,
+        scenarios::trailing_three_digits(&identifier),
+        types,
+    ) {
+        if let Some(sink) = req.sink.as_deref() {
+            let detail = &info["config"]["subscriptionDetail"];
+            let device = detail.get("device").cloned();
+            let area_json = detail["area"].clone();
+            let auth = req
+                .sink_credential
+                .as_ref()
+                .and_then(notifications::sink_authorization);
+            spawn_movement(
+                id.clone(),
+                sink.to_string(),
+                event_type,
+                device,
+                area_json,
+                auth,
+            );
+        }
+    }
+
     // Expiry (config.subscriptionExpireTime): if the caller set an expiry time and
     // the sink is deliverable, schedule a fire-and-forget timer that ends the
     // subscription at that instant — evicting it and delivering a
@@ -408,6 +446,44 @@ fn spawn_expiry(subscription_id: String, sink: String, expires_at: i64, auth: Op
                 rfc3339_utc(now_unix_secs()),
                 &subscription_id,
                 "SUBSCRIPTION_EXPIRED",
+            );
+            notifications::spawn_delivery(sink, event, auth);
+        }
+    });
+}
+
+/// Schedule a simulated boundary-crossing movement CloudEvent for a `…001`/`…002`
+/// subscription.
+///
+/// Spawns a fire-and-forget async timer (never on the request path, DESIGN §11)
+/// that waits [`MOVEMENT_GRACE_SECS`] — a short, fixed grace, not a real device
+/// motion — then, **if the subscription still exists**, delivers a single
+/// `area-entered` (`event_type`) / `area-left` movement CloudEvent to `sink`. A
+/// `deleteSubscription` or an expiry that evicted the subscription first makes this
+/// a no-op (the `store::get` check is `None`), so a movement event is never
+/// delivered for a subscription that has already ended. The sleep is async, so the
+/// (single-node, in-memory) runtime is never blocked. `auth`, when present, applies
+/// the subscription's ACCESSTOKEN `sinkCredential` as an `Authorization: Bearer`
+/// header (RFC 6750).
+fn spawn_movement(
+    subscription_id: String,
+    sink: String,
+    event_type: &'static str,
+    device: Option<Value>,
+    area: Value,
+    auth: Option<String>,
+) {
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(MOVEMENT_GRACE_SECS)).await;
+        // Only deliver if the subscription is still live (not deleted/expired).
+        if store::get(&subscription_id).is_some() {
+            let event = notifications::geofencing_event(
+                store::new_event_id(),
+                rfc3339_utc(now_unix_secs()),
+                event_type,
+                &subscription_id,
+                device.as_ref(),
+                &area,
             );
             notifications::spawn_delivery(sink, event, auth);
         }
@@ -1482,6 +1558,145 @@ mod tests {
         let (head, _) = raw.split_once("\r\n\r\n").expect("headers then body");
         // No sinkCredential → callback sent unauthenticated.
         assert!(!head.contains("Authorization:"), "unauthenticated: {head}");
+    }
+
+    // --- movement-triggered CloudEvent delivery ----------------------------
+
+    /// Build a create body with an http `sink`, both event types, and **no**
+    /// `initialEvent` (so the only callback is the movement event), keyed off the
+    /// given phone number.
+    fn body_movement(sink: &str, phone: &str) -> String {
+        json!({
+            "protocol": "HTTP",
+            "sink": sink,
+            "types": [TYPE_ENTERED, TYPE_LEFT],
+            "config": {
+                "subscriptionDetail": {
+                    "device": { "phoneNumber": phone },
+                    "area": {
+                        "areaType": "CIRCLE",
+                        "center": { "latitude": 51.5, "longitude": -0.12 },
+                        "radius": 5000,
+                    },
+                },
+            },
+        })
+        .to_string()
+    }
+
+    #[tokio::test]
+    async fn movement_001_tail_delivers_area_entered_to_the_sink() {
+        use tokio::io::AsyncReadExt;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let sink = format!("http://{addr}/geo-move-in");
+
+        // …001 is an ACTIVE movement tail → the device enters → area-entered.
+        let token = mint_token(CREATE_SCOPE).await;
+        let (status, _, created) =
+            post_subscriptions(Some(&token), &body_movement(&sink, "+123456789001"), None).await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(created["status"], "ACTIVE");
+        let id = created["id"].as_str().unwrap().to_string();
+
+        // The movement CloudEvent arrives after the (short) simulated-crossing grace.
+        let (mut sock, _) = listener.accept().await.unwrap();
+        let mut buf = Vec::new();
+        sock.read_to_end(&mut buf).await.unwrap();
+        let raw = String::from_utf8(buf).unwrap();
+        let (head, event_body) = raw.split_once("\r\n\r\n").expect("headers then body");
+        assert!(
+            head.starts_with("POST /geo-move-in HTTP/1.1\r\n"),
+            "request line: {head}"
+        );
+        assert!(head.contains("Content-Type: application/cloudevents+json"));
+
+        let event: Value = serde_json::from_str(event_body).expect("body is JSON");
+        assert_eq!(event["type"], TYPE_ENTERED);
+        assert_eq!(event["specversion"], "1.0");
+        assert!(event["id"].is_string() && event["time"].is_string());
+        assert_eq!(event["data"]["subscriptionId"], json!(id));
+        assert_eq!(event["data"]["device"]["phoneNumber"], "+123456789001");
+        assert_eq!(event["data"]["area"]["radius"].as_f64(), Some(5000.0));
+    }
+
+    #[tokio::test]
+    async fn movement_002_tail_delivers_area_left_to_the_sink() {
+        use tokio::io::AsyncReadExt;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let sink = format!("http://{addr}/geo-move-out");
+
+        // …002 is an ACTIVE movement tail → the device leaves → area-left.
+        let token = mint_token(CREATE_SCOPE).await;
+        let (status, _, created) =
+            post_subscriptions(Some(&token), &body_movement(&sink, "+123456789002"), None).await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(created["status"], "ACTIVE");
+        let id = created["id"].as_str().unwrap().to_string();
+
+        let (mut sock, _) = listener.accept().await.unwrap();
+        let mut buf = Vec::new();
+        sock.read_to_end(&mut buf).await.unwrap();
+        let raw = String::from_utf8(buf).unwrap();
+        let (_, event_body) = raw.split_once("\r\n\r\n").expect("headers then body");
+        let event: Value = serde_json::from_str(event_body).expect("body is JSON");
+        assert_eq!(event["type"], TYPE_LEFT);
+        assert_eq!(event["data"]["subscriptionId"], json!(id));
+    }
+
+    #[tokio::test]
+    async fn movement_applies_the_accesstoken_sink_credential() {
+        use tokio::io::AsyncReadExt;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let sink = format!("http://{addr}/geo-move-auth");
+
+        let body = json!({
+            "protocol": "HTTP",
+            "sink": sink,
+            "sinkCredential": {
+                "credentialType": "ACCESSTOKEN",
+                "accessToken": "move-secret-token",
+                "accessTokenType": "bearer",
+            },
+            "types": [TYPE_ENTERED, TYPE_LEFT],
+            "config": {
+                "subscriptionDetail": {
+                    "device": { "phoneNumber": "+123456789001" },
+                    "area": {
+                        "areaType": "CIRCLE",
+                        "center": { "latitude": 51.5, "longitude": -0.12 },
+                        "radius": 5000,
+                    },
+                },
+            },
+        })
+        .to_string();
+
+        let token = mint_token(CREATE_SCOPE).await;
+        let (status, _, created) = post_subscriptions(Some(&token), &body, None).await;
+        assert_eq!(status, StatusCode::CREATED);
+        // The secret is never echoed back.
+        assert!(created.get("sinkCredential").is_none());
+
+        let (mut sock, _) = listener.accept().await.unwrap();
+        let mut buf = Vec::new();
+        sock.read_to_end(&mut buf).await.unwrap();
+        let raw = String::from_utf8(buf).unwrap();
+        let (head, event_body) = raw.split_once("\r\n\r\n").expect("headers then body");
+        assert!(
+            head.contains("Authorization: Bearer move-secret-token\r\n"),
+            "authorization header present: {head}"
+        );
+        let event: Value = serde_json::from_str(event_body).expect("body is JSON");
+        assert_eq!(event["type"], TYPE_ENTERED);
     }
 
     // --- subscriptionExpireTime → subscription-ended -----------------------
