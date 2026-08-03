@@ -59,6 +59,56 @@ pub fn all() -> Vec<Value> {
         .collect()
 }
 
+/// The outcome of a [`confirm`] attempt on a payment.
+pub enum ConfirmOutcome {
+    /// The reservation was `reserved` and is now `succeeded` (charged).
+    Confirmed,
+    /// The payment was already `succeeded` (charged) — `PAYMENT_CONFIRMED`.
+    AlreadyConfirmed,
+    /// The payment was already `cancelled` — `PAYMENT_CANCELLED`.
+    AlreadyCancelled,
+    /// The payment exists but is not in a confirmable (`reserved`) state — e.g.
+    /// `pending_validation` (its OTP has not been cleared) or `denied`.
+    NotConfirmable,
+    /// No such payment.
+    Unknown,
+}
+
+/// Confirm (charge) the reserved payment `id`, moving it `reserved → succeeded`
+/// and stamping `paymentDate` with `payment_date`. Driven atomically under the
+/// store lock (never held across an `.await`):
+///
+/// - `reserved` → `succeeded` (with `paymentDate`) → [`Confirmed`];
+/// - already `succeeded` → [`AlreadyConfirmed`] (409 `PAYMENT_CONFIRMED`);
+/// - already `cancelled` → [`AlreadyCancelled`] (409 `PAYMENT_CANCELLED`);
+/// - any other existing state (`pending_validation`, `denied`, …) →
+///   [`NotConfirmable`] (409 `CONFLICT`);
+/// - no such payment → [`Unknown`] (404).
+///
+/// [`Confirmed`]: ConfirmOutcome::Confirmed
+/// [`AlreadyConfirmed`]: ConfirmOutcome::AlreadyConfirmed
+/// [`AlreadyCancelled`]: ConfirmOutcome::AlreadyCancelled
+/// [`NotConfirmable`]: ConfirmOutcome::NotConfirmable
+/// [`Unknown`]: ConfirmOutcome::Unknown
+pub fn confirm(id: &str, payment_date: &str) -> ConfirmOutcome {
+    let mut map = store()
+        .lock()
+        .expect("carrier-billing payment store not poisoned");
+    match map.get_mut(id) {
+        None => ConfirmOutcome::Unknown,
+        Some(payment) => match payment["paymentStatus"].as_str() {
+            Some("reserved") => {
+                payment["paymentStatus"] = Value::String("succeeded".to_string());
+                payment["paymentDate"] = Value::String(payment_date.to_string());
+                ConfirmOutcome::Confirmed
+            }
+            Some("succeeded") => ConfirmOutcome::AlreadyConfirmed,
+            Some("cancelled") => ConfirmOutcome::AlreadyCancelled,
+            _ => ConfirmOutcome::NotConfirmable,
+        },
+    }
+}
+
 // --- Pending-validation side-store (two-step OTP flow) --------------------
 //
 // A reservation created by `preparePayment` for a phone number that requires
@@ -220,5 +270,55 @@ mod tests {
         let listed = all();
         assert!(listed.contains(&pay_a), "all() includes the first payment");
         assert!(listed.contains(&pay_b), "all() includes the second payment");
+    }
+
+    #[test]
+    fn confirm_drives_every_state_branch() {
+        // A reserved payment → succeeded (with paymentDate), then a second
+        // confirm sees `succeeded` → AlreadyConfirmed.
+        let id = "cb-store-confirm-unit-res".to_string();
+        insert(
+            id.clone(),
+            json!({ "paymentId": id, "paymentStatus": "reserved" }),
+        );
+        assert!(matches!(
+            confirm(&id, "2024-01-01T00:00:00Z"),
+            ConfirmOutcome::Confirmed
+        ));
+        let charged = get(&id).unwrap();
+        assert_eq!(charged["paymentStatus"], "succeeded");
+        assert_eq!(charged["paymentDate"], "2024-01-01T00:00:00Z");
+        assert!(matches!(
+            confirm(&id, "2024-01-01T00:00:00Z"),
+            ConfirmOutcome::AlreadyConfirmed
+        ));
+
+        // A cancelled payment → AlreadyCancelled.
+        let cid = "cb-store-confirm-unit-can".to_string();
+        insert(
+            cid.clone(),
+            json!({ "paymentId": cid, "paymentStatus": "cancelled" }),
+        );
+        assert!(matches!(
+            confirm(&cid, "2024-01-01T00:00:00Z"),
+            ConfirmOutcome::AlreadyCancelled
+        ));
+
+        // A denied (or pending_validation) payment is not confirmable.
+        let did = "cb-store-confirm-unit-den".to_string();
+        insert(
+            did.clone(),
+            json!({ "paymentId": did, "paymentStatus": "denied" }),
+        );
+        assert!(matches!(
+            confirm(&did, "2024-01-01T00:00:00Z"),
+            ConfirmOutcome::NotConfirmable
+        ));
+
+        // An unknown id → Unknown.
+        assert!(matches!(
+            confirm("cb-store-confirm-unit-no-such", "2024-01-01T00:00:00Z"),
+            ConfirmOutcome::Unknown
+        ));
     }
 }

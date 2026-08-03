@@ -66,13 +66,14 @@
 //! ## Documented cuts (this slice)
 //!
 //! - The one-step `createPayment`, read-back `retrievePayment`, list
-//!   `retrievePayments`, and the two-step flow's reserve `preparePayment` +
-//!   validate `validatePayment` steps are implemented; the remaining two-step
-//!   `confirmPayment` / `cancelPayment` operations are later slices.
+//!   `retrievePayments`, and the two-step flow's reserve `preparePayment`,
+//!   validate `validatePayment` + confirm `confirmPayment` steps are implemented;
+//!   the remaining two-step `cancelPayment` operation is a later slice.
 //!   `preparePayment` lands a `…888`-tail reservation in `pending_validation`
 //!   (with `validationInfo`) for `validatePayment` to clear, and `reserved`
-//!   otherwise; the 409 `ALREADY_EXISTS` duplicate-session case on
-//!   `preparePayment` (a `clientCorrelator` already in flight) is not modelled.
+//!   otherwise; `confirmPayment` charges a `reserved` payment → `succeeded`. The
+//!   409 `ALREADY_EXISTS` duplicate-session case on `preparePayment` (a
+//!   `clientCorrelator` already in flight) is not modelled.
 //! - `retrievePayments` returns the full list unpaginated and unfiltered: its
 //!   `page`/`perPage`, `paymentCreationDate.gte`/`.lte`, `paymentStatus`,
 //!   `merchantIdentifier`, and `order` query parameters are accepted but not
@@ -160,6 +161,13 @@ pub fn routes() -> Router {
             "/carrier-billing/v0.5/payments/:payment_id/validate",
             post(validate_payment),
         )
+        // The two-step confirm step — charges a reserved payment. `matchit`
+        // disambiguates it from `/payments/:payment_id/validate` (a different
+        // static suffix on the same param) and from `/payments/:payment_id`.
+        .route(
+            "/carrier-billing/v0.5/payments/:payment_id/confirm",
+            post(confirm_payment),
+        )
 }
 
 /// `POST /payments` request body (CAMARA `CreatePayment`).
@@ -187,6 +195,20 @@ struct ValidatePayment {
     authorization_id: String,
     /// The OTP `code` received "via SMS" to validate the payment.
     code: String,
+}
+
+/// `POST /payments/{paymentId}/confirm` request body (CAMARA `ConfirmPayment` —
+/// the CAMARA `PhoneNumber` shape). The optional `phoneNumber` re-identifies the
+/// account for a two-legged confirmation, but CamaraSim addresses the reservation
+/// by its opaque `paymentId`, so the field is accepted for schema fidelity but
+/// **not applied** (a documented cut). The whole body is optional — an empty body
+/// is accepted.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ConfirmPayment {
+    #[serde(rename = "phoneNumber")]
+    #[allow(dead_code)]
+    phone_number: Option<String>,
 }
 
 /// The CAMARA `AmountTransactionInput`: what to charge and to whom.
@@ -466,6 +488,79 @@ async fn validate_payment(
         )
         .into_response(),
         store::ValidateOutcome::Unknown => {
+            CamaraError::not_found("No payment found for the provided paymentId.").into_response()
+        }
+    };
+
+    with_correlator(resp, &correlator)
+}
+
+/// `POST /carrier-billing/v0.5/payments/{paymentId}/confirm` — confirm (charge)
+/// a reserved payment (operationId `confirmPayment`), the third step of the
+/// two-step reserve → validate → confirm / cancel flow.
+///
+/// A `preparePayment` (optionally cleared by `validatePayment`) leaves a payment
+/// in `reserved`. This endpoint charges it: on success the payment moves to
+/// `succeeded` (gaining a `paymentDate`) and the endpoint answers `202 Accepted`
+/// (no body, per CAMARA). Requires the `carrier-billing:payments:write` scope.
+///
+/// ## Functional cases — the store state is the control plane
+///
+/// Keyed only on the in-memory store (no reserved-identifier plane — the
+/// `paymentId` is opaque):
+///
+/// - a `reserved` payment → `202` (reservation → `succeeded`, `paymentDate` set);
+/// - an already-`succeeded` payment → `409 CARRIER_BILLING.PAYMENT_CONFIRMED`;
+/// - an already-`cancelled` payment → `409 CARRIER_BILLING.PAYMENT_CANCELLED`;
+/// - a payment in any other state (`pending_validation` — its OTP has not been
+///   validated — or `denied`) → `409 CONFLICT` (not confirmable);
+/// - an unknown `paymentId` → `404 NOT_FOUND`.
+///
+/// **Documented cut:** the optional `phoneNumber` body field (CAMARA
+/// `ConfirmPayment`) is accepted but not applied — the reservation is addressed
+/// by its opaque `paymentId`, so CamaraSim does not re-check the identifier.
+async fn confirm_payment(
+    claims: Claims,
+    headers: HeaderMap,
+    Path(payment_id): Path<String>,
+    body: Bytes,
+) -> Response {
+    // Optional correlation header, echoed on every response (CAMARA Commonalities).
+    let correlator = headers.get("x-correlator").cloned();
+
+    // Endpoint authorisation: the token must carry this API's write scope.
+    if let Err(e) = claims.require_scope(WRITE_SCOPE) {
+        return with_correlator(e.into_response(), &correlator);
+    }
+
+    // The `ConfirmPayment` body is optional (the CAMARA `PhoneNumber` shape): an
+    // empty body is accepted; a present but malformed body → 400.
+    if !body.is_empty() && serde_json::from_slice::<ConfirmPayment>(&body).is_err() {
+        return invalid_argument("Request body is not a valid ConfirmPayment.", &correlator);
+    }
+
+    let now = rfc3339_utc(now_unix_secs());
+    let resp = match store::confirm(&payment_id, &now) {
+        store::ConfirmOutcome::Confirmed => StatusCode::ACCEPTED.into_response(),
+        store::ConfirmOutcome::AlreadyConfirmed => CamaraError::new(
+            StatusCode::CONFLICT,
+            "CARRIER_BILLING.PAYMENT_CONFIRMED",
+            "Payment has been confirmed.",
+        )
+        .into_response(),
+        store::ConfirmOutcome::AlreadyCancelled => CamaraError::new(
+            StatusCode::CONFLICT,
+            "CARRIER_BILLING.PAYMENT_CANCELLED",
+            "Payment has been cancelled.",
+        )
+        .into_response(),
+        store::ConfirmOutcome::NotConfirmable => CamaraError::new(
+            StatusCode::CONFLICT,
+            "CONFLICT",
+            "The payment cannot be confirmed in its current state.",
+        )
+        .into_response(),
+        store::ConfirmOutcome::Unknown => {
             CamaraError::not_found("No payment found for the provided paymentId.").into_response()
         }
     };
@@ -1543,6 +1638,198 @@ mod tests {
         assert_eq!(
             headers.get("x-correlator").and_then(|v| v.to_str().ok()),
             Some("corr-val-ok")
+        );
+    }
+
+    // --- confirmPayment (POST /payments/{paymentId}/confirm) ---------------
+
+    /// POST an (optional) JSON body to `/payments/{paymentId}/confirm`.
+    async fn post_confirm(
+        token: Option<&str>,
+        payment_id: &str,
+        body: &str,
+        correlator: Option<&str>,
+    ) -> (StatusCode, HeaderMap, Value) {
+        let mut builder = Request::builder()
+            .method("POST")
+            .uri(format!("/carrier-billing/v0.5/payments/{payment_id}/confirm"))
+            .header("host", HOST)
+            .header("content-type", "application/json");
+        if let Some(t) = token {
+            builder = builder.header("authorization", format!("Bearer {t}"));
+        }
+        if let Some(c) = correlator {
+            builder = builder.header("x-correlator", c);
+        }
+        let response = app()
+            .oneshot(builder.body(Body::from(body.to_string())).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let headers = response.headers().clone();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, headers, json)
+    }
+
+    /// Reserve a plain (`reserved`, not pending) payment, returning its id.
+    async fn prepare_reserved(phone: &str) -> String {
+        let (status, _, body) = prepare_ok_token(&payment_body(phone, 9.99)).await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(body["paymentStatus"], "reserved");
+        body["paymentId"].as_str().unwrap().to_string()
+    }
+
+    #[tokio::test]
+    async fn confirm_reserved_charges_and_moves_to_succeeded() {
+        let id = prepare_reserved("+123456789012").await;
+        let write = mint_token(WRITE_SCOPE).await;
+        let (status, _, _) = post_confirm(Some(&write), &id, "", None).await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+
+        // The reservation is now charged: `succeeded`, with a `paymentDate`.
+        let read = mint_token(READ_SCOPE).await;
+        let (status, _, fetched) = get_payment(Some(&read), &id, None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(fetched["paymentStatus"], "succeeded");
+        assert!(fetched["paymentDate"].as_str().unwrap().ends_with('Z'));
+    }
+
+    #[tokio::test]
+    async fn confirm_accepts_an_optional_phone_number_body() {
+        // A `{ phoneNumber }` body is accepted (though not applied).
+        let id = prepare_reserved("+123456789012").await;
+        let write = mint_token(WRITE_SCOPE).await;
+        let (status, _, _) = post_confirm(
+            Some(&write),
+            &id,
+            r#"{"phoneNumber":"+123456789012"}"#,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+    }
+
+    #[tokio::test]
+    async fn confirm_malformed_body_is_invalid_argument() {
+        let id = prepare_reserved("+123456789012").await;
+        let write = mint_token(WRITE_SCOPE).await;
+        let (status, _, body) =
+            post_confirm(Some(&write), &id, r#"{"unknownField":1}"#, None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "INVALID_ARGUMENT");
+    }
+
+    #[tokio::test]
+    async fn confirm_already_succeeded_is_payment_confirmed_conflict() {
+        // Confirm a reservation, then confirm again → 409 PAYMENT_CONFIRMED.
+        let id = prepare_reserved("+123456789012").await;
+        let write = mint_token(WRITE_SCOPE).await;
+        let (status, _, _) = post_confirm(Some(&write), &id, "", None).await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+
+        let (status, _, body) = post_confirm(Some(&write), &id, "", None).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["code"], "CARRIER_BILLING.PAYMENT_CONFIRMED");
+    }
+
+    #[tokio::test]
+    async fn confirm_a_one_step_payment_is_payment_confirmed_conflict() {
+        // A one-step `createPayment` is already `succeeded`, so it cannot be confirmed.
+        let (_, _, created) = create_ok_token(&payment_body("+123456789012", 9.99)).await;
+        let id = created["paymentId"].as_str().unwrap().to_string();
+        let write = mint_token(WRITE_SCOPE).await;
+        let (status, _, body) = post_confirm(Some(&write), &id, "", None).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["code"], "CARRIER_BILLING.PAYMENT_CONFIRMED");
+    }
+
+    #[tokio::test]
+    async fn confirm_a_pending_validation_reservation_is_conflict() {
+        // A `…888` reservation is `pending_validation` (OTP not cleared) → 409 CONFLICT.
+        let (id, _auth) = prepare_pending("+123456789888").await;
+        let write = mint_token(WRITE_SCOPE).await;
+        let (status, _, body) = post_confirm(Some(&write), &id, "", None).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["code"], "CONFLICT");
+    }
+
+    #[tokio::test]
+    async fn confirm_a_denied_reservation_is_conflict() {
+        // Exhaust the OTP budget so the reservation is `denied`, then confirm → 409 CONFLICT.
+        let (id, auth) = prepare_pending("+123456789888").await;
+        let write = mint_token(WRITE_SCOPE).await;
+        for _ in 0..VALIDATION_ATTEMPTS {
+            let (status, _, _) =
+                post_validate(Some(&write), &id, &validate_body(&auth, "000000"), None).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+        }
+        let (status, _, body) = post_confirm(Some(&write), &id, "", None).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["code"], "CONFLICT");
+    }
+
+    #[tokio::test]
+    async fn confirm_unknown_payment_is_not_found() {
+        let write = mint_token(WRITE_SCOPE).await;
+        let (status, _, body) = post_confirm(
+            Some(&write),
+            "11111111-1111-4111-8111-111111111111",
+            "",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn confirm_without_the_write_scope_is_forbidden() {
+        let id = prepare_reserved("+123456789012").await;
+        let create_only = mint_token(CREATE_SCOPE).await;
+        let (status, _, body) = post_confirm(Some(&create_only), &id, "", None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["code"], "PERMISSION_DENIED");
+    }
+
+    #[tokio::test]
+    async fn confirm_without_a_token_is_unauthenticated() {
+        let (status, _, body) = post_confirm(
+            None,
+            "11111111-1111-4111-8111-111111111111",
+            "",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["code"], "UNAUTHENTICATED");
+    }
+
+    #[tokio::test]
+    async fn confirm_echoes_x_correlator_on_success_and_error() {
+        let write = mint_token(WRITE_SCOPE).await;
+        let id = prepare_reserved("+123456789012").await;
+        let (status, headers, _) =
+            post_confirm(Some(&write), &id, "", Some("corr-conf-ok")).await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-conf-ok")
+        );
+
+        let (status, headers, _) = post_confirm(
+            Some(&write),
+            "11111111-1111-4111-8111-111111111111",
+            "",
+            Some("corr-conf-err"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-conf-err")
         );
     }
 }

@@ -13,8 +13,9 @@
 # `GET /payments/{paymentId}` (`retrievePayment`, read-back), `GET /payments`
 # (`retrievePayments`, list), `POST /payments/prepare` (`preparePayment`, the
 # two-step flow's reserve step), and `POST /payments/{paymentId}/validate`
-# (`validatePayment`, the two-step flow's OTP-validation step). The remaining
-# two-step confirm / cancel operations are later slices.
+# (`validatePayment`, the two-step flow's OTP-validation step), and
+# `POST /payments/{paymentId}/confirm` (`confirmPayment`, the two-step flow's
+# confirm step). The remaining two-step cancel operation is a later slice.
 openapi: 3.0.3
 info:
   title: Carrier Billing
@@ -117,17 +118,34 @@ info:
     awaiting validation (already reserved / succeeded / denied) → `409
     ALREADY_EXISTS`; an unknown `paymentId` → `404 NOT_FOUND`.
 
+    ## Confirm — `POST /payments/{paymentId}/confirm` (`confirmPayment`)
+
+    Third step of the two-step flow: charges a `reserved` payment. On success the
+    payment moves to `succeeded` (gaining a `paymentDate`) and the endpoint
+    answers `202 Accepted` (no body). It requires the
+    `carrier-billing:payments:write` scope. Keyed only on the store state (no
+    reserved-identifier plane — the `paymentId` is opaque): a `reserved` payment →
+    `202`; an already-`succeeded` payment → `409
+    CARRIER_BILLING.PAYMENT_CONFIRMED`; an already-`cancelled` payment → `409
+    CARRIER_BILLING.PAYMENT_CANCELLED`; any other non-`reserved` state
+    (`pending_validation` — its OTP is not cleared — or `denied`) → `409 CONFLICT`;
+    an unknown `paymentId` → `404 NOT_FOUND`. The optional `phoneNumber` body
+    field is accepted but not applied.
+
     ## Documented cuts (this slice)
 
     - `POST /payments` (`createPayment`), `GET /payments/{paymentId}`
       (`retrievePayment`), `GET /payments` (`retrievePayments`, list),
-      `POST /payments/prepare` (`preparePayment`), and
-      `POST /payments/{paymentId}/validate` (`validatePayment`) are implemented;
-      the remaining two-step confirm / cancel operations are later slices.
+      `POST /payments/prepare` (`preparePayment`),
+      `POST /payments/{paymentId}/validate` (`validatePayment`), and
+      `POST /payments/{paymentId}/confirm` (`confirmPayment`) are implemented;
+      the remaining two-step cancel operation is a later slice.
       `preparePayment` produces `pending_validation` (with `validationInfo`) for
       the `…888` tail and `reserved` otherwise; the 409 `ALREADY_EXISTS`
       duplicate-session case on `preparePayment` (a `clientCorrelator` already
-      in flight) is not modelled.
+      in flight) is not modelled. `confirmPayment`'s optional `phoneNumber` body
+      field is accepted but not applied (the reservation is addressed by its
+      `paymentId`).
     - `retrievePayments` returns the full list unpaginated and unfiltered — its
       `page`/`perPage`, `paymentCreationDate.gte`/`.lte`, `paymentStatus`,
       `merchantIdentifier`, and `order` query parameters are accepted but not
@@ -598,6 +616,99 @@ paths:
           - input: an unknown `paymentId`
             result: "404 NOT_FOUND"
 
+  /payments/{paymentId}/confirm:
+    post:
+      operationId: confirmPayment
+      summary: Confirm (charge) a reserved payment
+      description: |
+        Third step of the two-step flow: charges a `reserved` payment. On success
+        the payment moves to `succeeded` (gaining a `paymentDate`) and this
+        returns `202 Accepted` (no body). Requires the
+        `carrier-billing:payments:write` scope.
+
+        There is no reserved-identifier control plane here (the `paymentId` is
+        opaque); the store state drives the outcome. The optional `phoneNumber`
+        body field (CAMARA `ConfirmPayment` / `PhoneNumber`) is accepted but not
+        applied — the reservation is addressed by its `paymentId`.
+      security:
+        - openId:
+            - carrier-billing:payments:write
+      parameters:
+        - $ref: "#/components/parameters/PaymentId"
+        - $ref: "#/components/parameters/XCorrelator"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ConfirmPayment"
+      responses:
+        "202":
+          description: The confirmation was accepted; the payment is now `succeeded`.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+        "400":
+          $ref: "../../shared/errors.yaml#/components/responses/InvalidArgument"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "409":
+          description: |
+            409 — the payment cannot be confirmed in its current state.
+            CamaraSim returns `CARRIER_BILLING.PAYMENT_CONFIRMED` when the payment
+            is already `succeeded`, `CARRIER_BILLING.PAYMENT_CANCELLED` when it is
+            already `cancelled`, and the generic `CONFLICT` for any other
+            non-`reserved` state (`pending_validation` — its OTP has not been
+            validated — or `denied`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CarrierBillingError"
+              examples:
+                paymentConfirmed:
+                  summary: Already confirmed
+                  value:
+                    status: 409
+                    code: CARRIER_BILLING.PAYMENT_CONFIRMED
+                    message: Payment has been confirmed.
+                paymentCancelled:
+                  summary: Already cancelled
+                  value:
+                    status: 409
+                    code: CARRIER_BILLING.PAYMENT_CANCELLED
+                    message: Payment has been cancelled.
+                notConfirmable:
+                  summary: Not in a confirmable state
+                  value:
+                    status: 409
+                    code: CONFLICT
+                    message: The payment cannot be confirmed in its current state.
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          Keyed only on the in-memory store state (no reserved-identifier plane —
+          the `paymentId` is opaque). Only a `reserved` payment is confirmable.
+        cases:
+          - input: a `reserved` payment (from `preparePayment`, optionally validated)
+            result: "202 (reservation → succeeded, paymentDate set)"
+          - input: a payment already `succeeded`
+            result: "409 CARRIER_BILLING.PAYMENT_CONFIRMED"
+          - input: a payment already `cancelled`
+            result: "409 CARRIER_BILLING.PAYMENT_CANCELLED"
+          - input: a payment `pending_validation` (OTP not cleared) or `denied`
+            result: "409 CONFLICT"
+          - input: an unknown `paymentId`
+            result: "404 NOT_FOUND"
+
   /payments/{paymentId}:
     get:
       operationId: retrievePayment
@@ -1049,6 +1160,22 @@ components:
           description: Code received via SMS to validate and authorize the payment.
           example: "789888"
 
+    ConfirmPayment:
+      type: object
+      description: |
+        Request body for `confirmPayment` (the CAMARA `PhoneNumber` shape). The
+        optional `phoneNumber` re-identifies the account for a two-legged
+        confirmation; CamaraSim addresses the reservation by its opaque
+        `paymentId`, so the field is accepted but not applied. The whole body is
+        optional — an empty body is accepted.
+      properties:
+        phoneNumber:
+          type: string
+          pattern: '^\+[1-9][0-9]{4,14}$'
+          description: >-
+            E.164 phone number of the account. Accepted but not applied
+            (CamaraSim addresses the reservation by its `paymentId`).
+
     AmountTransaction:
       type: object
       description: The echoed charge, with the resolved `phoneNumber`.
@@ -1092,6 +1219,9 @@ components:
             - CARRIER_BILLING.INVALID_AUTHORIZATION_ID
             - CARRIER_BILLING.INVALID_CODE
             - CARRIER_BILLING.VALIDATION_FAILED
+            - CARRIER_BILLING.PAYMENT_CONFIRMED
+            - CARRIER_BILLING.PAYMENT_CANCELLED
+            - CONFLICT
         message:
           type: string
           description: Human-readable explanation.

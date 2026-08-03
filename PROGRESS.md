@@ -395,8 +395,18 @@ in-memory side-store (`store::PendingValidation`) apart from the echoed payment.
 dropped); wrong `authorizationId` → 400 `CARRIER_BILLING.INVALID_AUTHORIZATION_ID`;
 wrong `code` → 400 `CARRIER_BILLING.INVALID_CODE` until the 3-attempt budget is
 spent → 400 `CARRIER_BILLING.VALIDATION_FAILED` (reservation → `denied`); a
-settled payment → 409 `ALREADY_EXISTS`; unknown id → 404. Only `confirmPayment` /
-`cancelPayment` remain to complete the two-step flow.
+settled payment → 409 `ALREADY_EXISTS`; unknown id → 404.
+
+The two-step flow's **confirm** step is now live too: `POST /payments/{paymentId}/
+confirm` (`confirmPayment`, `carrier-billing:payments:write`) charges a `reserved`
+payment → `succeeded` (stamping `paymentDate`) and answers `202 Accepted` (no
+body). Keyed only on the store state (opaque `paymentId`, no reserved-identifier
+plane): `reserved` → 202; already `succeeded` → 409
+`CARRIER_BILLING.PAYMENT_CONFIRMED`; already `cancelled` → 409
+`CARRIER_BILLING.PAYMENT_CANCELLED`; other non-`reserved`
+(`pending_validation`/`denied`) → 409 `CONFLICT`; unknown → 404. The transition
+runs atomically in a new `store::confirm`; the optional `phoneNumber` body is
+accepted-not-applied. Only `cancelPayment` remains to complete the two-step flow.
 
 ## In progress (claimed this pass)
 
@@ -511,8 +521,14 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
       the reserved phone number's last six digits, zero-padded (deterministic;
       mirrors OTP SMS). The 409 duplicate-session case on `preparePayment` is not
       modelled (documented cut).
-    - [ ] `POST /payments/{paymentId}/confirm` (`confirmPayment`,
-      `carrier-billing:payments:write`)
+    - [x] `POST /payments/{paymentId}/confirm` (`confirmPayment`,
+      `carrier-billing:payments:write`) — charges a `reserved` payment
+      → `succeeded` (gains `paymentDate`), `202 Accepted` (no body). Store
+      state the only control plane: `reserved` → 202; already `succeeded` →
+      409 `CARRIER_BILLING.PAYMENT_CONFIRMED`; already `cancelled` → 409
+      `CARRIER_BILLING.PAYMENT_CANCELLED`; other non-`reserved`
+      (`pending_validation`/`denied`) → 409 `CONFLICT`; unknown → 404. Optional
+      `phoneNumber` body accepted-not-applied.
     - [ ] `POST /payments/{paymentId}/cancel` (`cancelPayment`,
       `carrier-billing:payments:write`)
   - [ ] charging notifications on `sink` (accepted-but-not-applied for now)
@@ -533,6 +549,37 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 ## Scan journal
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
+
+- 2026-08-03 — Phase 5 (payments): **Carrier Billing v0.5** — **two-step
+  `confirmPayment`** (`POST /payments/{paymentId}/confirm`, scope
+  `carrier-billing:payments:write`), the confirm step. Verified the real CAMARA
+  CarrierBillingCheckOut r3.2 spec: op `confirmPayment`, body `ConfirmPayment`
+  (the `PhoneNumber` shape — optional `phoneNumber`, no required fields),
+  responses `202` (no body) + 400/401/403/404/409/422/429, 409 codes
+  `CARRIER_BILLING.PAYMENT_CONFIRMED` (already confirmed) / `…PAYMENT_CANCELLED`
+  (already cancelled), 404 NOT_FOUND. Implemented: charges a `reserved` payment
+  → `succeeded` (stamps `paymentDate`) → `202 Accepted`; already `succeeded` →
+  409 `PAYMENT_CONFIRMED`; already `cancelled` → 409 `PAYMENT_CANCELLED`; other
+  non-`reserved` (`pending_validation`/`denied`) → 409 `CONFLICT`; unknown id →
+  404. New `store::confirm(id, payment_date)` → `ConfirmOutcome` drives the
+  transition atomically under the store lock (never across await). Store state
+  is the only control plane (opaque `paymentId`, no reserved-identifier plane);
+  the optional `phoneNumber` body is accepted-not-applied (documented cut — the
+  `paymentId` identifies the reservation). Only `cancelPayment` remains to
+  complete the two-step flow. **No new deps.** Spec: updated
+  `specs/carrier-billing/v0.5/openapi.yaml` — new `POST /payments/{paymentId}/
+  confirm` operation (`x-camarasim-scenarios`, full 202/400/401/403/404/409/429/
+  500/503 set with the three 409 examples), new `ConfirmPayment` schema, two new
+  `CarrierBillingError` codes + `CONFLICT`, new "Confirm" description section +
+  refreshed header/cuts. 505 tests green (was 493; +12: 1 unit [store::confirm
+  drives every state branch: reserved→succeeded/paymentDate, →AlreadyConfirmed,
+  cancelled→AlreadyCancelled, denied→NotConfirmable, unknown→Unknown] + 11
+  integration [reserved→202/succeeded · optional phoneNumber body · malformed
+  body→400 · confirm twice→PAYMENT_CONFIRMED · one-step payment→PAYMENT_CONFIRMED
+  · pending_validation→CONFLICT · denied→CONFLICT · unknown→404 · no write
+  scope→403 · no token→401 · x-correlator on 202+404]). — binary: 1606024 B
+  (+12088 B; the confirm handler + store::confirm + the new vendored spec text
+  embedded via include_str!)
 
 - 2026-08-03 — Phase 5 (payments): **Carrier Billing v0.5** — **two-step
   `validatePayment`** (`POST /payments/{paymentId}/validate`, scope
