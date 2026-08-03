@@ -53,6 +53,10 @@ pub const EVENT_TYPE_ENTERED: &str =
     "org.camaraproject.geofencing-subscriptions.v0.area-entered";
 /// The CloudEvent `type` for a device leaving the watched area.
 pub const EVENT_TYPE_LEFT: &str = "org.camaraproject.geofencing-subscriptions.v0.area-left";
+/// The CloudEvent `type` reported when a subscription ends (CAMARA
+/// event-subscription-template `subscription-ended`).
+pub const EVENT_TYPE_SUBSCRIPTION_ENDED: &str =
+    "org.camaraproject.geofencing-subscriptions.v0.subscription-ended";
 
 /// The CloudEvent `source` — a uri-reference identifying the simulator's
 /// geofencing provider context (CloudEvents requires `id` unique within `source`).
@@ -124,6 +128,34 @@ pub fn geofencing_event(
         "datacontenttype": "application/json",
         "time": time,
         "data": data,
+    })
+}
+
+/// Build a `subscription-ended` CloudEvent (CloudEvents 1.0 envelope).
+///
+/// CAMARA's event-subscription-template ends a subscription with a
+/// `subscription-ended` event whose `data` carries the `subscriptionId` and a
+/// `terminationReason` (here `SUBSCRIPTION_EXPIRED`, when the subscription reaches
+/// its `config.subscriptionExpireTime`). Pure: the caller supplies the unique
+/// `event_id` ([`super::store::new_event_id`]) and the RFC 3339 `time`, so this is
+/// deterministic and directly testable. There is no `area` in an ended event.
+pub fn subscription_ended_event(
+    event_id: String,
+    time: String,
+    subscription_id: &str,
+    termination_reason: &str,
+) -> Value {
+    json!({
+        "id": event_id,
+        "source": SOURCE,
+        "type": EVENT_TYPE_SUBSCRIPTION_ENDED,
+        "specversion": "1.0",
+        "datacontenttype": "application/json",
+        "time": time,
+        "data": {
+            "subscriptionId": subscription_id,
+            "terminationReason": termination_reason,
+        },
     })
 }
 
@@ -307,6 +339,29 @@ mod tests {
         );
         assert_eq!(e["data"]["device"]["phoneNumber"], "+123456789012");
         assert_eq!(e["data"]["area"]["radius"], 5000);
+    }
+
+    #[test]
+    fn subscription_ended_event_has_the_camara_shape() {
+        let e = subscription_ended_event(
+            "evt-end".to_string(),
+            "2024-01-01T00:00:00Z".to_string(),
+            "11111111-2222-4333-8444-555555555555",
+            "SUBSCRIPTION_EXPIRED",
+        );
+        assert_eq!(e["id"], "evt-end");
+        assert_eq!(e["source"], SOURCE);
+        assert_eq!(e["type"], EVENT_TYPE_SUBSCRIPTION_ENDED);
+        assert_eq!(e["specversion"], "1.0");
+        assert_eq!(e["datacontenttype"], "application/json");
+        assert_eq!(e["time"], "2024-01-01T00:00:00Z");
+        assert_eq!(
+            e["data"]["subscriptionId"],
+            "11111111-2222-4333-8444-555555555555"
+        );
+        assert_eq!(e["data"]["terminationReason"], "SUBSCRIPTION_EXPIRED");
+        // An ended event carries no area.
+        assert!(e["data"].get("area").is_none());
     }
 
     #[test]

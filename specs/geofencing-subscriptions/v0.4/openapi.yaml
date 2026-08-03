@@ -22,10 +22,12 @@
 # `area-left` CloudEvent reporting the device's current in/out state at
 # subscription time, POSTed to the `sink`. When the subscription carries an
 # ACCESSTOKEN `sinkCredential`, that bearer token is applied to the callback as an
-# `Authorization: Bearer` header (RFC 6750). The remaining movement-triggered
-# `area-entered` / `area-left` events, the `subscription-ended` event on deletion,
-# and subscription expiry/maxEvents are deferred to later passes; the served spec
-# covers only what is implemented.
+# `Authorization: Bearer` header (RFC 6750). Subscription **expiry** is enforced
+# too: when `config.subscriptionExpireTime` (UTC `…Z`) is reached, the subscription
+# is evicted and a `subscription-ended` (`SUBSCRIPTION_EXPIRED`) CloudEvent is
+# POSTed to the `sink`. The remaining movement-triggered `area-entered` /
+# `area-left` events and `subscriptionMaxEvents` are deferred to later passes; the
+# served spec covers only what is implemented.
 openapi: 3.0.3
 info:
   title: Geofencing Subscriptions
@@ -103,6 +105,19 @@ info:
     `http://` sink (no TLS client — a documented cut). An `ACTIVATION_REQUESTED`
     subscription reports no state (it is not yet active), so no initial event
     fires. See the `createSubscription` `callbacks`.
+
+    ### Expiry (`config.subscriptionExpireTime`)
+
+    When a subscription is created with a `config.subscriptionExpireTime` in the
+    UTC (`…Z`) form, CamaraSim arms a fire-and-forget timer that ends the
+    subscription at that instant: it is evicted from the store and a
+    `subscription-ended` CloudEvent (`terminationReason: SUBSCRIPTION_EXPIRED`) is
+    POSTed to the `sink`. A time already in the past ends the subscription
+    immediately. Only the `…Z` form drives the timer — a numeric offset (e.g.
+    `+01:00`) is echoed back but arms no timer (a documented cut). A
+    `deleteSubscription` that removes the subscription first makes the timer a
+    no-op (so at most one terminal outcome occurs). `subscriptionMaxEvents` is not
+    yet enforced (a documented cut).
   version: "0.4.0"
   license:
     name: Apache-2.0
@@ -202,12 +217,17 @@ paths:
           the device's current position — even → inside → `area-entered`, odd →
           outside → `area-left` — filtered to the subscribed `types`. An ACCESSTOKEN
           `sinkCredential` is applied to that callback as an `Authorization: Bearer`
-          header (RFC 6750); the secret is never echoed. Documented cuts: only
+          header (RFC 6750); the secret is never echoed. When the caller sets
+          `config.subscriptionExpireTime` (UTC `…Z` form), a fire-and-forget timer
+          ends the subscription at that instant — evicting it and POSTing a
+          `subscription-ended` CloudEvent (`terminationReason: SUBSCRIPTION_EXPIRED`)
+          to the `sink`, with the same ACCESSTOKEN auth applied. Documented cuts: only
           `protocol: HTTP` is supported; PLAIN/REFRESHTOKEN `sinkCredential` types are
           accepted but not applied (unauthenticated); only `http://` sinks are
-          delivered to (no TLS client); movement-triggered events, `subscription-ended`
-          on DELETE, and expiry/maxEvents are deferred. 409/500 are CamaraSim
-          extensions of the shared error set so every reserved suffix is reachable.
+          delivered to (no TLS client); a non-`Z` expire time arms no timer;
+          movement-triggered events and `subscriptionMaxEvents` are deferred; DELETE
+          emits no `subscription-ended` event. 409/500 are CamaraSim extensions of
+          the shared error set so every reserved suffix is reachable.
         cases:
           - input: identifier ending in a reserved error suffix (e.g. …404)
             result: the canonical CAMARA error for that status
@@ -221,6 +241,10 @@ paths:
             result: "201; area-left CloudEvent POSTed to the sink"
           - input: initialEvent delivered with an ACCESSTOKEN `sinkCredential`
             result: "callback carries `Authorization: Bearer <accessToken>` (RFC 6750)"
+          - input: "`config.subscriptionExpireTime` set (UTC `…Z`), reached (or already past)"
+            result: "subscription evicted; `subscription-ended` (SUBSCRIPTION_EXPIRED) CloudEvent POSTed to the sink"
+          - input: "`config.subscriptionExpireTime` with a numeric offset (e.g. +01:00)"
+            result: "201; echoed back but no expiry timer armed (documented cut)"
           - input: "circle radius < 2000 or > 200000, or center out of range"
             result: "400 OUT_OF_RANGE"
           - input: "areaType not CIRCLE, missing area/center/radius, protocol not HTTP, missing/unknown types, or a device carrying no identifier / malformed phoneNumber"
@@ -239,17 +263,21 @@ paths:
                 event whose `data` carries the `subscriptionId`, the `device`, and
                 the `area`.
 
-                CamaraSim currently emits only the **initial event**: when the
+                CamaraSim emits two events. The **initial event**: when the
                 subscription is created with `config.initialEvent: true` and becomes
                 `ACTIVE`, one CloudEvent reporting the device's current in/out state
                 is POSTed (`area-entered` for an even identifier tail, `area-left`
-                for an odd one, filtered to the subscribed `types`). Delivery is
-                best-effort, fire-and-forget, and only to an `http://` sink (no TLS
-                client). When the subscription carries an ACCESSTOKEN `sinkCredential`,
-                the callback is authenticated with an `Authorization: Bearer
+                for an odd one, filtered to the subscribed `types`). And the
+                **`subscription-ended` event**: when the subscription reaches its
+                `config.subscriptionExpireTime`, it is evicted and a
+                `subscription-ended` CloudEvent (`terminationReason:
+                SUBSCRIPTION_EXPIRED`) is POSTed. Delivery is best-effort,
+                fire-and-forget, and only to an `http://` sink (no TLS client). When
+                the subscription carries an ACCESSTOKEN `sinkCredential`, each
+                callback is authenticated with an `Authorization: Bearer
                 <accessToken>` header (RFC 6750); PLAIN/REFRESHTOKEN credential types
                 are accepted but not applied (a documented cut). Movement-triggered
-                events and expiry/maxEvents are deferred to later passes.
+                events and `subscriptionMaxEvents` are deferred to later passes.
               requestBody:
                 required: true
                 content:
@@ -532,8 +560,14 @@ components:
           type: string
           format: date-time
           description: >-
-            RFC 3339 time the subscription should expire. Echoed back if supplied;
-            expiry is not yet enforced (a documented cut).
+            RFC 3339 time the subscription should expire. When supplied in the UTC
+            (`…Z`) form, CamaraSim arms a fire-and-forget timer that ends the
+            subscription at that instant: it is evicted and a `subscription-ended`
+            CloudEvent (`terminationReason: SUBSCRIPTION_EXPIRED`) is POSTed to the
+            `sink` (see the `createSubscription` `callbacks`). A value already in
+            the past ends the subscription immediately. Only the `…Z` form drives
+            the timer — a numeric offset (e.g. `+01:00`) is echoed back but arms no
+            timer (a documented cut). Always echoed back if supplied.
           example: "2026-09-03T14:27:08Z"
         subscriptionMaxEvents:
           type: integer
@@ -711,8 +745,10 @@ components:
       type: object
       description: >-
         A CloudEvents 1.0 event delivered to a subscription's `sink`. CamaraSim
-        emits an `area-entered` / `area-left` event; its `data` carries the
-        `subscriptionId`, the `device`, and the `area`.
+        emits an `area-entered` / `area-left` event (its `data` carries the
+        `subscriptionId`, the `device`, and the `area`) or a `subscription-ended`
+        event (its `data` carries the `subscriptionId` and a `terminationReason`,
+        and no `area`). A single permissive `data` schema covers both shapes.
       required:
         - id
         - source
@@ -737,6 +773,7 @@ components:
           enum:
             - org.camaraproject.geofencing-subscriptions.v0.area-entered
             - org.camaraproject.geofencing-subscriptions.v0.area-left
+            - org.camaraproject.geofencing-subscriptions.v0.subscription-ended
         specversion:
           type: string
           enum:
@@ -752,10 +789,12 @@ components:
           example: "2026-08-03T14:27:08Z"
         data:
           type: object
-          description: The geofencing event payload.
+          description: >-
+            The event payload. An `area-entered` / `area-left` event carries the
+            `device` and `area`; a `subscription-ended` event carries a
+            `terminationReason` and no `area`.
           required:
             - subscriptionId
-            - area
           properties:
             subscriptionId:
               type: string
@@ -765,3 +804,11 @@ components:
               $ref: "#/components/schemas/Device"
             area:
               $ref: "#/components/schemas/Area"
+            terminationReason:
+              type: string
+              description: >-
+                Why the subscription ended (present only on a
+                `subscription-ended` event). CamaraSim emits `SUBSCRIPTION_EXPIRED`
+                when the `subscriptionExpireTime` is reached.
+              enum:
+                - SUBSCRIPTION_EXPIRED

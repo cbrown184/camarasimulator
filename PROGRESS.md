@@ -302,8 +302,16 @@ created with a `credentialType: ACCESSTOKEN` `sinkCredential` has its bearer tok
 applied to the initial-event callback as an `Authorization: Bearer <accessToken>`
 header (RFC 6750), derived at creation-time (`notifications::sink_authorization`,
 mirroring QoD) and never echoed in the `SubscriptionInfo` (it is a secret);
-PLAIN/REFRESHTOKEN are accepted but not applied (a documented cut). Only
-movement-triggered events + expiry/maxEvents remain.
+PLAIN/REFRESHTOKEN are accepted but not applied (a documented cut).
+**Subscription expiry** is now enforced: a subscription created with a
+`config.subscriptionExpireTime` (UTC `…Z`) arms a fire-and-forget async timer
+(`v0_4::spawn_expiry`, off the request path, mirroring QoD's `spawn_expiry`) that
+waits until that instant, then evicts the subscription and delivers a
+`subscription-ended` CloudEvent (`terminationReason: SUBSCRIPTION_EXPIRED`) to the
+`sink` — with the ACCESSTOKEN `sinkCredential` bearer applied. A concurrent
+`deleteSubscription` wins the eviction (exactly-once); a non-`Z` offset time is
+echoed but arms no timer (documented cut). Only movement-triggered events +
+`subscriptionMaxEvents` remain.
 
 ## In progress (claimed this pass)
 
@@ -376,7 +384,9 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     - [ ] movement-triggered `area-entered`/`area-left` events
     - [x] `sinkCredential` auth on the callback (ACCESSTOKEN bearer on the
       initial-event callback; PLAIN/REFRESHTOKEN deferred)
-    - [ ] expiry (`subscriptionExpireTime`) / `subscriptionMaxEvents` + `subscription-ended`
+    - [x] expiry (`subscriptionExpireTime`) → `subscription-ended`
+      (`SUBSCRIPTION_EXPIRED`) CloudEvent + eviction (async timer at creation)
+    - [ ] `subscriptionMaxEvents` enforcement
 
 ### Phase 5 — Remaining
 - [ ] Carrier Billing / Payments
@@ -397,6 +407,34 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 ## Scan journal
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
+
+- 2026-08-03 — Phase 4 (spatial): **Geofencing Subscriptions v0.4** — **subscription
+  expiry** (`config.subscriptionExpireTime` → `subscription-ended`). A subscription
+  created with an RFC 3339 UTC (`…Z`) expire time now arms a fire-and-forget async
+  timer (`v0_4::spawn_expiry`, off the request path, mirroring QoD's `spawn_expiry`)
+  that waits until that instant — a past time fires immediately — then evicts the
+  subscription (`store::remove`) and delivers a `subscription-ended` CloudEvent
+  (`terminationReason: SUBSCRIPTION_EXPIRED`) to the `sink`, with the ACCESSTOKEN
+  `sinkCredential` bearer applied (captured at creation, no side-store — geofencing
+  has no separate delete request to defer for, unlike QoD). Exactly-once vs a
+  concurrent `deleteSubscription` (whoever's `remove` returns `Some` sends the
+  event; DELETE itself stays event-less). New `notifications::subscription_ended_
+  event` (pure CloudEvents-1.0 builder) + `EVENT_TYPE_SUBSCRIPTION_ENDED` const;
+  new local `parse_rfc3339_utc`/`days_from_civil` (inverse of the existing
+  `rfc3339_utc`, mirroring QoD — no date-time dep). Documented cut: only the `…Z`
+  form drives the timer (a numeric offset is echoed but arms no timer);
+  `subscriptionMaxEvents` still deferred. **No new deps.** Spec: updated
+  `specs/geofencing-subscriptions/v0.4/openapi.yaml` — new expiry section + header
+  prose, `subscriptionExpireTime` description, `createSubscription`
+  `x-camarasim-scenarios` (2 expiry cases + cuts) and `callbacks` prose, and the
+  `CloudEvent` schema (added the `subscription-ended` type, a `terminationReason`
+  enum, and made `data.area` optional so both event shapes validate). 431 tests
+  green (was 426; +5: 1 notifications unit [subscription_ended shape, no area] +
+  1 v0_4 unit [parse_rfc3339_utc round-trip / rejects offset] + 3 v0_4 integration
+  [past expireTime → subscription-ended to loopback sink + eviction 404 · ACCESSTOKEN
+  → `Authorization: Bearer` on the expiry callback · non-`Z` offset echoed but no
+  timer → still readable]). — binary: 1476872 B (+10080 B; mostly the new vendored
+  spec text embedded via include_str!)
 
 - 2026-08-03 — Phase 4 (spatial): **Geofencing Subscriptions v0.4** — `sinkCredential`
   (ACCESSTOKEN bearer) **auth on the initial-event callback**. A subscription created

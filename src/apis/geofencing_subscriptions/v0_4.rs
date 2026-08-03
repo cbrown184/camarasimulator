@@ -55,7 +55,7 @@
 //! `ACTIVATION_REQUESTED`; `+123456789404` → `404 NOT_FOUND`; any device in a
 //! 500 m circle → `400 OUT_OF_RANGE`.
 
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::body::Bytes;
 use axum::extract::Path;
@@ -357,7 +357,61 @@ async fn create_subscription(claims: Claims, headers: HeaderMap, body: Bytes) ->
         }
     }
 
+    // Expiry (config.subscriptionExpireTime): if the caller set an expiry time and
+    // the sink is deliverable, schedule a fire-and-forget timer that ends the
+    // subscription at that instant — evicting it and delivering a
+    // `subscription-ended` CloudEvent (terminationReason: SUBSCRIPTION_EXPIRED) —
+    // off the request path. Only the RFC 3339 UTC (`…Z`) form drives the timer (a
+    // documented cut); an unparseable value is still echoed but arms no timer. An
+    // ACCESSTOKEN `sinkCredential` is applied to the callback (captured here).
+    if let Some(expires) = config
+        .subscription_expire_time
+        .as_deref()
+        .and_then(parse_rfc3339_utc)
+    {
+        if let Some(sink) = req.sink.as_deref() {
+            let auth = req
+                .sink_credential
+                .as_ref()
+                .and_then(notifications::sink_authorization);
+            spawn_expiry(id.clone(), sink.to_string(), expires, auth);
+        }
+    }
+
     with_correlator((StatusCode::CREATED, Json(info)).into_response(), &correlator)
+}
+
+/// Schedule the `subscription-ended` (SUBSCRIPTION_EXPIRED) transition for a
+/// stored subscription.
+///
+/// Spawns a fire-and-forget async timer (never on the request path, DESIGN §11)
+/// that waits until `expires_at` (Unix seconds, UTC), then — if the subscription
+/// still exists — evicts it and delivers a `subscription-ended` CloudEvent
+/// (`terminationReason: SUBSCRIPTION_EXPIRED`) to `sink`. A `deleteSubscription`
+/// that removed the subscription first makes this a no-op (`store::remove` is then
+/// `None`), so at most one terminal outcome occurs. Geofencing subscriptions have
+/// no "extend" operation, so — unlike QoD — the expiry instant is fixed and the
+/// timer sleeps just once. The sleep is async, so the (single-node, in-memory)
+/// runtime is never blocked. `auth`, when present, applies the subscription's
+/// ACCESSTOKEN `sinkCredential` as an `Authorization: Bearer` header (RFC 6750).
+fn spawn_expiry(subscription_id: String, sink: String, expires_at: i64, auth: Option<String>) {
+    tokio::spawn(async move {
+        let now = now_unix_secs();
+        if now < expires_at {
+            tokio::time::sleep(Duration::from_secs((expires_at - now) as u64)).await;
+        }
+        // Evict it; if a concurrent delete beat us, `remove` is None and we send
+        // nothing (deletion is a synchronous, event-less cut).
+        if store::remove(&subscription_id).is_some() {
+            let event = notifications::subscription_ended_event(
+                store::new_event_id(),
+                rfc3339_utc(now_unix_secs()),
+                &subscription_id,
+                "SUBSCRIPTION_EXPIRED",
+            );
+            notifications::spawn_delivery(sink, event, auth);
+        }
+    });
 }
 
 /// `GET /geofencing-subscriptions/v0.4/subscriptions/{subscriptionId}`.
@@ -648,6 +702,46 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
     let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
     (if m <= 2 { y + 1 } else { y }, m, d)
+}
+
+/// Parse an RFC 3339 UTC instant of the form `YYYY-MM-DDTHH:MM:SSZ` into Unix
+/// seconds. Only the 20-character `Z` (UTC) form is accepted — a numeric offset
+/// (e.g. `+01:00`) or fractional seconds returns `None`, so it arms no expiry
+/// timer (a documented cut). The inverse of [`rfc3339_utc`].
+fn parse_rfc3339_utc(s: &str) -> Option<i64> {
+    let b = s.as_bytes();
+    if b.len() != 20
+        || b[4] != b'-'
+        || b[7] != b'-'
+        || b[10] != b'T'
+        || b[13] != b':'
+        || b[16] != b':'
+        || b[19] != b'Z'
+    {
+        return None;
+    }
+    let y: i64 = s.get(0..4)?.parse().ok()?;
+    let mo: u32 = s.get(5..7)?.parse().ok()?;
+    let d: u32 = s.get(8..10)?.parse().ok()?;
+    let hh: i64 = s.get(11..13)?.parse().ok()?;
+    let mm: i64 = s.get(14..16)?.parse().ok()?;
+    let ss: i64 = s.get(17..19)?.parse().ok()?;
+    if !(1..=12).contains(&mo) || !(1..=31).contains(&d) || hh > 23 || mm > 59 || ss > 59 {
+        return None;
+    }
+    Some(days_from_civil(y, mo, d) * 86_400 + hh * 3600 + mm * 60 + ss)
+}
+
+/// Days since 1970-01-01 for a civil `(year, month, day)` — the inverse of
+/// [`civil_from_days`] (Howard Hinnant's `days_from_civil`, proleptic Gregorian).
+fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = (if y >= 0 { y } else { y - 399 }) / 400;
+    let yoe = (y - era * 400) as u64; // [0, 399]
+    let m = m as u64;
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + (d as u64 - 1); // [0, 365]
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy; // [0, 146096]
+    era * 146_097 + doe as i64 - 719_468
 }
 
 #[cfg(test)]
@@ -1388,5 +1482,162 @@ mod tests {
         let (head, _) = raw.split_once("\r\n\r\n").expect("headers then body");
         // No sinkCredential → callback sent unauthenticated.
         assert!(!head.contains("Authorization:"), "unauthenticated: {head}");
+    }
+
+    // --- subscriptionExpireTime → subscription-ended -----------------------
+
+    #[test]
+    fn parse_rfc3339_utc_is_the_inverse_of_rfc3339_utc() {
+        for &epoch in &[0_i64, 1_000_000_000, 1_722_695_228] {
+            assert_eq!(parse_rfc3339_utc(&rfc3339_utc(epoch)), Some(epoch));
+        }
+        // Only the `Z` (UTC) form is accepted (documented cut).
+        assert_eq!(parse_rfc3339_utc("2024-01-01T00:00:00+01:00"), None);
+        assert_eq!(parse_rfc3339_utc("2024-13-01T00:00:00Z"), None);
+        assert_eq!(parse_rfc3339_utc("not-a-date"), None);
+    }
+
+    const TYPE_ENDED: &str = "org.camaraproject.geofencing-subscriptions.v0.subscription-ended";
+
+    /// Build a create body with an http `sink`, one event type, and a
+    /// `subscriptionExpireTime` already in the past (so the timer fires at once).
+    fn body_with_expiry(sink: &str, phone: &str, expire: &str) -> String {
+        json!({
+            "protocol": "HTTP",
+            "sink": sink,
+            "types": [TYPE_ENTERED],
+            "config": {
+                "subscriptionDetail": {
+                    "device": { "phoneNumber": phone },
+                    "area": {
+                        "areaType": "CIRCLE",
+                        "center": { "latitude": 51.5, "longitude": -0.12 },
+                        "radius": 5000,
+                    },
+                },
+                "subscriptionExpireTime": expire,
+            },
+        })
+        .to_string()
+    }
+
+    #[tokio::test]
+    async fn expiry_delivers_subscription_ended_and_evicts_the_subscription() {
+        use tokio::io::AsyncReadExt;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let sink = format!("http://{addr}/geo-expiry");
+
+        // A past expireTime → the subscription ends immediately. No initialEvent,
+        // so the only callback the sink receives is the subscription-ended event.
+        let token = mint_token(&format!("{CREATE_SCOPE} {READ_SCOPE}")).await;
+        let (status, _, created) = post_subscriptions(
+            Some(&token),
+            &body_with_expiry(&sink, "+123456789012", "2020-01-01T00:00:00Z"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let id = created["id"].as_str().unwrap().to_string();
+
+        // Receive the fire-and-forget subscription-ended CloudEvent.
+        let (mut sock, _) = listener.accept().await.unwrap();
+        let mut buf = Vec::new();
+        sock.read_to_end(&mut buf).await.unwrap();
+        let raw = String::from_utf8(buf).unwrap();
+        let (head, event_body) = raw.split_once("\r\n\r\n").expect("headers then body");
+        assert!(
+            head.starts_with("POST /geo-expiry HTTP/1.1\r\n"),
+            "request line: {head}"
+        );
+        assert!(head.contains("Content-Type: application/cloudevents+json"));
+        let event: Value = serde_json::from_str(event_body).expect("body is JSON");
+        assert_eq!(event["type"], TYPE_ENDED);
+        assert_eq!(event["specversion"], "1.0");
+        assert_eq!(event["data"]["subscriptionId"], json!(id));
+        assert_eq!(event["data"]["terminationReason"], "SUBSCRIPTION_EXPIRED");
+
+        // The subscription is gone (remove precedes delivery): a read-back is 404.
+        let (status, body) = get_subscription(&token, &id).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn expiry_applies_the_accesstoken_sink_credential() {
+        use tokio::io::AsyncReadExt;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let sink = format!("http://{addr}/geo-expiry-auth");
+
+        let body = json!({
+            "protocol": "HTTP",
+            "sink": sink,
+            "sinkCredential": {
+                "credentialType": "ACCESSTOKEN",
+                "accessToken": "expiry-secret-token",
+                "accessTokenType": "bearer",
+            },
+            "types": [TYPE_ENTERED],
+            "config": {
+                "subscriptionDetail": {
+                    "device": { "phoneNumber": "+123456789012" },
+                    "area": {
+                        "areaType": "CIRCLE",
+                        "center": { "latitude": 51.5, "longitude": -0.12 },
+                        "radius": 5000,
+                    },
+                },
+                "subscriptionExpireTime": "2020-01-01T00:00:00Z",
+            },
+        })
+        .to_string();
+
+        let token = mint_token(CREATE_SCOPE).await;
+        let (status, _, created) = post_subscriptions(Some(&token), &body, None).await;
+        assert_eq!(status, StatusCode::CREATED);
+        // The secret is never echoed back.
+        assert!(created.get("sinkCredential").is_none());
+
+        let (mut sock, _) = listener.accept().await.unwrap();
+        let mut buf = Vec::new();
+        sock.read_to_end(&mut buf).await.unwrap();
+        let raw = String::from_utf8(buf).unwrap();
+        let (head, event_body) = raw.split_once("\r\n\r\n").expect("headers then body");
+        assert!(
+            head.contains("Authorization: Bearer expiry-secret-token\r\n"),
+            "authorization header present: {head}"
+        );
+        let event: Value = serde_json::from_str(event_body).expect("body is JSON");
+        assert_eq!(event["type"], TYPE_ENDED);
+        assert_eq!(event["data"]["terminationReason"], "SUBSCRIPTION_EXPIRED");
+    }
+
+    #[tokio::test]
+    async fn an_unparseable_expire_time_is_echoed_but_arms_no_timer() {
+        // A non-`Z` offset form is echoed back (schema fidelity) but drives no
+        // expiry timer, so the subscription persists and can be read back.
+        let token = mint_token(&format!("{CREATE_SCOPE} {READ_SCOPE}")).await;
+        let (status, _, created) = post_subscriptions(
+            Some(&token),
+            &body_with_expiry("https://example.com/cb", "+123456789012", "2020-01-01T00:00:00+01:00"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let id = created["id"].as_str().unwrap().to_string();
+        assert_eq!(
+            created["config"]["subscriptionExpireTime"],
+            "2020-01-01T00:00:00+01:00"
+        );
+
+        // The subscription is still there (no timer fired).
+        let (status, fetched) = get_subscription(&token, &id).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(fetched["id"], json!(id));
     }
 }
