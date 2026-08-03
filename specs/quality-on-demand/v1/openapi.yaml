@@ -8,10 +8,12 @@
 #
 # This slice serves `POST /sessions`, `GET /sessions/{sessionId}`,
 # `DELETE /sessions/{sessionId}`, `POST /sessions/{sessionId}/extend`, and
-# `POST /retrieve-sessions`. CloudEvents notifications on `sink` have begun: a
-# `DELETE_REQUESTED` `qos-status-changed` event is delivered on `deleteSession`
-# (see the `notifications` callback); the `DURATION_EXPIRED`/`NETWORK_TERMINATED`
-# transitions remain deferred. The served spec covers only what is implemented.
+# `POST /retrieve-sessions`. CloudEvents notifications on `sink` deliver a
+# `qos-status-changed` event on two transitions: `DELETE_REQUESTED` on
+# `deleteSession`, and `DURATION_EXPIRED` when an `AVAILABLE` session reaches its
+# `expiresAt` (see the `notifications` callback). The `NETWORK_TERMINATED`
+# transition, and TLS (`https://` sink) / `sinkCredential` auth, remain deferred.
+# The served spec covers only what is implemented.
 openapi: 3.0.3
 info:
   title: Quality On Demand
@@ -54,7 +56,10 @@ info:
     when no session exists for the id. `deleteSession` evicts the session and
     returns `204 No Content`, or `404 NOT_FOUND` for an unknown id; if the session
     was created with a `sink`, it delivers a `qos-status-changed` CloudEvent
-    (`DELETE_REQUESTED`) to that sink (best-effort, `http://` only).
+    (`DELETE_REQUESTED`) to that sink (best-effort, `http://` only). Separately, an
+    `AVAILABLE` session created with a `sink` delivers a `DURATION_EXPIRED`
+    `qos-status-changed` CloudEvent when it reaches its `expiresAt` (the grant
+    lapses and the session is evicted).
     `extendQosSession` adds `requestedAdditionalDuration` seconds to a stored
     session's `duration` in place (and, for an `AVAILABLE` session, pushes
     `expiresAt` out by the same amount), returning the updated `SessionInfo`
@@ -208,8 +213,10 @@ paths:
           `UNSUPPORTED_IDENTIFIER` (422) cases and the `INVALID_SINK` (400) case
           are declared by canonical QoD but not selected by an input pattern here
           (documented cut, DESIGN §7). If a `sink` is supplied it is remembered and
-          a `qos-status-changed` CloudEvent is delivered to it when the session is
-          deleted (see the `notifications` callback and `deleteSession`);
+          a `qos-status-changed` CloudEvent is delivered to it on two transitions:
+          `DELETE_REQUESTED` when the session is deleted, and `DURATION_EXPIRED`
+          when an `AVAILABLE` session reaches its `expiresAt` (see the
+          `notifications` callback, `deleteSession`, and the expiry note below).
           `sinkCredential` is accepted for schema fidelity but never stored or used,
           so notifications are unauthenticated. Delivery is best-effort and only to
           an `http://` sink — CamaraSim has no TLS client, so an `https://` sink is
@@ -219,6 +226,8 @@ paths:
             result: the canonical CAMARA error for that status (…409 → 409 CONFLICT)
           - input: valid request, identifier tail other than …000
             result: "201 SessionInfo, qosStatus AVAILABLE, startedAt/expiresAt set"
+          - input: an AVAILABLE session created with a sink, once expiresAt is reached
+            result: "session evicted; DURATION_EXPIRED CloudEvent POSTed to the sink"
           - input: valid request, identifier tail …000 (or no digits)
             result: "201 SessionInfo, qosStatus REQUESTED, no startedAt/expiresAt"
           - input: duration < 1
@@ -239,12 +248,13 @@ paths:
                 creation whenever the session's `qosStatus` changes. The body is a
                 CloudEvents 1.0 `qos-status-changed` event.
 
-                CamaraSim currently emits this callback only when a session is
-                deleted (`qosStatus: UNAVAILABLE`, `statusInfo: DELETE_REQUESTED`);
-                the `DURATION_EXPIRED` / `NETWORK_TERMINATED` transitions are not
-                yet emitted. Delivery is best-effort, fire-and-forget, and only to
-                an `http://` sink (no TLS client), and is unauthenticated
-                (`sinkCredential` is not used).
+                CamaraSim emits this callback (`qosStatus: UNAVAILABLE`) on two
+                transitions: `statusInfo: DELETE_REQUESTED` when a session is
+                deleted, and `statusInfo: DURATION_EXPIRED` when an `AVAILABLE`
+                session reaches its `expiresAt`. The `NETWORK_TERMINATED`
+                transition is not yet emitted. Delivery is best-effort,
+                fire-and-forget, and only to an `http://` sink (no TLS client), and
+                is unauthenticated (`sinkCredential` is not used).
               requestBody:
                 required: true
                 content:
@@ -613,8 +623,9 @@ components:
           description: >-
             Callback URL for CloudEvents notifications (see the `notifications`
             callback). CamaraSim delivers a `DELETE_REQUESTED` event here when the
-            session is deleted; delivery is best-effort and only to an `http://`
-            sink (no TLS client), so an `https://` sink is not delivered to.
+            session is deleted and a `DURATION_EXPIRED` event when an `AVAILABLE`
+            session reaches its `expiresAt`; delivery is best-effort and only to an
+            `http://` sink (no TLS client), so an `https://` sink is not delivered to.
           example: "http://application-server.example.com/notifications"
         sinkCredential:
           type: object
@@ -876,7 +887,9 @@ components:
           type: string
           description: >-
             Reason for the new `qosStatus`. Only applicable when `qosStatus` is
-            `UNAVAILABLE`. CamaraSim emits `DELETE_REQUESTED` (on delete).
+            `UNAVAILABLE`. CamaraSim emits `DELETE_REQUESTED` (on delete) and
+            `DURATION_EXPIRED` (when an `AVAILABLE` session reaches its
+            `expiresAt`); `NETWORK_TERMINATED` is declared but not yet emitted.
           enum:
             - DURATION_EXPIRED
             - NETWORK_TERMINATED

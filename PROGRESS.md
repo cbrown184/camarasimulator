@@ -203,8 +203,14 @@ notifications.rs`): deleting a session that was created with a `sink` delivers a
 DELETE_REQUESTED`) to it — a best-effort, fire-and-forget HTTP POST written over a
 raw `tokio` TCP stream (no HTTP-client dependency; off the request path). Only
 `http://` sinks are delivered to (no TLS client) and delivery is unauthenticated
-(`sinkCredential` unused). The `DURATION_EXPIRED`/`NETWORK_TERMINATED` transitions
-remain to complete QoD.
+(`sinkCredential` unused). The **`DURATION_EXPIRED`** transition is now in place
+too: creating an `AVAILABLE`, sink-bearing session spawns a fire-and-forget async
+timer (`v1::spawn_expiry`, off the request path) that waits until the session's
+`expiresAt`, re-reading it on each wake so an `extend` that pushed the expiry out is
+honoured, then evicts the session and delivers a `UNAVAILABLE`/`DURATION_EXPIRED`
+`qos-status-changed` CloudEvent to the sink (a concurrent `deleteSession` wins the
+eviction, so exactly one event fires). The `NETWORK_TERMINATED` transition and
+TLS/`sinkCredential` delivery remain to complete QoD.
 
 ## In progress (claimed this pass)
 
@@ -252,7 +258,9 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   - [~] CloudEvents notifications on `sink` (qosStatus changes / expiry):
     - [x] `DELETE_REQUESTED` `qos-status-changed` on `deleteSession` (http sink,
       best-effort fire-and-forget over raw TCP; no HTTP-client dep)
-    - [ ] `DURATION_EXPIRED` / `NETWORK_TERMINATED` transitions
+    - [x] `DURATION_EXPIRED` transition (async timer at creation for an AVAILABLE,
+      sink-bearing session; re-checks `expiresAt` so `extend` is honoured)
+    - [ ] `NETWORK_TERMINATED` transition
     - [ ] TLS (`https://` sink) delivery + `sinkCredential` auth
 
 ### Phase 4 — Spatial
@@ -276,6 +284,30 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-03 — Phase 3: Quality on Demand v1 — CloudEvents **`DURATION_EXPIRED`**
+  transition (CAMARA quality-on-demand 1.1.0, r3.2). New `v1::spawn_expiry`: after
+  `createSession` stores an `AVAILABLE` session that recorded a `sink`, it spawns a
+  fire-and-forget async timer (`tokio::spawn` + `tokio::time::sleep`, off the request
+  path — non-blocking preserved) that waits until the session's `expiresAt`. On each
+  wake it re-reads the live `SessionInfo`: gone or no longer `AVAILABLE` → stop (a
+  `deleteSession` already fired `DELETE_REQUESTED`); `expiresAt` still in the future
+  (e.g. after an `extend` pushed it out) → sleep again to the new instant; reached →
+  `store::remove` the session and, if it was still present (concurrent delete loses),
+  deliver a `UNAVAILABLE`/`DURATION_EXPIRED` `qos-status-changed` CloudEvent to the
+  sink via the existing `notifications::{qos_status_changed_event, spawn_delivery}`.
+  Insert-before-spawn so the timer always sees the stored session. Reused
+  `parse_rfc3339_utc`/`rfc3339_utc`/`now_unix_secs`/`store::new_event_id`; **no new
+  deps** (`tokio::time` already compiled; the `Duration` import was the only add). Also
+  fixed a stale `delete_session` doc comment that still claimed no notification was
+  emitted. Spec: updated `specs/quality-on-demand/v1/openapi.yaml` — header prose,
+  `createSession` description + `x-camarasim-scenarios` (new expiry case, delivery on
+  two transitions), the `notifications` callback description, the `sink` field doc, and
+  the `EventQosStatusChanged.statusInfo` description now document `DURATION_EXPIRED`
+  fires at expiry (NETWORK_TERMINATED still declared-not-emitted; TLS/sinkCredential
+  still deferred). 325 tests green (was 324; +1 integration: create AVAILABLE session
+  with sink + duration 1 s → the loopback sink receives the DURATION_EXPIRED CloudEvent
+  within the timeout and a later GET is 404, i.e. the session was evicted). — binary:
+  1141960 B (+5224 B)
 - 2026-08-03 — Phase 3: Quality on Demand v1 — CloudEvents notifications (begun):
   the **`DELETE_REQUESTED`** `qos-status-changed` event on `deleteSession` (CAMARA
   quality-on-demand 1.1.0, r3.2; event `type`

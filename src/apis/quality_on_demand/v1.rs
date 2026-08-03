@@ -15,12 +15,14 @@
 //!   sessions (operationId `retrieveSessionsByDevice`, scope
 //!   `quality-on-demand:sessions:retrieve-by-device`).
 //!
-//! CloudEvents notifications on `sink` have begun: a `deleteSession` on a session
-//! that was created with a `sink` fires a `qos-status-changed` CloudEvent
-//! (`qosStatus: UNAVAILABLE`, `statusInfo: DELETE_REQUESTED`) to that sink,
-//! best-effort and fire-and-forget (see [`super::notifications`]). The other
-//! status transitions (`DURATION_EXPIRED`, `NETWORK_TERMINATED`) are still
-//! deferred; `sinkCredential` is accepted for schema fidelity but not used.
+//! CloudEvents notifications on `sink` deliver a `qos-status-changed` CloudEvent
+//! (`qosStatus: UNAVAILABLE`) to a session's `sink` on two transitions:
+//! `statusInfo: DELETE_REQUESTED` when a `deleteSession` removes it, and
+//! `statusInfo: DURATION_EXPIRED` when an `AVAILABLE` session reaches its
+//! `expiresAt` ([`spawn_expiry`]) — both best-effort and fire-and-forget (see
+//! [`super::notifications`]). The `NETWORK_TERMINATED` transition and TLS
+//! (`https://` sink) / `sinkCredential`-authenticated delivery remain deferred;
+//! `sinkCredential` is accepted for schema fidelity but not used.
 //!
 //! ## What it does
 //!
@@ -64,7 +66,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use super::{notifications, store};
 use crate::auth::verify::Claims;
@@ -257,9 +259,73 @@ async fn create_session(claims: Claims, headers: HeaderMap, body: Bytes) -> Resp
         req.sink,
         &resolved.id,
     );
-    store::insert(session_id, info.clone());
+    store::insert(session_id.clone(), info.clone());
+
+    // Schedule the DURATION_EXPIRED transition for an AVAILABLE session that
+    // recorded a `sink`: when it reaches its `expiresAt` the grant lapses, so the
+    // session is evicted and a `qos-status-changed` CloudEvent is delivered to the
+    // sink (see `spawn_expiry`). A REQUESTED session has no `expiresAt`, and a
+    // session with no `sink` has nowhere to notify, so neither schedules a timer.
+    // Insert first, so the spawned task always sees the stored session.
+    if info["qosStatus"] == "AVAILABLE" {
+        if let Some(sink) = info.get("sink").and_then(Value::as_str) {
+            spawn_expiry(session_id, sink.to_string());
+        }
+    }
 
     with_correlator((StatusCode::CREATED, Json(info)).into_response(), &correlator)
+}
+
+/// Schedule the `DURATION_EXPIRED` status transition for a stored session.
+///
+/// Spawns a fire-and-forget async timer (never on the request path, DESIGN §11)
+/// that waits until the session's `expiresAt`, then — if it still exists and is
+/// still `AVAILABLE` — evicts it and delivers a `qos-status-changed` CloudEvent
+/// (`qosStatus: UNAVAILABLE`, `statusInfo: DURATION_EXPIRED`) to `sink`.
+///
+/// The wait re-reads the stored `expiresAt` on each wake, so an `extendQosSession`
+/// that pushed the expiry out is honoured (the timer simply sleeps again to the
+/// new instant), and a `deleteSession` that removed the session first makes this a
+/// no-op (the session is gone, so `DELETE_REQUESTED` already fired instead). The
+/// sleep is async, so the (single-node, in-memory) runtime is never blocked.
+fn spawn_expiry(session_id: String, sink: String) {
+    tokio::spawn(async move {
+        loop {
+            // Re-read the live session: stop if it is gone or no longer AVAILABLE
+            // (e.g. deleted — DELETE_REQUESTED already covered that case).
+            let expires = match store::get(&session_id) {
+                Some(info) if info["qosStatus"] == "AVAILABLE" => {
+                    match info["expiresAt"].as_str().and_then(parse_rfc3339_utc) {
+                        Some(exp) => exp,
+                        None => return,
+                    }
+                }
+                _ => return,
+            };
+
+            let now = now_unix_secs();
+            if now < expires {
+                // Not yet expired (a fresh session, or one just extended): sleep
+                // until the current expiry, then re-check (handles extension).
+                tokio::time::sleep(Duration::from_secs((expires - now) as u64)).await;
+                continue;
+            }
+
+            // Expired. Evict it; if a concurrent delete beat us, `remove` is None
+            // and we send nothing (that delete already notified DELETE_REQUESTED).
+            if store::remove(&session_id).is_some() {
+                let event = notifications::qos_status_changed_event(
+                    store::new_event_id(),
+                    rfc3339_utc(now),
+                    &session_id,
+                    "UNAVAILABLE",
+                    Some("DURATION_EXPIRED"),
+                );
+                notifications::spawn_delivery(sink, event);
+            }
+            return;
+        }
+    });
 }
 
 /// `GET /quality-on-demand/v1/sessions/{sessionId}`.
@@ -283,8 +349,9 @@ async fn get_session(claims: Claims, headers: HeaderMap, Path(session_id): Path<
 ///
 /// Deletes the session, releasing its QoS grant. Keyed only on the stored state:
 /// a session that exists is evicted → `204 No Content`; an unknown (or already
-/// deleted) id → `404 NOT_FOUND`. No CloudEvents `DELETE_REQUESTED` notification
-/// is emitted — notifications are deferred (see the module docs).
+/// deleted) id → `404 NOT_FOUND`. If the deleted session recorded a `sink`, a
+/// `DELETE_REQUESTED` `qos-status-changed` CloudEvent is delivered to it (best-
+/// effort, fire-and-forget; see [`super::notifications`]).
 async fn delete_session(
     claims: Claims,
     headers: HeaderMap,
@@ -1274,6 +1341,65 @@ mod tests {
         assert_eq!(event["data"]["sessionId"], json!(session_id));
         assert_eq!(event["data"]["qosStatus"], "UNAVAILABLE");
         assert_eq!(event["data"]["statusInfo"], "DELETE_REQUESTED");
+    }
+
+    #[tokio::test]
+    async fn an_available_session_with_a_sink_fires_duration_expired_at_expiry() {
+        use tokio::io::AsyncReadExt;
+        use tokio::net::TcpListener;
+
+        // A loopback receiver stands in for the consumer's `sink`.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let sink = format!("http://{addr}/qod-expiry");
+
+        // Create an AVAILABLE session (…012) granted for just 1 second, with a sink.
+        // A globally-unique number so this shares the store with no other test.
+        let create = mint_token(CREATE_SCOPE).await;
+        let body = json!({
+            "device": { "phoneNumber": "+19998889012" },
+            "applicationServer": { "ipv4Address": "203.0.113.0/24" },
+            "qosProfile": "QOS_L",
+            "duration": 1,
+            "sink": sink,
+        })
+        .to_string();
+        let (status, _, created) = post_sessions(Some(&create), &body, None).await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(created["qosStatus"], "AVAILABLE");
+        let session_id = created["sessionId"].as_str().unwrap().to_string();
+
+        // The scheduled timer fires a DURATION_EXPIRED CloudEvent once the 1-second
+        // grant lapses. Bound the wait so a bug can't hang the suite.
+        let (mut sock, _) = tokio::time::timeout(Duration::from_secs(10), listener.accept())
+            .await
+            .expect("the sink is notified within the timeout")
+            .unwrap();
+        let mut buf = Vec::new();
+        sock.read_to_end(&mut buf).await.unwrap();
+        let raw = String::from_utf8(buf).unwrap();
+        let (head, event_body) = raw.split_once("\r\n\r\n").expect("headers then body");
+        assert!(
+            head.starts_with("POST /qod-expiry HTTP/1.1\r\n"),
+            "request line: {head}"
+        );
+        assert!(head.contains("Content-Type: application/cloudevents+json"));
+
+        let event: Value = serde_json::from_str(event_body).expect("body is JSON");
+        assert_eq!(
+            event["type"],
+            "org.camaraproject.quality-on-demand.v1.qos-status-changed"
+        );
+        assert_eq!(event["specversion"], "1.0");
+        assert_eq!(event["data"]["sessionId"], json!(session_id));
+        assert_eq!(event["data"]["qosStatus"], "UNAVAILABLE");
+        assert_eq!(event["data"]["statusInfo"], "DURATION_EXPIRED");
+
+        // The expired session has been evicted: a later GET is 404 NOT_FOUND.
+        let read = mint_token(READ_SCOPE).await;
+        let (status, _, gone) = get_session_req(Some(&read), &session_id, None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(gone["code"], "NOT_FOUND");
     }
 
     #[tokio::test]
