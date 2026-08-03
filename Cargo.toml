@@ -7,7 +7,10 @@ license = "Apache-2.0"
 
 [dependencies]
 axum = "0.7"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal"] }
+# `io-util` supplies the `AsyncWriteExt`/`AsyncReadExt` extension traits used to
+# POST QoD CloudEvents notifications over a raw TCP stream (no HTTP-client dep);
+# it is already compiled transitively by axum, so it adds no binary size.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "io-util"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # Auth signing keys: parse the bundled PKCS#8 RSA key and expose its public

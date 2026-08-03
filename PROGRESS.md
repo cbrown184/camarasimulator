@@ -195,8 +195,16 @@ the token subject. Two control planes (DESIGN §7): the identifier — a reserve
 error suffix → canonical CAMARA error (`…404` → 404 device-not-found) — and, on
 the happy path, the in-memory store, scanned by each session's echoed `device`
 (new `store::find_by_device`). A resolved identifier with no `device` echo (a
-non-E.164 subject, no submitted device) matches nothing → `200 []`. Only
-CloudEvents notifications on `sink` remain to complete QoD.
+non-E.164 subject, no submitted device) matches nothing → `200 []`.
+
+CloudEvents notifications on `sink` have begun (`src/apis/quality_on_demand/
+notifications.rs`): deleting a session that was created with a `sink` delivers a
+`qos-status-changed` CloudEvent (`qosStatus: UNAVAILABLE`, `statusInfo:
+DELETE_REQUESTED`) to it — a best-effort, fire-and-forget HTTP POST written over a
+raw `tokio` TCP stream (no HTTP-client dependency; off the request path). Only
+`http://` sinks are delivered to (no TLS client) and delivery is unauthenticated
+(`sinkCredential` unused). The `DURATION_EXPIRED`/`NETWORK_TERMINATED` transitions
+remain to complete QoD.
 
 ## In progress (claimed this pass)
 
@@ -241,7 +249,11 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   - [x] `DELETE /sessions/{sessionId}` (`quality-on-demand:sessions:delete`, `deleteSession`)
   - [x] `POST /sessions/{sessionId}/extend` (`quality-on-demand:sessions:update`, `extendQosSession`)
   - [x] `POST /retrieve-sessions` (`quality-on-demand:sessions:retrieve-by-device`, `retrieveSessionsByDevice`)
-  - [ ] CloudEvents notifications on `sink` (qosStatus changes / expiry)
+  - [~] CloudEvents notifications on `sink` (qosStatus changes / expiry):
+    - [x] `DELETE_REQUESTED` `qos-status-changed` on `deleteSession` (http sink,
+      best-effort fire-and-forget over raw TCP; no HTTP-client dep)
+    - [ ] `DURATION_EXPIRED` / `NETWORK_TERMINATED` transitions
+    - [ ] TLS (`https://` sink) delivery + `sinkCredential` auth
 
 ### Phase 4 — Spatial
 - [ ] Device Location Verification
@@ -264,6 +276,38 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-03 — Phase 3: Quality on Demand v1 — CloudEvents notifications (begun):
+  the **`DELETE_REQUESTED`** `qos-status-changed` event on `deleteSession` (CAMARA
+  quality-on-demand 1.1.0, r3.2; event `type`
+  `org.camaraproject.quality-on-demand.v1.qos-status-changed`, confirmed against
+  the r3.2 upstream `callbacks.notifications` + `CloudEvent` schema). New
+  `src/apis/quality_on_demand/notifications.rs`: a pure `qos_status_changed_event`
+  builder (CloudEvents 1.0 envelope — id/source/type/specversion/datacontenttype/
+  time + `data{sessionId,qosStatus,statusInfo}`; statusInfo omitted when None) and
+  an async `deliver` that POSTs it as `application/cloudevents+json` over a raw
+  `tokio` TCP stream (no HTTP-client dep — DESIGN §11), fired via `spawn_delivery`
+  (fire-and-forget, so a slow/unreachable sink never delays the `204`). Wired into
+  `v1::delete_session`: on eviction, if the stored `SessionInfo` recorded a `sink`,
+  spawn a `UNAVAILABLE`/`DELETE_REQUESTED` event to it. Added `store::new_event_id`
+  (shares the UUID minter with `new_session_id`). Documented cuts: `http://` sinks
+  only (no TLS client → `https://` parsed but not delivered to); unauthenticated
+  (`sinkCredential` unused); only DELETE_REQUESTED emitted so far
+  (DURATION_EXPIRED/NETWORK_TERMINATED still deferred). Non-blocking + in-memory
+  preserved (TCP write is async and off the request path). New dep feature:
+  tokio `io-util` (AsyncWriteExt/AsyncReadExt) — already compiled transitively by
+  axum, ~0 added size. Spec: added the `notifications` callback (POST to
+  `{$request.body#/sink}`, `application/cloudevents+json`, 204) to `createSession`
+  + `CloudEvent`/`EventQosStatusChanged` schemas to
+  `specs/quality-on-demand/v1/openapi.yaml`; updated create/delete descriptions +
+  `x-camarasim-scenarios` (delete now fires DELETE_REQUESTED for sink-bearing
+  sessions) and the `sink`/`sinkCredential` field docs; header prose no longer says
+  notifications are wholly deferred. 324 tests green (was 317; +7: 1 store unit
+  [event-id unique/uuid-shaped/distinct-from-session-ids] + 5 notifications units
+  [event shape / statusInfo-omitted-when-None / parse_http_sink host+port+path &
+  rejects https/junk / deliver POSTs a CloudEvent to an http listener / deliver to
+  non-http is a no-op Ok] + 1 v1 integration [create-with-sink → delete → the
+  loopback sink receives the DELETE_REQUESTED CloudEvent, 204 to the caller]). —
+  binary: 1136736 B (+11992 B)
 - 2026-08-03 — Phase 3: Quality on Demand v1 — `POST /retrieve-sessions`
   (CAMARA quality-on-demand 1.1.0, r3.2), operationId `retrieveSessionsByDevice`,
   scope `quality-on-demand:sessions:retrieve-by-device` (confirmed against the

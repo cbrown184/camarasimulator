@@ -91,13 +91,26 @@ pub fn update<F: FnOnce(&mut Value)>(id: &str, f: F) -> Option<Value> {
     Some(info.clone())
 }
 
-/// Mint a fresh, opaque, UUID-shaped `sessionId`.
+/// Mint a fresh, opaque, UUID-shaped `sessionId`. See [`mint_uuid`] for the shape.
+pub fn new_session_id() -> String {
+    mint_uuid()
+}
+
+/// Mint a fresh, opaque, UUID-shaped **CloudEvent id** for a notification. CAMARA
+/// requires `CloudEvent.id` to be unique in the source context; a UUID-shaped
+/// value satisfies that. Shares [`mint_uuid`]'s minting (and thus its monotonic
+/// counter) with `new_session_id`, so ids never collide across either use.
+pub fn new_event_id() -> String {
+    mint_uuid()
+}
+
+/// Mint a fresh, opaque, UUID-v4-shaped identifier.
 ///
 /// The 16 bytes come from `SHA-256(counter ‖ now)` — the monotonic counter alone
 /// guarantees uniqueness — with the RFC 4122 version (4) and variant (`10`) bits
-/// set so it is a well-formed v4-shaped UUID, matching CAMARA's
-/// `SessionInfo.sessionId: format: uuid`. No `uuid`/`rand` dependency.
-pub fn new_session_id() -> String {
+/// set so it is a well-formed v4-shaped UUID, matching CAMARA's `format: uuid`.
+/// No `uuid`/`rand` dependency.
+fn mint_uuid() -> String {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
     let mut hasher = Sha256::new();
@@ -140,6 +153,22 @@ mod tests {
         );
         assert!(a.bytes().all(|c| c.is_ascii_hexdigit() || c == b'-'));
         // Version nibble is 4; variant nibble is one of 8/9/a/b.
+        assert_eq!(parts[2].as_bytes()[0], b'4', "version 4");
+        assert!(matches!(parts[3].as_bytes()[0], b'8' | b'9' | b'a' | b'b'));
+    }
+
+    #[test]
+    fn event_ids_are_unique_uuid_shaped_and_distinct_from_session_ids() {
+        let e1 = new_event_id();
+        let e2 = new_event_id();
+        assert_ne!(e1, e2, "each event id must be unique");
+        // Shares the counter with session ids, so the two never collide.
+        assert_ne!(e1, new_session_id());
+        let parts: Vec<&str> = e1.split('-').collect();
+        assert_eq!(
+            parts.iter().map(|p| p.len()).collect::<Vec<_>>(),
+            vec![8, 4, 4, 4, 12]
+        );
         assert_eq!(parts[2].as_bytes()[0], b'4', "version 4");
         assert!(matches!(parts[3].as_bytes()[0], b'8' | b'9' | b'a' | b'b'));
     }

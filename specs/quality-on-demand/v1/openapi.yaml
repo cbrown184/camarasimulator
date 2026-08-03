@@ -8,8 +8,10 @@
 #
 # This slice serves `POST /sessions`, `GET /sessions/{sessionId}`,
 # `DELETE /sessions/{sessionId}`, `POST /sessions/{sessionId}/extend`, and
-# `POST /retrieve-sessions`. The CloudEvents notifications on `sink` are deferred
-# to a later pass; the served spec covers only what is implemented.
+# `POST /retrieve-sessions`. CloudEvents notifications on `sink` have begun: a
+# `DELETE_REQUESTED` `qos-status-changed` event is delivered on `deleteSession`
+# (see the `notifications` callback); the `DURATION_EXPIRED`/`NETWORK_TERMINATED`
+# transitions remain deferred. The served spec covers only what is implemented.
 openapi: 3.0.3
 info:
   title: Quality On Demand
@@ -50,8 +52,9 @@ info:
 
     `getSession` returns the stored `SessionInfo` (`200`), or `404 NOT_FOUND`
     when no session exists for the id. `deleteSession` evicts the session and
-    returns `204 No Content`, or `404 NOT_FOUND` for an unknown id; it emits no
-    CloudEvents `DELETE_REQUESTED` notification (notifications are deferred).
+    returns `204 No Content`, or `404 NOT_FOUND` for an unknown id; if the session
+    was created with a `sink`, it delivers a `qos-status-changed` CloudEvent
+    (`DELETE_REQUESTED`) to that sink (best-effort, `http://` only).
     `extendQosSession` adds `requestedAdditionalDuration` seconds to a stored
     session's `duration` in place (and, for an `AVAILABLE` session, pushes
     `expiresAt` out by the same amount), returning the updated `SessionInfo`
@@ -204,8 +207,13 @@ paths:
           extension). The three-legged `UNNECESSARY_IDENTIFIER` /
           `UNSUPPORTED_IDENTIFIER` (422) cases and the `INVALID_SINK` (400) case
           are declared by canonical QoD but not selected by an input pattern here
-          (documented cut, DESIGN §7); `sink`/`sinkCredential` are accepted for
-          schema fidelity but no notification is emitted yet.
+          (documented cut, DESIGN §7). If a `sink` is supplied it is remembered and
+          a `qos-status-changed` CloudEvent is delivered to it when the session is
+          deleted (see the `notifications` callback and `deleteSession`);
+          `sinkCredential` is accepted for schema fidelity but never stored or used,
+          so notifications are unauthenticated. Delivery is best-effort and only to
+          an `http://` sink — CamaraSim has no TLS client, so an `https://` sink is
+          not delivered to (documented cut).
         cases:
           - input: identifier ending in a reserved error suffix (e.g. …409)
             result: the canonical CAMARA error for that status (…409 → 409 CONFLICT)
@@ -221,6 +229,31 @@ paths:
             result: "422 QUALITY_ON_DEMAND.QOS_PROFILE_NOT_APPLICABLE"
           - input: missing applicationServer/qosProfile/duration, bad phoneNumber, or unknown field
             result: "400 INVALID_ARGUMENT"
+      callbacks:
+        notifications:
+          "{$request.body#/sink}":
+            post:
+              summary: QoS status change notification
+              description: |
+                Delivered by the API provider to the `sink` URL supplied at session
+                creation whenever the session's `qosStatus` changes. The body is a
+                CloudEvents 1.0 `qos-status-changed` event.
+
+                CamaraSim currently emits this callback only when a session is
+                deleted (`qosStatus: UNAVAILABLE`, `statusInfo: DELETE_REQUESTED`);
+                the `DURATION_EXPIRED` / `NETWORK_TERMINATED` transitions are not
+                yet emitted. Delivery is best-effort, fire-and-forget, and only to
+                an `http://` sink (no TLS client), and is unauthenticated
+                (`sinkCredential` is not used).
+              requestBody:
+                required: true
+                content:
+                  application/cloudevents+json:
+                    schema:
+                      $ref: "#/components/schemas/CloudEvent"
+              responses:
+                "204":
+                  description: Notification received.
 
   /sessions/{sessionId}:
     get:
@@ -277,8 +310,11 @@ paths:
       description: |
         Deletes the session identified by `sessionId`, releasing its QoS grant,
         and returns `204 No Content`. `404 NOT_FOUND` if no such session exists
-        (never created, or already deleted). CamaraSim emits no CloudEvents
-        `DELETE_REQUESTED` notification — notifications are deferred.
+        (never created, or already deleted). If the session was created with a
+        `sink`, CamaraSim delivers a `qos-status-changed` CloudEvent to it
+        (`qosStatus: UNAVAILABLE`, `statusInfo: DELETE_REQUESTED`) — see the
+        `notifications` callback on `createSession`. Delivery is best-effort and
+        fire-and-forget, so it never delays this `204`.
       security:
         - openId:
             - quality-on-demand:sessions:delete
@@ -312,10 +348,14 @@ paths:
       x-camarasim-scenarios:
         description: >-
           Keyed on the `sessionId` path parameter against the in-memory store:
-          delete is single-use, so a second delete of the same id is 404.
+          delete is single-use, so a second delete of the same id is 404. When a
+          deleted session recorded a `sink`, a `qos-status-changed` CloudEvent
+          (`DELETE_REQUESTED`) is delivered to it (best-effort, `http://` only).
         cases:
-          - input: a sessionId of a session that currently exists
-            result: "204 No Content (the session is evicted)"
+          - input: a sessionId of a session that currently exists (created with a sink)
+            result: "204 No Content; DELETE_REQUESTED CloudEvent POSTed to the sink"
+          - input: a sessionId of a session that currently exists (no sink)
+            result: "204 No Content (the session is evicted; no notification)"
           - input: an unknown or already-deleted sessionId
             result: "404 NOT_FOUND"
 
@@ -571,14 +611,17 @@ components:
           type: string
           format: uri
           description: >-
-            HTTPS callback for CloudEvents notifications. Accepted for schema
-            fidelity; CamaraSim does not emit notifications yet.
-          example: "https://application-server.example.com/notifications"
+            Callback URL for CloudEvents notifications (see the `notifications`
+            callback). CamaraSim delivers a `DELETE_REQUESTED` event here when the
+            session is deleted; delivery is best-effort and only to an `http://`
+            sink (no TLS client), so an `https://` sink is not delivered to.
+          example: "http://application-server.example.com/notifications"
         sinkCredential:
           type: object
           description: >-
             Credential the notification callback expects. Accepted for schema
-            fidelity but never echoed back (it carries a secret) and not yet used.
+            fidelity but never echoed back (it carries a secret) and not used —
+            CamaraSim's notifications are unauthenticated.
 
     ExtendSessionDuration:
       type: object
@@ -757,3 +800,84 @@ components:
             format: int32
             minimum: 0
             maximum: 65535
+
+    CloudEvent:
+      type: object
+      description: |
+        A CloudEvents 1.0 event delivered to a session's `sink`. CamaraSim emits
+        the `qos-status-changed` type; the `data` payload is
+        `EventQosStatusChanged`.
+      required:
+        - id
+        - source
+        - specversion
+        - type
+        - time
+        - data
+      properties:
+        id:
+          type: string
+          description: Identifier of this event, unique within the source context.
+          example: "83a1c8e0-2b6a-4a2e-9c1f-0a1b2c3d4e5f"
+        source:
+          type: string
+          format: uri-reference
+          description: The context in which the event happened.
+          example: "//camarasimulator/quality-on-demand"
+        type:
+          type: string
+          enum:
+            - "org.camaraproject.quality-on-demand.v1.qos-status-changed"
+        specversion:
+          type: string
+          enum:
+            - "1.0"
+        datacontenttype:
+          type: string
+          enum:
+            - "application/json"
+        time:
+          type: string
+          format: date-time
+          description: RFC 3339 timestamp (with time zone) of the occurrence.
+          example: "2024-01-01T15:27:08Z"
+        data:
+          $ref: "#/components/schemas/EventQosStatusChanged"
+      example:
+        id: "83a1c8e0-2b6a-4a2e-9c1f-0a1b2c3d4e5f"
+        source: "//camarasimulator/quality-on-demand"
+        type: "org.camaraproject.quality-on-demand.v1.qos-status-changed"
+        specversion: "1.0"
+        datacontenttype: "application/json"
+        time: "2024-01-01T15:27:08Z"
+        data:
+          sessionId: "11111111-1111-4111-8111-111111111111"
+          qosStatus: UNAVAILABLE
+          statusInfo: DELETE_REQUESTED
+
+    EventQosStatusChanged:
+      type: object
+      description: The `data` payload of a `qos-status-changed` CloudEvent.
+      required:
+        - sessionId
+        - qosStatus
+      properties:
+        sessionId:
+          type: string
+          format: uuid
+          description: The session whose status changed.
+        qosStatus:
+          type: string
+          description: The session's new status.
+          enum:
+            - AVAILABLE
+            - UNAVAILABLE
+        statusInfo:
+          type: string
+          description: >-
+            Reason for the new `qosStatus`. Only applicable when `qosStatus` is
+            `UNAVAILABLE`. CamaraSim emits `DELETE_REQUESTED` (on delete).
+          enum:
+            - DURATION_EXPIRED
+            - NETWORK_TERMINATED
+            - DELETE_REQUESTED

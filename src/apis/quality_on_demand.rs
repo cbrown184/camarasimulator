@@ -11,6 +11,7 @@
 //! - [`v1`] — mounted at `/quality-on-demand/v1` (CAMARA quality-on-demand
 //!   1.1.0, release r3.2). First slice: `POST /sessions` + `GET /sessions/{id}`.
 
+pub mod notifications;
 pub mod store;
 pub mod v1;
 

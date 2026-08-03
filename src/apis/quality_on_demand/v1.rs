@@ -15,10 +15,12 @@
 //!   sessions (operationId `retrieveSessionsByDevice`, scope
 //!   `quality-on-demand:sessions:retrieve-by-device`).
 //!
-//! The CloudEvents notifications on `sink` are deferred to later passes (see
-//! `PROGRESS.md`); `sink`/`sinkCredential` are accepted for schema fidelity but no
-//! notification is emitted yet — so a `deleteSession` fires no `DELETE_REQUESTED`
-//! CloudEvent.
+//! CloudEvents notifications on `sink` have begun: a `deleteSession` on a session
+//! that was created with a `sink` fires a `qos-status-changed` CloudEvent
+//! (`qosStatus: UNAVAILABLE`, `statusInfo: DELETE_REQUESTED`) to that sink,
+//! best-effort and fire-and-forget (see [`super::notifications`]). The other
+//! status transitions (`DURATION_EXPIRED`, `NETWORK_TERMINATED`) are still
+//! deferred; `sinkCredential` is accepted for schema fidelity but not used.
 //!
 //! ## What it does
 //!
@@ -64,7 +66,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use super::store;
+use super::{notifications, store};
 use crate::auth::verify::Claims;
 use crate::errors::CamaraError;
 use crate::scenarios;
@@ -295,7 +297,22 @@ async fn delete_session(
     }
 
     match store::remove(&session_id) {
-        Some(_) => with_correlator(StatusCode::NO_CONTENT.into_response(), &correlator),
+        Some(info) => {
+            // Notify the session's `sink` (if any) that it is now UNAVAILABLE
+            // because the consumer requested deletion. Fire-and-forget so a slow
+            // or unreachable sink never delays this response (see `notifications`).
+            if let Some(sink) = info.get("sink").and_then(Value::as_str) {
+                let event = notifications::qos_status_changed_event(
+                    store::new_event_id(),
+                    rfc3339_utc(now_unix_secs()),
+                    &session_id,
+                    "UNAVAILABLE",
+                    Some("DELETE_REQUESTED"),
+                );
+                notifications::spawn_delivery(sink.to_string(), event);
+            }
+            with_correlator(StatusCode::NO_CONTENT.into_response(), &correlator)
+        }
         None => with_correlator(
             CamaraError::not_found("No session found for the provided sessionId.").into_response(),
             &correlator,
@@ -1203,6 +1220,60 @@ mod tests {
             headers.get("x-correlator").and_then(|v| v.to_str().ok()),
             Some("corr-del-404")
         );
+    }
+
+    #[tokio::test]
+    async fn deleting_a_session_with_a_sink_fires_a_delete_requested_cloudevent() {
+        use tokio::io::AsyncReadExt;
+        use tokio::net::TcpListener;
+
+        // A loopback receiver stands in for the consumer's `sink`.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let sink = format!("http://{addr}/qod-notify");
+
+        // Create a session that records the sink…
+        let create = mint_token(CREATE_SCOPE).await;
+        let body = json!({
+            "device": { "phoneNumber": "+123456789012" },
+            "applicationServer": { "ipv4Address": "203.0.113.0/24" },
+            "qosProfile": "QOS_L",
+            "duration": 3600,
+            "sink": sink,
+        })
+        .to_string();
+        let (status, _, created) = post_sessions(Some(&create), &body, None).await;
+        assert_eq!(status, StatusCode::CREATED);
+        let session_id = created["sessionId"].as_str().unwrap().to_string();
+
+        // …then delete it: 204 to the caller, and a CloudEvent to the sink.
+        let del = mint_token(DELETE_SCOPE).await;
+        let (status, _, _) = delete_session_req(Some(&del), &session_id, None).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        // Receive the fire-and-forget notification the handler spawned.
+        let (mut sock, _) = listener.accept().await.unwrap();
+        let mut buf = Vec::new();
+        sock.read_to_end(&mut buf).await.unwrap();
+        let raw = String::from_utf8(buf).unwrap();
+        let (head, event_body) = raw.split_once("\r\n\r\n").expect("headers then body");
+        assert!(
+            head.starts_with("POST /qod-notify HTTP/1.1\r\n"),
+            "request line: {head}"
+        );
+        assert!(head.contains("Content-Type: application/cloudevents+json"));
+
+        let event: Value = serde_json::from_str(event_body).expect("body is JSON");
+        assert_eq!(
+            event["type"],
+            "org.camaraproject.quality-on-demand.v1.qos-status-changed"
+        );
+        assert_eq!(event["specversion"], "1.0");
+        assert_eq!(event["datacontenttype"], "application/json");
+        assert!(event["id"].is_string() && event["time"].is_string());
+        assert_eq!(event["data"]["sessionId"], json!(session_id));
+        assert_eq!(event["data"]["qosStatus"], "UNAVAILABLE");
+        assert_eq!(event["data"]["statusInfo"], "DELETE_REQUESTED");
     }
 
     #[tokio::test]
