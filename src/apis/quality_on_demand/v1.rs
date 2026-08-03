@@ -16,13 +16,15 @@
 //!   `quality-on-demand:sessions:retrieve-by-device`).
 //!
 //! CloudEvents notifications on `sink` deliver a `qos-status-changed` CloudEvent
-//! (`qosStatus: UNAVAILABLE`) to a session's `sink` on two transitions:
-//! `statusInfo: DELETE_REQUESTED` when a `deleteSession` removes it, and
+//! (`qosStatus: UNAVAILABLE`) to a session's `sink` on three transitions:
+//! `statusInfo: DELETE_REQUESTED` when a `deleteSession` removes it,
 //! `statusInfo: DURATION_EXPIRED` when an `AVAILABLE` session reaches its
-//! `expiresAt` ([`spawn_expiry`]) — both best-effort and fire-and-forget (see
-//! [`super::notifications`]). The `NETWORK_TERMINATED` transition and TLS
-//! (`https://` sink) / `sinkCredential`-authenticated delivery remain deferred;
-//! `sinkCredential` is accepted for schema fidelity but not used.
+//! `expiresAt` ([`spawn_expiry`]), and `statusInfo: NETWORK_TERMINATED` when the
+//! (simulated) network drops a `…001` `AVAILABLE` session early
+//! ([`spawn_network_termination`]) — all best-effort and fire-and-forget (see
+//! [`super::notifications`]). TLS (`https://` sink) / `sinkCredential`-authenticated
+//! delivery remain deferred; `sinkCredential` is accepted for schema fidelity but
+//! not used.
 //!
 //! ## What it does
 //!
@@ -48,7 +50,11 @@
 //!    QoD `409 CONFLICT` (duplicate-session) case. Otherwise the trailing digits
 //!    pick the grant state: `…000` (and an identifier with no digits) →
 //!    `qosStatus: REQUESTED` (no `startedAt`/`expiresAt` yet); any other tail →
-//!    `qosStatus: AVAILABLE`, granted from now for `duration` seconds.
+//!    `qosStatus: AVAILABLE`, granted from now for `duration` seconds. A `…001`
+//!    tail is a special `AVAILABLE` case: if the session recorded a `sink`, the
+//!    (simulated) network terminates it early — a `NETWORK_TERMINATED`
+//!    `qos-status-changed` CloudEvent fires and the session is evicted shortly
+//!    after creation ([`spawn_network_termination`]).
 //! 2. **`duration`** — seconds the session is requested for. `< 1` → `400
 //!    INVALID_ARGUMENT`; `> `[`MAX_DURATION_SECS`] → `400`
 //!    `QUALITY_ON_DEMAND.DURATION_OUT_OF_RANGE` (the simulator's fixed QoS-profile
@@ -88,6 +94,22 @@ const RETRIEVE_SCOPE: &str = "quality-on-demand:sessions:retrieve-by-device";
 /// requested `duration` beyond this is out of range for the (single, simulated)
 /// profile → `QUALITY_ON_DEMAND.DURATION_OUT_OF_RANGE`.
 const MAX_DURATION_SECS: i64 = 86_400;
+
+/// Identifier tail that makes the network terminate an `AVAILABLE` session early
+/// (docs/DESIGN.md §7). The trailing three digits `…001` select the
+/// `NETWORK_TERMINATED` transition: the session is granted `AVAILABLE` as usual,
+/// but instead of running to its `expiresAt` the (simulated) network drops it
+/// after [`NETWORK_TERMINATION_GRACE_SECS`], evicting it and delivering a
+/// `qos-status-changed` CloudEvent. `…001` is otherwise an ordinary AVAILABLE
+/// tail, so it stays distinct from `…000` (REQUESTED) and the reserved-error
+/// suffixes.
+const NETWORK_TERMINATION_TAIL: u16 = 1;
+
+/// How long an `AVAILABLE`, network-terminated (`…001`) session survives before
+/// the simulated network drops it, in seconds. Kept short — and independent of
+/// (typically much longer) `duration` — so the transition is observably *not*
+/// `DURATION_EXPIRED`.
+const NETWORK_TERMINATION_GRACE_SECS: u64 = 1;
 
 /// Routes for Quality on Demand v1, mounted at their canonical URLs.
 pub fn routes() -> Router {
@@ -261,15 +283,21 @@ async fn create_session(claims: Claims, headers: HeaderMap, body: Bytes) -> Resp
     );
     store::insert(session_id.clone(), info.clone());
 
-    // Schedule the DURATION_EXPIRED transition for an AVAILABLE session that
-    // recorded a `sink`: when it reaches its `expiresAt` the grant lapses, so the
-    // session is evicted and a `qos-status-changed` CloudEvent is delivered to the
-    // sink (see `spawn_expiry`). A REQUESTED session has no `expiresAt`, and a
-    // session with no `sink` has nowhere to notify, so neither schedules a timer.
-    // Insert first, so the spawned task always sees the stored session.
+    // Schedule the status transition for an AVAILABLE session that recorded a
+    // `sink`. A `…001` identifier (`NETWORK_TERMINATION_TAIL`) selects the
+    // `NETWORK_TERMINATED` transition — the network drops the session early
+    // (`spawn_network_termination`); any other AVAILABLE tail runs to its
+    // `expiresAt`, then `DURATION_EXPIRED` fires (`spawn_expiry`). A REQUESTED
+    // session has no `expiresAt`, and a session with no `sink` has nowhere to
+    // notify, so neither schedules a timer. Insert first, so the spawned task
+    // always sees the stored session.
     if info["qosStatus"] == "AVAILABLE" {
         if let Some(sink) = info.get("sink").and_then(Value::as_str) {
-            spawn_expiry(session_id, sink.to_string());
+            if scenarios::trailing_three_digits(&resolved.id) == Some(NETWORK_TERMINATION_TAIL) {
+                spawn_network_termination(session_id, sink.to_string());
+            } else {
+                spawn_expiry(session_id, sink.to_string());
+            }
         }
     }
 
@@ -324,6 +352,38 @@ fn spawn_expiry(session_id: String, sink: String) {
                 notifications::spawn_delivery(sink, event);
             }
             return;
+        }
+    });
+}
+
+/// Schedule the `NETWORK_TERMINATED` status transition for a `…001` session.
+///
+/// Spawns a fire-and-forget async timer (never on the request path, DESIGN §11)
+/// that waits [`NETWORK_TERMINATION_GRACE_SECS`] — a short, fixed grace,
+/// independent of the session's (typically longer) `duration` — then, if the
+/// session still exists, evicts it and delivers a `qos-status-changed` CloudEvent
+/// (`qosStatus: UNAVAILABLE`, `statusInfo: NETWORK_TERMINATED`) to `sink`. This
+/// models the network dropping a granted session *early*, so the transition is
+/// distinct from `DURATION_EXPIRED` (which fires at `expiresAt`).
+///
+/// A `deleteSession` that removed the session first makes this a no-op (the
+/// concurrent delete already fired `DELETE_REQUESTED`; `store::remove` is then
+/// `None`, so exactly one event fires). The sleep is async, so the (single-node,
+/// in-memory) runtime is never blocked.
+fn spawn_network_termination(session_id: String, sink: String) {
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(NETWORK_TERMINATION_GRACE_SECS)).await;
+        // Evict it; if a concurrent delete beat us, `remove` is None and we send
+        // nothing (that delete already notified DELETE_REQUESTED).
+        if store::remove(&session_id).is_some() {
+            let event = notifications::qos_status_changed_event(
+                store::new_event_id(),
+                rfc3339_utc(now_unix_secs()),
+                &session_id,
+                "UNAVAILABLE",
+                Some("NETWORK_TERMINATED"),
+            );
+            notifications::spawn_delivery(sink, event);
         }
     });
 }
@@ -1396,6 +1456,63 @@ mod tests {
         assert_eq!(event["data"]["statusInfo"], "DURATION_EXPIRED");
 
         // The expired session has been evicted: a later GET is 404 NOT_FOUND.
+        let read = mint_token(READ_SCOPE).await;
+        let (status, _, gone) = get_session_req(Some(&read), &session_id, None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(gone["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn a_001_session_with_a_sink_fires_network_terminated_early() {
+        use tokio::io::AsyncReadExt;
+        use tokio::net::TcpListener;
+
+        // A loopback receiver stands in for the consumer's `sink`.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let sink = format!("http://{addr}/qod-netterm");
+
+        // Create an AVAILABLE session with the network-termination tail (…001) and
+        // a *long* duration, so termination is provably not DURATION_EXPIRED. A
+        // globally-unique number so this shares the store with no other test.
+        let create = mint_token(CREATE_SCOPE).await;
+        let body = json!({
+            "device": { "phoneNumber": "+19998887001" },
+            "applicationServer": { "ipv4Address": "203.0.113.0/24" },
+            "qosProfile": "QOS_L",
+            "duration": 86400,
+            "sink": sink,
+        })
+        .to_string();
+        let (status, _, created) = post_sessions(Some(&create), &body, None).await;
+        assert_eq!(status, StatusCode::CREATED);
+        // The session is granted AVAILABLE with its full (long) expiry…
+        assert_eq!(created["qosStatus"], "AVAILABLE");
+        assert!(created["expiresAt"].is_string());
+        let session_id = created["sessionId"].as_str().unwrap().to_string();
+
+        // …yet the network drops it early: a NETWORK_TERMINATED CloudEvent arrives
+        // well before the 86400 s grant would have expired. Bound the wait so a bug
+        // can't hang the suite.
+        let (mut sock, _) = tokio::time::timeout(Duration::from_secs(10), listener.accept())
+            .await
+            .expect("the sink is notified within the timeout")
+            .unwrap();
+        let mut buf = Vec::new();
+        sock.read_to_end(&mut buf).await.unwrap();
+        let raw = String::from_utf8(buf).unwrap();
+        let (_head, event_body) = raw.split_once("\r\n\r\n").expect("headers then body");
+
+        let event: Value = serde_json::from_str(event_body).expect("body is JSON");
+        assert_eq!(
+            event["type"],
+            "org.camaraproject.quality-on-demand.v1.qos-status-changed"
+        );
+        assert_eq!(event["data"]["sessionId"], json!(session_id));
+        assert_eq!(event["data"]["qosStatus"], "UNAVAILABLE");
+        assert_eq!(event["data"]["statusInfo"], "NETWORK_TERMINATED");
+
+        // The terminated session has been evicted: a later GET is 404 NOT_FOUND.
         let read = mint_token(READ_SCOPE).await;
         let (status, _, gone) = get_session_req(Some(&read), &session_id, None).await;
         assert_eq!(status, StatusCode::NOT_FOUND);

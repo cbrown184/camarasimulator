@@ -209,8 +209,13 @@ timer (`v1::spawn_expiry`, off the request path) that waits until the session's
 `expiresAt`, re-reading it on each wake so an `extend` that pushed the expiry out is
 honoured, then evicts the session and delivers a `UNAVAILABLE`/`DURATION_EXPIRED`
 `qos-status-changed` CloudEvent to the sink (a concurrent `deleteSession` wins the
-eviction, so exactly one event fires). The `NETWORK_TERMINATED` transition and
-TLS/`sinkCredential` delivery remain to complete QoD.
+eviction, so exactly one event fires). The **`NETWORK_TERMINATED`** transition is
+now in place too: a `…001` identifier tail marks an `AVAILABLE`, sink-bearing
+session for early network drop — a short fire-and-forget timer (`v1::spawn_network_
+termination`, off the request path) evicts it a fixed grace after creation,
+independent of its (longer) `expiresAt`, and delivers a `UNAVAILABLE`/
+`NETWORK_TERMINATED` event (again exactly-once vs a concurrent delete). Only
+TLS/`sinkCredential` delivery remains to complete QoD.
 
 ## In progress (claimed this pass)
 
@@ -260,7 +265,8 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
       best-effort fire-and-forget over raw TCP; no HTTP-client dep)
     - [x] `DURATION_EXPIRED` transition (async timer at creation for an AVAILABLE,
       sink-bearing session; re-checks `expiresAt` so `extend` is honoured)
-    - [ ] `NETWORK_TERMINATED` transition
+    - [x] `NETWORK_TERMINATED` transition (`…001` identifier tail: an AVAILABLE,
+      sink-bearing session is dropped early by the simulated network)
     - [ ] TLS (`https://` sink) delivery + `sinkCredential` auth
 
 ### Phase 4 — Spatial
@@ -284,6 +290,29 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-03 — Phase 3: Quality on Demand v1 — CloudEvents **`NETWORK_TERMINATED`**
+  transition (CAMARA quality-on-demand 1.1.0, r3.2). New `v1::spawn_network_termination`:
+  when `createSession` stores an `AVAILABLE` session whose identifier tail is `…001`
+  (`NETWORK_TERMINATION_TAIL`) and that recorded a `sink`, it spawns a fire-and-forget
+  timer (`tokio::spawn` + `tokio::time::sleep`, off the request path) that waits a short
+  fixed grace (`NETWORK_TERMINATION_GRACE_SECS` = 1 s), then `store::remove`s the session
+  and — if still present (a concurrent `deleteSession` loses, so exactly one event fires)
+  — delivers a `UNAVAILABLE`/`NETWORK_TERMINATED` `qos-status-changed` CloudEvent to the
+  sink via the existing `notifications::{qos_status_changed_event,spawn_delivery}`. `…001`
+  is otherwise an ordinary AVAILABLE tail (distinct from `…000` REQUESTED and the reserved
+  error suffixes); the grace is independent of the (typically much longer) `duration`, so
+  the transition is provably *not* DURATION_EXPIRED. create_session now branches: `…001`
+  AVAILABLE+sink → network-termination timer, any other AVAILABLE+sink → expiry timer.
+  Non-blocking + in-memory preserved. **No new deps** (`tokio::time` already compiled).
+  Spec: updated `specs/quality-on-demand/v1/openapi.yaml` — header prose, info description,
+  `createSession` description + `x-camarasim-scenarios` (now three transitions + a new
+  `…001` case), the `notifications` callback description, the `sink` field doc, and the
+  `EventQosStatusChanged.statusInfo` description now all document NETWORK_TERMINATED fires
+  for a `…001` AVAILABLE sink-bearing session (was "declared but not yet emitted"); only
+  TLS/sinkCredential remain deferred. 326 tests green (was 325; +1 integration: create an
+  AVAILABLE `…001` session with a sink and a long 86400 s duration → the loopback sink
+  receives the NETWORK_TERMINATED CloudEvent within the timeout, well before expiry, and a
+  later GET is 404, i.e. the session was evicted early). — binary: 1144800 B (+2840 B)
 - 2026-08-03 — Phase 3: Quality on Demand v1 — CloudEvents **`DURATION_EXPIRED`**
   transition (CAMARA quality-on-demand 1.1.0, r3.2). New `v1::spawn_expiry`: after
   `createSession` stores an `AVAILABLE` session that recorded a `sink`, it spawns a
