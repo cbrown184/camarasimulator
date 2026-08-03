@@ -14,12 +14,13 @@
 # circular area, and the event types of interest) and the network would later
 # POST a CloudEvent to the `sink` when the device enters/leaves the area.
 #
-# This slice serves `POST /subscriptions` (create) and
-# `GET /subscriptions/{subscriptionId}` (read-back). The subscription is held in
-# an in-memory store (single node). Event delivery to the `sink`
-# (`area-entered` / `area-left` CloudEvents), listing (`GET /subscriptions`),
-# `DELETE`, and subscription expiry are deferred to later passes; the served
-# spec covers only what is implemented.
+# This slice serves the full subscription CRUD: `POST /subscriptions` (create),
+# `GET /subscriptions` (list), `GET /subscriptions/{subscriptionId}` (read-back),
+# and `DELETE /subscriptions/{subscriptionId}` (delete). The subscriptions are
+# held in an in-memory store (single node). Event delivery to the `sink`
+# (`area-entered` / `area-left` CloudEvents), the `subscription-ended` event on
+# deletion, and subscription expiry/maxEvents are deferred to later passes; the
+# served spec covers only what is implemented.
 openapi: 3.0.3
 info:
   title: Geofencing Subscriptions
@@ -33,17 +34,20 @@ info:
 
     This is the CamaraSim reference double for CAMARA Geofencing Subscriptions
     0.4.0. It is an **event-subscription** API: `POST /subscriptions` creates a
-    subscription and returns a `SubscriptionInfo` with an `id`, and
-    `GET /subscriptions/{subscriptionId}` reads that subscription back by id.
-    Subscriptions are held in an in-memory store (single node).
+    subscription and returns a `SubscriptionInfo` with an `id`, `GET
+    /subscriptions` lists the stored subscriptions, `GET
+    /subscriptions/{subscriptionId}` reads one back by id, and `DELETE
+    /subscriptions/{subscriptionId}` removes it. Subscriptions are held in an
+    in-memory store (single node).
 
     The device can be identified either by the `device` object inside
     `config.subscriptionDetail` (two-legged / CIBA) or by the identity a
     three-legged access token authenticated (in which case `device` is omitted).
     `createSubscription` requires the
-    `geofencing-subscriptions:subscriptions:create` scope and
-    `retrieveSubscription` the `geofencing-subscriptions:subscriptions:read`
-    scope.
+    `geofencing-subscriptions:subscriptions:create` scope, `retrieveSubscription`
+    and `retrieveSubscriptionList` the
+    `geofencing-subscriptions:subscriptions:read` scope, and `deleteSubscription`
+    the `geofencing-subscriptions:subscriptions:delete` scope.
 
     > **Scopes** — CAMARA geofencing-subscriptions publishes *per-event-type*
     > scopes (e.g.
@@ -191,6 +195,50 @@ paths:
             result: "400 INVALID_ARGUMENT"
           - input: no `device` and no token subject
             result: "422 MISSING_IDENTIFIER"
+    get:
+      operationId: retrieveSubscriptionList
+      summary: List geofencing subscriptions
+      description: |
+        Returns the stored geofencing subscriptions as an array of
+        `SubscriptionInfo`, or an empty array when there are none.
+
+        > CamaraSim does not scope subscriptions per client, so this returns every
+        > subscription in the in-memory store — a documented simplification.
+      security:
+        - openId:
+            - geofencing-subscriptions:subscriptions:read
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+      responses:
+        "200":
+          description: The stored subscriptions (possibly empty).
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/SubscriptionInfo"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          Reads only the in-memory store: returns every stored SubscriptionInfo
+          (200), or an empty array when none exist. CamaraSim does not scope
+          subscriptions per client — a documented simplification.
+        cases:
+          - input: any authorised request
+            result: "200 with an array of the stored SubscriptionInfo (possibly empty)"
 
   /subscriptions/{subscriptionId}:
     get:
@@ -240,6 +288,59 @@ paths:
         cases:
           - input: a subscriptionId returned by a prior createSubscription
             result: "200 with the stored SubscriptionInfo"
+          - input: any other id
+            result: "404 NOT_FOUND"
+    delete:
+      operationId: deleteSubscription
+      summary: Delete a geofencing subscription
+      description: |
+        Deletes the subscription identified by `subscriptionId`, stopping any
+        future notifications. Returns `204 No Content` when a subscription was
+        deleted, or `404 NOT_FOUND` when no such subscription exists.
+
+        > CamaraSim deletes synchronously and does **not** emit the CAMARA
+        > `subscription-ended` CloudEvent (notification delivery is deferred), so
+        > it answers `204` rather than the subscription template's asynchronous
+        > `202 Accepted` — a documented simplification.
+      security:
+        - openId:
+            - geofencing-subscriptions:subscriptions:delete
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+        - name: subscriptionId
+          in: path
+          required: true
+          description: The id returned by `createSubscription`.
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "204":
+          description: The subscription was deleted.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          Keyed only on the in-memory store: a known id is evicted → 204 No
+          Content; an unknown/already-deleted id → 404 NOT_FOUND. No
+          `subscription-ended` CloudEvent is emitted (a documented cut), so the
+          deletion is synchronous (204, not the template's async 202).
+        cases:
+          - input: a subscriptionId returned by a prior createSubscription
+            result: "204 No Content (the subscription is removed)"
           - input: any other id
             result: "404 NOT_FOUND"
 

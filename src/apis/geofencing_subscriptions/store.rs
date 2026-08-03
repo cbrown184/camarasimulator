@@ -53,6 +53,31 @@ pub fn get(id: &str) -> Option<Value> {
         .cloned()
 }
 
+/// Remove the subscription stored under `id`, returning its `SubscriptionInfo`
+/// if one was present, or `None` if no such subscription existed.
+/// `deleteSubscription` uses the distinction to answer `204` (a subscription was
+/// deleted) vs `404` (unknown id).
+pub fn remove(id: &str) -> Option<Value> {
+    store()
+        .lock()
+        .expect("geofencing subscription store not poisoned")
+        .remove(id)
+}
+
+/// Return a snapshot of every stored `SubscriptionInfo`.
+/// `retrieveSubscriptionList` uses this to list subscriptions. The lock is held
+/// only for the clone (never across an `.await`), and the returned `Vec` is an
+/// independent copy. CamaraSim does not scope subscriptions per client, so this
+/// returns every subscription in the store — a documented simplification.
+pub fn all() -> Vec<Value> {
+    store()
+        .lock()
+        .expect("geofencing subscription store not poisoned")
+        .values()
+        .cloned()
+        .collect()
+}
+
 /// Mint a fresh, opaque, UUID-shaped subscription `id`. See [`mint_uuid`].
 pub fn new_subscription_id() -> String {
     mint_uuid()
@@ -119,5 +144,24 @@ mod tests {
         insert(id.clone(), info.clone());
         assert_eq!(get(&id), Some(info));
         assert!(get("no-such-subscription").is_none());
+    }
+
+    #[test]
+    fn remove_returns_the_subscription_once_then_none() {
+        let id = new_subscription_id();
+        insert(id.clone(), json!({ "id": id, "status": "ACTIVE" }));
+        assert!(remove(&id).is_some(), "first remove evicts and returns it");
+        assert!(remove(&id).is_none(), "second remove finds nothing");
+        assert!(get(&id).is_none(), "and it is gone from the store");
+    }
+
+    #[test]
+    fn all_includes_a_stored_subscription() {
+        let id = new_subscription_id();
+        insert(id.clone(), json!({ "id": id, "status": "ACTIVE" }));
+        assert!(
+            all().iter().any(|s| s.get("id").and_then(Value::as_str) == Some(id.as_str())),
+            "the stored subscription appears in the snapshot"
+        );
     }
 }

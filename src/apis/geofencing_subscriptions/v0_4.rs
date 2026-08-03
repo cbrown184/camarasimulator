@@ -1,13 +1,19 @@
 //! Geofencing Subscriptions **v0.4** (CAMARA geofencing-subscriptions 0.4.0,
 //! release r3.2).
 //!
-//! First slice of the subscription lifecycle:
+//! The subscription lifecycle (CRUD):
 //! - `POST /geofencing-subscriptions/v0.4/subscriptions` — create a geofencing
 //!   subscription and return its `SubscriptionInfo` (operationId
 //!   `createSubscription`, scope `geofencing-subscriptions:subscriptions:create`).
+//! - `GET /geofencing-subscriptions/v0.4/subscriptions` — list the stored
+//!   subscriptions (operationId `retrieveSubscriptionList`, scope
+//!   `geofencing-subscriptions:subscriptions:read`).
 //! - `GET /geofencing-subscriptions/v0.4/subscriptions/{subscriptionId}` — read a
 //!   subscription back by id (operationId `retrieveSubscription`, scope
 //!   `geofencing-subscriptions:subscriptions:read`).
+//! - `DELETE /geofencing-subscriptions/v0.4/subscriptions/{subscriptionId}` —
+//!   delete a subscription (operationId `deleteSubscription`, scope
+//!   `geofencing-subscriptions:subscriptions:delete`).
 //!
 //! ## What it does
 //!
@@ -70,8 +76,10 @@ use crate::scenarios;
 /// resource-action scope (a single subscription can carry several event types),
 /// a documented simplification mirroring the QoD `sessions:*` scopes.
 const CREATE_SCOPE: &str = "geofencing-subscriptions:subscriptions:create";
-/// Scope required to read a subscription back.
+/// Scope required to read a subscription back (single read or the list).
 const READ_SCOPE: &str = "geofencing-subscriptions:subscriptions:read";
+/// Scope required to delete a subscription.
+const DELETE_SCOPE: &str = "geofencing-subscriptions:subscriptions:delete";
 
 /// Minimum circle radius, in metres (CAMARA geofencing `radius.minimum`). A
 /// radius below this is out of range.
@@ -97,11 +105,11 @@ pub fn routes() -> Router {
     Router::new()
         .route(
             "/geofencing-subscriptions/v0.4/subscriptions",
-            post(create_subscription),
+            post(create_subscription).get(list_subscriptions),
         )
         .route(
             "/geofencing-subscriptions/v0.4/subscriptions/:subscription_id",
-            get(retrieve_subscription),
+            get(retrieve_subscription).delete(delete_subscription),
         )
 }
 
@@ -335,6 +343,54 @@ async fn retrieve_subscription(
         Some(info) => {
             with_correlator((StatusCode::OK, Json(info)).into_response(), &correlator)
         }
+        None => with_correlator(
+            CamaraError::not_found("No subscription exists for the supplied id.").into_response(),
+            &correlator,
+        ),
+    }
+}
+
+/// `GET /geofencing-subscriptions/v0.4/subscriptions`.
+///
+/// Lists the stored subscriptions as an array of `SubscriptionInfo` (`200`), or
+/// an empty array when there are none. CamaraSim does not scope subscriptions per
+/// client, so this returns every subscription in the store — a documented
+/// simplification (see [`store::all`]).
+async fn list_subscriptions(claims: Claims, headers: HeaderMap) -> Response {
+    let correlator = headers.get("x-correlator").cloned();
+
+    if let Err(e) = claims.require_scope(READ_SCOPE) {
+        return with_correlator(e.into_response(), &correlator);
+    }
+
+    let subscriptions = store::all();
+    with_correlator(
+        (StatusCode::OK, Json(subscriptions)).into_response(),
+        &correlator,
+    )
+}
+
+/// `DELETE /geofencing-subscriptions/v0.4/subscriptions/{subscriptionId}`.
+///
+/// Deletes the subscription, stopping any future notifications. Keyed only on the
+/// stored state: a subscription that exists is evicted → `204 No Content`; an
+/// unknown (or already deleted) id → `404 NOT_FOUND`. No `subscription-ended`
+/// CloudEvent is emitted (notification delivery is deferred — a documented cut),
+/// so the deletion is synchronous and CamaraSim answers `204` rather than the
+/// template's async `202`.
+async fn delete_subscription(
+    claims: Claims,
+    headers: HeaderMap,
+    Path(subscription_id): Path<String>,
+) -> Response {
+    let correlator = headers.get("x-correlator").cloned();
+
+    if let Err(e) = claims.require_scope(DELETE_SCOPE) {
+        return with_correlator(e.into_response(), &correlator);
+    }
+
+    match store::remove(&subscription_id) {
+        Some(_) => with_correlator(StatusCode::NO_CONTENT.into_response(), &correlator),
         None => with_correlator(
             CamaraError::not_found("No subscription exists for the supplied id.").into_response(),
             &correlator,
@@ -701,6 +757,47 @@ mod tests {
         (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
     }
 
+    async fn list_subscriptions_req(token: Option<&str>) -> (StatusCode, Value) {
+        let mut builder = Request::builder()
+            .method("GET")
+            .uri("/geofencing-subscriptions/v0.4/subscriptions")
+            .header("host", HOST);
+        if let Some(t) = token {
+            builder = builder.header("authorization", format!("Bearer {t}"));
+        }
+        let response = app().oneshot(builder.body(Body::empty()).unwrap()).await.unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+    }
+
+    async fn delete_subscription_req(
+        token: Option<&str>,
+        id: &str,
+        correlator: Option<&str>,
+    ) -> (StatusCode, HeaderMap, Value) {
+        let mut builder = Request::builder()
+            .method("DELETE")
+            .uri(format!("/geofencing-subscriptions/v0.4/subscriptions/{id}"))
+            .header("host", HOST);
+        if let Some(t) = token {
+            builder = builder.header("authorization", format!("Bearer {t}"));
+        }
+        if let Some(c) = correlator {
+            builder = builder.header("x-correlator", c);
+        }
+        let response = app().oneshot(builder.body(Body::empty()).unwrap()).await.unwrap();
+        let status = response.status();
+        let headers = response.headers().clone();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, headers, json)
+    }
+
     /// Build a request body with the given device fragment, the OK area, and one
     /// event type.
     fn body_with_device(device: &str) -> String {
@@ -966,6 +1063,126 @@ mod tests {
         assert_eq!(
             headers.get("x-correlator").and_then(|v| v.to_str().ok()),
             Some("corr-err")
+        );
+    }
+
+    // --- GET /subscriptions (list) -----------------------------------------
+
+    #[tokio::test]
+    async fn list_includes_a_created_subscription() {
+        let token = mint_token(&format!("{CREATE_SCOPE} {READ_SCOPE}")).await;
+        let (status, _, created) = post_subscriptions(
+            Some(&token),
+            &body_with_device(r#"{"phoneNumber":"+123456789012"}"#),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let id = created["id"].as_str().unwrap().to_string();
+
+        let (status, list) = list_subscriptions_req(Some(&token)).await;
+        assert_eq!(status, StatusCode::OK);
+        let items = list.as_array().expect("list is a JSON array");
+        // The store is process-global, so other tests may add entries; assert the
+        // created subscription is present rather than an exact length.
+        let found = items
+            .iter()
+            .find(|s| s.get("id").and_then(Value::as_str) == Some(id.as_str()))
+            .expect("the created subscription appears in the list");
+        assert_eq!(*found, created);
+    }
+
+    #[tokio::test]
+    async fn list_requires_the_read_scope() {
+        let token = mint_token("some:other-scope").await;
+        let (status, body) = list_subscriptions_req(Some(&token)).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["code"], "PERMISSION_DENIED");
+    }
+
+    #[tokio::test]
+    async fn list_without_a_token_is_unauthenticated() {
+        let (status, body) = list_subscriptions_req(None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["code"], "UNAUTHENTICATED");
+    }
+
+    // --- DELETE /subscriptions/{id} ----------------------------------------
+
+    #[tokio::test]
+    async fn delete_evicts_a_subscription_then_get_is_404() {
+        let token =
+            mint_token(&format!("{CREATE_SCOPE} {READ_SCOPE} {DELETE_SCOPE}")).await;
+        let (status, _, created) = post_subscriptions(
+            Some(&token),
+            &body_with_device(r#"{"phoneNumber":"+123456789012"}"#),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let id = created["id"].as_str().unwrap().to_string();
+
+        // First delete evicts it → 204 No Content, no body.
+        let (status, _, _) = delete_subscription_req(Some(&token), &id, None).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        // The subscription is gone: a read-back is 404.
+        let (status, body) = get_subscription(&token, &id).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn delete_of_unknown_id_is_not_found() {
+        let token = mint_token(DELETE_SCOPE).await;
+        let (status, _, body) =
+            delete_subscription_req(Some(&token), "no-such-id", None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn delete_requires_the_delete_scope() {
+        let token = mint_token(READ_SCOPE).await;
+        let (status, _, body) = delete_subscription_req(Some(&token), "any-id", None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["code"], "PERMISSION_DENIED");
+    }
+
+    #[tokio::test]
+    async fn delete_without_a_token_is_unauthenticated() {
+        let (status, _, body) = delete_subscription_req(None, "any-id", None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["code"], "UNAUTHENTICATED");
+    }
+
+    #[tokio::test]
+    async fn x_correlator_is_echoed_on_delete() {
+        let token = mint_token(&format!("{CREATE_SCOPE} {DELETE_SCOPE}")).await;
+        let (status, _, created) = post_subscriptions(
+            Some(&token),
+            &body_with_device(r#"{"phoneNumber":"+123456789012"}"#),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let id = created["id"].as_str().unwrap().to_string();
+
+        let (status, headers, _) =
+            delete_subscription_req(Some(&token), &id, Some("corr-del")).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-del")
+        );
+
+        // A 404 delete also echoes the correlator.
+        let (status, headers, _) =
+            delete_subscription_req(Some(&token), "no-such-id", Some("corr-del-404")).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-del-404")
         );
     }
 }

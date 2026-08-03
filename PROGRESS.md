@@ -281,8 +281,16 @@ subject) → reserved suffix → canonical CAMARA error; else tail `…000`/no-d
 `radius` (2000–200000 m, else 400 OUT_OF_RANGE). `protocol` must be `HTTP` and
 `types` must be known geofencing events, else 400 INVALID_ARGUMENT.
 `sinkCredential` is accepted but never applied/echoed. `x-correlator` echoed on
-every response. Notification delivery (`area-entered`/`area-left` CloudEvents),
-listing, `DELETE`, and expiry are deferred to later passes.
+every response. The subscription CRUD is now complete: `GET /subscriptions`
+(`retrieveSubscriptionList`, `…:subscriptions:read`) lists the stored
+subscriptions as an array of `SubscriptionInfo` (`200`, empty array when none;
+CamaraSim does not scope subscriptions per client — a documented simplification),
+and `DELETE /subscriptions/{subscriptionId}` (`deleteSubscription`,
+`…:subscriptions:delete`) evicts a stored subscription → `204 No Content`
+(single-use) or `404 NOT_FOUND` for an unknown/already-deleted id; deletion is
+synchronous with no `subscription-ended` CloudEvent (204, not the template's
+async 202 — a documented cut). Only notification delivery
+(`area-entered`/`area-left` CloudEvents) + expiry/maxEvents remain.
 
 ## In progress (claimed this pass)
 
@@ -347,7 +355,7 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   0.4.0, r3.2; in-memory subscription store):
   - [x] `POST /subscriptions` (`geofencing-subscriptions:subscriptions:create`, `createSubscription`)
   - [x] `GET /subscriptions/{subscriptionId}` (`geofencing-subscriptions:subscriptions:read`, `retrieveSubscription`)
-  - [ ] `GET /subscriptions` (list) + `DELETE /subscriptions/{subscriptionId}`
+  - [x] `GET /subscriptions` (list, `retrieveSubscriptionList`) + `DELETE /subscriptions/{subscriptionId}` (`…:subscriptions:delete`, `deleteSubscription`)
   - [ ] CloudEvents delivery on `sink` (`area-entered` / `area-left`) + expiry/maxEvents
 
 ### Phase 5 — Remaining
@@ -369,6 +377,33 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 ## Scan journal
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
+
+- 2026-08-03 — Phase 4 (spatial): **Geofencing Subscriptions v0.4** — completed the
+  subscription CRUD with `GET /subscriptions` (list, operationId
+  `retrieveSubscriptionList`, scope `…:subscriptions:read`) and `DELETE
+  /subscriptions/{subscriptionId}` (`deleteSubscription`, new scope
+  `geofencing-subscriptions:subscriptions:delete`). New `store::all()` (snapshot of
+  every stored `SubscriptionInfo`) and `store::remove()` (evict, returning the prior
+  value so delete can answer 204 vs 404), both holding the `Mutex` only for the
+  map access (never across `.await`); the `/subscriptions` route gained `.get(list_
+  subscriptions)` and `/subscriptions/{id}` gained `.delete(delete_subscription)`.
+  list returns `200` with a JSON array (empty when none) — CamaraSim does not scope
+  subscriptions per client, so it returns every stored subscription, a documented
+  simplification. delete evicts an existing subscription → `204 No Content`
+  (single-use) or `404 NOT_FOUND`; deletion is synchronous with **no**
+  `subscription-ended` CloudEvent (so `204`, not the CAMARA subscription-template's
+  async `202` — a documented cut). `x-correlator` echoed on every response including
+  the `204`. Only notification delivery (`area-entered`/`area-left` CloudEvents) +
+  expiry/maxEvents now remain for the API. **No new deps** (pure axum routing +
+  serde_json + shared errors). Spec: updated
+  `specs/geofencing-subscriptions/v0.4/openapi.yaml` — added the `retrieveSubscription
+  List` (200 array) and `deleteSubscription` (204/404) operations with their
+  `x-camarasim-scenarios`, refreshed the header/info prose (CRUD now complete; only
+  the sink-delivery cut remains) and scope docs. 412 tests green (was 402; +10:
+  2 store units [remove-once-then-none / all-includes-a-stored-subscription] +
+  8 integration covering list-includes-created / list-requires-read-scope /
+  list-no-token-401 / delete-then-get-404 / delete-unknown-404 / delete-requires-
+  delete-scope / delete-no-token-401 / x-correlator-on-delete-204-and-404). — binary: 1453040 B (+10816 B)
 
 - 2026-08-03 — Phase 4 (spatial): **Geofencing Subscriptions v0.4** begun —
   CamaraSim's first **event-subscription** API (CAMARA geofencing-subscriptions
