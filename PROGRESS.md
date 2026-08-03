@@ -347,9 +347,17 @@ subject) — reserved error suffix → canonical CAMARA error, malformed `phoneN
 `INVALID_ARGUMENT` and `> 1000` (authorised ceiling) → 422
 `CARRIER_BILLING.UNAUTHORIZED_AMOUNT`; else the charge succeeds. The identifier
 plane is checked first (a reserved-error number wins over an out-of-range amount).
-Stateless for now — nothing reads a payment back yet, so it is not persisted;
 `sink`/`sinkCredential` are accepted but not acted on (both documented cuts).
 `x-correlator` echoed on every response.
+
+Carrier Billing is now **stateful**: `GET /payments/{paymentId}`
+(`retrievePayment`, scope `carrier-billing:payments:read`) reads a created
+payment back. `createPayment` persists the charged payment in a new in-memory
+store (`src/apis/carrier_billing/store.rs`; `Mutex<HashMap>`, lock never held
+across await, mirroring QoD's session store), and `retrievePayment` returns it
+verbatim (`200`) or `404 NOT_FOUND` for an unknown/never-created id. The
+`paymentId` is opaque (UUID-shaped), so — unlike `createPayment` — there is no
+reserved-identifier control plane here; the store state is the only one.
 
 ## In progress (claimed this pass)
 
@@ -432,10 +440,15 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 ### Phase 5 — Remaining
 - [~] Carrier Billing v0.5 (`/carrier-billing/v0.5`; CAMARA 0.5.0, release r3.2):
   - [x] `POST /payments` (`carrier-billing:payments:create`, `createPayment`) —
-    one-step charge; identifier + amount control planes (DESIGN §7). Stateless
-    (nothing reads a payment back yet, so not persisted).
-  - [ ] `GET /payments` (list, `retrievePayments`) · `GET /payments/{paymentId}`
-    (`retrievePayment`) — `carrier-billing:payments:read` (needs a payment store)
+    one-step charge; identifier + amount control planes (DESIGN §7). Now
+    persists the charged payment (see `retrievePayment` below).
+  - [x] `GET /payments/{paymentId}` (`retrievePayment`) —
+    `carrier-billing:payments:read`. In-memory payment store
+    (`src/apis/carrier_billing/store.rs`); `createPayment` now persists the
+    charged payment so it can be read back (`200`) or `404 NOT_FOUND` for an
+    unknown id. Opaque `paymentId` → store state is the only control plane.
+  - [ ] `GET /payments` (list, `retrievePayments`) —
+    `carrier-billing:payments:read` (store `all()` scan; next slice)
   - [ ] two-step flow: `POST /payments/prepare` (`preparePayment`) ·
     `.../{paymentId}/validate` · `.../confirm` · `.../cancel`
     (`carrier-billing:payments:write`)
@@ -457,6 +470,29 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 ## Scan journal
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
+
+- 2026-08-03 — Phase 5 (payments): **Carrier Billing v0.5** — `GET
+  /payments/{paymentId}` (`retrievePayment`, scope `carrier-billing:payments:read`),
+  making the API **stateful**. Confirmed the canonical operation against the real
+  CAMARA CarrierBillingCheckOut r3.2 spec (op `retrievePayment`, path
+  `/payments/{paymentId}`, scope `carrier-billing:payments:read`, 200/400/401/403/
+  404/429, response schema `Payment` = `PaymentCreated` + optional `sink`). New
+  in-memory payment store `src/apis/carrier_billing/store.rs` (`Mutex<HashMap>`,
+  lock never held across await, mirroring QoD's session store; `insert`/`get`, no
+  new dep); `createPayment` now persists the charged payment. `retrievePayment`
+  returns it verbatim (`200`) or `404 NOT_FOUND` for an unknown id — the opaque
+  `paymentId` means the store state is the only control plane (no reserved-suffix
+  plane, mirroring QoD `getSession`); `x-correlator` echoed on 200 + 404. The list
+  op (`retrievePayments`) is the next slice. Spec: updated
+  `specs/carrier-billing/v0.5/openapi.yaml` — new `GET /payments/{paymentId}`
+  operation (`x-camarasim-scenarios`: found → 200 / unknown → 404, `$ref`ing the
+  shared 400/401/403/404/429 responses), new `PaymentId` path param, new `Payment`
+  schema (sink optional, always omitted here), refreshed description (read-back
+  section + updated cuts). 468 tests green (was 462; +6: 1 store unit [read-back /
+  unknown → None] + 5 v0_5 integration [created payment retrieved verbatim ·
+  unknown id → 404 NOT_FOUND · read without read scope → 403 · no token → 401 ·
+  x-correlator echoed on 200 + 404]). — binary: 1547504 B (+9312 B; the store
+  module + the new vendored spec text embedded via include_str!)
 
 - 2026-08-03 — Phase 5 (payments) **begun** — **Carrier Billing v0.5**
   `POST /payments` (`createPayment`), CamaraSim's first payments API. Phases 0–4

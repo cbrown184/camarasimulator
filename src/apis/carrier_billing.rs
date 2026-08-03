@@ -14,10 +14,15 @@
 //! omitted).
 //!
 //! One submodule per major version (docs/DESIGN.md §5, §9). So far:
-//! - [`v0_5`] — mounted at `/carrier-billing/v0.5`. Only `POST /payments`
-//!   (`createPayment`, the one-step charge) so far; the read/prepare/validate/
-//!   confirm/cancel operations are later slices.
+//! - [`v0_5`] — mounted at `/carrier-billing/v0.5`. `POST /payments`
+//!   (`createPayment`, the one-step charge) and `GET /payments/{paymentId}`
+//!   (`retrievePayment`, read-back) so far; the list / prepare / validate /
+//!   confirm / cancel operations are later slices.
+//!
+//! Reading a payment back makes Carrier Billing **stateful**, so a shared
+//! in-memory [`store`] holds created payments keyed by `paymentId`.
 
+pub mod store;
 pub mod v0_5;
 
 use axum::Router;

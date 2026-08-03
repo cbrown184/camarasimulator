@@ -9,8 +9,10 @@
 # Retrieval v0.4 — it is mounted under its real published sub-1.0 version
 # `/carrier-billing/v0.5` rather than a loose "v1" (DESIGN §9).
 #
-# This slice serves only `POST /payments` (the one-step `createPayment`). The
-# read/prepare/validate/confirm/cancel operations are later slices.
+# This slice serves `POST /payments` (the one-step `createPayment`) and
+# `GET /payments/{paymentId}` (`retrievePayment`, read-back). The list
+# (`retrievePayments`) / prepare / validate / confirm / cancel operations are
+# later slices.
 openapi: 3.0.3
 info:
   title: Carrier Billing
@@ -55,12 +57,25 @@ info:
     → `404 NOT_FOUND`; `+123456789012` charging `5000` →
     `422 CARRIER_BILLING.UNAUTHORIZED_AMOUNT`.
 
+    ## Read-back — `GET /payments/{paymentId}` (`retrievePayment`)
+
+    Reading a payment back makes Carrier Billing **stateful**: `createPayment`
+    persists the payment it charges in an in-memory store (single node), and
+    `retrievePayment` returns it verbatim (`200`) or `404 NOT_FOUND` for an
+    unknown/never-created id. The `paymentId` is opaque (UUID-shaped), so the
+    store state is `retrievePayment`'s only control plane — there is no
+    reserved-identifier suffix here. It requires the
+    `carrier-billing:payments:read` scope.
+
     ## Documented cuts (this slice)
 
-    - Only the one-step `POST /payments` is implemented. Nothing reads a payment
-      back yet, so the created payment is **not** persisted.
+    - `POST /payments` (one-step `createPayment`) and `GET /payments/{paymentId}`
+      (`retrievePayment`) are implemented; the list (`retrievePayments`) /
+      prepare / validate / confirm / cancel operations are later slices.
     - `sink` / `sinkCredential` are accepted for schema fidelity but not acted on
-      (Carrier Billing charging notifications are a later slice).
+      (Carrier Billing charging notifications are a later slice). They are never
+      applied, so the persisted payment carries no `sink`; the `Payment` schema's
+      `sink` is optional, so a `retrievePayment` response omits it.
   version: "0.5.0"
   license:
     name: Apache-2.0
@@ -194,6 +209,72 @@ paths:
           - input: no `phoneNumber` and a non-E.164 token subject
             result: "422 MISSING_IDENTIFIER"
 
+  /payments/{paymentId}:
+    get:
+      operationId: retrievePayment
+      summary: Retrieve a payment by id
+      description: |
+        Reads a previously created payment back by its `paymentId`. Returns the
+        payment's representation (`200`) or `404 NOT_FOUND` when no payment
+        exists for the id.
+
+        The `paymentId` is opaque, so — unlike `createPayment` — there is no
+        reserved-identifier control plane: the only control plane is the
+        in-memory store state (known id → `200`, unknown id → `404`).
+      security:
+        - openId:
+            - carrier-billing:payments:read
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+        - $ref: "#/components/parameters/PaymentId"
+      responses:
+        "200":
+          description: The payment was found.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Payment"
+              examples:
+                succeeded:
+                  summary: A previously created, succeeded payment
+                  value:
+                    paymentId: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+                    amountTransaction:
+                      phoneNumber: "+123456789012"
+                      paymentAmount:
+                        chargingInformation:
+                          amount: 9.99
+                          currency: EUR
+                          description: A digital good
+                      referenceCode: ref-001
+                    paymentStatus: succeeded
+                    paymentCreationDate: "2024-01-01T14:27:08Z"
+                    paymentDate: "2024-01-01T14:27:08Z"
+        "400":
+          $ref: "../../shared/errors.yaml#/components/responses/InvalidArgument"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+      x-camarasim-scenarios:
+        description: >-
+          Keyed only on the in-memory payment store (docs/DESIGN.md §7): a
+          payment created by `createPayment` is returned verbatim; an unknown or
+          never-created id yields `404 NOT_FOUND`. The `paymentId` is opaque, so
+          no reserved-identifier suffix applies here.
+        cases:
+          - input: a `paymentId` returned by a prior `createPayment`
+            result: "200 with the stored payment representation"
+          - input: an unknown / never-created `paymentId`
+            result: "404 NOT_FOUND"
+
 components:
   securitySchemes:
     openId:
@@ -207,6 +288,16 @@ components:
       description: Correlation id for the request, echoed back on the response.
       schema:
         type: string
+
+    PaymentId:
+      name: paymentId
+      in: path
+      required: true
+      description: The id of a previously created payment.
+      schema:
+        type: string
+        format: uuid
+      example: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
 
   headers:
     XCorrelator:
@@ -411,6 +502,50 @@ components:
           type: string
           format: date-time
           description: When the payment was charged (RFC 3339, `Z` offset).
+
+    Payment:
+      type: object
+      description: |
+        A payment as returned by `retrievePayment`. Identical to
+        `PaymentCreated` plus an optional `sink`. CamaraSim never applies a
+        `sink`, so the read-back representation omits it (it returns exactly what
+        `createPayment` produced).
+      required:
+        - paymentId
+        - amountTransaction
+        - paymentStatus
+        - paymentCreationDate
+      properties:
+        paymentId:
+          type: string
+          description: Server-assigned, opaque, UUID-shaped payment id.
+          example: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+        amountTransaction:
+          $ref: "#/components/schemas/AmountTransaction"
+        paymentStatus:
+          type: string
+          description: The payment's status (a happy path is `succeeded`).
+          enum:
+            - processing
+            - pending_validation
+            - denied
+            - reserved
+            - succeeded
+            - cancelled
+        paymentCreationDate:
+          type: string
+          format: date-time
+          description: When the payment was created (RFC 3339, `Z` offset).
+        paymentDate:
+          type: string
+          format: date-time
+          description: When the payment was charged (RFC 3339, `Z` offset).
+        sink:
+          type: string
+          format: uri
+          description: >-
+            The callback that was registered at creation, if any. CamaraSim does
+            not act on or persist a `sink`, so it is always omitted here.
 
     AmountTransaction:
       type: object
