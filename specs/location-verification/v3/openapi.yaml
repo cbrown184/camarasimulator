@@ -1,0 +1,412 @@
+# CamaraSim — Device Location Verification, API version v3 (CAMARA 3.0.0).
+#
+# Vendored from the CAMARA Location Verification API (location-verification
+# 3.0.0, release r3.2 — the latest published stable version) and annotated with
+# CamaraSim's parameter-driven functional cases (docs/DESIGN.md §7, §9). Backed
+# by `src/apis/location_verification/v3.rs`; spec and code must not drift.
+#
+# This is the first CamaraSim *spatial* API (docs/DESIGN.md §12, Phase 4). It
+# answers a verdict (device inside / outside / partly inside a requested circle),
+# never a coordinate.
+#
+# Serves `POST /verify`.
+openapi: 3.0.3
+info:
+  title: Device Location Verification
+  description: |
+    Verifies whether a device is currently located within a requested area — a
+    circle defined by a `center` point and a `radius` — returning a verdict
+    (`TRUE` / `FALSE` / `PARTIAL`) rather than the device's exact position.
+
+    This is the CamaraSim reference double for CAMARA Location Verification
+    3.0.0. The device can be identified either by the `device` object in the
+    request body (two-legged / CIBA) or by the identity a three-legged access
+    token authenticated (in which case `device` is omitted). The endpoint
+    requires the `location-verification:verify` scope.
+
+    ## Functional cases — the input is the control plane (docs/DESIGN.md §7)
+
+    Two control planes:
+
+    **1. The identifier** — the submitted device identifier (`phoneNumber`, else
+    the IPv4 `publicAddress`, else `ipv6Address`), or — when no `device` is
+    supplied — the access token's subject (`sub`). Its trailing three digits
+    drive the verdict:
+
+    - **Reserved error suffix** — if those digits name a reserved CAMARA status,
+      the endpoint answers with that canonical CAMARA error instead of a verdict
+      (shared convention — see the referenced `errors.yaml`): `…400`, `…401`,
+      `…403`, `…404`, `…409`, `…422`, `…429`, `…500`, `…503`.
+    - **`…000`** — the device is **outside** the area: `verificationResult: FALSE`.
+    - **odd trailing digits** — the device is **partly inside**:
+      `verificationResult: PARTIAL` with `matchRate = (digits % 99) + 1` (1–99).
+    - **any other input** (the happy-path default, including a non-numeric subject
+      such as the synthetic `lv-client`) — the device is **inside**:
+      `verificationResult: TRUE`.
+
+    **2. The area** — the circle `radius` is a second control plane. CamaraSim
+    enforces a documented regulatory minimum radius of **2000 m**: a `radius`
+    below it → `422 LOCATION_VERIFICATION.INVALID_AREA`. A `center` outside the
+    valid latitude/longitude range, or a `radius` below the schema minimum of
+    1 m, → `400 OUT_OF_RANGE`; an `areaType` other than `CIRCLE` → `400
+    INVALID_ARGUMENT`.
+
+    Examples: `+123456789012` in a 3000 m circle → `TRUE`; `+123456789011` →
+    `PARTIAL` (matchRate 12); `+123456789000` → `FALSE`; `+123456789404` →
+    `404 NOT_FOUND`; any device in a 500 m circle → `422 INVALID_AREA`.
+  version: "3.0.0"
+  license:
+    name: Apache-2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0.html
+
+servers:
+  - url: "{apiRoot}/location-verification/v3"
+    variables:
+      apiRoot:
+        default: http://localhost:8080
+        description: API root, e.g. the CamaraSim base URL.
+
+paths:
+  /verify:
+    post:
+      operationId: verifyLocation
+      summary: Verify whether a device is within a requested area
+      description: |
+        Returns whether the device is currently located within the requested
+        circular `area`, as a verdict (`TRUE` / `FALSE` / `PARTIAL`). Supply a
+        `device`, or omit it to use the device identified by a three-legged
+        access token.
+
+        See the API description for the parameter-driven functional cases.
+      security:
+        - openId:
+            - location-verification:verify
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/VerifyLocationRequest"
+      responses:
+        "200":
+          description: The verification verdict for the device and area.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VerifyLocationResponse"
+              examples:
+                inside:
+                  summary: Device inside the area (default happy path / even tail)
+                  value:
+                    verificationResult: "TRUE"
+                    lastLocationTime: "2026-08-03T14:27:08Z"
+                    device:
+                      phoneNumber: "+123456789012"
+                partly:
+                  summary: Device partly inside (odd tail)
+                  value:
+                    verificationResult: "PARTIAL"
+                    matchRate: 12
+                    lastLocationTime: "2026-08-03T14:27:08Z"
+                outside:
+                  summary: Device outside the area (…000 tail)
+                  value:
+                    verificationResult: "FALSE"
+                    lastLocationTime: "2026-08-03T14:27:08Z"
+        "400":
+          $ref: "#/components/responses/Generic400"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "409":
+          $ref: "../../shared/errors.yaml#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/Generic422"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          Two control planes (docs/DESIGN.md §7). The verdict is selected from the
+          identifier (the first present device identifier, else the access token
+          subject) whose trailing three digits drive the case; reserved error
+          suffixes come from the shared convention in errors.yaml. The circle
+          `radius` is a second control plane. Precedence: syntactic area/body
+          validation (400) → identifier resolution + reserved error → the
+          regulatory `INVALID_AREA` (422) check → verdict. Documented cuts: the
+          422 codes AREA_NOT_COVERED, UNABLE_TO_FULFILL_MAX_AGE, UNABLE_TO_LOCATE,
+          SERVICE_NOT_APPLICABLE (except via the shared …422 suffix),
+          UNSUPPORTED_IDENTIFIER, UNNECESSARY_IDENTIFIER, and MISSING_IDENTIFIER
+          (except when neither device nor subject is present) are declared but not
+          all input-selected — `maxAge` is validated for range but otherwise
+          ignored (location data is always treated as fresh), and CamaraSim does
+          not distinguish two- vs three-legged tokens. 409/500 are CamaraSim
+          extensions of the shared error set so every reserved suffix is reachable.
+        cases:
+          - input: identifier ending in a reserved error suffix (e.g. …404)
+            result: the canonical CAMARA error for that status
+          - input: "identifier ending in …000"
+            result: '200 { verificationResult: "FALSE" }'
+          - input: identifier with odd trailing three digits
+            result: '200 { verificationResult: "PARTIAL", matchRate: (digits % 99) + 1 }'
+          - input: any other identifier (happy-path default)
+            result: '200 { verificationResult: "TRUE" }'
+          - input: "circle radius in [1, 2000) metres"
+            result: "422 LOCATION_VERIFICATION.INVALID_AREA"
+          - input: "circle radius < 1 m, or center lat/long out of range"
+            result: "400 OUT_OF_RANGE"
+          - input: "areaType other than CIRCLE, or missing area/center/radius"
+            result: "400 INVALID_ARGUMENT"
+          - input: "maxAge < 0 or > 2147483647"
+            result: "400 OUT_OF_RANGE"
+          - input: no `device` and no token subject
+            result: "422 MISSING_IDENTIFIER"
+
+components:
+  securitySchemes:
+    openId:
+      $ref: "../../auth/openapi.yaml#/components/securitySchemes/camaraOAuth"
+
+  parameters:
+    XCorrelator:
+      name: x-correlator
+      in: header
+      required: false
+      description: Correlation id for the request, echoed back on the response.
+      schema:
+        type: string
+
+  headers:
+    XCorrelator:
+      description: The `x-correlator` from the request, echoed if one was sent.
+      required: false
+      schema:
+        type: string
+
+  responses:
+    # 400 for this API carries either INVALID_ARGUMENT (bad syntax / unsupported
+    # areaType) or OUT_OF_RANGE (a value outside its allowed range).
+    Generic400:
+      description: Invalid request — `INVALID_ARGUMENT` or `OUT_OF_RANGE`.
+      headers:
+        x-correlator:
+          $ref: "#/components/headers/XCorrelator"
+      content:
+        application/json:
+          schema:
+            $ref: "../../shared/errors.yaml#/components/schemas/CamaraError"
+          examples:
+            invalidArgument:
+              value:
+                status: 400
+                code: INVALID_ARGUMENT
+                message: "Only `CIRCLE` `areaType` is supported."
+            outOfRange:
+              value:
+                status: 400
+                code: OUT_OF_RANGE
+                message: "`area.radius` must be at least 1 metre."
+    # 422 for this API carries either the API-specific LOCATION_VERIFICATION.*
+    # codes (only INVALID_AREA is input-selected — see x-camarasim-scenarios) or
+    # the shared MISSING_IDENTIFIER / SERVICE_NOT_APPLICABLE codes.
+    Generic422:
+      description: >-
+        Unprocessable request — the regulatory `LOCATION_VERIFICATION.INVALID_AREA`
+        (radius below the 2000 m minimum), `MISSING_IDENTIFIER`, or the shared
+        `SERVICE_NOT_APPLICABLE` (via a …422 identifier suffix).
+      headers:
+        x-correlator:
+          $ref: "#/components/headers/XCorrelator"
+      content:
+        application/json:
+          schema:
+            $ref: "../../shared/errors.yaml#/components/schemas/CamaraError"
+          examples:
+            invalidArea:
+              value:
+                status: 422
+                code: LOCATION_VERIFICATION.INVALID_AREA
+                message: "The requested area is invalid: a circle radius must be at least 2000 metres."
+            missingIdentifier:
+              value:
+                status: 422
+                code: MISSING_IDENTIFIER
+                message: "No `device` supplied and the access token identifies no device."
+
+  schemas:
+    VerifyLocationRequest:
+      type: object
+      description: Request to verify a device's location against an area.
+      required:
+        - area
+      properties:
+        device:
+          $ref: "#/components/schemas/Device"
+        area:
+          $ref: "#/components/schemas/Area"
+        maxAge:
+          type: integer
+          format: int32
+          minimum: 0
+          maximum: 2147483647
+          description: >-
+            Maximum acceptable age (seconds) of the location data used for the
+            verification. CamaraSim validates the range but always treats its
+            location data as fresh (`lastLocationTime` = now), so a valid `maxAge`
+            never changes the verdict.
+          example: 120
+
+    Device:
+      type: object
+      description: >-
+        Identifies the device. At least one identifier must be present. Optional
+        at the request level: omit `device` to use the device identified by a
+        three-legged access token. This API does not accept
+        `networkAccessIdentifier` (CAMARA guidelines disallow it here). CamaraSim
+        keys its cases off the first present identifier, in the order phoneNumber
+        → ipv4Address.publicAddress → ipv6Address.
+      minProperties: 1
+      properties:
+        phoneNumber:
+          type: string
+          description: A phone number in E.164 format (starting with `+`).
+          pattern: '^\+[1-9][0-9]{4,14}$'
+          example: "+123456789012"
+        ipv4Address:
+          $ref: "#/components/schemas/DeviceIpv4Addr"
+        ipv6Address:
+          type: string
+          format: ipv6
+          description: The device's IPv6 address.
+          example: "2001:db8::11"
+
+    DeviceIpv4Addr:
+      type: object
+      description: >-
+        The device's IPv4 address information. CamaraSim reads `publicAddress` as
+        the identifier; `privateAddress`/`publicPort` are accepted for fidelity.
+      properties:
+        publicAddress:
+          type: string
+          example: "203.0.113.12"
+        privateAddress:
+          type: string
+          example: "192.0.2.25"
+        publicPort:
+          type: integer
+          format: int32
+          minimum: 0
+          maximum: 65535
+          example: 59765
+
+    Area:
+      type: object
+      description: >-
+        The area to verify the device against. The discriminator is `areaType`;
+        this API version supports only `CIRCLE`.
+      required:
+        - areaType
+      discriminator:
+        propertyName: areaType
+      properties:
+        areaType:
+          type: string
+          description: The kind of area. Only `CIRCLE` is supported.
+          enum:
+            - CIRCLE
+        center:
+          $ref: "#/components/schemas/Point"
+        radius:
+          type: number
+          format: double
+          minimum: 1
+          description: >-
+            Circle radius in metres. The schema minimum is 1 m; CamaraSim
+            additionally enforces a regulatory minimum of 2000 m (a smaller
+            radius → 422 LOCATION_VERIFICATION.INVALID_AREA).
+          example: 3000
+
+    Point:
+      type: object
+      description: A WGS-84 point (decimal degrees).
+      required:
+        - latitude
+        - longitude
+      properties:
+        latitude:
+          type: number
+          format: double
+          minimum: -90
+          maximum: 90
+          example: 51.5
+        longitude:
+          type: number
+          format: double
+          minimum: -180
+          maximum: 180
+          example: -0.12
+
+    VerifyLocationResponse:
+      type: object
+      description: The verification verdict for the requested device and area.
+      required:
+        - verificationResult
+        - lastLocationTime
+      properties:
+        verificationResult:
+          type: string
+          description: >-
+            `TRUE` if the device is inside the area, `FALSE` if outside, `PARTIAL`
+            if the requested area only partly covers the device's location.
+          enum:
+            - "TRUE"
+            - "FALSE"
+            - "PARTIAL"
+        matchRate:
+          type: integer
+          format: int32
+          minimum: 1
+          maximum: 99
+          description: >-
+            Percentage the requested area overlaps the device's location area.
+            Present only when `verificationResult` is `PARTIAL`.
+          example: 12
+        lastLocationTime:
+          type: string
+          format: date-time
+          description: >-
+            RFC 3339 timestamp of when the location used for the verification was
+            last determined.
+          example: "2026-08-03T14:27:08Z"
+        device:
+          $ref: "#/components/schemas/DeviceResponse"
+
+    DeviceResponse:
+      type: object
+      description: >-
+        The single device identifier CamaraSim used, echoed back when the caller
+        supplied a `device` in the request.
+      minProperties: 1
+      maxProperties: 1
+      properties:
+        phoneNumber:
+          type: string
+          pattern: '^\+[1-9][0-9]{4,14}$'
+          example: "+123456789012"
+        ipv4Address:
+          $ref: "#/components/schemas/DeviceIpv4Addr"
+        ipv6Address:
+          type: string
+          format: ipv6
+          example: "2001:db8::11"

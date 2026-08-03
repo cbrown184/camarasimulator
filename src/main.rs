@@ -82,6 +82,12 @@ async fn catalog() -> Json<Value> {
                 "version": "v1",
                 "base_path": "/quality-on-demand/v1",
                 "spec_url": "/quality-on-demand/v1/openapi.yaml",
+            },
+            {
+                "name": "location-verification",
+                "version": "v3",
+                "base_path": "/location-verification/v3",
+                "spec_url": "/location-verification/v3/openapi.yaml",
             }
         ],
         "authorization_servers": [{
@@ -166,6 +172,10 @@ mod tests {
         assert!(apis.iter().any(|a| a["name"] == "quality-on-demand"
             && a["version"] == "v1"
             && a["base_path"] == "/quality-on-demand/v1"));
+        assert!(apis.iter().any(|a| a["name"] == "location-verification"
+            && a["version"] == "v3"
+            && a["base_path"] == "/location-verification/v3"
+            && a["spec_url"] == "/location-verification/v3/openapi.yaml"));
         assert_eq!(
             body["authorization_servers"][0]["openid_configuration"],
             "/.well-known/openid-configuration"

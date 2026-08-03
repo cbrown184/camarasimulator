@@ -224,7 +224,28 @@ in a process-global in-memory side-store keyed by `sessionId`
 map so the secret is never echoed by `GET`/`retrieve-sessions`; it is taken
 (single-use) at delivery time, so it drops from memory as the session ends. The
 `PLAIN`/`REFRESHTOKEN` credential types are accepted but not applied (documented
-cut). Only TLS (`https://` sink) delivery remains to complete QoD.
+cut). Only TLS (`https://` sink) delivery remains to complete QoD (deferred — it needs
+a rustls TLS client whose crypto backend pulls a C/cmake toolchain and a large binary
+regression, a dependency trade-off that deserves a deliberate decision, not an
+automated pass).
+
+**Phase 4 (spatial) has begun.** **Device Location Verification v3** `POST /verify` is
+live at `/location-verification/v3/verify` (scope `location-verification:verify`,
+operationId `verifyLocation`; CAMARA Location Verification 3.0.0, release r3.2 — the
+latest published stable, so mounted at `/v3`). The caller submits an `area` (currently
+only a `CIRCLE` — `center` lat/long + `radius` metres) and optionally a `device`
+(`phoneNumber`, else IPv4 `publicAddress`, else `ipv6Address`; no
+`networkAccessIdentifier` — CAMARA disallows it here), else the token subject. The
+endpoint answers a **verdict, never a coordinate**:
+`{verificationResult: TRUE|FALSE|PARTIAL, lastLocationTime}`. Two control planes
+(DESIGN §7): the identifier's trailing three digits — reserved suffix → canonical CAMARA
+error; `…000` → `FALSE`; odd → `PARTIAL` with `matchRate = (digits % 99) + 1` (1–99);
+else → `TRUE` — and the circle `radius`, where CamaraSim enforces a documented regulatory
+minimum of 2000 m (radius `[1, 2000)` → 422 `LOCATION_VERIFICATION.INVALID_AREA`; radius
+`<1` or `center` lat/long out of range → 400 `OUT_OF_RANGE`; non-`CIRCLE` areaType → 400
+`INVALID_ARGUMENT`). `maxAge` is validated for range (0..=int32) but otherwise ignored
+(location data always treated as fresh). A supplied `device` is echoed back
+(`VerifyLocationResponse.device`). `x-correlator` echoed on every response.
 
 ## In progress (claimed this pass)
 
@@ -281,7 +302,8 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     - [ ] TLS (`https://` sink) delivery (needs a rustls TLS client)
 
 ### Phase 4 — Spatial
-- [ ] Device Location Verification
+- [x] Device Location Verification v3 — `POST /verify` (`/location-verification/v3`;
+  CAMARA 3.0.0, r3.2; verdict TRUE/FALSE/PARTIAL, identifier + circle-radius control planes)
 - [ ] Device Location Retrieval
 - [ ] Geofencing (subscriptions/notifications)
 
@@ -304,6 +326,48 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 ## Scan journal
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
+
+- 2026-08-03 — Phase 4 (spatial) begun: **Device Location Verification v3** — `POST
+  /verify` (CAMARA Location Verification 3.0.0, release r3.2 — the latest published
+  stable; the API has one endpoint, so this completes it). CamaraSim's first spatial
+  API: it answers a verdict (device inside/outside/partly-inside a requested circle),
+  never a coordinate. New `src/apis/location_verification/{,v3}.rs` merged into the app
+  router; `/` catalog + openapi server now list location-verification v3. Mounted at
+  `/location-verification/v3/verify`, scope `location-verification:verify`, operationId
+  `verifyLocation` (confirmed against the r3.2 upstream spec: `VerifyLocationRequest`
+  {device?, area(required), maxAge?}, `VerifyLocationResponse` {verificationResult
+  TRUE|FALSE|PARTIAL (req), lastLocationTime (req), matchRate 1–99 (PARTIAL only),
+  device?}). Body parsed with `deny_unknown_fields`. Two control planes (§7): (1) the
+  identifier (submitted `device` id [phoneNumber E.164, else IPv4 publicAddress, else
+  ipv6Address — no NAI, disallowed here], else token subject → 422 MISSING_IDENTIFIER) —
+  reserved suffix → canonical CAMARA error, `…000` → FALSE, odd tail → PARTIAL with
+  matchRate=(digits%99)+1, else → TRUE; (2) the circle `radius` — regulatory minimum
+  2000 m enforced (radius [1,2000) → 422 LOCATION_VERIFICATION.INVALID_AREA), radius <1
+  or center lat/long out of [-90,90]/[-180,180] → 400 OUT_OF_RANGE, non-CIRCLE areaType
+  or missing area/center/radius → 400 INVALID_ARGUMENT. Precedence: syntactic area/body
+  400s → identifier resolution + reserved error → regulatory INVALID_AREA 422 → verdict.
+  `maxAge` validated (0..=int32; else 400 OUT_OF_RANGE) but otherwise ignored (location
+  data always fresh, lastLocationTime=now via the self-contained rfc3339/civil_from_days
+  formatter reused from sim_swap — no date-time dep). A supplied `device` is echoed as
+  the single-identifier `VerifyLocationResponse.device`. Documented cuts: the 422 codes
+  AREA_NOT_COVERED / UNABLE_TO_FULFILL_MAX_AGE / UNABLE_TO_LOCATE / UNSUPPORTED_IDENTIFIER
+  / UNNECESSARY_IDENTIFIER declared-not-selected (CamaraSim doesn't distinguish 2- vs
+  3-legged tokens); 409/500 are CamaraSim extensions so every reserved suffix is
+  reachable. `x-correlator` echoed on every response. **No new deps** (reuses
+  serde_json/shared scenarios+errors, local E.164/rfc3339). Spec: new
+  `specs/location-verification/v3/openapi.yaml` — vendored 3.0.0 `POST /verify` with
+  VerifyLocationRequest/Device/DeviceIpv4Addr/Area(CIRCLE)/Point/VerifyLocationResponse/
+  DeviceResponse schemas, `$ref`-ing shared `errors.yaml` (CamaraError) + auth
+  `camaraOAuth`, Generic400 (INVALID_ARGUMENT|OUT_OF_RANGE) + Generic422
+  (INVALID_AREA|MISSING_IDENTIFIER) responses, `x-camarasim-scenarios` documenting both
+  control planes + precedence + cuts. 360 tests green (was 335; +25: 4 units
+  [verdict/matchRate-range/E.164/device-precedence] + 21 integration covering
+  inside-TRUE+device-echo / …000-FALSE / odd-PARTIAL+matchRate / reserved-404+422 /
+  ipv4+ipv6-echo / radius-regulatory-422 / radius-schema-400 / center-out-of-range-400 /
+  non-CIRCLE-400 / missing-area-400 / maxAge-out-of-range-400 / valid-maxAge-200 /
+  bad-phone-400 / empty-device-400 / NAI-rejected-400 / subject-fallback / subject-
+  reserved / non-numeric-subject-TRUE / no-scope-403 / no-token-401 / x-correlator;
+  also extended the catalog + openapi-server tests). — binary: 1365616 B (+37288 B)
 
 - 2026-08-03 — Cross-cutting: **serve the vendored OpenAPI specs over HTTP**
   (DESIGN §9). New `src/apis/openapi.rs` merged into the app router: a `GET` route
