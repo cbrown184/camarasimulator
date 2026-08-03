@@ -27,7 +27,8 @@ async fn health() -> &'static str {
     "ok"
 }
 
-/// Catalog of mounted CAMARA APIs and versions. Empty until the agent mounts APIs
+/// Catalog of mounted CAMARA APIs and versions. Each entry advertises its
+/// `base_path` and the `spec_url` where its vendored OpenAPI spec is served
 /// (canonical URL versioning — see docs/DESIGN.md §9).
 async fn catalog() -> Json<Value> {
     Json(json!({
@@ -38,41 +39,49 @@ async fn catalog() -> Json<Value> {
                 "name": "number-verification",
                 "version": "v1",
                 "base_path": "/number-verification/v1",
+                "spec_url": "/number-verification/v1/openapi.yaml",
             },
             {
                 "name": "sim-swap",
                 "version": "v2",
                 "base_path": "/sim-swap/v2",
+                "spec_url": "/sim-swap/v2/openapi.yaml",
             },
             {
                 "name": "kyc-match",
                 "version": "v0.3",
                 "base_path": "/kyc-match/v0.3",
+                "spec_url": "/kyc-match/v0.3/openapi.yaml",
             },
             {
                 "name": "device-reachability-status",
                 "version": "v1",
                 "base_path": "/device-reachability-status/v1",
+                "spec_url": "/device-reachability-status/v1/openapi.yaml",
             },
             {
                 "name": "device-roaming-status",
                 "version": "v1",
                 "base_path": "/device-roaming-status/v1",
+                "spec_url": "/device-roaming-status/v1/openapi.yaml",
             },
             {
                 "name": "device-identifier",
                 "version": "v0.3",
                 "base_path": "/device-identifier/v0.3",
+                "spec_url": "/device-identifier/v0.3/openapi.yaml",
             },
             {
                 "name": "one-time-password-sms",
                 "version": "v1",
                 "base_path": "/one-time-password-sms/v1",
+                "spec_url": "/one-time-password-sms/v1/openapi.yaml",
             },
             {
                 "name": "quality-on-demand",
                 "version": "v1",
                 "base_path": "/quality-on-demand/v1",
+                "spec_url": "/quality-on-demand/v1/openapi.yaml",
             }
         ],
         "authorization_servers": [{
@@ -132,7 +141,10 @@ mod tests {
         let apis = body["apis"].as_array().unwrap();
         assert!(apis.iter().any(|a| a["name"] == "number-verification"
             && a["version"] == "v1"
-            && a["base_path"] == "/number-verification/v1"));
+            && a["base_path"] == "/number-verification/v1"
+            && a["spec_url"] == "/number-verification/v1/openapi.yaml"));
+        // Every catalogued API advertises where its OpenAPI spec is served.
+        assert!(apis.iter().all(|a| a["spec_url"].is_string()));
         assert!(apis.iter().any(|a| a["name"] == "sim-swap"
             && a["version"] == "v2"
             && a["base_path"] == "/sim-swap/v2"));
@@ -157,6 +169,28 @@ mod tests {
         assert_eq!(
             body["authorization_servers"][0]["openid_configuration"],
             "/.well-known/openid-configuration"
+        );
+    }
+
+    #[tokio::test]
+    async fn openapi_spec_is_reachable_through_the_app() {
+        let response = app()
+            .oneshot(
+                Request::builder()
+                    .uri("/number-verification/v1/openapi.yaml")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(axum::http::header::CONTENT_TYPE)
+                .unwrap(),
+            "application/yaml"
         );
     }
 

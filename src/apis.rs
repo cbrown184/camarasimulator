@@ -14,6 +14,9 @@
 //! - **Device Identifier v0.3** — `/device-identifier/v0.3/…`.
 //! - **One Time Password SMS v1** — `/one-time-password-sms/v1/…`.
 //! - **Quality on Demand v1** — `/quality-on-demand/v1/…`.
+//!
+//! Plus [`openapi`], which serves each mounted API's vendored OpenAPI spec at
+//! `/{api}/v{n}/openapi.yaml` (docs/DESIGN.md §9).
 
 pub mod device_identifier;
 pub mod device_reachability_status;
@@ -21,6 +24,7 @@ pub mod device_roaming_status;
 pub mod kyc_match;
 pub mod number_verification;
 pub mod one_time_password_sms;
+pub mod openapi;
 pub mod quality_on_demand;
 pub mod sim_swap;
 
@@ -37,4 +41,5 @@ pub fn routes() -> Router {
         .merge(device_identifier::routes())
         .merge(one_time_password_sms::routes())
         .merge(quality_on_demand::routes())
+        .merge(openapi::routes())
 }

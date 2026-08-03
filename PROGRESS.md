@@ -292,7 +292,11 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 ## Cross-cutting (do alongside the item that needs it)
 - [~] `errors.rs`: base CAMARA error model done (`src/errors.rs`, `specs/shared/errors.yaml`); per-version catalogs still TODO (DESIGN §8)
 - [ ] `registry.rs`: canonical URL versioning + `/` catalog wiring (DESIGN §9)
-- [ ] `specs/…`: vendor + annotate OpenAPI per API/version, serve at `/{api}/v{n}/openapi.yaml`
+- [~] `specs/…`: vendor + annotate OpenAPI per API/version, serve at `/{api}/v{n}/openapi.yaml`
+  — **serving done** (`src/apis/openapi.rs`: every mounted API's spec at
+  `/{api}/v{n}/openapi.yaml`, plus `/auth/openapi.yaml` + `/shared/errors.yaml` so
+  `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
+  continues alongside each new API.
 - [ ] Contract-test harness (validate responses against vendored spec)
 
 ---
@@ -301,6 +305,33 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-03 — Cross-cutting: **serve the vendored OpenAPI specs over HTTP**
+  (DESIGN §9). New `src/apis/openapi.rs` merged into the app router: a `GET` route
+  per mounted API at `/{api}/v{n}/openapi.yaml` (all 8 — number-verification/v1,
+  sim-swap/v2, kyc-match/v0.3, device-reachability-status/v1, device-roaming-
+  status/v1, device-identifier/v0.3, one-time-password-sms/v1, quality-on-demand/v1),
+  each returning its spec as `Content-Type: application/yaml`. Also serves
+  `/auth/openapi.yaml` and `/shared/errors.yaml` — every API spec `$ref`s them by the
+  relative paths `../../auth/openapi.yaml` / `../../shared/errors.yaml`, which resolve
+  against a `…/v{n}/openapi.yaml` URL exactly onto those two URLs, so a client that
+  follows the `$ref`s finds them and every served spec is fully resolvable. Bodies are
+  embedded at compile time with `include_str!` → in-memory `&'static str` (no runtime
+  filesystem read on the request path, non-blocking; binary stays self-contained). `/`
+  catalog now advertises each API's `spec_url`. These are simulator meta-endpoints (they
+  publish the contracts), not a CAMARA business API, so there is no upstream CAMARA spec
+  to vendor for them and no served-spec change was needed. **No new deps** (pure axum
+  routing + static body). Binary grew +180360 B — this is exactly the ~176 KB of vendored
+  spec text now embedded so the binary can serve its own contracts (a deliberate
+  self-contained-binary trade-off, not code bloat). 335 tests green (was 330; +5:
+  4 openapi units [serves an API spec byte-for-byte as application/yaml / serves every
+  mounted API spec / serves the shared+auth `$ref` targets / unknown path → 404] + 1
+  main integration [a spec is reachable as application/yaml through the full `app()`];
+  also extended the catalog test to assert every entry carries a `spec_url`). NOTE: the
+  sole remaining QoD item — TLS (`https://` sink) CloudEvents delivery — was deferred
+  this pass: it needs a rustls TLS client whose crypto backend (ring / aws-lc-rs) pulls a
+  C/cmake build toolchain (a real green-build risk in this headless container) and a large
+  binary regression, so that dependency trade-off deserves a deliberate decision rather
+  than an automated pass. — binary: 1328328 B (+180360 B)
 - 2026-08-03 — Phase 3: Quality on Demand v1 — CloudEvents **`sinkCredential`
   (ACCESSTOKEN) auth** (CAMARA quality-on-demand 1.1.0, r3.2). A session created
   with a `credentialType: ACCESSTOKEN` `sinkCredential` now has its bearer token
