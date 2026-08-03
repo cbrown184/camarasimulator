@@ -22,9 +22,10 @@
 //! `expiresAt` ([`spawn_expiry`]), and `statusInfo: NETWORK_TERMINATED` when the
 //! (simulated) network drops a `…001` `AVAILABLE` session early
 //! ([`spawn_network_termination`]) — all best-effort and fire-and-forget (see
-//! [`super::notifications`]). TLS (`https://` sink) / `sinkCredential`-authenticated
-//! delivery remain deferred; `sinkCredential` is accepted for schema fidelity but
-//! not used.
+//! [`super::notifications`]). A session created with an `ACCESSTOKEN`
+//! `sinkCredential` has its bearer token applied to those callbacks as an
+//! `Authorization` header (kept in memory only). TLS (`https://` sink) delivery,
+//! and the `PLAIN`/`REFRESHTOKEN` credential types, remain deferred.
 //!
 //! ## What it does
 //!
@@ -146,10 +147,11 @@ struct CreateSession {
     #[serde(rename = "applicationServerPorts")]
     application_server_ports: Option<Value>,
     sink: Option<String>,
-    // Accepted but never echoed (it carries a credential) and not yet used —
-    // CloudEvents notifications are deferred.
+    // Never echoed (it carries a secret). When it is an ACCESSTOKEN credential the
+    // bearer token authenticates the notification callbacks (see
+    // `notifications::sink_authorization`); kept in memory only, dropped as the
+    // session ends.
     #[serde(rename = "sinkCredential")]
-    #[allow(dead_code)]
     sink_credential: Option<Value>,
 }
 
@@ -283,6 +285,21 @@ async fn create_session(claims: Claims, headers: HeaderMap, body: Bytes) -> Resp
     );
     store::insert(session_id.clone(), info.clone());
 
+    // Remember the notification credential (in memory only, dropped as the session
+    // ends) so the callbacks are authenticated. Only meaningful when the session
+    // has a `sink`; an ACCESSTOKEN credential yields a bearer `Authorization`
+    // header, other credential types are a documented cut. Stored before the timers
+    // are spawned so a delivery always sees it.
+    if info.get("sink").is_some() {
+        if let Some(auth) = req
+            .sink_credential
+            .as_ref()
+            .and_then(notifications::sink_authorization)
+        {
+            store::insert_credential(session_id.clone(), auth);
+        }
+    }
+
     // Schedule the status transition for an AVAILABLE session that recorded a
     // `sink`. A `…001` identifier (`NETWORK_TERMINATION_TAIL`) selects the
     // `NETWORK_TERMINATED` transition — the network drops the session early
@@ -349,7 +366,7 @@ fn spawn_expiry(session_id: String, sink: String) {
                     "UNAVAILABLE",
                     Some("DURATION_EXPIRED"),
                 );
-                notifications::spawn_delivery(sink, event);
+                notifications::spawn_delivery(sink, event, store::take_credential(&session_id));
             }
             return;
         }
@@ -383,7 +400,7 @@ fn spawn_network_termination(session_id: String, sink: String) {
                 "UNAVAILABLE",
                 Some("NETWORK_TERMINATED"),
             );
-            notifications::spawn_delivery(sink, event);
+            notifications::spawn_delivery(sink, event, store::take_credential(&session_id));
         }
     });
 }
@@ -436,7 +453,11 @@ async fn delete_session(
                     "UNAVAILABLE",
                     Some("DELETE_REQUESTED"),
                 );
-                notifications::spawn_delivery(sink.to_string(), event);
+                notifications::spawn_delivery(
+                    sink.to_string(),
+                    event,
+                    store::take_credential(&session_id),
+                );
             }
             with_correlator(StatusCode::NO_CONTENT.into_response(), &correlator)
         }
@@ -1400,6 +1421,57 @@ mod tests {
         assert!(event["id"].is_string() && event["time"].is_string());
         assert_eq!(event["data"]["sessionId"], json!(session_id));
         assert_eq!(event["data"]["qosStatus"], "UNAVAILABLE");
+        assert_eq!(event["data"]["statusInfo"], "DELETE_REQUESTED");
+    }
+
+    #[tokio::test]
+    async fn a_sink_credential_authenticates_the_notification_and_is_never_echoed() {
+        use tokio::io::AsyncReadExt;
+        use tokio::net::TcpListener;
+
+        // A loopback receiver stands in for the consumer's `sink`.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let sink = format!("http://{addr}/qod-auth");
+
+        // Create a session with a sink AND an ACCESSTOKEN sinkCredential…
+        let create = mint_token(CREATE_SCOPE).await;
+        let body = json!({
+            "device": { "phoneNumber": "+123456789012" },
+            "applicationServer": { "ipv4Address": "203.0.113.0/24" },
+            "qosProfile": "QOS_L",
+            "duration": 3600,
+            "sink": sink,
+            "sinkCredential": {
+                "credentialType": "ACCESSTOKEN",
+                "accessToken": "notify-secret-token",
+                "accessTokenType": "bearer",
+            },
+        })
+        .to_string();
+        let (status, _, created) = post_sessions(Some(&create), &body, None).await;
+        assert_eq!(status, StatusCode::CREATED);
+        let session_id = created["sessionId"].as_str().unwrap().to_string();
+        // The credential is a secret: it must never appear in the SessionInfo echo.
+        assert!(created.get("sinkCredential").is_none(), "secret not echoed");
+        assert!(!created.to_string().contains("notify-secret-token"));
+
+        // …delete it and read the notification the handler spawned.
+        let del = mint_token(DELETE_SCOPE).await;
+        let (status, _, _) = delete_session_req(Some(&del), &session_id, None).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        let (mut sock, _) = listener.accept().await.unwrap();
+        let mut buf = Vec::new();
+        sock.read_to_end(&mut buf).await.unwrap();
+        let raw = String::from_utf8(buf).unwrap();
+        let (head, event_body) = raw.split_once("\r\n\r\n").expect("headers then body");
+        // The bearer token from the sinkCredential authenticates the callback.
+        assert!(
+            head.contains("Authorization: Bearer notify-secret-token\r\n"),
+            "authenticated callback: {head}"
+        );
+        let event: Value = serde_json::from_str(event_body).expect("body is JSON");
         assert_eq!(event["data"]["statusInfo"], "DELETE_REQUESTED");
     }
 

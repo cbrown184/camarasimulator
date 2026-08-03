@@ -12,9 +12,11 @@
 # `qos-status-changed` event on three transitions: `DELETE_REQUESTED` on
 # `deleteSession`, `DURATION_EXPIRED` when an `AVAILABLE` session reaches its
 # `expiresAt`, and `NETWORK_TERMINATED` when the (simulated) network drops a
-# `…001` `AVAILABLE` session early (see the `notifications` callback). TLS
-# (`https://` sink) / `sinkCredential` auth remain deferred. The served spec
-# covers only what is implemented.
+# `…001` `AVAILABLE` session early (see the `notifications` callback). An
+# `ACCESSTOKEN` `sinkCredential` authenticates those callbacks with an
+# `Authorization: Bearer` header (in-memory only, never echoed). TLS
+# (`https://` sink) delivery and the `PLAIN`/`REFRESHTOKEN` credential types
+# remain deferred. The served spec covers only what is implemented.
 openapi: 3.0.3
 info:
   title: Quality On Demand
@@ -225,10 +227,12 @@ paths:
           `DELETE_REQUESTED` when the session is deleted, `DURATION_EXPIRED` when
           an `AVAILABLE` session reaches its `expiresAt`, and `NETWORK_TERMINATED`
           shortly after creation for a `…001` identifier (the simulated network
-          drops the session early). `sinkCredential` is accepted for schema
-          fidelity but never stored or used, so notifications are unauthenticated.
-          Delivery is best-effort and only to an `http://` sink — CamaraSim has no
-          TLS client, so an `https://` sink is not delivered to (documented cut).
+          drops the session early). An `ACCESSTOKEN` `sinkCredential` authenticates
+          those callbacks with an `Authorization: Bearer <accessToken>` header
+          (kept in memory only, never echoed); `PLAIN`/`REFRESHTOKEN` are accepted
+          but not applied (documented cut). Delivery is best-effort and only to an
+          `http://` sink — CamaraSim has no TLS client, so an `https://` sink is not
+          delivered to (documented cut).
         cases:
           - input: identifier ending in a reserved error suffix (e.g. …409)
             result: the canonical CAMARA error for that status (…409 → 409 CONFLICT)
@@ -238,6 +242,8 @@ paths:
             result: "session evicted; DURATION_EXPIRED CloudEvent POSTed to the sink"
           - input: valid request, identifier tail …001, session created with a sink
             result: "201 AVAILABLE; then NETWORK_TERMINATED CloudEvent POSTed and the session evicted early"
+          - input: session created with a sink and an ACCESSTOKEN sinkCredential
+            result: "the CloudEvent callback carries Authorization: Bearer <accessToken>"
           - input: valid request, identifier tail …000 (or no digits)
             result: "201 SessionInfo, qosStatus REQUESTED, no startedAt/expiresAt"
           - input: duration < 1
@@ -264,8 +270,11 @@ paths:
                 reaches its `expiresAt`, and `statusInfo: NETWORK_TERMINATED`
                 shortly after creation for a `…001` `AVAILABLE` session (the
                 simulated network drops it early). Delivery is best-effort,
-                fire-and-forget, and only to an `http://` sink (no TLS client), and
-                is unauthenticated (`sinkCredential` is not used).
+                fire-and-forget, and only to an `http://` sink (no TLS client). When
+                the session was created with an `ACCESSTOKEN` `sinkCredential`, the
+                request carries an `Authorization: Bearer <accessToken>` header
+                (RFC 6750); the `PLAIN` and `REFRESHTOKEN` credential types are
+                accepted but not applied (a documented cut).
               requestBody:
                 required: true
                 content:
@@ -643,9 +652,28 @@ components:
         sinkCredential:
           type: object
           description: >-
-            Credential the notification callback expects. Accepted for schema
-            fidelity but never echoed back (it carries a secret) and not used —
-            CamaraSim's notifications are unauthenticated.
+            Credential the notification callback presents to the `sink`. Kept in
+            memory only and never echoed back in a `SessionInfo` (it carries a
+            secret). CamaraSim applies a `credentialType: ACCESSTOKEN` credential:
+            its `accessToken` is sent on every callback as
+            `Authorization: Bearer <accessToken>` (RFC 6750). The `PLAIN` and
+            `REFRESHTOKEN` credential types are accepted but not applied (a
+            documented cut).
+          properties:
+            credentialType:
+              type: string
+              enum: [PLAIN, ACCESSTOKEN, REFRESHTOKEN]
+              description: >-
+                The type of credential. CamaraSim applies only `ACCESSTOKEN`.
+            accessToken:
+              type: string
+              description: >-
+                Bearer token sent on the notification callback when
+                `credentialType` is `ACCESSTOKEN`.
+            accessTokenType:
+              type: string
+              enum: [bearer]
+              description: The access-token type; only `bearer` is defined.
 
     ExtendSessionDuration:
       type: object

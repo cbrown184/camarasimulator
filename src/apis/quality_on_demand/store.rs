@@ -36,12 +36,42 @@ fn store() -> &'static Mutex<HashMap<String, Value>> {
     STORE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// The process-global **sink-credential** side-store: `sessionId` → the derived
+/// `Authorization` header value (e.g. `"Bearer <token>"`) for that session's
+/// notification callbacks. Kept apart from the `SessionInfo` map so the secret is
+/// never returned by `GET`/`retrieve-sessions` (those clone the `SessionInfo`
+/// only). In-memory only (single node, per DESIGN §4).
+fn credentials() -> &'static Mutex<HashMap<String, String>> {
+    static CREDS: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+    CREDS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
 /// Store `session` (its rendered `SessionInfo` JSON) under `id`.
 pub fn insert(id: String, session: Value) {
     store()
         .lock()
         .expect("qod session store not poisoned")
         .insert(id, session);
+}
+
+/// Remember the derived `Authorization` header (`auth`) for `id`'s notification
+/// callbacks. Only called when the session recorded both a `sink` and a usable
+/// `sinkCredential`; the secret lives here (in memory) and never in `SessionInfo`.
+pub fn insert_credential(id: String, auth: String) {
+    credentials()
+        .lock()
+        .expect("qod credential store not poisoned")
+        .insert(id, auth);
+}
+
+/// Remove and return the stored `Authorization` header for `id`, if any. Callers
+/// fetch it at delivery time (the session is being evicted), so the secret is
+/// dropped from memory as the session ends.
+pub fn take_credential(id: &str) -> Option<String> {
+    credentials()
+        .lock()
+        .expect("qod credential store not poisoned")
+        .remove(id)
 }
 
 /// Fetch the `SessionInfo` stored under `id`, or `None` if no such session
@@ -217,6 +247,18 @@ mod tests {
         assert_eq!(found[0]["sessionId"], json!(id_a));
         // A device nobody stored → empty.
         assert!(find_by_device(&json!({ "phoneNumber": "+15550000099" })).is_empty());
+    }
+
+    #[test]
+    fn credential_is_stored_and_taken_once_then_none() {
+        let id = new_session_id();
+        assert!(take_credential(&id).is_none(), "not stored yet → None");
+        insert_credential(id.clone(), "Bearer sekret".to_string());
+        // First take yields the header and removes it (single-use, dropped as the
+        // session ends)…
+        assert_eq!(take_credential(&id), Some("Bearer sekret".to_string()));
+        // …a second take finds nothing.
+        assert!(take_credential(&id).is_none());
     }
 
     #[test]

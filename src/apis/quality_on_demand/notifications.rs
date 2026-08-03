@@ -22,9 +22,14 @@
 //!   TLS client, so an `https://` (or otherwise non-`http`) `sink` is parsed and
 //!   **not delivered to** — a deliberate cut for the simulator (test receivers run
 //!   on `http://` loopback). Documented in the served spec.
-//! - **Unauthenticated.** `sinkCredential` is accepted at session creation but is
-//!   never stored (it is a secret) and is not used here, so notifications are sent
-//!   without credentials.
+//! - **`sinkCredential` (ACCESSTOKEN) auth.** When a session is created with a
+//!   `sinkCredential` of `credentialType: ACCESSTOKEN`, its bearer token is applied
+//!   to every notification as an `Authorization: Bearer <token>` header
+//!   ([`sink_authorization`]) — matching RFC 6750, the same scheme CAMARA uses on
+//!   the resource server. The credential is kept **in memory only** (single node,
+//!   DESIGN §4) and is never echoed back in a `SessionInfo` (it is a secret). The
+//!   other `credentialType`s (`PLAIN` HTTP Basic, `REFRESHTOKEN`) are accepted for
+//!   schema fidelity but not applied — a documented cut in the served spec.
 
 use serde_json::{json, Value};
 use tokio::io::AsyncWriteExt;
@@ -68,11 +73,32 @@ pub fn qos_status_changed_event(
     })
 }
 
+/// Derive the `Authorization` header value from a CAMARA `SinkCredential`.
+///
+/// Returns `Some("Bearer <token>")` for a `credentialType: ACCESSTOKEN` credential
+/// carrying a non-empty `accessToken` (CAMARA's `accessTokenType` enum only permits
+/// `bearer`, so RFC 6750 `Bearer` is always the scheme). Every other shape — a
+/// missing/empty token, or a `PLAIN`/`REFRESHTOKEN` credential — returns `None`, so
+/// the notification is sent unauthenticated (documented cut). Pure and directly
+/// testable.
+pub fn sink_authorization(cred: &Value) -> Option<String> {
+    if cred.get("credentialType").and_then(Value::as_str) != Some("ACCESSTOKEN") {
+        return None;
+    }
+    let token = cred.get("accessToken").and_then(Value::as_str)?;
+    if token.is_empty() {
+        return None;
+    }
+    Some(format!("Bearer {token}"))
+}
+
 /// Fire-and-forget delivery of `event` to `sink`: spawn [`deliver`] onto the
 /// runtime and drop its result. Never blocks the caller (the API request path).
-pub fn spawn_delivery(sink: String, event: Value) {
+/// `auth`, when present, is sent as the `Authorization` header (see
+/// [`sink_authorization`]).
+pub fn spawn_delivery(sink: String, event: Value, auth: Option<String>) {
     tokio::spawn(async move {
-        let _ = deliver(&sink, &event).await;
+        let _ = deliver(&sink, &event, auth.as_deref()).await;
     });
 }
 
@@ -80,10 +106,11 @@ pub fn spawn_delivery(sink: String, event: Value) {
 ///
 /// Writes a minimal HTTP/1.1 request over a `tokio` TCP stream and returns once the
 /// body is flushed (the stream is dropped on return, closing the connection so the
-/// receiver sees EOF; `Connection: close` is advertised). A non-`http` sink is a
-/// no-op success (see the module docs' documented cut). The response is not read —
-/// delivery is best-effort.
-async fn deliver(sink: &str, event: &Value) -> std::io::Result<()> {
+/// receiver sees EOF; `Connection: close` is advertised). When `auth` is `Some`, it
+/// is sent as the `Authorization` header (RFC 6750 bearer, from the session's
+/// `sinkCredential`). A non-`http` sink is a no-op success (see the module docs'
+/// documented cut). The response is not read — delivery is best-effort.
+async fn deliver(sink: &str, event: &Value, auth: Option<&str>) -> std::io::Result<()> {
     let Some((host, port, path)) = parse_http_sink(sink) else {
         return Ok(()); // non-http sink: not delivered (documented cut)
     };
@@ -93,9 +120,14 @@ async fn deliver(sink: &str, event: &Value) -> std::io::Result<()> {
     } else {
         format!("{host}:{port}")
     };
+    let auth_header = match auth {
+        Some(a) => format!("Authorization: {a}\r\n"),
+        None => String::new(),
+    };
     let head = format!(
         "POST {path} HTTP/1.1\r\n\
          Host: {host_header}\r\n\
+         {auth_header}\
          Content-Type: application/cloudevents+json\r\n\
          Content-Length: {}\r\n\
          Connection: close\r\n\r\n",
@@ -205,7 +237,7 @@ mod tests {
         let sink = format!("http://{addr}/notify");
 
         // deliver() awaits the connection; run it concurrently with accept().
-        let send = tokio::spawn(async move { deliver(&sink, &event).await });
+        let send = tokio::spawn(async move { deliver(&sink, &event, None).await });
 
         let (mut sock, _) = listener.accept().await.unwrap();
         let mut buf = Vec::new();
@@ -217,10 +249,74 @@ mod tests {
         assert!(head.starts_with("POST /notify HTTP/1.1\r\n"), "request line: {head}");
         assert!(head.contains("Content-Type: application/cloudevents+json"));
         assert!(head.contains(&format!("Host: {addr}")));
+        // No sinkCredential → no Authorization header.
+        assert!(!head.contains("Authorization:"), "unauthenticated: {head}");
         let parsed: Value = serde_json::from_str(body).expect("body is JSON");
         assert_eq!(parsed["type"], EVENT_TYPE);
         assert_eq!(parsed["data"]["sessionId"], "the-session");
         assert_eq!(parsed["data"]["statusInfo"], "DELETE_REQUESTED");
+    }
+
+    #[tokio::test]
+    async fn deliver_sends_the_authorization_header_when_auth_is_present() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let event = qos_status_changed_event(
+            "evt-auth".to_string(),
+            "2024-01-01T00:00:00Z".to_string(),
+            "the-session",
+            "UNAVAILABLE",
+            Some("DELETE_REQUESTED"),
+        );
+        let sink = format!("http://{addr}/notify");
+
+        let send =
+            tokio::spawn(async move { deliver(&sink, &event, Some("Bearer sekret")).await });
+
+        let (mut sock, _) = listener.accept().await.unwrap();
+        let mut buf = Vec::new();
+        sock.read_to_end(&mut buf).await.unwrap();
+        send.await.unwrap().expect("delivery succeeds");
+
+        let raw = String::from_utf8(buf).unwrap();
+        let (head, _) = raw.split_once("\r\n\r\n").expect("headers then body");
+        assert!(
+            head.contains("Authorization: Bearer sekret\r\n"),
+            "authorization header present: {head}"
+        );
+    }
+
+    #[test]
+    fn sink_authorization_derives_a_bearer_header_only_for_accesstoken() {
+        // ACCESSTOKEN with a token → RFC 6750 Bearer header.
+        assert_eq!(
+            sink_authorization(&json!({
+                "credentialType": "ACCESSTOKEN",
+                "accessToken": "abc123",
+                "accessTokenType": "bearer",
+            })),
+            Some("Bearer abc123".to_string())
+        );
+        // ACCESSTOKEN missing/empty token → None (nothing to send).
+        assert_eq!(sink_authorization(&json!({ "credentialType": "ACCESSTOKEN" })), None);
+        assert_eq!(
+            sink_authorization(&json!({ "credentialType": "ACCESSTOKEN", "accessToken": "" })),
+            None
+        );
+        // Other credential types are a documented cut → None.
+        assert_eq!(
+            sink_authorization(&json!({
+                "credentialType": "PLAIN",
+                "identifier": "u",
+                "secret": "p",
+            })),
+            None
+        );
+        assert_eq!(
+            sink_authorization(&json!({ "credentialType": "REFRESHTOKEN", "refreshToken": "r" })),
+            None
+        );
+        assert_eq!(sink_authorization(&json!({})), None);
     }
 
     #[tokio::test]
@@ -234,7 +330,7 @@ mod tests {
             "UNAVAILABLE",
             Some("DELETE_REQUESTED"),
         );
-        assert!(deliver("https://example.test/cb", &event).await.is_ok());
-        assert!(deliver("not-a-url", &event).await.is_ok());
+        assert!(deliver("https://example.test/cb", &event, None).await.is_ok());
+        assert!(deliver("not-a-url", &event, None).await.is_ok());
     }
 }

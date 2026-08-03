@@ -214,8 +214,17 @@ now in place too: a `…001` identifier tail marks an `AVAILABLE`, sink-bearing
 session for early network drop — a short fire-and-forget timer (`v1::spawn_network_
 termination`, off the request path) evicts it a fixed grace after creation,
 independent of its (longer) `expiresAt`, and delivers a `UNAVAILABLE`/
-`NETWORK_TERMINATED` event (again exactly-once vs a concurrent delete). Only
-TLS/`sinkCredential` delivery remains to complete QoD.
+`NETWORK_TERMINATED` event (again exactly-once vs a concurrent delete).
+**`sinkCredential` (ACCESSTOKEN) auth** is now in place: a session created with a
+`credentialType: ACCESSTOKEN` `sinkCredential` has its bearer token applied to
+every callback as an `Authorization: Bearer <accessToken>` header (RFC 6750). The
+credential is derived at creation (`notifications::sink_authorization`) and held
+in a process-global in-memory side-store keyed by `sessionId`
+(`store::insert_credential`/`take_credential`), kept apart from the `SessionInfo`
+map so the secret is never echoed by `GET`/`retrieve-sessions`; it is taken
+(single-use) at delivery time, so it drops from memory as the session ends. The
+`PLAIN`/`REFRESHTOKEN` credential types are accepted but not applied (documented
+cut). Only TLS (`https://` sink) delivery remains to complete QoD.
 
 ## In progress (claimed this pass)
 
@@ -267,7 +276,9 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
       sink-bearing session; re-checks `expiresAt` so `extend` is honoured)
     - [x] `NETWORK_TERMINATED` transition (`…001` identifier tail: an AVAILABLE,
       sink-bearing session is dropped early by the simulated network)
-    - [ ] TLS (`https://` sink) delivery + `sinkCredential` auth
+    - [x] `sinkCredential` (ACCESSTOKEN bearer) auth — `Authorization: Bearer`
+      header on the callbacks (in-memory credential; PLAIN/REFRESHTOKEN deferred)
+    - [ ] TLS (`https://` sink) delivery (needs a rustls TLS client)
 
 ### Phase 4 — Spatial
 - [ ] Device Location Verification
@@ -290,6 +301,34 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-03 — Phase 3: Quality on Demand v1 — CloudEvents **`sinkCredential`
+  (ACCESSTOKEN) auth** (CAMARA quality-on-demand 1.1.0, r3.2). A session created
+  with a `credentialType: ACCESSTOKEN` `sinkCredential` now has its bearer token
+  applied to every notification callback as `Authorization: Bearer <accessToken>`
+  (RFC 6750 — same scheme as the resource server). New pure
+  `notifications::sink_authorization(&Value) -> Option<String>` derives the header
+  (ACCESSTOKEN + non-empty accessToken → `Bearer …`; PLAIN/REFRESHTOKEN/empty →
+  None, a documented cut); `deliver`/`spawn_delivery` gained an `Option<auth>`
+  param that writes the `Authorization` header line. The credential is kept in a
+  process-global in-memory **side-store** keyed by sessionId
+  (`store::insert_credential`/`take_credential`), separate from the `SessionInfo`
+  map so the secret is never echoed by `GET`/`retrieve-sessions`; stored at
+  creation (before the timers spawn) and **taken single-use** at delivery time by
+  all three transitions (delete / expiry / network-termination), so it drops from
+  memory as the session ends. `create_session` now uses the formerly-dead
+  `sink_credential` field. Non-blocking + in-memory preserved (TCP write still
+  async, off the request path). **No new deps** (raw-TCP POST + serde_json only;
+  TLS still deferred). Spec: updated `specs/quality-on-demand/v1/openapi.yaml` —
+  header prose, `createSession` description + `x-camarasim-scenarios` (new
+  ACCESSTOKEN case), the `notifications` callback description, and expanded the
+  `sinkCredential` schema (credentialType/accessToken/accessTokenType) to document
+  the bearer auth and the PLAIN/REFRESHTOKEN cut. 330 tests green (was 326; +4:
+  1 notifications unit [sink_authorization: ACCESSTOKEN→Bearer, empty/PLAIN/
+  REFRESHTOKEN→None] + 1 notifications unit [deliver sends the Authorization
+  header] + 1 store unit [credential stored then taken-once] + 1 v1 integration
+  [create-with-sink+ACCESSTOKEN-cred → delete → the loopback sink receives the
+  callback carrying `Authorization: Bearer <token>`, and the SessionInfo never
+  echoes the secret]). — binary: 1147968 B (+3168 B)
 - 2026-08-03 — Phase 3: Quality on Demand v1 — CloudEvents **`NETWORK_TERMINATED`**
   transition (CAMARA quality-on-demand 1.1.0, r3.2). New `v1::spawn_network_termination`:
   when `createSession` stores an `AVAILABLE` session whose identifier tail is `…001`
