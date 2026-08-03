@@ -7,9 +7,9 @@
 # code must not drift.
 #
 # This slice serves `POST /sessions`, `GET /sessions/{sessionId}`,
-# `DELETE /sessions/{sessionId}`, and `POST /sessions/{sessionId}/extend`.
-# `POST /retrieve-sessions` and the CloudEvents notifications on `sink` are
-# deferred to later passes; the served spec covers only what is implemented.
+# `DELETE /sessions/{sessionId}`, `POST /sessions/{sessionId}/extend`, and
+# `POST /retrieve-sessions`. The CloudEvents notifications on `sink` are deferred
+# to a later pass; the served spec covers only what is implemented.
 openapi: 3.0.3
 info:
   title: Quality On Demand
@@ -415,6 +415,104 @@ paths:
           - input: an unknown or already-deleted sessionId
             result: "404 NOT_FOUND"
 
+  /retrieve-sessions:
+    post:
+      operationId: retrieveSessionsByDevice
+      summary: Retrieve a device's QoS sessions
+      description: |
+        Returns the active QoS sessions for a device, as an array of
+        `SessionInfo`. The device is identified by the `device` object
+        (two-legged token) or by the access token (three-legged). An empty array
+        is returned when the device has no sessions — CAMARA does not 404 on an
+        empty result. See the API description and `x-camarasim-scenarios` for the
+        parameter-driven functional cases.
+      security:
+        - openId:
+            - quality-on-demand:sessions:retrieve-by-device
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+      requestBody:
+        # CamaraSim leniency: `device` is optional (three-legged tokens take the
+        # device from the subject), so an empty body is accepted as `{}`.
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RetrieveSessionsInput"
+      responses:
+        "200":
+          description: The device's active sessions (possibly an empty array).
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/SessionInfo"
+              examples:
+                some:
+                  summary: One active session for the device
+                  value:
+                    - sessionId: "11111111-1111-4111-8111-111111111111"
+                      device:
+                        phoneNumber: "+123456789012"
+                      applicationServer:
+                        ipv4Address: "203.0.113.0/24"
+                      qosProfile: "QOS_L"
+                      duration: 3600
+                      qosStatus: AVAILABLE
+                      startedAt: "2024-01-01T14:27:08Z"
+                      expiresAt: "2024-01-01T15:27:08Z"
+                none:
+                  summary: No sessions for the device
+                  value: []
+        "400":
+          $ref: "../../shared/errors.yaml#/components/responses/InvalidArgument"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "422":
+          $ref: "../../shared/errors.yaml#/components/responses/ServiceNotApplicable"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          Two control planes (docs/DESIGN.md §7): the identifier — the submitted
+          `device` (phoneNumber, else networkAccessIdentifier, else the IPv4
+          publicAddress, else ipv6Address), else the token subject — and, on the
+          happy path, the in-memory store. A reserved error suffix on the
+          identifier selects the canonical CAMARA error (…404 → 404 NOT_FOUND,
+          the device-identifier-not-found case); otherwise the store is scanned
+          and every session whose echoed `device` equals the requested device is
+          returned (an empty array when there are none). Canonical
+          Quality-On-Demand 1.1.0 declares 400/401/403/404/422/429 for this
+          operation; CamaraSim also exposes 500/503 so every reserved suffix is
+          reachable (documented extension). Sessions are matched by their echoed
+          `device`, so a session created for a non-E.164 token subject (which
+          carries no `device` echo) is not retrievable — and a request that
+          resolves to such a subject with no submitted device returns an empty
+          array (documented cut, DESIGN §7).
+        cases:
+          - input: identifier ending in a reserved error suffix (e.g. …404)
+            result: the canonical CAMARA error for that status (…404 → 404 NOT_FOUND)
+          - input: a device with one or more stored sessions
+            result: "200 with the array of that device's SessionInfo"
+          - input: a device (or resolvable subject) with no stored sessions
+            result: "200 with an empty array []"
+          - input: no device and a non-E.164 token subject
+            result: "200 with an empty array [] (no device echo to match)"
+          - input: malformed phoneNumber or an unknown field
+            result: "400 INVALID_ARGUMENT"
+
 components:
   securitySchemes:
     openId:
@@ -498,6 +596,15 @@ components:
             value beyond 86400 s — or one that pushes the resulting total duration
             beyond 86400 s — with QUALITY_ON_DEMAND.DURATION_OUT_OF_RANGE.
           example: 60
+
+    RetrieveSessionsInput:
+      type: object
+      description: >-
+        Parameters to list a device's QoS sessions. `device` is optional — for a
+        three-legged token the device is taken from the access-token subject.
+      properties:
+        device:
+          $ref: "#/components/schemas/Device"
 
     SessionInfo:
       type: object

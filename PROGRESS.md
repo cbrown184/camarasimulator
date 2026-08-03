@@ -185,8 +185,18 @@ returning the updated `SessionInfo` (`200`); the change persists (a later
 (unknown id → `404 NOT_FOUND`) and the requested seconds (`<1` → 400
 `INVALID_ARGUMENT`; `>86400`, **or** a resulting total duration `>86400`, → 400
 `QUALITY_ON_DEMAND.DURATION_OUT_OF_RANGE` — so the ceiling case is
-state-dependent). retrieve-sessions and CloudEvents notifications are still
-deferred.
+state-dependent).
+
+`POST /retrieve-sessions` (`quality-on-demand:sessions:retrieve-by-device`,
+`retrieveSessionsByDevice`) is now live too: it lists a device's active sessions
+as an array of `SessionInfo` (`200`; an empty array when there are none — CAMARA
+never 404s on an empty result). The device is the submitted `device` id, else
+the token subject. Two control planes (DESIGN §7): the identifier — a reserved
+error suffix → canonical CAMARA error (`…404` → 404 device-not-found) — and, on
+the happy path, the in-memory store, scanned by each session's echoed `device`
+(new `store::find_by_device`). A resolved identifier with no `device` echo (a
+non-E.164 subject, no submitted device) matches nothing → `200 []`. Only
+CloudEvents notifications on `sink` remain to complete QoD.
 
 ## In progress (claimed this pass)
 
@@ -230,7 +240,7 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   - [x] `GET /sessions/{sessionId}` (`quality-on-demand:sessions:read`, `getSession`)
   - [x] `DELETE /sessions/{sessionId}` (`quality-on-demand:sessions:delete`, `deleteSession`)
   - [x] `POST /sessions/{sessionId}/extend` (`quality-on-demand:sessions:update`, `extendQosSession`)
-  - [ ] `POST /retrieve-sessions` (`quality-on-demand:sessions:retrieve-by-device`)
+  - [x] `POST /retrieve-sessions` (`quality-on-demand:sessions:retrieve-by-device`, `retrieveSessionsByDevice`)
   - [ ] CloudEvents notifications on `sink` (qosStatus changes / expiry)
 
 ### Phase 4 — Spatial
@@ -254,6 +264,36 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-03 — Phase 3: Quality on Demand v1 — `POST /retrieve-sessions`
+  (CAMARA quality-on-demand 1.1.0, r3.2), operationId `retrieveSessionsByDevice`,
+  scope `quality-on-demand:sessions:retrieve-by-device` (confirmed against the
+  r3.2 upstream spec: `device` optional in `RetrieveSessionsInput`, 200 returns an
+  array of `SessionInfo`, empty array — not 404 — when no sessions found). Added
+  the route + `retrieve_sessions` handler to `src/apis/quality_on_demand/v1.rs`
+  and a `store::find_by_device(&Value) -> Vec<Value>` to `store.rs` (lock held
+  only for the scan + clone, never across await). Body `RetrieveSessionsInput`
+  parsed with `deny_unknown_fields`; empty body accepted as `{}` (device optional,
+  three-legged fallback). Two control planes (§7): the identifier (submitted
+  `device` id [phoneNumber E.164, else NAI, else IPv4 publicAddress, else
+  ipv6Address], else token subject → 422 MISSING_IDENTIFIER) — reserved suffix →
+  canonical CAMARA error (`…404` → 404 device-not-found) — and the in-memory store,
+  matched by each session's echoed `device`; happy path → 200 with the array
+  (empty `[]` when none). Documented cut: a resolved identifier with no `device`
+  echo (non-E.164 subject, no submitted device) matches nothing → `200 []`.
+  Reused the module's `resolve_identifier`/E.164/`with_correlator` helpers; no new
+  deps. `x-correlator` echoed on every response. Spec: added the
+  `/retrieve-sessions` path (operationId `retrieveSessionsByDevice`) +
+  `RetrieveSessionsInput` schema to `specs/quality-on-demand/v1/openapi.yaml` — 200
+  (array of SessionInfo, some/none examples) + shared 400/401/403/404/422/429/500/
+  503, `$ref`-ing auth `camaraOAuth`, `requestBody` required:false (documented
+  leniency), `x-camarasim-scenarios` documenting the two control planes + the
+  no-device-echo cut; header prose updated (retrieve-sessions no longer deferred,
+  only CloudEvents remain). 317 tests green (was 307; +10: 1 store unit
+  [find_by_device matches only that device's echo] + 9 integration covering
+  returns-only-requested-device's-sessions [multi + filtering] / empty-array-when-
+  none / reserved-suffix-404+429 / subject-fallback-matches / non-E.164-subject-
+  empty / bad-body-unknown-field+bad-phone / retrieve-scope-isolation / no-token-
+  401 / x-correlator). — binary: 1124744 B (+8088 B)
 - 2026-08-03 — Phase 3: Quality on Demand v1 — `POST /sessions/{sessionId}/extend`
   (CAMARA quality-on-demand 1.1.0, r3.2), operationId `extendQosSession`, scope
   `quality-on-demand:sessions:update` (confirmed against the r3.2 upstream spec).

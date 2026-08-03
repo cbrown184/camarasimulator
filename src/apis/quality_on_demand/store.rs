@@ -64,6 +64,20 @@ pub fn remove(id: &str) -> Option<Value> {
         .remove(id)
 }
 
+/// Return a snapshot of every stored `SessionInfo` whose echoed `device` equals
+/// `device`. `retrieveSessionsByDevice` uses this to list a device's active
+/// sessions. The lock is held only for the scan + clone (never across an
+/// `.await`), and the returned `Vec` is an independent copy.
+pub fn find_by_device(device: &Value) -> Vec<Value> {
+    store()
+        .lock()
+        .expect("qod session store not poisoned")
+        .values()
+        .filter(|info| info.get("device") == Some(device))
+        .cloned()
+        .collect()
+}
+
 /// Atomically update the session stored under `id`: apply `f` to a mutable
 /// reference to its `SessionInfo`, then return the updated value — or `None` if
 /// no such session exists. `extendQosSession` uses this to bump a session's
@@ -153,6 +167,27 @@ mod tests {
         assert_eq!(updated.unwrap()["duration"], 120);
         // …and the mutation persists for a later read.
         assert_eq!(get(&id).unwrap()["duration"], 120);
+    }
+
+    #[test]
+    fn find_by_device_matches_only_sessions_with_that_device_echo() {
+        // Two devices, uniquely keyed so this shares the process-global store
+        // with nothing else. A session carrying `device` A is found only when
+        // querying A; a session with no `device` echo is never matched.
+        let dev_a = json!({ "phoneNumber": "+15550000001" });
+        let dev_b = json!({ "networkAccessIdentifier": "store-unit-nai-b" });
+        let id_a = new_session_id();
+        let id_b = new_session_id();
+        let id_none = new_session_id();
+        insert(id_a.clone(), json!({ "sessionId": id_a, "device": dev_a }));
+        insert(id_b.clone(), json!({ "sessionId": id_b, "device": dev_b }));
+        insert(id_none.clone(), json!({ "sessionId": id_none })); // no device
+
+        let found = find_by_device(&json!({ "phoneNumber": "+15550000001" }));
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0]["sessionId"], json!(id_a));
+        // A device nobody stored → empty.
+        assert!(find_by_device(&json!({ "phoneNumber": "+15550000099" })).is_empty());
     }
 
     #[test]

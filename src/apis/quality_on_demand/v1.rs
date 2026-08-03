@@ -11,11 +11,14 @@
 //! - `POST /quality-on-demand/v1/sessions/{sessionId}/extend` — extend a session's
 //!   duration (operationId `extendQosSession`, scope
 //!   `quality-on-demand:sessions:update`).
+//! - `POST /quality-on-demand/v1/retrieve-sessions` — list a device's active
+//!   sessions (operationId `retrieveSessionsByDevice`, scope
+//!   `quality-on-demand:sessions:retrieve-by-device`).
 //!
-//! `retrieve-sessions` and the CloudEvents notifications on `sink` are deferred to
-//! later passes (see `PROGRESS.md`); `sink`/`sinkCredential` are accepted for
-//! schema fidelity but no notification is emitted yet — so a `deleteSession` fires
-//! no `DELETE_REQUESTED` CloudEvent.
+//! The CloudEvents notifications on `sink` are deferred to later passes (see
+//! `PROGRESS.md`); `sink`/`sinkCredential` are accepted for schema fidelity but no
+//! notification is emitted yet — so a `deleteSession` fires no `DELETE_REQUESTED`
+//! CloudEvent.
 //!
 //! ## What it does
 //!
@@ -74,6 +77,8 @@ const READ_SCOPE: &str = "quality-on-demand:sessions:read";
 const DELETE_SCOPE: &str = "quality-on-demand:sessions:delete";
 /// Scope required to extend a session (CAMARA quality-on-demand 1.1.0).
 const UPDATE_SCOPE: &str = "quality-on-demand:sessions:update";
+/// Scope required to list a device's sessions (CAMARA quality-on-demand 1.1.0).
+const RETRIEVE_SCOPE: &str = "quality-on-demand:sessions:retrieve-by-device";
 
 /// The simulator's fixed QoS-profile maximum duration, in seconds (24 h). A
 /// requested `duration` beyond this is out of range for the (single, simulated)
@@ -91,6 +96,10 @@ pub fn routes() -> Router {
         .route(
             "/quality-on-demand/v1/sessions/:session_id/extend",
             post(extend_session),
+        )
+        .route(
+            "/quality-on-demand/v1/retrieve-sessions",
+            post(retrieve_sessions),
         )
 }
 
@@ -375,6 +384,75 @@ async fn extend_session(
         Some(info) => with_correlator((StatusCode::OK, Json(info)).into_response(), &correlator),
         None => session_not_found(&correlator),
     }
+}
+
+/// `RetrieveSessionsInput` request body (CAMARA 1.1.0): the device whose active
+/// sessions to list. `device` is optional — omitted for a three-legged token,
+/// where the device is taken from the token subject.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RetrieveSessionsInput {
+    device: Option<Device>,
+}
+
+/// `POST /quality-on-demand/v1/retrieve-sessions`.
+///
+/// Lists the active QoS sessions for a device as an array of `SessionInfo`
+/// (`200`; an empty array when the device has none — CAMARA never 404s on an
+/// empty result). The device is the submitted `device` identifier, else the
+/// token subject (three-legged fallback; neither present → `422
+/// MISSING_IDENTIFIER`). Two control planes (docs/DESIGN.md §7): the identifier —
+/// a reserved error suffix selects a canonical CAMARA error (so `…404` → `404
+/// NOT_FOUND` for an unknown device) — and, on the happy path, the in-memory
+/// store, which is matched by each session's echoed `device`. A resolved
+/// identifier with no `device` echo (a non-E.164 token subject and no submitted
+/// device) matches nothing → `200 []`.
+async fn retrieve_sessions(claims: Claims, headers: HeaderMap, body: Bytes) -> Response {
+    let correlator = headers.get("x-correlator").cloned();
+
+    if let Err(e) = claims.require_scope(RETRIEVE_SCOPE) {
+        return with_correlator(e.into_response(), &correlator);
+    }
+
+    // `device` is optional, so an empty body is accepted as `{}` (three-legged:
+    // the device comes from the token subject). A non-empty body must be valid.
+    let req: RetrieveSessionsInput = if body.is_empty() {
+        RetrieveSessionsInput { device: None }
+    } else {
+        match serde_json::from_slice(&body) {
+            Ok(req) => req,
+            Err(_) => {
+                return invalid_argument(
+                    "Request body is not a valid RetrieveSessionsInput.",
+                    &correlator,
+                )
+            }
+        }
+    };
+
+    // Resolve the identifier (submitted device, else token subject).
+    let resolved = match resolve_identifier(req.device, &claims, &correlator) {
+        Ok(r) => r,
+        Err(resp) => return resp,
+    };
+
+    // Reserved error suffix on the identifier selects a canonical CAMARA error
+    // (…404 → 404 NOT_FOUND, the device-identifier-not-found case).
+    if let Some(err) = scenarios::reserved_error(&resolved.id) {
+        return with_correlator(err.into_response(), &correlator);
+    }
+
+    // Match stored sessions by their echoed `device`. A resolved identifier with
+    // no device echo (a non-E.164 subject, no submitted device) matches nothing.
+    let sessions = match resolved.echo {
+        Some(echo) => store::find_by_device(&echo),
+        None => Vec::new(),
+    };
+
+    with_correlator(
+        (StatusCode::OK, Json(sessions)).into_response(),
+        &correlator,
+    )
 }
 
 /// Render the `SessionInfo` for a freshly created session. The trailing three
@@ -675,6 +753,7 @@ mod tests {
 
     const HOST: &str = "qod.local:8080";
     const SESSIONS: &str = "/quality-on-demand/v1/sessions";
+    const RETRIEVE_SESSIONS: &str = "/quality-on-demand/v1/retrieve-sessions";
     /// A well-formed CreateSession body for `phone`, `profile`, `duration`.
     fn create_body(phone: &str, profile: &str, duration: i64) -> String {
         json!({
@@ -802,6 +881,20 @@ mod tests {
     /// A well-formed ExtendSessionDuration body for `additional` seconds.
     fn extend_body(additional: i64) -> String {
         json!({ "requestedAdditionalDuration": additional }).to_string()
+    }
+
+    /// POST a retrieve-sessions body with an optional Bearer token/correlator.
+    async fn retrieve_sessions_req(
+        token: Option<&str>,
+        body: &str,
+        correlator: Option<&str>,
+    ) -> (StatusCode, HeaderMap, Value) {
+        request("POST", RETRIEVE_SESSIONS, token, Some(body), correlator).await
+    }
+
+    /// A retrieve-sessions body naming `phone` as the device.
+    fn retrieve_body(phone: &str) -> String {
+        json!({ "device": { "phoneNumber": phone } }).to_string()
     }
 
     async fn request(
@@ -1276,6 +1369,145 @@ mod tests {
         assert_eq!(
             headers.get("x-correlator").and_then(|v| v.to_str().ok()),
             Some("corr-ext-404")
+        );
+    }
+
+    #[tokio::test]
+    async fn retrieve_sessions_returns_only_the_requested_devices_sessions() {
+        // Two globally-unique devices so this shares the process-global store
+        // with no other test. Create two sessions for A and one for B.
+        let create = mint_token(CREATE_SCOPE).await;
+        let dev_a = "+19998880012"; // …012 → AVAILABLE, not a reserved suffix
+        let dev_b = "+19998883016";
+        for _ in 0..2 {
+            let (status, _, _) =
+                post_sessions(Some(&create), &create_body(dev_a, "QOS_L", 60), None).await;
+            assert_eq!(status, StatusCode::CREATED);
+        }
+        let (status, _, _) =
+            post_sessions(Some(&create), &create_body(dev_b, "QOS_L", 60), None).await;
+        assert_eq!(status, StatusCode::CREATED);
+
+        // Retrieving A's sessions returns exactly the two, each carrying A.
+        let retrieve = mint_token(RETRIEVE_SCOPE).await;
+        let (status, _, body) =
+            retrieve_sessions_req(Some(&retrieve), &retrieve_body(dev_a), None).await;
+        assert_eq!(status, StatusCode::OK);
+        let arr = body.as_array().expect("array of SessionInfo");
+        assert_eq!(arr.len(), 2);
+        assert!(arr
+            .iter()
+            .all(|s| s["device"]["phoneNumber"] == dev_a && s["qosProfile"] == "QOS_L"));
+
+        // Retrieving B's sessions returns exactly the one.
+        let (status, _, body) =
+            retrieve_sessions_req(Some(&retrieve), &retrieve_body(dev_b), None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body.as_array().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn retrieve_sessions_for_a_device_with_none_is_empty_array() {
+        // A globally-unique device with no sessions created for it.
+        let retrieve = mint_token(RETRIEVE_SCOPE).await;
+        let (status, _, body) =
+            retrieve_sessions_req(Some(&retrieve), &retrieve_body("+19998881013"), None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, json!([]));
+    }
+
+    #[tokio::test]
+    async fn retrieve_sessions_reserved_suffix_selects_a_camara_error() {
+        let retrieve = mint_token(RETRIEVE_SCOPE).await;
+        // …404 → 404 NOT_FOUND (device identifier not found).
+        let (status, _, body) =
+            retrieve_sessions_req(Some(&retrieve), &retrieve_body("+19998880404"), None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["code"], "NOT_FOUND");
+        // …429 → 429 TOO_MANY_REQUESTS.
+        let (status, _, body) =
+            retrieve_sessions_req(Some(&retrieve), &retrieve_body("+19998880429"), None).await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(body["code"], "TOO_MANY_REQUESTS");
+    }
+
+    #[tokio::test]
+    async fn retrieve_sessions_falls_back_to_the_token_subject() {
+        // A three-legged token whose subject is the (globally-unique) device.
+        let subject = "+19998884017";
+        // Create a session for that device with a create token…
+        let create = mint_token(CREATE_SCOPE).await;
+        let (status, _, _) =
+            post_sessions(Some(&create), &create_body(subject, "QOS_L", 60), None).await;
+        assert_eq!(status, StatusCode::CREATED);
+
+        // …then retrieve with no device in the body — the subject supplies it.
+        let retrieve = mint_token_with_client(RETRIEVE_SCOPE, subject).await;
+        let (status, _, body) = retrieve_sessions_req(Some(&retrieve), "{}", None).await;
+        assert_eq!(status, StatusCode::OK);
+        let arr = body.as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["device"]["phoneNumber"], subject);
+    }
+
+    #[tokio::test]
+    async fn retrieve_sessions_with_a_non_e164_subject_and_no_device_is_empty() {
+        // The default client_credentials subject is non-E.164, so there is no
+        // `device` echo to match → an empty array (not an error).
+        let retrieve = mint_token(RETRIEVE_SCOPE).await;
+        let (status, _, body) = retrieve_sessions_req(Some(&retrieve), "", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, json!([]));
+    }
+
+    #[tokio::test]
+    async fn retrieve_sessions_rejects_a_bad_body() {
+        let retrieve = mint_token(RETRIEVE_SCOPE).await;
+        // Unknown field.
+        let b = json!({ "device": { "phoneNumber": "+19998880012" }, "x": 1 }).to_string();
+        let (status, _, body) = retrieve_sessions_req(Some(&retrieve), &b, None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "INVALID_ARGUMENT");
+        // Malformed phoneNumber.
+        let (status, _, body) =
+            retrieve_sessions_req(Some(&retrieve), &retrieve_body("0123"), None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "INVALID_ARGUMENT");
+    }
+
+    #[tokio::test]
+    async fn retrieve_sessions_requires_the_retrieve_scope() {
+        // A read token must not satisfy the retrieve-by-device scope.
+        let read = mint_token(READ_SCOPE).await;
+        let (status, _, body) =
+            retrieve_sessions_req(Some(&read), &retrieve_body("+19998880012"), None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["code"], "PERMISSION_DENIED");
+        // A retrieve token must not satisfy the read scope.
+        let retrieve = mint_token(RETRIEVE_SCOPE).await;
+        let (status, _, body) = get_session_req(Some(&retrieve), "any-id", None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["code"], "PERMISSION_DENIED");
+    }
+
+    #[tokio::test]
+    async fn retrieve_sessions_without_a_token_is_unauthenticated() {
+        let (status, _, body) =
+            retrieve_sessions_req(None, &retrieve_body("+19998880012"), None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["code"], "UNAUTHENTICATED");
+    }
+
+    #[tokio::test]
+    async fn x_correlator_is_echoed_on_retrieve_sessions() {
+        let retrieve = mint_token(RETRIEVE_SCOPE).await;
+        let (status, headers, _) =
+            retrieve_sessions_req(Some(&retrieve), &retrieve_body("+19998881013"), Some("corr-ret"))
+                .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-ret")
         );
     }
 
