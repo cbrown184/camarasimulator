@@ -46,6 +46,19 @@ pub fn get(id: &str) -> Option<Value> {
         .cloned()
 }
 
+/// Snapshot every stored payment (its rendered JSON), in unspecified order.
+/// `retrievePayments` (GET /payments) uses this to render the `PaymentArray`
+/// list. The lock is held only for the clone of the values, never across an
+/// `.await`, so it never blocks the async runtime.
+pub fn all() -> Vec<Value> {
+    store()
+        .lock()
+        .expect("carrier-billing payment store not poisoned")
+        .values()
+        .cloned()
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -60,5 +73,21 @@ mod tests {
         insert(id.clone(), payment.clone());
         assert_eq!(get(&id), Some(payment));
         assert!(get("cb-store-unit-no-such").is_none());
+    }
+
+    #[test]
+    fn all_includes_every_inserted_payment() {
+        // Uniquely-keyed ids so the assertion is robust against whatever else
+        // the process-global store holds (the test binary shares one store).
+        let id_a = "cb-store-all-unit-000a".to_string();
+        let id_b = "cb-store-all-unit-000b".to_string();
+        let pay_a = json!({ "paymentId": id_a, "paymentStatus": "succeeded" });
+        let pay_b = json!({ "paymentId": id_b, "paymentStatus": "succeeded" });
+        insert(id_a.clone(), pay_a.clone());
+        insert(id_b.clone(), pay_b.clone());
+
+        let listed = all();
+        assert!(listed.contains(&pay_a), "all() includes the first payment");
+        assert!(listed.contains(&pay_b), "all() includes the second payment");
     }
 }

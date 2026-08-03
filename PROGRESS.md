@@ -359,6 +359,14 @@ verbatim (`200`) or `404 NOT_FOUND` for an unknown/never-created id. The
 `paymentId` is opaque (UUID-shaped), so — unlike `createPayment` — there is no
 reserved-identifier control plane here; the store state is the only one.
 
+Carrier Billing now also **lists**: `GET /payments` (`retrievePayments`, scope
+`carrier-billing:payments:read`) returns a `PaymentArray` of every payment in
+the store (new `store::all()` scan) — `200` with an empty array when none
+(CAMARA lists never `404`). The store state is the only control plane. The real
+op's `page`/`perPage`/`order`/`paymentCreationDate.gte|lte`/`paymentStatus`/
+`merchantIdentifier` query parameters are accepted but not applied, and payments
+aren't scoped per client (documented cuts, mirroring the Geofencing list).
+
 ## In progress (claimed this pass)
 
 _None._  <!-- agent: put the claimed item + run timestamp here, clear it when done -->
@@ -447,8 +455,11 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     (`src/apis/carrier_billing/store.rs`); `createPayment` now persists the
     charged payment so it can be read back (`200`) or `404 NOT_FOUND` for an
     unknown id. Opaque `paymentId` → store state is the only control plane.
-  - [ ] `GET /payments` (list, `retrievePayments`) —
-    `carrier-billing:payments:read` (store `all()` scan; next slice)
+  - [x] `GET /payments` (list, `retrievePayments`) —
+    `carrier-billing:payments:read`. Store `all()` scan → a `PaymentArray` of
+    every stored payment (`200`, empty array when none; store state the only
+    control plane). Query-param pagination/filtering (`page`/`perPage`/`order`/
+    date+status filters) accepted but not applied — documented cut, later slice.
   - [ ] two-step flow: `POST /payments/prepare` (`preparePayment`) ·
     `.../{paymentId}/validate` · `.../confirm` · `.../cancel`
     (`carrier-billing:payments:write`)
@@ -470,6 +481,30 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 ## Scan journal
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
+
+- 2026-08-03 — Phase 5 (payments): **Carrier Billing v0.5** — `GET /payments`
+  (`retrievePayments`, scope `carrier-billing:payments:read`), the list op.
+  Confirmed the canonical operation against the real CAMARA
+  CarrierBillingCheckOut r3.2 spec (op `retrievePayments`, path `/payments`,
+  scope `carrier-billing:payments:read`, response `PaymentArray` = array of
+  `Payment`; query params `page`/`perPage`/`order`/`paymentCreationDate.gte|lte`/
+  `paymentStatus`/`merchantIdentifier`; errors 400/401/403/429). Scoped this pass
+  to the **core list**: new `store::all()` snapshots every stored payment, and
+  the new `retrieve_payments` handler (a `.get()` on the existing `/payments`
+  route) returns them as a `PaymentArray` (`200`, empty array when none; store
+  state the only control plane, mirroring QoD `retrieve-sessions` / the
+  Geofencing list). Query-param pagination/filtering accepted but **not applied**
+  and payments not scoped per client — documented cuts, a later slice; no
+  reserved-identifier plane (opaque ids). No new deps. Spec: updated
+  `specs/carrier-billing/v0.5/openapi.yaml` — new `GET /payments` operation
+  (`page`/`perPage`/`order` params documented as accepted-not-applied, 200
+  `PaymentArray` with one-item + empty examples, shared 400/401/403/429), new
+  `PaymentArray` schema, refreshed header/description/cuts. 473 tests green (was
+  468; +5: 1 store unit [`all()` includes every inserted payment] + 4 v0_5
+  integration [list contains a created payment verbatim as a JSON array · list
+  without read scope → 403 · list without token → 401 · x-correlator echoed]). —
+  binary: 1555176 B (+7672 B; the list handler + the new vendored spec text
+  embedded via include_str!)
 
 - 2026-08-03 — Phase 5 (payments): **Carrier Billing v0.5** — `GET
   /payments/{paymentId}` (`retrievePayment`, scope `carrier-billing:payments:read`),

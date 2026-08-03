@@ -12,6 +12,11 @@
 //!   verbatim (`200`) or `404 NOT_FOUND` for an unknown id. The `paymentId` is
 //!   opaque (UUID-shaped), so the store state is `retrievePayment`'s only
 //!   control plane (known → `200`, unknown → `404`), mirroring QoD `getSession`.
+//! - `GET /carrier-billing/v0.5/payments` — list created payments as a
+//!   `PaymentArray` (operationId `retrievePayments`, scope
+//!   `carrier-billing:payments:read`). Returns every stored payment as a JSON
+//!   array (`200`, empty array when none). The store state is its only control
+//!   plane; query-parameter pagination/filtering is a documented cut (below).
 //!
 //! ## What it does
 //!
@@ -53,10 +58,14 @@
 //!
 //! ## Documented cuts (this slice)
 //!
-//! - The one-step `createPayment` and read-back `retrievePayment` are
-//!   implemented; the `retrievePayments` (list) / `preparePayment` /
+//! - The one-step `createPayment`, read-back `retrievePayment`, and list
+//!   `retrievePayments` are implemented; the two-step `preparePayment` /
 //!   `validatePayment` / `confirmPayment` / `cancelPayment` operations are later
 //!   slices.
+//! - `retrievePayments` returns the full list unpaginated and unfiltered: its
+//!   `page`/`perPage`, `paymentCreationDate.gte`/`.lte`, `paymentStatus`,
+//!   `merchantIdentifier`, and `order` query parameters are accepted but not
+//!   applied (a later slice), and payments are not scoped per client.
 //! - `sink` / `sinkCredential` are accepted for schema fidelity but not acted on
 //!   (Carrier Billing charging notifications are a later slice). Because they are
 //!   never applied, the persisted payment carries no `sink` — the CAMARA
@@ -100,7 +109,10 @@ const MIN_AMOUNT: f64 = 0.001;
 /// Routes for Carrier Billing v0.5, mounted at their canonical URLs.
 pub fn routes() -> Router {
     Router::new()
-        .route("/carrier-billing/v0.5/payments", post(create_payment))
+        .route(
+            "/carrier-billing/v0.5/payments",
+            post(create_payment).get(retrieve_payments),
+        )
         .route(
             "/carrier-billing/v0.5/payments/:payment_id",
             get(retrieve_payment),
@@ -265,6 +277,35 @@ async fn retrieve_payment(claims: Claims, headers: HeaderMap, Path(payment_id): 
             &correlator,
         ),
     }
+}
+
+/// `GET /carrier-billing/v0.5/payments` — list created payments as a
+/// `PaymentArray` (operationId `retrievePayments`).
+///
+/// Returns every payment held in the shared in-memory [`super::store`] as a JSON
+/// array of `PaymentCreated`/`Payment` objects — `200` with an empty array when
+/// none exist (CAMARA lists never `404` on an empty result). Requires a token
+/// carrying `carrier-billing:payments:read` (the same read scope as
+/// `retrievePayment`).
+///
+/// **Documented cut (this slice):** the real operation's query parameters —
+/// `page`/`perPage` pagination, `paymentCreationDate.gte`/`.lte` and
+/// `paymentStatus`/`merchantIdentifier` filtering, and `order` — are accepted
+/// (unknown query parameters are ignored) but **not applied**: the full list is
+/// returned unpaginated and unfiltered. CamaraSim also does not scope payments
+/// per client (a documented simplification, mirroring the Geofencing
+/// Subscriptions list). Pagination/filtering is a later slice.
+async fn retrieve_payments(claims: Claims, headers: HeaderMap) -> Response {
+    // Optional correlation header, echoed on every response (CAMARA Commonalities).
+    let correlator = headers.get("x-correlator").cloned();
+
+    // Endpoint authorisation: the token must carry this API's read scope.
+    if let Err(e) = claims.require_scope(READ_SCOPE) {
+        return with_correlator(e.into_response(), &correlator);
+    }
+
+    let payments = store::all();
+    with_correlator((StatusCode::OK, Json(payments)).into_response(), &correlator)
 }
 
 /// Resolve the mobile account to charge: the submitted `phoneNumber` (validated
@@ -534,6 +575,34 @@ mod tests {
         (status, headers, json)
     }
 
+    /// GET `/payments` (list) with an optional Bearer token and correlator.
+    async fn list_payments(
+        token: Option<&str>,
+        correlator: Option<&str>,
+    ) -> (StatusCode, HeaderMap, Value) {
+        let mut builder = Request::builder()
+            .method("GET")
+            .uri("/carrier-billing/v0.5/payments")
+            .header("host", HOST);
+        if let Some(t) = token {
+            builder = builder.header("authorization", format!("Bearer {t}"));
+        }
+        if let Some(c) = correlator {
+            builder = builder.header("x-correlator", c);
+        }
+        let response = app()
+            .oneshot(builder.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let headers = response.headers().clone();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, headers, json)
+    }
+
     /// A minimal valid CreatePayment body for the given phone number and amount.
     fn payment_body(phone: &str, amount: f64) -> String {
         format!(
@@ -752,6 +821,59 @@ mod tests {
             get_payment(None, "11111111-1111-4111-8111-111111111111", None).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
         assert_eq!(body["code"], "UNAUTHENTICATED");
+    }
+
+    // --- retrievePayments (GET /payments, list) ----------------------------
+
+    #[tokio::test]
+    async fn list_returns_a_json_array_containing_a_created_payment() {
+        // Create a payment, then confirm it appears in the list. The store is
+        // process-global, so assert containment (not an exact list) — other
+        // tests may have created payments too.
+        let (status, _, created) = create_ok_token(&payment_body("+123456789012", 9.99)).await;
+        assert_eq!(status, StatusCode::CREATED);
+        let id = created["paymentId"].as_str().unwrap().to_string();
+
+        let read = mint_token(READ_SCOPE).await;
+        let (status, _, list) = list_payments(Some(&read), None).await;
+        assert_eq!(status, StatusCode::OK);
+        let items = list.as_array().expect("response is a JSON array");
+        assert!(
+            items.iter().any(|p| p["paymentId"] == id.as_str()),
+            "the created payment appears in the list"
+        );
+        // The listed representation is the verbatim created payment.
+        let found = items
+            .iter()
+            .find(|p| p["paymentId"] == id.as_str())
+            .unwrap();
+        assert_eq!(found, &created);
+    }
+
+    #[tokio::test]
+    async fn list_without_the_read_scope_is_forbidden() {
+        let create_only = mint_token(CREATE_SCOPE).await;
+        let (status, _, body) = list_payments(Some(&create_only), None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["code"], "PERMISSION_DENIED");
+    }
+
+    #[tokio::test]
+    async fn list_without_a_token_is_unauthenticated() {
+        let (status, _, body) = list_payments(None, None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["code"], "UNAUTHENTICATED");
+    }
+
+    #[tokio::test]
+    async fn list_echoes_x_correlator() {
+        let read = mint_token(READ_SCOPE).await;
+        let (status, headers, _) = list_payments(Some(&read), Some("corr-list")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-list")
+        );
     }
 
     #[tokio::test]

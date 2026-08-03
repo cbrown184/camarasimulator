@@ -9,10 +9,10 @@
 # Retrieval v0.4 — it is mounted under its real published sub-1.0 version
 # `/carrier-billing/v0.5` rather than a loose "v1" (DESIGN §9).
 #
-# This slice serves `POST /payments` (the one-step `createPayment`) and
-# `GET /payments/{paymentId}` (`retrievePayment`, read-back). The list
-# (`retrievePayments`) / prepare / validate / confirm / cancel operations are
-# later slices.
+# This slice serves `POST /payments` (the one-step `createPayment`),
+# `GET /payments/{paymentId}` (`retrievePayment`, read-back), and
+# `GET /payments` (`retrievePayments`, list). The two-step prepare / validate /
+# confirm / cancel operations are later slices.
 openapi: 3.0.3
 info:
   title: Carrier Billing
@@ -67,11 +67,27 @@ info:
     reserved-identifier suffix here. It requires the
     `carrier-billing:payments:read` scope.
 
+    ## List — `GET /payments` (`retrievePayments`)
+
+    Lists created payments as a `PaymentArray` — a JSON array of every payment
+    held in the in-memory store (`200`, an empty array when none exist; CAMARA
+    lists never `404` on an empty result). Like `retrievePayment` it requires the
+    `carrier-billing:payments:read` scope, and the store state is its only
+    control plane. The real operation's `page`/`perPage` pagination and
+    `paymentCreationDate.gte`/`.lte` / `paymentStatus` / `merchantIdentifier` /
+    `order` query parameters are accepted but not applied in this slice (a later
+    slice); payments are not scoped per client.
+
     ## Documented cuts (this slice)
 
-    - `POST /payments` (one-step `createPayment`) and `GET /payments/{paymentId}`
-      (`retrievePayment`) are implemented; the list (`retrievePayments`) /
-      prepare / validate / confirm / cancel operations are later slices.
+    - `POST /payments` (`createPayment`), `GET /payments/{paymentId}`
+      (`retrievePayment`), and `GET /payments` (`retrievePayments`, list) are
+      implemented; the two-step prepare / validate / confirm / cancel operations
+      are later slices.
+    - `retrievePayments` returns the full list unpaginated and unfiltered — its
+      `page`/`perPage`, `paymentCreationDate.gte`/`.lte`, `paymentStatus`,
+      `merchantIdentifier`, and `order` query parameters are accepted but not
+      applied — and payments are not scoped per client.
     - `sink` / `sinkCredential` are accepted for schema fidelity but not acted on
       (Carrier Billing charging notifications are a later slice). They are never
       applied, so the persisted payment carries no `sink`; the `Payment` schema's
@@ -208,6 +224,100 @@ paths:
             result: "400 INVALID_ARGUMENT"
           - input: no `phoneNumber` and a non-E.164 token subject
             result: "422 MISSING_IDENTIFIER"
+    get:
+      operationId: retrievePayments
+      summary: List created payments
+      description: |
+        Lists created payments as a `PaymentArray`. Returns every payment held in
+        the in-memory store (`200`, an empty array when none exist).
+
+        In this slice the query parameters below are accepted but **not applied**:
+        the full list is returned unpaginated and unfiltered, and payments are not
+        scoped per client (a documented simplification). Pagination/filtering is a
+        later slice.
+      security:
+        - openId:
+            - carrier-billing:payments:read
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+        - name: page
+          in: query
+          required: false
+          description: >-
+            1-based page index. Accepted but not applied in this slice (the full
+            list is always returned).
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+        - name: perPage
+          in: query
+          required: false
+          description: >-
+            Page size. Accepted but not applied in this slice (the full list is
+            always returned).
+          schema:
+            type: integer
+            minimum: 1
+            default: 10
+        - name: order
+          in: query
+          required: false
+          description: >-
+            Sort order by `paymentCreationDate`. Accepted but not applied in this
+            slice.
+          schema:
+            type: string
+            enum: [asc, desc]
+            default: desc
+      responses:
+        "200":
+          description: The list of payments (possibly empty).
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PaymentArray"
+              examples:
+                oneItem:
+                  summary: A store holding one payment
+                  value:
+                    - paymentId: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+                      amountTransaction:
+                        phoneNumber: "+123456789012"
+                        paymentAmount:
+                          chargingInformation:
+                            amount: 9.99
+                            currency: EUR
+                            description: A digital good
+                        referenceCode: ref-001
+                      paymentStatus: succeeded
+                      paymentCreationDate: "2024-01-01T14:27:08Z"
+                      paymentDate: "2024-01-01T14:27:08Z"
+                empty:
+                  summary: An empty store
+                  value: []
+        "400":
+          $ref: "../../shared/errors.yaml#/components/responses/InvalidArgument"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+      x-camarasim-scenarios:
+        description: >-
+          Keyed only on the in-memory payment store (docs/DESIGN.md §7): every
+          payment created by `createPayment` appears in the returned array, in
+          unspecified order; an empty store yields `200 []`. Query-parameter
+          pagination/filtering is accepted but not applied in this slice.
+        cases:
+          - input: any read-scoped token, with payments in the store
+            result: "200 with a `PaymentArray` containing every stored payment"
+          - input: any read-scoped token, with no payments in the store
+            result: "200 []"
 
   /payments/{paymentId}:
     get:
@@ -546,6 +656,15 @@ components:
           description: >-
             The callback that was registered at creation, if any. CamaraSim does
             not act on or persist a `sink`, so it is always omitted here.
+
+    PaymentArray:
+      type: array
+      description: |
+        A list of payment(s), returned by `retrievePayments`. May be empty. Each
+        item is a `Payment` (identical to what `createPayment` produced;
+        CamaraSim never applies a `sink`, so items omit it).
+      items:
+        $ref: "#/components/schemas/Payment"
 
     AmountTransaction:
       type: object
