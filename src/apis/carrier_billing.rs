@@ -24,6 +24,7 @@
 //! Reading a payment back makes Carrier Billing **stateful**, so a shared
 //! in-memory [`store`] holds created payments keyed by `paymentId`.
 
+pub mod notifications;
 pub mod store;
 pub mod v0_5;
 

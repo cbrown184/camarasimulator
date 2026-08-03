@@ -97,6 +97,7 @@ use sha2::{Digest, Sha256};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use super::notifications;
 use super::store;
 use crate::auth::verify::Claims;
 use crate::errors::CamaraError;
@@ -135,6 +136,10 @@ const UNAUTHORIZED_AMOUNT_THRESHOLD: f64 = 1000.0;
 
 /// The CAMARA schema minimum for a charge `amount` (`minimum: 0.001`).
 const MIN_AMOUNT: f64 = 0.001;
+
+/// The `description` carried by the `payment-completed` charging notification's
+/// `data` (the CAMARA `BasicEvent`'s human-readable status explanation).
+const PAYMENT_COMPLETED_DESCRIPTION: &str = "The payment has been completed successfully.";
 
 /// Routes for Carrier Billing v0.5, mounted at their canonical URLs.
 pub fn routes() -> Router {
@@ -184,12 +189,16 @@ pub fn routes() -> Router {
 struct CreatePayment {
     #[serde(rename = "amountTransaction")]
     amount_transaction: AmountTransactionInput,
-    /// Accepted for schema fidelity; charging notifications are a later slice.
-    #[allow(dead_code)]
+    /// Optional `http://` callback for charging notifications. On a successful
+    /// one-step `createPayment` charge, CamaraSim delivers a `payment-completed`
+    /// CloudEvent here (fire-and-forget; see [`notifications`]). `preparePayment`
+    /// accepts it for schema fidelity but does not yet act on it (later slice).
     sink: Option<String>,
-    /// Accepted for schema fidelity; not applied (notifications deferred).
+    /// Optional credential for the callback `sink`. An `ACCESSTOKEN` credential's
+    /// bearer token is applied to the `payment-completed` callback as an
+    /// `Authorization: Bearer` header ([`notifications::sink_authorization`]);
+    /// `PLAIN`/`REFRESHTOKEN` are accepted but not applied (documented cut).
     #[serde(rename = "sinkCredential")]
-    #[allow(dead_code)]
     sink_credential: Option<Value>,
 }
 
@@ -321,7 +330,27 @@ async fn create_payment(claims: Claims, headers: HeaderMap, body: Bytes) -> Resp
     });
 
     // Persist so `retrievePayment` (GET /payments/{paymentId}) can read it back.
-    store::insert(payment_id, created.clone());
+    store::insert(payment_id.clone(), created.clone());
+
+    // Charging notification: when the caller supplied a `sink`, deliver a
+    // `payment-completed` CloudEvent for this successful one-step charge. Delivery
+    // is fire-and-forget and off the request path (see `notifications`), so a slow
+    // or unreachable sink never delays this `201`. An ACCESSTOKEN `sinkCredential`
+    // yields a bearer `Authorization` header on the callback.
+    if let Some(sink) = &req.sink {
+        let auth = req
+            .sink_credential
+            .as_ref()
+            .and_then(notifications::sink_authorization);
+        let event = notifications::payment_completed_event(
+            mint_uuid(),
+            now.clone(),
+            &payment_id,
+            PAYMENT_COMPLETED_DESCRIPTION,
+            &now,
+        );
+        notifications::spawn_delivery(sink.clone(), event, auth);
+    }
 
     with_correlator((StatusCode::CREATED, Json(created)).into_response(), &correlator)
 }
@@ -2139,5 +2168,117 @@ mod tests {
             headers.get("x-correlator").and_then(|v| v.to_str().ok()),
             Some("corr-can-err")
         );
+    }
+
+    // --- Charging notifications (payment-completed CloudEvent) --------------
+
+    #[tokio::test]
+    async fn creating_a_payment_with_a_sink_fires_a_payment_completed_cloudevent() {
+        use tokio::io::AsyncReadExt;
+        use tokio::net::TcpListener;
+
+        // A loopback receiver stands in for the merchant's `sink`.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let sink = format!("http://{addr}/cb-notify");
+
+        // A successful one-step charge carrying a sink.
+        let token = mint_token(CREATE_SCOPE).await;
+        let body = format!(
+            r#"{{"amountTransaction":{{"phoneNumber":"+123456789012","paymentAmount":{{"chargingInformation":{{"amount":9.99,"currency":"EUR","description":"A digital good"}}}},"referenceCode":"ref-001"}},"sink":"{sink}"}}"#
+        );
+        let (status, _, created) = post_payment(Some(&token), &body, None).await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(created["paymentStatus"], "succeeded");
+        let payment_id = created["paymentId"].as_str().unwrap().to_string();
+        // The sink is never echoed back in the created payment representation.
+        assert!(created.get("sink").is_none(), "sink not echoed");
+
+        // Receive the fire-and-forget notification the handler spawned.
+        let (mut sock, _) = listener.accept().await.unwrap();
+        let mut buf = Vec::new();
+        sock.read_to_end(&mut buf).await.unwrap();
+        let raw = String::from_utf8(buf).unwrap();
+        let (head, event_body) = raw.split_once("\r\n\r\n").expect("headers then body");
+        assert!(
+            head.starts_with("POST /cb-notify HTTP/1.1\r\n"),
+            "request line: {head}"
+        );
+        assert!(head.contains("Content-Type: application/cloudevents+json"));
+        // No sinkCredential → no Authorization header.
+        assert!(!head.contains("Authorization:"), "unauthenticated: {head}");
+
+        let event: Value = serde_json::from_str(event_body).expect("body is JSON");
+        assert_eq!(
+            event["type"],
+            "org.camaraproject.carrier-billing.v0.payment-completed"
+        );
+        assert_eq!(event["source"], "//camarasimulator/carrier-billing");
+        assert_eq!(event["specversion"], "1.0");
+        assert_eq!(event["datacontenttype"], "application/json");
+        assert!(event["id"].is_string() && event["time"].is_string());
+        assert_eq!(event["data"]["paymentId"], json!(payment_id));
+        assert_eq!(event["data"]["status"], "succeeded");
+        assert!(event["data"]["description"].is_string());
+        assert!(event["data"]["paymentDate"].as_str().unwrap().ends_with('Z'));
+    }
+
+    #[tokio::test]
+    async fn a_sink_credential_authenticates_the_charging_notification() {
+        use tokio::io::AsyncReadExt;
+        use tokio::net::TcpListener;
+
+        // A loopback receiver stands in for the merchant's `sink`.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let sink = format!("http://{addr}/cb-auth");
+
+        // A successful charge carrying a sink AND an ACCESSTOKEN sinkCredential.
+        let token = mint_token(CREATE_SCOPE).await;
+        let body = format!(
+            r#"{{"amountTransaction":{{"phoneNumber":"+123456789012","paymentAmount":{{"chargingInformation":{{"amount":1.0,"currency":"EUR","description":"x"}}}},"referenceCode":"ref-001"}},"sink":"{sink}","sinkCredential":{{"credentialType":"ACCESSTOKEN","accessToken":"cb-notify-secret","accessTokenType":"bearer"}}}}"#
+        );
+        let (status, _, created) = post_payment(Some(&token), &body, None).await;
+        assert_eq!(status, StatusCode::CREATED);
+        // The credential is a secret: it must never appear in the created payment.
+        assert!(created.get("sinkCredential").is_none(), "secret not echoed");
+        assert!(!created.to_string().contains("cb-notify-secret"));
+
+        // Read the notification: it carries the RFC 6750 bearer header.
+        let (mut sock, _) = listener.accept().await.unwrap();
+        let mut buf = Vec::new();
+        sock.read_to_end(&mut buf).await.unwrap();
+        let raw = String::from_utf8(buf).unwrap();
+        let (head, _) = raw.split_once("\r\n\r\n").expect("headers then body");
+        assert!(
+            head.contains("Authorization: Bearer cb-notify-secret\r\n"),
+            "authorization header present: {head}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_reserved_error_payment_fires_no_charging_notification() {
+        use tokio::net::TcpListener;
+
+        // A loopback receiver that must never be POSTed to (the charge fails).
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let sink = format!("http://{addr}/cb-none");
+
+        // …404 reserved suffix → 404 NOT_FOUND, so nothing is charged/notified.
+        let token = mint_token(CREATE_SCOPE).await;
+        let body = format!(
+            r#"{{"amountTransaction":{{"phoneNumber":"+123456789404","paymentAmount":{{"chargingInformation":{{"amount":9.99,"currency":"EUR","description":"x"}}}},"referenceCode":"ref-001"}},"sink":"{sink}"}}"#
+        );
+        let (status, _, _) = post_payment(Some(&token), &body, None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        // No callback should arrive: a short accept() times out.
+        let accepted = tokio::time::timeout(
+            std::time::Duration::from_millis(300),
+            listener.accept(),
+        )
+        .await;
+        assert!(accepted.is_err(), "no notification for a failed charge");
     }
 }

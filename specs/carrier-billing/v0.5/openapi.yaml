@@ -167,10 +167,18 @@ info:
       `page`/`perPage`, `paymentCreationDate.gte`/`.lte`, `paymentStatus`,
       `merchantIdentifier`, and `order` query parameters are accepted but not
       applied — and payments are not scoped per client.
-    - `sink` / `sinkCredential` are accepted for schema fidelity but not acted on
-      (Carrier Billing charging notifications are a later slice). They are never
-      applied, so the persisted payment carries no `sink`; the `Payment` schema's
-      `sink` is optional, so a `retrievePayment` response omits it.
+    - **Charging notifications.** A successful one-step `createPayment` charge
+      now delivers a `payment-completed` CloudEvent to the request's `sink` (see
+      the operation's `callbacks`), fire-and-forget over raw TCP to an `http://`
+      sink only (no TLS client), with an `ACCESSTOKEN` `sinkCredential`'s bearer
+      token applied as an `Authorization` header (`PLAIN`/`REFRESHTOKEN` accepted
+      but not applied). The `sink` is used only to notify — it is never persisted
+      with the payment, so a `retrievePayment` response omits it (the `Payment`
+      schema's `sink` is optional). `preparePayment` still accepts `sink` /
+      `sinkCredential` for schema fidelity but does not yet notify (a later
+      slice), and the two-step terminal events (`payment-reserved`,
+      `payment-completed` on confirm, `payment-cancelled`, `payment-denied`,
+      `payment-pending-validation`) are not yet delivered.
   version: "0.5.0"
   license:
     name: Apache-2.0
@@ -303,6 +311,37 @@ paths:
             result: "400 INVALID_ARGUMENT"
           - input: no `phoneNumber` and a non-E.164 token subject
             result: "422 MISSING_IDENTIFIER"
+          - input: successful charge with an `http://` `sink`
+            result: "201; a payment-completed CloudEvent POSTed to the sink"
+          - input: successful charge with a `sink` + ACCESSTOKEN `sinkCredential`
+            result: "the callback carries Authorization: Bearer <accessToken>"
+      callbacks:
+        chargingNotifications:
+          "{$request.body#/sink}":
+            post:
+              summary: Charging status notification
+              description: |
+                Delivered by the API provider to the `sink` URL supplied in the
+                `createPayment` request when the payment reaches a terminal
+                charging outcome. The body is a CloudEvents 1.0 event.
+
+                CamaraSim delivers the `payment-completed` event
+                (`data.status: succeeded`) on a successful one-step charge.
+                Delivery is best-effort, fire-and-forget, and only to an
+                `http://` sink (no TLS client). When the payment was created with
+                an `ACCESSTOKEN` `sinkCredential`, the request carries an
+                `Authorization: Bearer <accessToken>` header (RFC 6750); the
+                `PLAIN` and `REFRESHTOKEN` credential types are accepted but not
+                applied (a documented cut).
+              requestBody:
+                required: true
+                content:
+                  application/cloudevents+json:
+                    schema:
+                      $ref: "#/components/schemas/CloudEvent"
+              responses:
+                "204":
+                  description: Notification received.
     get:
       operationId: retrievePayments
       summary: List created payments
@@ -928,10 +967,12 @@ components:
         sink:
           type: string
           format: uri
-          pattern: '^https://.+$'
           description: >-
-            Optional HTTPS callback for charging notifications. Accepted for
-            schema fidelity but not acted on in this slice.
+            Optional callback URL for charging notifications. On a successful
+            one-step charge CamaraSim delivers a `payment-completed` CloudEvent
+            here (see the operation's `callbacks`). CAMARA specifies `https://`;
+            CamaraSim only delivers to an `http://` sink (no TLS client — a
+            documented cut).
         sinkCredential:
           $ref: "#/components/schemas/SinkCredential"
 
@@ -1065,8 +1106,10 @@ components:
     SinkCredential:
       type: object
       description: >-
-        Credential for the callback `sink`. Accepted for schema fidelity but not
-        applied in this slice.
+        Credential for the callback `sink`. An `ACCESSTOKEN` credential's
+        `accessToken` is applied to the charging notification as an
+        `Authorization: Bearer` header (RFC 6750); `PLAIN` / `REFRESHTOKEN` are
+        accepted for schema fidelity but not applied (a documented cut).
       required:
         - credentialType
       properties:
@@ -1076,6 +1119,98 @@ components:
             - PLAIN
             - ACCESSTOKEN
             - REFRESHTOKEN
+        accessToken:
+          type: string
+          description: >-
+            The bearer token applied to the callback (`credentialType: ACCESSTOKEN`).
+        accessTokenType:
+          type: string
+          enum:
+            - bearer
+
+    CloudEvent:
+      type: object
+      description: |
+        A CloudEvents 1.0 event delivered to a payment's `sink`. CamaraSim emits
+        the `payment-completed` type; the `data` payload is
+        `EventPaymentCompleted`.
+      required:
+        - id
+        - source
+        - specversion
+        - type
+        - time
+        - data
+      properties:
+        id:
+          type: string
+          description: Identifier of this event, unique within the source context.
+          example: "83a1c8e0-2b6a-4a2e-9c1f-0a1b2c3d4e5f"
+        source:
+          type: string
+          format: uri-reference
+          description: The context in which the event happened.
+          example: "//camarasimulator/carrier-billing"
+        type:
+          type: string
+          enum:
+            - "org.camaraproject.carrier-billing.v0.payment-completed"
+        specversion:
+          type: string
+          enum:
+            - "1.0"
+        datacontenttype:
+          type: string
+          enum:
+            - "application/json"
+        time:
+          type: string
+          format: date-time
+          description: RFC 3339 timestamp (with time zone) of the occurrence.
+          example: "2024-01-01T14:27:08Z"
+        data:
+          $ref: "#/components/schemas/EventPaymentCompleted"
+      example:
+        id: "83a1c8e0-2b6a-4a2e-9c1f-0a1b2c3d4e5f"
+        source: "//camarasimulator/carrier-billing"
+        type: "org.camaraproject.carrier-billing.v0.payment-completed"
+        specversion: "1.0"
+        datacontenttype: "application/json"
+        time: "2024-01-01T14:27:08Z"
+        data:
+          paymentId: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+          status: succeeded
+          description: The payment has been completed successfully.
+          paymentDate: "2024-01-01T14:27:08Z"
+
+    EventPaymentCompleted:
+      type: object
+      description: >-
+        The `data` payload of a `payment-completed` CloudEvent (the CAMARA
+        `BasicEvent` for a completed payment).
+      required:
+        - paymentId
+        - status
+        - description
+        - paymentDate
+      properties:
+        paymentId:
+          type: string
+          format: uuid
+          description: The payment that completed.
+        status:
+          type: string
+          description: The charging outcome. `succeeded` for a completed charge.
+          enum:
+            - succeeded
+            - failed
+        description:
+          type: string
+          description: Human-readable explanation of the outcome.
+        paymentDate:
+          type: string
+          format: date-time
+          description: When the payment was charged (RFC 3339, `Z` offset).
 
     PaymentCreated:
       type: object

@@ -422,6 +422,19 @@ cancelled); other non-`reserved` (`pending_validation`/`denied`) → 409
 accepted-not-applied. Only charging notifications on `sink` remain before Carrier
 Billing v0.5 is complete.
 
+**Charging notifications on `sink` have begun** (`src/apis/carrier_billing/
+notifications.rs`): a successful one-step `createPayment` charge now delivers a
+`payment-completed` CloudEvent (`data.status: succeeded`, `paymentId`,
+`description`, `paymentDate`) to the request's `sink` — best-effort,
+fire-and-forget over a raw `tokio` TCP stream (no HTTP-client dep, `http://`
+sinks only, mirroring QoD/Geofencing), off the request path so a slow sink never
+delays the `201`. An `ACCESSTOKEN` `sinkCredential`'s bearer token is applied as
+an `Authorization: Bearer` header (RFC 6750); the `sink` is used only to notify
+and never persisted with the payment (so `retrievePayment` still omits it).
+`preparePayment` notifications and the two-step terminal events
+(`payment-reserved`/`-cancelled`/`-denied`/`-pending-validation` and
+`payment-completed` on confirm) are the remaining slice.
+
 ## In progress (claimed this pass)
 
 _None._  <!-- agent: put the claimed item + run timestamp here, clear it when done -->
@@ -552,7 +565,13 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
       other non-`reserved` (`pending_validation`/`denied`) → 409 `CONFLICT`;
       unknown → 404. New `store::cancel`; optional `phoneNumber` body
       accepted-not-applied. **Completes the two-step flow.**
-  - [ ] charging notifications on `sink` (accepted-but-not-applied for now)
+  - [~] charging notifications on `sink`:
+    - [x] `createPayment` → `payment-completed` CloudEvent on a successful
+      one-step charge (http sink, fire-and-forget over raw TCP, no HTTP-client
+      dep; ACCESSTOKEN `sinkCredential` bearer applied; PLAIN/REFRESHTOKEN cut).
+    - [ ] `preparePayment` notify + two-step terminal events (`payment-reserved`,
+      `payment-completed` on confirm, `payment-cancelled`, `payment-denied`,
+      `payment-pending-validation`)
 - [ ] Other CAMARA APIs as capacity allows
 
 ## Cross-cutting (do alongside the item that needs it)
@@ -570,6 +589,33 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 ## Scan journal
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
+
+- 2026-08-03 — Phase 5 (payments): **Carrier Billing v0.5** — **charging
+  notifications on `sink` begun**: a successful one-step `createPayment` charge
+  now delivers a `payment-completed` CloudEvent to the request's `sink`. Verified
+  the real CAMARA CarrierBillingCheckOut r3.2 notification set — event type
+  `org.camaraproject.carrier-billing.v0.payment-completed`, `data` (BasicEvent)
+  = required `paymentId`/`status`(`succeeded`|`failed`)/`description`/
+  `paymentDate`. New `src/apis/carrier_billing/notifications.rs` mirrors QoD:
+  pure `payment_completed_event` builder + `sink_authorization` + fire-and-forget
+  `spawn_delivery`/`deliver` over a raw `tokio` TCP stream (**no new dep**;
+  `http://` sinks only — no TLS client; ACCESSTOKEN `sinkCredential` bearer
+  applied, PLAIN/REFRESHTOKEN cut). Wired into `create_payment`: on a `succeeded`
+  charge with a `sink`, spawn the event off the request path (so a slow sink
+  never delays the `201`); the `sink` is used only to notify and never persisted
+  (retrievePayment still omits it). `preparePayment` notify + the two-step
+  terminal events remain. Spec: updated `specs/carrier-billing/v0.5/openapi.yaml`
+  — `createPayment` `callbacks` (`payment-completed`), two new scenario cases,
+  new `CloudEvent` + `EventPaymentCompleted` schemas, `SinkCredential` gains
+  `accessToken`/`accessTokenType`, refreshed `sink` description + documented-cuts
+  section. 528 tests green (was 519; +9: 6 unit in notifications.rs [event shape,
+  parse_http_sink host/port/path + non-http reject, deliver posts a
+  cloudevents+json POST, deliver sends Authorization when present,
+  sink_authorization ACCESSTOKEN-only, non-http deliver is a no-op success] + 3
+  integration [createPayment+http sink → payment-completed CloudEvent received &
+  sink not echoed; ACCESSTOKEN sinkCredential → Bearer header & secret never
+  echoed; a …404 reserved-error charge fires no notification]). — binary:
+  1630032 B (+12432 B; the new notifications module + wiring + vendored spec text)
 
 - 2026-08-03 — Phase 5 (payments): **Carrier Billing v0.5** — **two-step
   `cancelPayment`** (`POST /payments/{paymentId}/cancel`, scope
