@@ -1,0 +1,535 @@
+# CamaraSim — Geofencing Subscriptions, API version v0.4 (CAMARA 0.4.0).
+#
+# Vendored from the CAMARA Geofencing Subscriptions API
+# (geofencing-subscriptions 0.4.0, release r3.2 — the latest published version;
+# the API has never reached 1.0.0, so — mirroring KYC Match / Device Identifier /
+# Location Retrieval — it is mounted at its real published version
+# `/geofencing-subscriptions/v0.4`, DESIGN §9) and annotated with CamaraSim's
+# parameter-driven functional cases (docs/DESIGN.md §7, §9). Backed by
+# `src/apis/geofencing_subscriptions/v0_4.rs` and its in-memory subscription
+# store; spec and code must not drift.
+#
+# This is a CamaraSim *spatial* API (docs/DESIGN.md §12, Phase 4) and its first
+# **event-subscription** API: the caller registers a subscription (a device, a
+# circular area, and the event types of interest) and the network would later
+# POST a CloudEvent to the `sink` when the device enters/leaves the area.
+#
+# This slice serves `POST /subscriptions` (create) and
+# `GET /subscriptions/{subscriptionId}` (read-back). The subscription is held in
+# an in-memory store (single node). Event delivery to the `sink`
+# (`area-entered` / `area-left` CloudEvents), listing (`GET /subscriptions`),
+# `DELETE`, and subscription expiry are deferred to later passes; the served
+# spec covers only what is implemented.
+openapi: 3.0.3
+info:
+  title: Geofencing Subscriptions
+  description: |
+    Lets an application be *notified* when a device enters or leaves a
+    geographic area, instead of polling its location. The caller registers a
+    subscription describing a `device`, a circular `area`, the event `types` of
+    interest (`area-entered` / `area-left`), and a `sink` callback URL; the
+    network would later POST a CloudEvent to that sink on each matching
+    transition.
+
+    This is the CamaraSim reference double for CAMARA Geofencing Subscriptions
+    0.4.0. It is an **event-subscription** API: `POST /subscriptions` creates a
+    subscription and returns a `SubscriptionInfo` with an `id`, and
+    `GET /subscriptions/{subscriptionId}` reads that subscription back by id.
+    Subscriptions are held in an in-memory store (single node).
+
+    The device can be identified either by the `device` object inside
+    `config.subscriptionDetail` (two-legged / CIBA) or by the identity a
+    three-legged access token authenticated (in which case `device` is omitted).
+    `createSubscription` requires the
+    `geofencing-subscriptions:subscriptions:create` scope and
+    `retrieveSubscription` the `geofencing-subscriptions:subscriptions:read`
+    scope.
+
+    > **Scopes** — CAMARA geofencing-subscriptions publishes *per-event-type*
+    > scopes (e.g.
+    > `geofencing-subscriptions:org.camaraproject.geofencing-subscriptions.v0.area-entered:create`).
+    > A single subscription can carry several event types, so CamaraSim collapses
+    > them to a single resource-action scope per operation — a documented
+    > simplification, consistent with the QoD `sessions:*` scopes.
+
+    ## Functional cases — the input is the control plane (docs/DESIGN.md §7)
+
+    `createSubscription` reads two control planes:
+
+    **1. The identifier** — the submitted `config.subscriptionDetail.device`
+    identifier (`phoneNumber`, else `networkAccessIdentifier`, else the IPv4
+    `publicAddress`, else `ipv6Address`), or — when no `device` is supplied — the
+    access token's subject (`sub`). Its trailing three digits drive the result:
+
+    - **Reserved error suffix** — if those digits name a reserved CAMARA status,
+      the endpoint answers with that canonical CAMARA error instead of creating a
+      subscription (shared convention — see the referenced `errors.yaml`):
+      `…400`, `…401`, `…403`, `…404`, `…409`, `…422`, `…429`, `…500`, `…503`.
+    - **`…000`** (and an identifier with no trailing digits, such as the
+      synthetic `geo-client` subject) → `201` with `status: ACTIVATION_REQUESTED`
+      (the request is accepted but the subscription is not yet active).
+    - **any other input** (the happy-path default) → `201` with `status: ACTIVE`.
+
+    **2. The area** (`radius`). Geofencing only supports a `CIRCLE`. CAMARA bounds
+    its `radius` to 2000–200000 m: a `radius` outside that band → `400
+    OUT_OF_RANGE`. A `center` outside the valid latitude/longitude range → `400
+    OUT_OF_RANGE`; a missing `area`/`center`/`radius`, or an `areaType` other than
+    `CIRCLE`, → `400 INVALID_ARGUMENT`.
+
+    Examples: `+123456789012` in a 5000 m circle → `201 { status: ACTIVE }`;
+    `+123456789000` → `201 { status: ACTIVATION_REQUESTED }`; `+123456789404` →
+    `404 NOT_FOUND`; a 500 m circle → `400 OUT_OF_RANGE`.
+  version: "0.4.0"
+  license:
+    name: Apache-2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0.html
+
+servers:
+  - url: "{apiRoot}/geofencing-subscriptions/v0.4"
+    variables:
+      apiRoot:
+        default: http://localhost:8080
+        description: API root, e.g. the CamaraSim base URL.
+
+paths:
+  /subscriptions:
+    post:
+      operationId: createSubscription
+      summary: Create a geofencing subscription
+      description: |
+        Registers a subscription: a `device`, a circular `area`, and the event
+        `types` of interest, plus a `sink` the network would POST CloudEvents to.
+        Returns the created `SubscriptionInfo` (with a server-assigned `id`).
+
+        See the API description for the parameter-driven functional cases.
+      security:
+        - openId:
+            - geofencing-subscriptions:subscriptions:create
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SubscriptionRequest"
+      responses:
+        "201":
+          description: The created subscription.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SubscriptionInfo"
+              examples:
+                active:
+                  summary: Subscription active (happy path)
+                  value:
+                    id: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+                    protocol: HTTP
+                    sink: "https://example.com/callback"
+                    types:
+                      - org.camaraproject.geofencing-subscriptions.v0.area-entered
+                    config:
+                      subscriptionDetail:
+                        device:
+                          phoneNumber: "+123456789012"
+                        area:
+                          areaType: CIRCLE
+                          center:
+                            latitude: 51.5
+                            longitude: -0.12
+                          radius: 5000
+                    startsAt: "2026-08-03T14:27:08Z"
+                    status: ACTIVE
+        "400":
+          $ref: "#/components/responses/Generic400"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "409":
+          $ref: "../../shared/errors.yaml#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/Generic422"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          Two control planes (docs/DESIGN.md §7). The subscription `status` is
+          selected from the identifier (the first present device identifier, else
+          the access token subject) whose trailing three digits pick
+          ACTIVATION_REQUESTED (…000 / no digits) vs ACTIVE (any other tail);
+          reserved error suffixes come from the shared convention in errors.yaml.
+          The circle `radius` is a second control plane (2000–200000 m). Precedence:
+          envelope validation (protocol/sink/types) and area validation (400) →
+          identifier resolution (400/422) + reserved error → the created
+          subscription. Documented cuts: only `protocol: HTTP` is supported; the
+          `sinkCredential` is accepted but not applied and never echoed; event
+          delivery to the sink (`area-entered`/`area-left` CloudEvents), listing,
+          `DELETE`, and expiry are deferred, so no notification fires yet. 409/500
+          are CamaraSim extensions of the shared error set so every reserved suffix
+          is reachable.
+        cases:
+          - input: identifier ending in a reserved error suffix (e.g. …404)
+            result: the canonical CAMARA error for that status
+          - input: identifier ending …000, or with no trailing digits
+            result: "201 { status: ACTIVATION_REQUESTED }"
+          - input: any other identifier (happy-path default)
+            result: "201 { status: ACTIVE }"
+          - input: "circle radius < 2000 or > 200000, or center out of range"
+            result: "400 OUT_OF_RANGE"
+          - input: "areaType not CIRCLE, missing area/center/radius, protocol not HTTP, missing/unknown types, or a device carrying no identifier / malformed phoneNumber"
+            result: "400 INVALID_ARGUMENT"
+          - input: no `device` and no token subject
+            result: "422 MISSING_IDENTIFIER"
+
+  /subscriptions/{subscriptionId}:
+    get:
+      operationId: retrieveSubscription
+      summary: Retrieve a geofencing subscription by id
+      description: |
+        Returns the `SubscriptionInfo` stored for `subscriptionId`, or `404
+        NOT_FOUND` when no such subscription exists.
+      security:
+        - openId:
+            - geofencing-subscriptions:subscriptions:read
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+        - name: subscriptionId
+          in: path
+          required: true
+          description: The id returned by `createSubscription`.
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: The requested subscription.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SubscriptionInfo"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          Keyed only on the in-memory store: a known id → 200 with the stored
+          SubscriptionInfo; an unknown/never-created id → 404 NOT_FOUND.
+        cases:
+          - input: a subscriptionId returned by a prior createSubscription
+            result: "200 with the stored SubscriptionInfo"
+          - input: any other id
+            result: "404 NOT_FOUND"
+
+components:
+  securitySchemes:
+    openId:
+      $ref: "../../auth/openapi.yaml#/components/securitySchemes/camaraOAuth"
+
+  parameters:
+    XCorrelator:
+      name: x-correlator
+      in: header
+      required: false
+      description: Correlation id for the request, echoed back on the response.
+      schema:
+        type: string
+
+  headers:
+    XCorrelator:
+      description: The `x-correlator` from the request, echoed if one was sent.
+      required: false
+      schema:
+        type: string
+
+  responses:
+    # 400 for this API carries either INVALID_ARGUMENT (bad envelope / area
+    # syntax / device with no identifier / malformed phoneNumber) or OUT_OF_RANGE
+    # (radius or center out of range).
+    Generic400:
+      description: Invalid request — `INVALID_ARGUMENT` or `OUT_OF_RANGE`.
+      headers:
+        x-correlator:
+          $ref: "#/components/headers/XCorrelator"
+      content:
+        application/json:
+          schema:
+            $ref: "../../shared/errors.yaml#/components/schemas/CamaraError"
+          examples:
+            invalidArgument:
+              value:
+                status: 400
+                code: INVALID_ARGUMENT
+                message: "Only `CIRCLE` `areaType` is supported."
+            outOfRange:
+              value:
+                status: 400
+                code: OUT_OF_RANGE
+                message: "`area.radius` must be between 2000 and 200000 metres."
+    # 422 for this API carries the shared MISSING_IDENTIFIER (no device and no
+    # token subject) or SERVICE_NOT_APPLICABLE (via a …422 identifier suffix).
+    Generic422:
+      description: >-
+        Unprocessable request — `MISSING_IDENTIFIER` (no device supplied and the
+        token identifies none) or the shared `SERVICE_NOT_APPLICABLE` (via a …422
+        identifier suffix).
+      headers:
+        x-correlator:
+          $ref: "#/components/headers/XCorrelator"
+      content:
+        application/json:
+          schema:
+            $ref: "../../shared/errors.yaml#/components/schemas/CamaraError"
+          examples:
+            missingIdentifier:
+              value:
+                status: 422
+                code: MISSING_IDENTIFIER
+                message: "No `device` supplied and the access token identifies no device."
+
+  schemas:
+    SubscriptionRequest:
+      type: object
+      description: Request to create a geofencing subscription.
+      required:
+        - protocol
+        - sink
+        - types
+        - config
+      properties:
+        protocol:
+          type: string
+          description: >-
+            Delivery protocol for notifications. CamaraSim delivers only over
+            `HTTP` (other CAMARA protocols are accepted by the schema but rejected
+            with 400 — a documented cut).
+          enum:
+            - HTTP
+          example: HTTP
+        sink:
+          type: string
+          format: uri
+          description: The callback URL notifications would be POSTed to.
+          example: "https://example.com/callback"
+        sinkCredential:
+          type: object
+          description: >-
+            Credential the network would present to the `sink`. Accepted for
+            schema fidelity but not applied in this slice and never echoed in the
+            response (it carries a secret).
+        types:
+          type: array
+          description: The geofencing event types to subscribe to. Must be non-empty.
+          minItems: 1
+          items:
+            type: string
+            enum:
+              - org.camaraproject.geofencing-subscriptions.v0.area-entered
+              - org.camaraproject.geofencing-subscriptions.v0.area-left
+          example:
+            - org.camaraproject.geofencing-subscriptions.v0.area-entered
+        config:
+          $ref: "#/components/schemas/Config"
+
+    Config:
+      type: object
+      description: Subscription configuration.
+      required:
+        - subscriptionDetail
+      properties:
+        subscriptionDetail:
+          $ref: "#/components/schemas/SubscriptionDetail"
+        subscriptionExpireTime:
+          type: string
+          format: date-time
+          description: >-
+            RFC 3339 time the subscription should expire. Echoed back if supplied;
+            expiry is not yet enforced (a documented cut).
+          example: "2026-09-03T14:27:08Z"
+        subscriptionMaxEvents:
+          type: integer
+          format: int32
+          minimum: 1
+          description: >-
+            Maximum number of events to deliver before the subscription ends.
+            Echoed back if supplied; not yet enforced (a documented cut).
+          example: 10
+        initialEvent:
+          type: boolean
+          description: >-
+            Whether to emit an event for the device's current in/out state at
+            subscription time. Echoed back if supplied; not yet acted on.
+          example: false
+
+    SubscriptionDetail:
+      type: object
+      description: The geofencing detail — which device and which area to watch.
+      required:
+        - area
+      properties:
+        device:
+          $ref: "#/components/schemas/Device"
+        area:
+          $ref: "#/components/schemas/Area"
+
+    Device:
+      type: object
+      description: >-
+        Identifies the device. At least one identifier must be present. Optional:
+        omit `device` to use the device identified by a three-legged access token.
+        CamaraSim keys its cases off the first present identifier, in the order
+        phoneNumber → networkAccessIdentifier → ipv4Address.publicAddress →
+        ipv6Address.
+      minProperties: 1
+      properties:
+        phoneNumber:
+          type: string
+          description: A phone number in E.164 format (starting with `+`).
+          pattern: '^\+[1-9][0-9]{4,14}$'
+          example: "+123456789012"
+        networkAccessIdentifier:
+          type: string
+          description: A network access identifier (operator-assigned).
+          example: "123456789@domain.com"
+        ipv4Address:
+          $ref: "#/components/schemas/DeviceIpv4Addr"
+        ipv6Address:
+          type: string
+          format: ipv6
+          description: The device's IPv6 address.
+          example: "2001:db8::11"
+
+    DeviceIpv4Addr:
+      type: object
+      description: >-
+        The device's IPv4 address information. CamaraSim reads `publicAddress` as
+        the identifier; `privateAddress`/`publicPort` are accepted for fidelity.
+      properties:
+        publicAddress:
+          type: string
+          example: "203.0.113.12"
+        privateAddress:
+          type: string
+          example: "192.0.2.25"
+        publicPort:
+          type: integer
+          format: int32
+          minimum: 0
+          maximum: 65535
+          example: 59765
+
+    Area:
+      type: object
+      description: >-
+        The geographic area to watch. The discriminator is `areaType`; geofencing
+        supports only `CIRCLE`.
+      required:
+        - areaType
+      discriminator:
+        propertyName: areaType
+      properties:
+        areaType:
+          type: string
+          description: The kind of area. Geofencing supports only `CIRCLE`.
+          enum:
+            - CIRCLE
+        center:
+          $ref: "#/components/schemas/Point"
+        radius:
+          type: number
+          format: double
+          minimum: 2000
+          maximum: 200000
+          description: >-
+            Circle radius in metres. CAMARA bounds a geofencing circle to
+            2000–200000 m; a value outside that band → 400 OUT_OF_RANGE.
+          example: 5000
+
+    Point:
+      type: object
+      description: A WGS-84 point (decimal degrees).
+      required:
+        - latitude
+        - longitude
+      properties:
+        latitude:
+          type: number
+          format: double
+          minimum: -90
+          maximum: 90
+          example: 51.5
+        longitude:
+          type: number
+          format: double
+          minimum: -180
+          maximum: 180
+          example: -0.12
+
+    SubscriptionInfo:
+      type: object
+      description: >-
+        A created geofencing subscription — the request echoed back (minus the
+        `sinkCredential` secret) plus the server-assigned `id`, `startsAt`, and
+        `status`.
+      required:
+        - id
+        - protocol
+        - sink
+        - types
+        - config
+        - status
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Server-assigned subscription identifier.
+          example: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+        protocol:
+          type: string
+          enum:
+            - HTTP
+        sink:
+          type: string
+          format: uri
+        types:
+          type: array
+          items:
+            type: string
+        config:
+          $ref: "#/components/schemas/Config"
+        startsAt:
+          type: string
+          format: date-time
+          description: RFC 3339 time the subscription started.
+          example: "2026-08-03T14:27:08Z"
+        status:
+          type: string
+          description: >-
+            Subscription status. CamaraSim returns `ACTIVATION_REQUESTED` (…000 /
+            no-digit identifier) or `ACTIVE` (any other identifier).
+          enum:
+            - ACTIVATION_REQUESTED
+            - ACTIVE
+          example: ACTIVE

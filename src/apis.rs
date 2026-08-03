@@ -16,6 +16,7 @@
 //! - **Quality on Demand v1** — `/quality-on-demand/v1/…`.
 //! - **Location Verification v3** — `/location-verification/v3/…`.
 //! - **Location Retrieval v0.4** — `/location-retrieval/v0.4/…`.
+//! - **Geofencing Subscriptions v0.4** — `/geofencing-subscriptions/v0.4/…`.
 //!
 //! Plus [`openapi`], which serves each mounted API's vendored OpenAPI spec at
 //! `/{api}/v{n}/openapi.yaml` (docs/DESIGN.md §9).
@@ -23,6 +24,7 @@
 pub mod device_identifier;
 pub mod device_reachability_status;
 pub mod device_roaming_status;
+pub mod geofencing_subscriptions;
 pub mod kyc_match;
 pub mod location_retrieval;
 pub mod location_verification;
@@ -47,5 +49,6 @@ pub fn routes() -> Router {
         .merge(quality_on_demand::routes())
         .merge(location_verification::routes())
         .merge(location_retrieval::routes())
+        .merge(geofencing_subscriptions::routes())
         .merge(openapi::routes())
 }

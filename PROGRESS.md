@@ -263,6 +263,27 @@ circle deterministically (`center` = base point offset by `digits*0.001°`, `rad
 `[60, int32]`; out-of-range → 400 OUT_OF_RANGE, else ignored as location is always
 fresh). `x-correlator` echoed on every response.
 
+**Geofencing Subscriptions v0.4** has begun — CamaraSim's first
+**event-subscription** API (CAMARA geofencing-subscriptions 0.4.0, r3.2, mounted
+at its real sub-1.0 version `/geofencing-subscriptions/v0.4` like KYC Match /
+Device Identifier / Location Retrieval). `POST /subscriptions`
+(`geofencing-subscriptions:subscriptions:create`, `createSubscription`) registers
+a subscription (a `device`, a `CIRCLE` `area`, and the event `types`
+`area-entered`/`area-left`, plus an HTTP `sink`), mints a UUID-shaped `id`
+(`src/apis/geofencing_subscriptions/store.rs`; `Mutex<HashMap>`, no uuid/rand
+dep), stores the rendered `SubscriptionInfo`, and returns 201.
+`GET /subscriptions/{subscriptionId}` (`…:subscriptions:read`,
+`retrieveSubscription`) reads it back (200) or 404 `NOT_FOUND`. Two control planes
+(DESIGN §7): the identifier (submitted `config.subscriptionDetail.device` id —
+phoneNumber, else NAI, else IPv4 publicAddress, else ipv6Address — else token
+subject) → reserved suffix → canonical CAMARA error; else tail `…000`/no-digits →
+`status:ACTIVATION_REQUESTED`, any other tail → `status:ACTIVE`; and the circle
+`radius` (2000–200000 m, else 400 OUT_OF_RANGE). `protocol` must be `HTTP` and
+`types` must be known geofencing events, else 400 INVALID_ARGUMENT.
+`sinkCredential` is accepted but never applied/echoed. `x-correlator` echoed on
+every response. Notification delivery (`area-entered`/`area-left` CloudEvents),
+listing, `DELETE`, and expiry are deferred to later passes.
+
 ## In progress (claimed this pass)
 
 _None._  <!-- agent: put the claimed item + run timestamp here, clear it when done -->
@@ -322,7 +343,12 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   CAMARA 3.0.0, r3.2; verdict TRUE/FALSE/PARTIAL, identifier + circle-radius control planes)
 - [x] Device Location Retrieval v0.4 — `POST /retrieve` (`/location-retrieval/v0.4`;
   CAMARA 0.4.0, r3.2; returns a CIRCLE area, identifier + maxAge control planes)
-- [ ] Geofencing (subscriptions/notifications)
+- [~] Geofencing Subscriptions v0.4 (`/geofencing-subscriptions/v0.4`; CAMARA
+  0.4.0, r3.2; in-memory subscription store):
+  - [x] `POST /subscriptions` (`geofencing-subscriptions:subscriptions:create`, `createSubscription`)
+  - [x] `GET /subscriptions/{subscriptionId}` (`geofencing-subscriptions:subscriptions:read`, `retrieveSubscription`)
+  - [ ] `GET /subscriptions` (list) + `DELETE /subscriptions/{subscriptionId}`
+  - [ ] CloudEvents delivery on `sink` (`area-entered` / `area-left`) + expiry/maxEvents
 
 ### Phase 5 — Remaining
 - [ ] Carrier Billing / Payments
@@ -343,6 +369,57 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 ## Scan journal
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
+
+- 2026-08-03 — Phase 4 (spatial): **Geofencing Subscriptions v0.4** begun —
+  CamaraSim's first **event-subscription** API (CAMARA geofencing-subscriptions
+  0.4.0, release r3.2). The only remaining Phase 3 item (QoD TLS `https://` sink)
+  stays deferred pending a deliberate rustls-TLS dependency decision, so this pass
+  advances Phase 4. Mounted at `/geofencing-subscriptions/v0.4` (real sub-1.0
+  published version, mirroring KYC Match / Device Identifier / Location Retrieval).
+  New `src/apis/geofencing_subscriptions/{,store,v0_4}.rs` merged into the app
+  router; `/` catalog + openapi server now list geofencing-subscriptions v0.4.
+  Two endpoints this slice: `POST /subscriptions` (operationId `createSubscription`,
+  scope `geofencing-subscriptions:subscriptions:create`) and
+  `GET /subscriptions/{subscriptionId}` (`retrieveSubscription`,
+  `…:subscriptions:read`). Body `SubscriptionRequest{protocol,sink,sinkCredential?,
+  types,config{subscriptionDetail{device?,area},subscriptionExpireTime?,
+  subscriptionMaxEvents?,initialEvent?}}` parsed with `deny_unknown_fields`.
+  createSubscription mints a UUID-shaped `id` (store.rs; `Mutex<HashMap>`, lock
+  never across await, SHA-256(counter‖now) uuid mint, no uuid/rand dep), renders
+  `SubscriptionInfo` (request echoed minus the secret + id/startsAt/status), stores
+  it, returns 201; retrieveSubscription reads it back (200) or 404 NOT_FOUND. Two
+  control planes (§7): (1) the identifier (config.subscriptionDetail.device id —
+  phoneNumber E.164, else NAI, else IPv4 publicAddress, else ipv6Address — else
+  token subject → 422 MISSING_IDENTIFIER) — reserved suffix → canonical CAMARA
+  error, `…000`/no-digits → status ACTIVATION_REQUESTED, any other tail → status
+  ACTIVE; (2) the circle `radius` — 2000–200000 m (CAMARA geofencing bounds), else
+  400 OUT_OF_RANGE; center out of lat/long range → 400 OUT_OF_RANGE. Envelope
+  validation: `protocol` must be `HTTP` (other protocols → 400, a documented cut),
+  `types` non-empty and only the two known geofencing events (else 400
+  INVALID_ARGUMENT), non-CIRCLE areaType / missing area/center/radius → 400
+  INVALID_ARGUMENT. Precedence: envelope 400 → area 400 → identifier (400/422) +
+  reserved error → created subscription. `sinkCredential` accepted but not applied
+  and never echoed. `x-correlator` echoed on every response. Documented cuts:
+  notification delivery (`area-entered`/`area-left` CloudEvents), listing
+  (`GET /subscriptions`), `DELETE`, and expiry/maxEvents enforcement deferred to
+  later passes; scopes collapsed from CAMARA's per-event-type form to a single
+  resource-action scope (a subscription can carry several event types). **No new
+  deps** (serde_json + sha2 uuid mint + shared scenarios/errors + local
+  E.164/rfc3339). Spec: new `specs/geofencing-subscriptions/v0.4/openapi.yaml` —
+  vendored 0.4.0 `POST /subscriptions` + `GET /subscriptions/{id}` with
+  SubscriptionRequest/Config/SubscriptionDetail/Device/DeviceIpv4Addr/Area(CIRCLE)/
+  Point/SubscriptionInfo schemas, `$ref`-ing shared `errors.yaml` + auth
+  `camaraOAuth`, Generic400 (INVALID_ARGUMENT|OUT_OF_RANGE) + Generic422
+  (MISSING_IDENTIFIER), `x-camarasim-scenarios` documenting both control planes +
+  precedence + cuts. 402 tests green (was 378; +24: 2 store units [uuid-shape /
+  round-trip] + 2 v0_4 units [E.164 / device-precedence] + 20 integration covering
+  happy-ACTIVE+device-echo / …000-ACTIVATION_REQUESTED / reserved-404+429 /
+  create-then-read-back / unknown-id-404 / NAI+ipv6-echo / radius-below-2000-400 /
+  radius-above-200000-400 / center-out-of-range-400 / non-CIRCLE-400 / bad-protocol-
+  400 / unknown-event-type-400 / missing-types-400 / empty-device-400 / subject-
+  fallback / subject-reserved-503 / non-numeric-subject-ACTIVATION_REQUESTED /
+  no-scope-403 / no-token-401 / x-correlator; also extended the catalog + openapi-
+  server tests). — binary: 1442224 B (+53520 B)
 
 - 2026-08-03 — Phase 4 (spatial): **Device Location Retrieval v0.4** — `POST
   /retrieve` (CAMARA Location Retrieval 0.4.0, release r3.2 — the latest published
