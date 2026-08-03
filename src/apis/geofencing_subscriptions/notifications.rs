@@ -239,6 +239,20 @@ pub fn spawn_delivery(sink: String, event: Value, auth: Option<String>) {
     });
 }
 
+/// Fire-and-forget **in-order** delivery of several `events` to `sink`, each over
+/// its own connection. Used when a domain event must be immediately followed by a
+/// terminal `subscription-ended` event (e.g. `subscriptionMaxEvents` reached) so the
+/// two arrive in a deterministic order — a single [`spawn_delivery`] per event races.
+/// `auth`, when present, is applied to every request. Never blocks the caller (the
+/// API request path); each transport error is dropped (best-effort).
+pub fn spawn_delivery_seq(sink: String, events: Vec<Value>, auth: Option<String>) {
+    tokio::spawn(async move {
+        for event in &events {
+            let _ = deliver(&sink, event, auth.as_deref()).await;
+        }
+    });
+}
+
 /// POST `event` to an `http://` `sink` as `application/cloudevents+json`.
 ///
 /// Writes a minimal HTTP/1.1 request over a `tokio` TCP stream and returns once
@@ -454,6 +468,21 @@ mod tests {
         );
         assert_eq!(e["data"]["terminationReason"], "SUBSCRIPTION_EXPIRED");
         // An ended event carries no area.
+        assert!(e["data"].get("area").is_none());
+    }
+
+    #[test]
+    fn subscription_ended_event_carries_the_max_events_reason() {
+        // The same builder renders the MAX_EVENTS_REACHED termination (subscription
+        // reached its subscriptionMaxEvents), differing only in terminationReason.
+        let e = subscription_ended_event(
+            "evt-max".to_string(),
+            "2024-01-01T00:00:00Z".to_string(),
+            "11111111-2222-4333-8444-555555555555",
+            "MAX_EVENTS_REACHED",
+        );
+        assert_eq!(e["type"], EVENT_TYPE_SUBSCRIPTION_ENDED);
+        assert_eq!(e["data"]["terminationReason"], "MAX_EVENTS_REACHED");
         assert!(e["data"].get("area").is_none());
     }
 

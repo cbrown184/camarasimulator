@@ -317,8 +317,20 @@ simulates it *leaving* (`area-left`), delivered by a short (1 s) fire-and-forget
 timer (`v0_4::spawn_movement`, off the request path, mirroring QoD's `…001`
 NETWORK_TERMINATED), filtered to the subscribed `types`, with the ACCESSTOKEN
 `sinkCredential` bearer applied; the subscription stays `ACTIVE` and a crossing is
-suppressed if a delete/expiry already ended it. Only `subscriptionMaxEvents`
-enforcement now remains for the API.
+suppressed if a delete/expiry already ended it.
+
+**`subscriptionMaxEvents` enforcement** is now in place, **completing Geofencing
+Subscriptions v0.4 and Phase 4**. A subscription created with
+`config.subscriptionMaxEvents` (integer `>= 1`, else 400 `OUT_OF_RANGE`) carries an
+in-memory event budget (`store::consume_event`, a side-store kept apart from the
+echoed `SubscriptionInfo`). Each delivered domain event (`area-entered`/`area-left`
+— initial and movement) consumes one unit; the event that spends the last unit is
+delivered and then the subscription **ends** — evicted, with a `subscription-ended`
+CloudEvent (`terminationReason: MAX_EVENTS_REACHED`) POSTed in order right after the
+triggering event (new `notifications::spawn_delivery_seq`), the ACCESSTOKEN
+`sinkCredential` bearer applied. Eviction is synchronous, so a still-pending
+movement/expiry timer becomes a no-op (exactly one terminal outcome). An unset
+`subscriptionMaxEvents` is unbounded.
 
 ## In progress (claimed this pass)
 
@@ -379,12 +391,12 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   CAMARA 3.0.0, r3.2; verdict TRUE/FALSE/PARTIAL, identifier + circle-radius control planes)
 - [x] Device Location Retrieval v0.4 — `POST /retrieve` (`/location-retrieval/v0.4`;
   CAMARA 0.4.0, r3.2; returns a CIRCLE area, identifier + maxAge control planes)
-- [~] Geofencing Subscriptions v0.4 (`/geofencing-subscriptions/v0.4`; CAMARA
+- [x] Geofencing Subscriptions v0.4 (`/geofencing-subscriptions/v0.4`; CAMARA
   0.4.0, r3.2; in-memory subscription store):
   - [x] `POST /subscriptions` (`geofencing-subscriptions:subscriptions:create`, `createSubscription`)
   - [x] `GET /subscriptions/{subscriptionId}` (`geofencing-subscriptions:subscriptions:read`, `retrieveSubscription`)
   - [x] `GET /subscriptions` (list, `retrieveSubscriptionList`) + `DELETE /subscriptions/{subscriptionId}` (`…:subscriptions:delete`, `deleteSubscription`)
-  - [~] CloudEvents delivery on `sink` (`area-entered` / `area-left`) + expiry/maxEvents:
+  - [x] CloudEvents delivery on `sink` (`area-entered` / `area-left`) + expiry/maxEvents:
     - [x] initial event (`config.initialEvent`) — an `area-entered`/`area-left`
       CloudEvent for the device's current in/out state at creation of an ACTIVE
       subscription (http sink, fire-and-forget over raw TCP; no HTTP-client dep)
@@ -394,7 +406,9 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
       initial-event callback; PLAIN/REFRESHTOKEN deferred)
     - [x] expiry (`subscriptionExpireTime`) → `subscription-ended`
       (`SUBSCRIPTION_EXPIRED`) CloudEvent + eviction (async timer at creation)
-    - [ ] `subscriptionMaxEvents` enforcement
+    - [x] `subscriptionMaxEvents` enforcement (count delivered domain events;
+      the Nth event ends the subscription → `subscription-ended`
+      `MAX_EVENTS_REACHED` + eviction; `<1` → 400 OUT_OF_RANGE)
 
 ### Phase 5 — Remaining
 - [ ] Carrier Billing / Payments
@@ -415,6 +429,35 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 ## Scan journal
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
+
+- 2026-08-03 — Phase 4 (spatial): **Geofencing Subscriptions v0.4** —
+  **`subscriptionMaxEvents` enforcement**, the API's last open item — **completes
+  Geofencing Subscriptions v0.4 and Phase 4**. A subscription created with
+  `config.subscriptionMaxEvents` (validated integer `>= 1`, else 400 `OUT_OF_RANGE`)
+  now bounds the `area-entered`/`area-left` events it delivers. New store side-store
+  (`budgets()`, kept apart from the echoed `SubscriptionInfo`, mirroring QoD's
+  credential side-store) + `set_event_budget`/`consume_event` returning a new
+  `EventBudget{Unbounded,Allowed,Last,Exhausted}`; `store::remove` now also drops the
+  budget so delete/expiry leave nothing stale. New `v0_4::deliver_counted` wraps every
+  domain-event delivery (initial + movement): while budget remains it delivers; the
+  event that spends the last unit is delivered and then the subscription ends —
+  evicted synchronously (so a pending movement/expiry timer becomes a no-op, exactly
+  one terminal outcome) and a `subscription-ended` (`MAX_EVENTS_REACHED`) CloudEvent
+  POSTed in order right after it via the new `notifications::spawn_delivery_seq`
+  (ordered multi-event delivery; a single `spawn_delivery` per event races). The
+  terminal event isn't counted; unset maxEvents is unbounded; ACCESSTOKEN
+  `sinkCredential` bearer applied to the terminal callback too. **No new deps.** Spec:
+  updated `specs/geofencing-subscriptions/v0.4/openapi.yaml` — new "Max events"
+  section + header/movement/expiry prose, `subscriptionMaxEvents` property (now
+  enforced), the `MAX_EVENTS_REACHED` `terminationReason` enum value, and the
+  `createSubscription` `x-camarasim-scenarios` (2 max-events cases + refreshed cuts) /
+  `callbacks` prose. 444 tests green (was 436; +8: 3 store units [budget counts
+  down→Last→Unbounded · budget-of-1→Last · remove drops budget] + 1 notifications
+  unit [subscription-ended MAX_EVENTS_REACHED shape] + 4 v0_4 integration [maxEvents<1
+  → 400 OUT_OF_RANGE · maxEvents=1 initial event → event+subscription-ended, GET 404 ·
+  maxEvents=1 movement event → event+ended, GET 404 · maxEvents=2 spans initial +
+  movement then ends]). — binary: 1495656 B (+10456 B; mostly the new vendored spec
+  text embedded via include_str!)
 
 - 2026-08-03 — Phase 4 (spatial): **Geofencing Subscriptions v0.4** —
   **movement-triggered `area-entered`/`area-left` events** (simulated boundary

@@ -259,6 +259,16 @@ async fn create_subscription(claims: Claims, headers: HeaderMap, body: Bytes) ->
         Some(c) => c,
         None => return invalid_argument("`config` is required.", &correlator),
     };
+    // `subscriptionMaxEvents`, when supplied, must be at least 1 (CAMARA minimum:
+    // a subscription that ends before its first event is meaningless).
+    if let Some(m) = config.subscription_max_events {
+        if m < 1 {
+            return out_of_range(
+                "`config.subscriptionMaxEvents` must be at least 1.",
+                &correlator,
+            );
+        }
+    }
     let detail = match config.subscription_detail {
         Some(d) => d,
         None => return invalid_argument("`config.subscriptionDetail` is required.", &correlator),
@@ -331,6 +341,13 @@ async fn create_subscription(claims: Claims, headers: HeaderMap, body: Bytes) ->
     );
     store::insert(id.clone(), info.clone());
 
+    // Register the subscriptionMaxEvents budget (if any), so each delivered domain
+    // event (area-entered / area-left) is counted and the subscription ends once the
+    // budget is spent (see `deliver_counted`). Validated `>= 1` above.
+    if let Some(m) = config.subscription_max_events {
+        store::set_event_budget(id.clone(), m as u64);
+    }
+
     // Initial event (config.initialEvent): if the subscription is ACTIVE and the
     // caller asked for the device's current in/out state, deliver a single
     // `area-entered`/`area-left` CloudEvent to the sink (fire-and-forget, off the
@@ -359,7 +376,7 @@ async fn create_subscription(claims: Claims, headers: HeaderMap, body: Bytes) ->
                 .sink_credential
                 .as_ref()
                 .and_then(notifications::sink_authorization);
-            notifications::spawn_delivery(sink.to_string(), event, auth);
+            deliver_counted(&id, sink.to_string(), event, auth);
         }
     }
 
@@ -368,9 +385,10 @@ async fn create_subscription(claims: Claims, headers: HeaderMap, body: Bytes) ->
     // a crossing shortly after creation — `…001` → the device enters (`area-entered`),
     // `…002` → it leaves (`area-left`) — filtered to the subscribed `types` and
     // delivered off the request path by a short fire-and-forget timer (mirroring
-    // QoD's `…001` NETWORK_TERMINATED). The subscription stays ACTIVE (bounding the
-    // event count via `subscriptionMaxEvents` is a later pass). An ACCESSTOKEN
-    // `sinkCredential` is applied to the callback.
+    // QoD's `…001` NETWORK_TERMINATED). The subscription stays ACTIVE unless the
+    // movement event exhausts its `subscriptionMaxEvents` budget, in which case it
+    // ends (see `deliver_counted`). An ACCESSTOKEN `sinkCredential` is applied to
+    // the callback.
     if let Some(event_type) = notifications::movement_event_type(
         status,
         scenarios::trailing_three_digits(&identifier),
@@ -485,9 +503,48 @@ fn spawn_movement(
                 device.as_ref(),
                 &area,
             );
-            notifications::spawn_delivery(sink, event, auth);
+            deliver_counted(&subscription_id, sink, event, auth);
         }
     });
+}
+
+/// Deliver a domain (`area-entered` / `area-left`) CloudEvent to `sink`, counting it
+/// against the subscription's `subscriptionMaxEvents` budget (docs/DESIGN.md §7).
+///
+/// A subscription that set no `subscriptionMaxEvents` is unbounded: the event is
+/// delivered and the subscription is left untouched. Otherwise each delivered event
+/// consumes one unit of budget ([`store::consume_event`]):
+/// - while budget remains → deliver the event;
+/// - the event that spends the **last** unit → deliver it and then **end** the
+///   subscription: evict it and POST a `subscription-ended` CloudEvent
+///   (`terminationReason: MAX_EVENTS_REACHED`) to the same `sink`, after the
+///   triggering event and in order (via [`notifications::spawn_delivery_seq`]);
+/// - a budget already spent → suppress the event (defensive).
+///
+/// The eviction is synchronous (done before this returns), so a still-pending
+/// movement/expiry timer for the same subscription then sees it gone and becomes a
+/// no-op — exactly one terminal outcome fires. Only the network I/O is spawned, never
+/// on the request path (DESIGN §11). An ACCESSTOKEN `sinkCredential` (`auth`) is
+/// applied to every callback, including the terminal `subscription-ended` event.
+fn deliver_counted(subscription_id: &str, sink: String, event: Value, auth: Option<String>) {
+    match store::consume_event(subscription_id) {
+        store::EventBudget::Unbounded | store::EventBudget::Allowed => {
+            notifications::spawn_delivery(sink, event, auth);
+        }
+        store::EventBudget::Last => {
+            // Evict now so any pending movement/expiry timer becomes a no-op, then
+            // deliver the triggering event followed (in order) by subscription-ended.
+            store::remove(subscription_id);
+            let ended = notifications::subscription_ended_event(
+                store::new_event_id(),
+                rfc3339_utc(now_unix_secs()),
+                subscription_id,
+                "MAX_EVENTS_REACHED",
+            );
+            notifications::spawn_delivery_seq(sink, vec![event, ended], auth);
+        }
+        store::EventBudget::Exhausted => { /* budget already spent: suppress */ }
+    }
 }
 
 /// `GET /geofencing-subscriptions/v0.4/subscriptions/{subscriptionId}`.
@@ -1854,5 +1911,191 @@ mod tests {
         let (status, fetched) = get_subscription(&token, &id).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(fetched["id"], json!(id));
+    }
+
+    // --- subscriptionMaxEvents enforcement ---------------------------------
+
+    /// Accept one fire-and-forget HTTP POST on `listener` and return its
+    /// `(head, parsed CloudEvent body)`. Reads to EOF (delivery sends
+    /// `Connection: close`).
+    async fn recv_post(listener: &tokio::net::TcpListener) -> (String, Value) {
+        use tokio::io::AsyncReadExt;
+        let (mut sock, _) = listener.accept().await.unwrap();
+        let mut buf = Vec::new();
+        sock.read_to_end(&mut buf).await.unwrap();
+        let raw = String::from_utf8(buf).unwrap();
+        let (head, body) = raw.split_once("\r\n\r\n").expect("headers then body");
+        (
+            head.to_string(),
+            serde_json::from_str(body).expect("body is JSON"),
+        )
+    }
+
+    #[tokio::test]
+    async fn max_events_below_one_is_out_of_range() {
+        let body = json!({
+            "protocol": "HTTP",
+            "sink": "https://example.com/cb",
+            "types": [TYPE_ENTERED],
+            "config": {
+                "subscriptionDetail": {
+                    "device": { "phoneNumber": "+123456789012" },
+                    "area": {
+                        "areaType": "CIRCLE",
+                        "center": { "latitude": 51.5, "longitude": -0.12 },
+                        "radius": 5000,
+                    },
+                },
+                "subscriptionMaxEvents": 0,
+            },
+        })
+        .to_string();
+        let (status, _, resp) = create_ok(&body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(resp["code"], "OUT_OF_RANGE");
+    }
+
+    #[tokio::test]
+    async fn max_events_one_ends_the_subscription_after_the_initial_event() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let sink = format!("http://{addr}/geo-max1");
+
+        // …012 (even) → initial area-entered; no movement tail; subscriptionMaxEvents=1.
+        let body = json!({
+            "protocol": "HTTP",
+            "sink": sink,
+            "types": [TYPE_ENTERED, TYPE_LEFT],
+            "config": {
+                "subscriptionDetail": {
+                    "device": { "phoneNumber": "+123456789012" },
+                    "area": {
+                        "areaType": "CIRCLE",
+                        "center": { "latitude": 51.5, "longitude": -0.12 },
+                        "radius": 5000,
+                    },
+                },
+                "initialEvent": true,
+                "subscriptionMaxEvents": 1,
+            },
+        })
+        .to_string();
+
+        let token = mint_token(&format!("{CREATE_SCOPE} {READ_SCOPE}")).await;
+        let (status, _, created) = post_subscriptions(Some(&token), &body, None).await;
+        assert_eq!(status, StatusCode::CREATED);
+        // The maxEvents budget is echoed back in the stored config.
+        assert_eq!(created["config"]["subscriptionMaxEvents"], json!(1));
+        let id = created["id"].as_str().unwrap().to_string();
+
+        // The single allowed domain event, then the terminal subscription-ended
+        // (delivered in order over the same sink by spawn_delivery_seq).
+        let (_, first) = recv_post(&listener).await;
+        assert_eq!(first["type"], TYPE_ENTERED);
+        assert_eq!(first["data"]["subscriptionId"], json!(id));
+
+        let (_, ended) = recv_post(&listener).await;
+        assert_eq!(ended["type"], TYPE_ENDED);
+        assert_eq!(ended["data"]["subscriptionId"], json!(id));
+        assert_eq!(ended["data"]["terminationReason"], "MAX_EVENTS_REACHED");
+
+        // The subscription ended: a read-back is 404.
+        let (status, body) = get_subscription(&token, &id).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn max_events_one_ends_the_subscription_after_a_movement_event() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let sink = format!("http://{addr}/geo-max1-move");
+
+        // …001 → a movement area-entered (no initialEvent); subscriptionMaxEvents=1.
+        let body = json!({
+            "protocol": "HTTP",
+            "sink": sink,
+            "types": [TYPE_ENTERED, TYPE_LEFT],
+            "config": {
+                "subscriptionDetail": {
+                    "device": { "phoneNumber": "+123456789001" },
+                    "area": {
+                        "areaType": "CIRCLE",
+                        "center": { "latitude": 51.5, "longitude": -0.12 },
+                        "radius": 5000,
+                    },
+                },
+                "subscriptionMaxEvents": 1,
+            },
+        })
+        .to_string();
+
+        let token = mint_token(&format!("{CREATE_SCOPE} {READ_SCOPE}")).await;
+        let (status, _, created) = post_subscriptions(Some(&token), &body, None).await;
+        assert_eq!(status, StatusCode::CREATED);
+        let id = created["id"].as_str().unwrap().to_string();
+
+        // The movement event exhausts the budget → the crossing, then subscription-ended.
+        let (_, first) = recv_post(&listener).await;
+        assert_eq!(first["type"], TYPE_ENTERED);
+        assert_eq!(first["data"]["subscriptionId"], json!(id));
+
+        let (_, ended) = recv_post(&listener).await;
+        assert_eq!(ended["type"], TYPE_ENDED);
+        assert_eq!(ended["data"]["terminationReason"], "MAX_EVENTS_REACHED");
+
+        let (status, body) = get_subscription(&token, &id).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn max_events_budget_spans_initial_and_movement_events() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let sink = format!("http://{addr}/geo-max2");
+
+        // …001 (odd) with initialEvent=true fires TWO domain events: the initial
+        // area-left (current state), then a movement area-entered (the …001 crossing).
+        // subscriptionMaxEvents=2 admits both, and the second ends the subscription.
+        let body = json!({
+            "protocol": "HTTP",
+            "sink": sink,
+            "types": [TYPE_ENTERED, TYPE_LEFT],
+            "config": {
+                "subscriptionDetail": {
+                    "device": { "phoneNumber": "+123456789001" },
+                    "area": {
+                        "areaType": "CIRCLE",
+                        "center": { "latitude": 51.5, "longitude": -0.12 },
+                        "radius": 5000,
+                    },
+                },
+                "initialEvent": true,
+                "subscriptionMaxEvents": 2,
+            },
+        })
+        .to_string();
+
+        let token = mint_token(&format!("{CREATE_SCOPE} {READ_SCOPE}")).await;
+        let (status, _, created) = post_subscriptions(Some(&token), &body, None).await;
+        assert_eq!(status, StatusCode::CREATED);
+        let id = created["id"].as_str().unwrap().to_string();
+
+        // 1) initial area-left (immediate); 2) movement area-entered (after the grace);
+        // 3) the terminal subscription-ended, in order behind the movement event.
+        let (_, initial) = recv_post(&listener).await;
+        assert_eq!(initial["type"], TYPE_LEFT);
+
+        let (_, movement) = recv_post(&listener).await;
+        assert_eq!(movement["type"], TYPE_ENTERED);
+
+        let (_, ended) = recv_post(&listener).await;
+        assert_eq!(ended["type"], TYPE_ENDED);
+        assert_eq!(ended["data"]["terminationReason"], "MAX_EVENTS_REACHED");
+
+        // The subscription ended after its second (final) event.
+        let (status, _) = get_subscription(&token, &id).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
     }
 }

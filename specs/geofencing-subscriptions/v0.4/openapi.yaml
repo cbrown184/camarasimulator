@@ -28,8 +28,10 @@
 # POSTed to the `sink`. **Movement-triggered** `area-entered` / `area-left` events
 # are delivered too: a `…001` identifier tail simulates the device entering the
 # area and a `…002` tail simulates it leaving, delivered as a CloudEvent shortly
-# after creation. Only `subscriptionMaxEvents` enforcement is deferred to a later
-# pass; the served spec covers only what is implemented.
+# after creation. `subscriptionMaxEvents` is enforced too: once the configured number
+# of `area-entered`/`area-left` events has been delivered, the subscription is evicted
+# and a `subscription-ended` (`MAX_EVENTS_REACHED`) CloudEvent is POSTed to the `sink`.
+# The served spec covers only what is implemented.
 openapi: 3.0.3
 info:
   title: Geofencing Subscriptions
@@ -119,10 +121,11 @@ info:
     documented ~1 s grace after the `201`), only for an `ACTIVE` subscription, only
     when the crossing's type is among the subscription's `types`, and only to an
     `http://` sink, with the ACCESSTOKEN `sinkCredential` bearer applied. The
-    subscription stays `ACTIVE` after the movement event (bounding the event count
-    via `subscriptionMaxEvents` is not yet enforced — a documented cut). A crossing
-    is not delivered for a subscription that a `deleteSubscription` or expiry has
-    already ended. The movement marker is independent of the initial-event even/odd
+    subscription stays `ACTIVE` after the movement event unless it exhausts the
+    subscription's `subscriptionMaxEvents` budget (see below), in which case the
+    subscription ends. A crossing is not delivered for a subscription that a
+    `deleteSubscription`, expiry, or a reached `subscriptionMaxEvents` has already
+    ended. The movement marker is independent of the initial-event even/odd
     position, so both events can fire for one subscription (e.g. a `…001` device
     reports its current `area-left` state, then an `area-entered` crossing).
 
@@ -136,8 +139,21 @@ info:
     immediately. Only the `…Z` form drives the timer — a numeric offset (e.g.
     `+01:00`) is echoed back but arms no timer (a documented cut). A
     `deleteSubscription` that removes the subscription first makes the timer a
-    no-op (so at most one terminal outcome occurs). `subscriptionMaxEvents` is not
-    yet enforced (a documented cut).
+    no-op (so at most one terminal outcome occurs).
+
+    ### Max events (`config.subscriptionMaxEvents`)
+
+    When a subscription is created with `config.subscriptionMaxEvents` (an integer
+    `>= 1`; a value below 1 → `400 OUT_OF_RANGE`), CamaraSim counts the domain events
+    (`area-entered` / `area-left`) it delivers — the initial event and any movement
+    crossings. The event that reaches the configured maximum is delivered and then
+    the subscription **ends**: it is evicted from the store and a `subscription-ended`
+    CloudEvent (`terminationReason: MAX_EVENTS_REACHED`) is POSTed to the `sink`,
+    in order immediately after the triggering event, with the same ACCESSTOKEN
+    `sinkCredential` auth applied. The terminal `subscription-ended` event itself is
+    not counted. A subscription with no `subscriptionMaxEvents` is unbounded. Because
+    the subscription is evicted the moment its budget is spent, any still-pending
+    movement/expiry timer then becomes a no-op — at most one terminal outcome occurs.
   version: "0.4.0"
   license:
     name: Apache-2.0
@@ -245,12 +261,16 @@ paths:
           identifier tail on an ACTIVE subscription additionally simulates a boundary
           crossing — `…001` → `area-entered`, `…002` → `area-left` — delivered to the
           `sink` a short grace after the `201` (filtered to the subscribed `types`,
-          with the ACCESSTOKEN auth applied). Documented cuts: only `protocol: HTTP`
-          is supported; PLAIN/REFRESHTOKEN `sinkCredential` types are accepted but not
-          applied (unauthenticated); only `http://` sinks are delivered to (no TLS
-          client); a non-`Z` expire time arms no timer; `subscriptionMaxEvents` is not
-          enforced; DELETE emits no `subscription-ended` event. 409/500 are CamaraSim
-          extensions of the shared error set so every reserved suffix is reachable.
+          with the ACCESSTOKEN auth applied). `config.subscriptionMaxEvents` (integer
+          `>= 1`, else 400 OUT_OF_RANGE) bounds the number of `area-entered`/`area-left`
+          events delivered: the event that reaches the maximum is delivered, then the
+          subscription is evicted and a `subscription-ended` (`MAX_EVENTS_REACHED`)
+          CloudEvent is POSTed after it (unbounded when unset). Documented cuts: only
+          `protocol: HTTP` is supported; PLAIN/REFRESHTOKEN `sinkCredential` types are
+          accepted but not applied (unauthenticated); only `http://` sinks are delivered
+          to (no TLS client); a non-`Z` expire time arms no timer; DELETE emits no
+          `subscription-ended` event. 409/500 are CamaraSim extensions of the shared
+          error set so every reserved suffix is reachable.
         cases:
           - input: identifier ending in a reserved error suffix (e.g. …404)
             result: the canonical CAMARA error for that status
@@ -274,6 +294,10 @@ paths:
             result: "subscription evicted; `subscription-ended` (SUBSCRIPTION_EXPIRED) CloudEvent POSTed to the sink"
           - input: "`config.subscriptionExpireTime` with a numeric offset (e.g. +01:00)"
             result: "201; echoed back but no expiry timer armed (documented cut)"
+          - input: "`config.subscriptionMaxEvents: N` (>= 1); the Nth delivered area-entered/area-left event"
+            result: "that event is delivered, then subscription evicted + `subscription-ended` (MAX_EVENTS_REACHED) CloudEvent POSTed to the sink"
+          - input: "`config.subscriptionMaxEvents` < 1"
+            result: "400 OUT_OF_RANGE"
           - input: "circle radius < 2000 or > 200000, or center out of range"
             result: "400 OUT_OF_RANGE"
           - input: "areaType not CIRCLE, missing area/center/radius, protocol not HTTP, missing/unknown types, or a device carrying no identifier / malformed phoneNumber"
@@ -302,15 +326,16 @@ paths:
                 (`area-left`), POSTed a short grace after creation for an `ACTIVE`
                 subscription (filtered to the subscribed `types`). And the
                 **`subscription-ended` event**: when the subscription reaches its
-                `config.subscriptionExpireTime`, it is evicted and a
-                `subscription-ended` CloudEvent (`terminationReason:
-                SUBSCRIPTION_EXPIRED`) is POSTed. Delivery is best-effort,
-                fire-and-forget, and only to an `http://` sink (no TLS client). When
-                the subscription carries an ACCESSTOKEN `sinkCredential`, each
-                callback is authenticated with an `Authorization: Bearer
+                `config.subscriptionExpireTime` (`terminationReason:
+                SUBSCRIPTION_EXPIRED`) or delivers its `config.subscriptionMaxEvents`-th
+                domain event (`terminationReason: MAX_EVENTS_REACHED`), it is evicted
+                and a `subscription-ended` CloudEvent is POSTed — for the max-events
+                case, in order immediately after the triggering event. Delivery is
+                best-effort, fire-and-forget, and only to an `http://` sink (no TLS
+                client). When the subscription carries an ACCESSTOKEN `sinkCredential`,
+                each callback is authenticated with an `Authorization: Bearer
                 <accessToken>` header (RFC 6750); PLAIN/REFRESHTOKEN credential types
-                are accepted but not applied (a documented cut). `subscriptionMaxEvents`
-                enforcement is deferred to a later pass.
+                are accepted but not applied (a documented cut).
               requestBody:
                 required: true
                 content:
@@ -607,8 +632,13 @@ components:
           format: int32
           minimum: 1
           description: >-
-            Maximum number of events to deliver before the subscription ends.
-            Echoed back if supplied; not yet enforced (a documented cut).
+            Maximum number of `area-entered` / `area-left` events to deliver before
+            the subscription ends. When supplied it is enforced: the event that
+            reaches this count is delivered, then the subscription is evicted and a
+            `subscription-ended` CloudEvent (`terminationReason: MAX_EVENTS_REACHED`)
+            is POSTed to the `sink` after it (see the `createSubscription`
+            `callbacks`). A value below 1 → `400 OUT_OF_RANGE`. Omitted → unbounded.
+            Echoed back if supplied.
           example: 10
         initialEvent:
           type: boolean
@@ -842,6 +872,9 @@ components:
               description: >-
                 Why the subscription ended (present only on a
                 `subscription-ended` event). CamaraSim emits `SUBSCRIPTION_EXPIRED`
-                when the `subscriptionExpireTime` is reached.
+                when the `subscriptionExpireTime` is reached, and
+                `MAX_EVENTS_REACHED` when the `subscriptionMaxEvents` count is
+                reached.
               enum:
                 - SUBSCRIPTION_EXPIRED
+                - MAX_EVENTS_REACHED

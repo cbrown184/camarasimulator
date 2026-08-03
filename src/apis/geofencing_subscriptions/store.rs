@@ -35,6 +35,18 @@ fn store() -> &'static Mutex<HashMap<String, Value>> {
     STORE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// The process-global **event budget** side-store: subscription `id` → remaining
+/// number of domain events (`area-entered` / `area-left`) still allowed before the
+/// subscription ends. Populated only for a subscription created with a
+/// `config.subscriptionMaxEvents`; a subscription with no entry is unbounded. Kept
+/// apart from the `SubscriptionInfo` map (like QoD's credential side-store) so the
+/// running count is never echoed by `GET` / `retrieveSubscriptionList`. In-memory
+/// only (single node, per DESIGN §4).
+fn budgets() -> &'static Mutex<HashMap<String, u64>> {
+    static BUDGETS: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
+    BUDGETS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
 /// Store `subscription` (its rendered `SubscriptionInfo` JSON) under `id`.
 pub fn insert(id: String, subscription: Value) {
     store()
@@ -56,12 +68,77 @@ pub fn get(id: &str) -> Option<Value> {
 /// Remove the subscription stored under `id`, returning its `SubscriptionInfo`
 /// if one was present, or `None` if no such subscription existed.
 /// `deleteSubscription` uses the distinction to answer `204` (a subscription was
-/// deleted) vs `404` (unknown id).
+/// deleted) vs `404` (unknown id). Any `subscriptionMaxEvents` budget for the id is
+/// dropped in the same call (the two mutexes are locked sequentially, never across
+/// an `.await`), so a subscription that a delete/expiry ended leaves no stale
+/// budget behind.
 pub fn remove(id: &str) -> Option<Value> {
-    store()
+    let removed = store()
         .lock()
         .expect("geofencing subscription store not poisoned")
-        .remove(id)
+        .remove(id);
+    budgets()
+        .lock()
+        .expect("geofencing subscription budget store not poisoned")
+        .remove(id);
+    removed
+}
+
+/// Register a `subscriptionMaxEvents` budget for a subscription: the maximum number
+/// of domain events (`area-entered` / `area-left`) to deliver before the
+/// subscription ends. Called once at creation for a subscription that set
+/// `config.subscriptionMaxEvents` (which is validated `>= 1`).
+pub fn set_event_budget(id: String, max_events: u64) {
+    budgets()
+        .lock()
+        .expect("geofencing subscription budget store not poisoned")
+        .insert(id, max_events);
+}
+
+/// The outcome of consuming one domain event from a subscription's
+/// `subscriptionMaxEvents` budget (see [`consume_event`]).
+#[derive(Debug, PartialEq, Eq)]
+pub enum EventBudget {
+    /// No `subscriptionMaxEvents` was set: deliver the event; the subscription is
+    /// never ended by the count.
+    Unbounded,
+    /// The event was consumed and budget still remains: deliver it, do not end.
+    Allowed,
+    /// The event consumed the final unit of budget: deliver it, then end the
+    /// subscription (`terminationReason: MAX_EVENTS_REACHED`).
+    Last,
+    /// The budget was already spent: suppress the event (defensive — the
+    /// subscription is normally evicted the moment the budget reaches zero).
+    Exhausted,
+}
+
+/// Atomically consume one domain event from the subscription's
+/// `subscriptionMaxEvents` budget and report the outcome ([`EventBudget`]).
+///
+/// A subscription with no budget entry is [`EventBudget::Unbounded`]. Otherwise the
+/// remaining count is decremented: it becomes [`EventBudget::Allowed`] while budget
+/// remains, [`EventBudget::Last`] on the event that exhausts it (the entry is then
+/// dropped), or [`EventBudget::Exhausted`] if it was already zero. The lock is held
+/// only for the map access — never across an `.await`.
+pub fn consume_event(id: &str) -> EventBudget {
+    let mut budgets = budgets()
+        .lock()
+        .expect("geofencing subscription budget store not poisoned");
+    let Some(remaining) = budgets.get(id).copied() else {
+        return EventBudget::Unbounded;
+    };
+    if remaining == 0 {
+        budgets.remove(id);
+        return EventBudget::Exhausted;
+    }
+    let left = remaining - 1;
+    if left == 0 {
+        budgets.remove(id);
+        EventBudget::Last
+    } else {
+        budgets.insert(id.to_string(), left);
+        EventBudget::Allowed
+    }
 }
 
 /// Return a snapshot of every stored `SubscriptionInfo`.
@@ -169,6 +246,37 @@ mod tests {
         assert!(remove(&id).is_some(), "first remove evicts and returns it");
         assert!(remove(&id).is_none(), "second remove finds nothing");
         assert!(get(&id).is_none(), "and it is gone from the store");
+    }
+
+    #[test]
+    fn event_budget_counts_down_and_ends_on_the_last_event() {
+        let id = new_subscription_id();
+        // No budget registered → unbounded (never ends by count).
+        assert_eq!(consume_event(&id), EventBudget::Unbounded);
+
+        // A budget of 2: first event allowed, second is the last, then exhausted.
+        set_event_budget(id.clone(), 2);
+        assert_eq!(consume_event(&id), EventBudget::Allowed);
+        assert_eq!(consume_event(&id), EventBudget::Last);
+        // The entry was dropped on Last, so the id is unbounded again.
+        assert_eq!(consume_event(&id), EventBudget::Unbounded);
+    }
+
+    #[test]
+    fn a_budget_of_one_ends_on_the_first_event() {
+        let id = new_subscription_id();
+        set_event_budget(id.clone(), 1);
+        assert_eq!(consume_event(&id), EventBudget::Last);
+    }
+
+    #[test]
+    fn remove_drops_the_event_budget_too() {
+        let id = new_subscription_id();
+        insert(id.clone(), json!({ "id": id, "status": "ACTIVE" }));
+        set_event_budget(id.clone(), 5);
+        assert!(remove(&id).is_some());
+        // The budget is gone with the subscription: the id reads as unbounded.
+        assert_eq!(consume_event(&id), EventBudget::Unbounded);
     }
 
     #[test]
