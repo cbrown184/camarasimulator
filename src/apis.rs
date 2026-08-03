@@ -17,10 +17,12 @@
 //! - **Location Verification v3** — `/location-verification/v3/…`.
 //! - **Location Retrieval v0.4** — `/location-retrieval/v0.4/…`.
 //! - **Geofencing Subscriptions v0.4** — `/geofencing-subscriptions/v0.4/…`.
+//! - **Carrier Billing v0.5** — `/carrier-billing/v0.5/…`.
 //!
 //! Plus [`openapi`], which serves each mounted API's vendored OpenAPI spec at
 //! `/{api}/v{n}/openapi.yaml` (docs/DESIGN.md §9).
 
+pub mod carrier_billing;
 pub mod device_identifier;
 pub mod device_reachability_status;
 pub mod device_roaming_status;
@@ -50,5 +52,6 @@ pub fn routes() -> Router {
         .merge(location_verification::routes())
         .merge(location_retrieval::routes())
         .merge(geofencing_subscriptions::routes())
+        .merge(carrier_billing::routes())
         .merge(openapi::routes())
 }

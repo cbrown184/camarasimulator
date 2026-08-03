@@ -332,6 +332,25 @@ triggering event (new `notifications::spawn_delivery_seq`), the ACCESSTOKEN
 movement/expiry timer becomes a no-op (exactly one terminal outcome). An unset
 `subscriptionMaxEvents` is unbounded.
 
+**Phase 5 (payments) has begun.** **Carrier Billing v0.5** `POST /payments` is
+live at `/carrier-billing/v0.5/payments` (scope `carrier-billing:payments:create`,
+operationId `createPayment`; CAMARA Carrier Billing 0.5.0, release r3.2 — the API's
+first public release, mounted at its real sub-1.0 version like KYC Match / Location
+Retrieval). It runs the **one-step** flow (the only flow 0.5.0 covers): a payment
+is created and charged in a single call, so a happy path returns `201` with
+`paymentStatus: "succeeded"` (opaque UUID-shaped `paymentId`, `paymentCreationDate`
+= `paymentDate` = now; no `uuid`/`rand` dep). Two control planes (DESIGN §7): the
+charged phone number (submitted `amountTransaction.phoneNumber`, else the token
+subject) — reserved error suffix → canonical CAMARA error, malformed `phoneNumber`
+→ 400 `INVALID_ARGUMENT`, no number + non-E.164 subject → 422 `MISSING_IDENTIFIER`
+— and the requested `amount`, where `< 0.001` (schema minimum) → 400
+`INVALID_ARGUMENT` and `> 1000` (authorised ceiling) → 422
+`CARRIER_BILLING.UNAUTHORIZED_AMOUNT`; else the charge succeeds. The identifier
+plane is checked first (a reserved-error number wins over an out-of-range amount).
+Stateless for now — nothing reads a payment back yet, so it is not persisted;
+`sink`/`sinkCredential` are accepted but not acted on (both documented cuts).
+`x-correlator` echoed on every response.
+
 ## In progress (claimed this pass)
 
 _None._  <!-- agent: put the claimed item + run timestamp here, clear it when done -->
@@ -411,7 +430,16 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
       `MAX_EVENTS_REACHED` + eviction; `<1` → 400 OUT_OF_RANGE)
 
 ### Phase 5 — Remaining
-- [ ] Carrier Billing / Payments
+- [~] Carrier Billing v0.5 (`/carrier-billing/v0.5`; CAMARA 0.5.0, release r3.2):
+  - [x] `POST /payments` (`carrier-billing:payments:create`, `createPayment`) —
+    one-step charge; identifier + amount control planes (DESIGN §7). Stateless
+    (nothing reads a payment back yet, so not persisted).
+  - [ ] `GET /payments` (list, `retrievePayments`) · `GET /payments/{paymentId}`
+    (`retrievePayment`) — `carrier-billing:payments:read` (needs a payment store)
+  - [ ] two-step flow: `POST /payments/prepare` (`preparePayment`) ·
+    `.../{paymentId}/validate` · `.../confirm` · `.../cancel`
+    (`carrier-billing:payments:write`)
+  - [ ] charging notifications on `sink` (accepted-but-not-applied for now)
 - [ ] Other CAMARA APIs as capacity allows
 
 ## Cross-cutting (do alongside the item that needs it)
@@ -429,6 +457,41 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 ## Scan journal
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
+
+- 2026-08-03 — Phase 5 (payments) **begun** — **Carrier Billing v0.5**
+  `POST /payments` (`createPayment`), CamaraSim's first payments API. Phases 0–4
+  are complete (only the deliberately-deferred QoD `https://` TLS sink remains, an
+  intentional dependency decision), so this pass opens Phase 5. Fetched the real
+  CAMARA spec: the `main` branch is `wip`, but release **r3.2** ships Carrier
+  Billing **0.5.0** (first public release), so — like KYC Match v0.3 / Location
+  Retrieval v0.4 — it is mounted at its real sub-1.0 URL `/carrier-billing/v0.5`.
+  Scoped to the single one-step `createPayment` endpoint (the only flow 0.5.0
+  covers): a happy path returns `201 { paymentStatus: "succeeded" }` with an opaque
+  UUID-shaped `paymentId` and `paymentCreationDate = paymentDate = now` (local
+  `mint_uuid` off a SHA-256(counter‖now) + atomic counter, and a self-contained
+  `rfc3339_utc` — both mirroring `quality_on_demand`; **no new dep**, sha2 already
+  present). Two control planes (DESIGN §7): the charged phone number (submitted
+  `amountTransaction.phoneNumber`, else the token subject) — reserved suffix →
+  canonical CAMARA error, malformed `phoneNumber` → 400 INVALID_ARGUMENT, no number
+  + non-E.164 subject → 422 MISSING_IDENTIFIER — and the requested `amount`
+  (`< 0.001` schema min → 400 INVALID_ARGUMENT; `> 1000` ceiling → 422
+  `CARRIER_BILLING.UNAUTHORIZED_AMOUNT`); identifier plane checked first. Stateless
+  (no read-back yet → not persisted); `sink`/`sinkCredential` accepted but not
+  applied (documented cuts). New `src/apis/carrier_billing{,.rs}/v0_5.rs` merged
+  into the app router; `/` catalog + openapi server now list carrier-billing v0.5.
+  Spec: new `specs/carrier-billing/v0.5/openapi.yaml` (vendored + annotated —
+  `createPayment` with `x-camarasim-scenarios`, inline 400/422 responses carrying
+  the carrier-billing codes, the full CreatePayment/PaymentCreated schema tree,
+  reserved floor `$ref`ing shared/errors.yaml). 462 tests green (was 444; +18: 3
+  units [E.164 validation · paymentId unique/uuid-v4-shaped · rfc3339 known epoch]
+  + 15 integration [happy 201 succeeded · clientCorrelator echoed · reserved suffix
+  → error · amount>1000 → UNAUTHORIZED_AMOUNT · amount<0.001 → INVALID_ARGUMENT ·
+  reserved-id wins over amount · malformed phone → 400 · missing required field →
+  400 · unknown field → 400 · no-phone falls back to E.164 subject · no-phone +
+  non-E.164 subject → MISSING_IDENTIFIER · subject reserved suffix → error · no
+  scope → 403 · no token → 401 · x-correlator echoed on 201 + error]). — binary:
+  1538192 B (+42536 B; the new module + ~14 KB of vendored spec text embedded via
+  include_str!)
 
 - 2026-08-03 — Phase 4 (spatial): **Geofencing Subscriptions v0.4** —
   **`subscriptionMaxEvents` enforcement**, the API's last open item — **completes
