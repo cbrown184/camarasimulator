@@ -59,6 +59,137 @@ pub fn all() -> Vec<Value> {
         .collect()
 }
 
+// --- Pending-validation side-store (two-step OTP flow) --------------------
+//
+// A reservation created by `preparePayment` for a phone number that requires
+// OTP validation lands in `pending_validation` and carries an `authorizationId`
+// (echoed in its `validationInfo`). The expected OTP `code` is a **secret** and
+// so is held here, apart from the echoed payment JSON — the map is keyed by
+// `paymentId` and never rendered to a client. `validatePayment` consumes it.
+
+/// A pending OTP validation for a two-step reservation awaiting `validatePayment`.
+pub struct PendingValidation {
+    /// The `authorizationId` echoed to the caller in `validationInfo`. A
+    /// `validatePayment` must present it (else `INVALID_AUTHORIZATION_ID`).
+    pub authorization_id: String,
+    /// The expected OTP `code` (secret; never echoed). Deterministic from the
+    /// phone number so a headless caller can compute it.
+    pub code: String,
+    /// Remaining validation attempts before the reservation is denied.
+    pub attempts_left: u32,
+}
+
+/// The outcome of a [`validate_pending`] attempt.
+pub enum ValidateOutcome {
+    /// Correct `authorizationId` + `code`: the reservation moved to `reserved`.
+    Validated,
+    /// The presented `authorizationId` does not match the pending validation.
+    InvalidAuthId,
+    /// Correct `authorizationId` but wrong `code`; an attempt was consumed.
+    InvalidCode,
+    /// The final attempt was consumed with a wrong `code`: the reservation was
+    /// denied (moved to `denied`).
+    ValidationFailed,
+    /// The payment exists but is not awaiting validation (already settled).
+    NotPending,
+    /// No such payment.
+    Unknown,
+}
+
+/// The process-global pending-validation side-store: `paymentId` →
+/// [`PendingValidation`]. Kept apart from the payment JSON map so the OTP `code`
+/// is never rendered to a client. In-memory only (single node, per DESIGN §4).
+fn pending() -> &'static Mutex<HashMap<String, PendingValidation>> {
+    static PENDING: OnceLock<Mutex<HashMap<String, PendingValidation>>> = OnceLock::new();
+    PENDING.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Record that the reservation `id` is awaiting OTP validation. Called by
+/// `preparePayment` when the resolved phone number requires validation.
+pub fn insert_pending(id: String, validation: PendingValidation) {
+    pending()
+        .lock()
+        .expect("carrier-billing pending-validation store not poisoned")
+        .insert(id, validation);
+}
+
+/// Attempt to validate the reservation `id` with the presented `authorization_id`
+/// and `code`, driving its `paymentStatus` transition atomically:
+///
+/// - correct id + code → the reservation becomes `reserved` → [`Validated`];
+/// - wrong `authorization_id` → [`InvalidAuthId`] (no attempt consumed);
+/// - correct id, wrong `code` → an attempt is consumed → [`InvalidCode`], or —
+///   when it was the last attempt — the reservation becomes `denied` →
+///   [`ValidationFailed`];
+/// - the payment exists but has no pending validation → [`NotPending`];
+/// - no such payment → [`Unknown`].
+///
+/// Both maps are locked in a fixed order (pending → payments) so nothing
+/// deadlocks against the single-lock accessors above; neither lock is held
+/// across an `.await`.
+///
+/// [`Validated`]: ValidateOutcome::Validated
+/// [`InvalidAuthId`]: ValidateOutcome::InvalidAuthId
+/// [`InvalidCode`]: ValidateOutcome::InvalidCode
+/// [`ValidationFailed`]: ValidateOutcome::ValidationFailed
+/// [`NotPending`]: ValidateOutcome::NotPending
+/// [`Unknown`]: ValidateOutcome::Unknown
+pub fn validate_pending(id: &str, authorization_id: &str, code: &str) -> ValidateOutcome {
+    let mut pend = pending()
+        .lock()
+        .expect("carrier-billing pending-validation store not poisoned");
+    match pend.get_mut(id) {
+        None => {
+            // No pending validation: distinguish an unknown id from a payment
+            // that exists but is already settled (reserved/succeeded/denied/…).
+            if store()
+                .lock()
+                .expect("carrier-billing payment store not poisoned")
+                .contains_key(id)
+            {
+                ValidateOutcome::NotPending
+            } else {
+                ValidateOutcome::Unknown
+            }
+        }
+        Some(validation) => {
+            if validation.authorization_id != authorization_id {
+                return ValidateOutcome::InvalidAuthId;
+            }
+            if validation.code == code {
+                pend.remove(id);
+                settle(id, "reserved");
+                ValidateOutcome::Validated
+            } else {
+                validation.attempts_left = validation.attempts_left.saturating_sub(1);
+                if validation.attempts_left == 0 {
+                    pend.remove(id);
+                    settle(id, "denied");
+                    ValidateOutcome::ValidationFailed
+                } else {
+                    ValidateOutcome::InvalidCode
+                }
+            }
+        }
+    }
+}
+
+/// Settle a pending reservation into a terminal-for-validation `status`
+/// (`reserved` or `denied`): set its `paymentStatus` and drop the now-stale
+/// `validationInfo`. A no-op if the payment has since been evicted.
+fn settle(id: &str, status: &str) {
+    if let Some(payment) = store()
+        .lock()
+        .expect("carrier-billing payment store not poisoned")
+        .get_mut(id)
+    {
+        payment["paymentStatus"] = Value::String(status.to_string());
+        if let Some(obj) = payment.as_object_mut() {
+            obj.remove("validationInfo");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

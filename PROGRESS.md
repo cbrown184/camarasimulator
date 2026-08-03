@@ -383,6 +383,21 @@ unidentifiable → 422 `MISSING_IDENTIFIER`) and the requested `amount` (`< 0.00
 duplicate-session case are deferred to the `validatePayment` slice. `x-correlator`
 echoed on every response.
 
+The two-step flow's **validate** step is now live: `POST /payments/{paymentId}/
+validate` (`validatePayment`, scope `carrier-billing:payments:write`). A
+`preparePayment` for a phone number ending in `888` now lands in
+`pending_validation`, carrying a `validationInfo` (`action: "validate"`, an
+`authorizationId`); the expected OTP `code` (the reserved number's last six
+digits, zero-padded — deterministic, mirroring OTP SMS) is held in a secret
+in-memory side-store (`store::PendingValidation`) apart from the echoed payment.
+`validatePayment` clears it atomically (`store::validate_pending`): correct
+`authorizationId` + `code` → `204` (reservation → `reserved`, `validationInfo`
+dropped); wrong `authorizationId` → 400 `CARRIER_BILLING.INVALID_AUTHORIZATION_ID`;
+wrong `code` → 400 `CARRIER_BILLING.INVALID_CODE` until the 3-attempt budget is
+spent → 400 `CARRIER_BILLING.VALIDATION_FAILED` (reservation → `denied`); a
+settled payment → 409 `ALREADY_EXISTS`; unknown id → 404. Only `confirmPayment` /
+`cancelPayment` remain to complete the two-step flow.
+
 ## In progress (claimed this pass)
 
 _None._  <!-- agent: put the claimed item + run timestamp here, clear it when done -->
@@ -483,8 +498,19 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
       reads back via `retrievePayment`. Shares `createPayment`'s identifier +
       amount control planes. `pending_validation`/`validationInfo` (OTP) + 409
       `ALREADY_EXISTS` deferred to `validatePayment`.
-    - [ ] `POST /payments/{paymentId}/validate` (`validatePayment`,
-      `carrier-billing:payments:write`)
+    - [x] `POST /payments/{paymentId}/validate` (`validatePayment`,
+      `carrier-billing:payments:write`) — the OTP-validation step. A
+      `preparePayment` for a phone number ending in `888` now lands in
+      `pending_validation` (with `validationInfo`: `action` + `authorizationId`);
+      `validatePayment` clears it. Correct `authorizationId` + `code` → `204`
+      (reservation → `reserved`); wrong `authorizationId` → 400
+      `CARRIER_BILLING.INVALID_AUTHORIZATION_ID`; wrong `code` → 400
+      `CARRIER_BILLING.INVALID_CODE` until the 3-attempt budget is spent → 400
+      `CARRIER_BILLING.VALIDATION_FAILED` (reservation → `denied`); a payment not
+      awaiting validation → 409 `ALREADY_EXISTS`; unknown id → 404. OTP `code` is
+      the reserved phone number's last six digits, zero-padded (deterministic;
+      mirrors OTP SMS). The 409 duplicate-session case on `preparePayment` is not
+      modelled (documented cut).
     - [ ] `POST /payments/{paymentId}/confirm` (`confirmPayment`,
       `carrier-billing:payments:write`)
     - [ ] `POST /payments/{paymentId}/cancel` (`cancelPayment`,
@@ -507,6 +533,41 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 ## Scan journal
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
+
+- 2026-08-03 — Phase 5 (payments): **Carrier Billing v0.5** — **two-step
+  `validatePayment`** (`POST /payments/{paymentId}/validate`, scope
+  `carrier-billing:payments:write`), the OTP-validation step. Verified the real
+  CAMARA CarrierBillingCheckOut r3.2 spec: op `validatePayment`, body
+  `ValidatePayment` (`authorizationId` + `code`), responses
+  204/400/401/403/404/409/429, 400 codes `CARRIER_BILLING.INVALID_AUTHORIZATION_ID`
+  / `…INVALID_CODE` / `…VALIDATION_FAILED`, `validationInfo` with an `action`
+  discriminator (`validate` → an `authorizationId`). To have something to
+  validate, `preparePayment` now produces `pending_validation` for a phone number
+  ending in `888` (a free tail — not a reserved-error suffix), carrying a
+  `validationInfo` (`action: "validate"`, minted `authorizationId`); the expected
+  OTP `code` = the reserved number's last six digits, zero-padded (deterministic,
+  mirroring OTP SMS), held in a new secret side-store `store::PendingValidation`
+  apart from the echoed payment. `validatePayment` clears it atomically
+  (`store::validate_pending`, locking pending→payments in a fixed order, never
+  across await): correct id+code → `204` (reservation → `reserved`,
+  `validationInfo` dropped); wrong `authorizationId` → 400 INVALID_AUTHORIZATION_ID;
+  wrong `code` → 400 INVALID_CODE until the 3-attempt budget is spent → 400
+  VALIDATION_FAILED (reservation → `denied`); a settled payment → 409
+  ALREADY_EXISTS; unknown id → 404. Only `confirmPayment`/`cancelPayment` remain
+  to complete the two-step flow; the 409 duplicate-session case on
+  `preparePayment` is not modelled (documented cut). **No new deps.** Spec:
+  updated `specs/carrier-billing/v0.5/openapi.yaml` — new `validatePayment`
+  operation (`x-camarasim-scenarios`, full 204/400/401/403/404/409/429/500/503
+  set with the three validation examples), new `ValidatePayment` + `ValidationInfo`
+  schemas, `validationInfo` added to `PaymentReserved`, new error codes in
+  `CarrierBillingError`, refreshed header/prepare description + cuts. 493 tests
+  green (was 482; +11: 1 unit [otp_code last-six-padded] + 10 integration
+  [prepare `…888` → pending_validation · validate ok → 204/reserved · wrong authId
+  → 400 · wrong code ×3 → INVALID_CODE then VALIDATION_FAILED/denied · validate a
+  reserved payment → 409 · re-validate a validated payment → 409 · unknown → 404 ·
+  no write scope → 403 · no token → 401 · x-correlator echoed on 204 + error]). —
+  binary: 1593936 B (+26128 B; the validate handler + side-store + the new
+  vendored spec text embedded via include_str!)
 
 - 2026-08-03 — Phase 5 (payments): **Carrier Billing v0.5** — **two-step flow
   begun**: `POST /payments/prepare` (`preparePayment`, scope

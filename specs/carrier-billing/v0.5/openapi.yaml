@@ -11,9 +11,10 @@
 #
 # This slice serves `POST /payments` (the one-step `createPayment`),
 # `GET /payments/{paymentId}` (`retrievePayment`, read-back), `GET /payments`
-# (`retrievePayments`, list), and `POST /payments/prepare` (`preparePayment`, the
-# two-step flow's reserve step). The remaining two-step validate / confirm /
-# cancel operations are later slices.
+# (`retrievePayments`, list), `POST /payments/prepare` (`preparePayment`, the
+# two-step flow's reserve step), and `POST /payments/{paymentId}/validate`
+# (`validatePayment`, the two-step flow's OTP-validation step). The remaining
+# two-step confirm / cancel operations are later slices.
 openapi: 3.0.3
 info:
   title: Carrier Billing
@@ -90,15 +91,43 @@ info:
     shares `createPayment`'s two control planes (charged/reserved phone number
     and requested `amount`).
 
+    A reservation whose resolved phone number ends in `888` instead lands in
+    `paymentStatus: "pending_validation"`, carrying a `validationInfo`
+    (`action: "validate"`, an `authorizationId`) — it must be cleared by
+    `validatePayment` before it can be confirmed.
+
+    ## Validate — `POST /payments/{paymentId}/validate` (`validatePayment`)
+
+    Second step of the two-step flow: clears the OTP validation on a
+    `pending_validation` reservation. The caller submits the `authorizationId`
+    (echoed by `preparePayment` in `validationInfo`) and the OTP `code`; on
+    success the reservation moves to `reserved` and the endpoint answers `204 No
+    Content`. It requires the `carrier-billing:payments:write` scope. The OTP
+    `code` is deterministic from the reserved phone number — its last six digits,
+    zero-padded (there is no real SMS; mirrors One Time Password SMS) — so a
+    headless caller can compute what to submit. E.g. a reservation for
+    `+123456789888` validates with code `789888`.
+
+    Keyed on the store state + submitted `code` (no reserved-identifier plane —
+    the `paymentId` is opaque): correct id + code → `204`; wrong `authorizationId`
+    → `400 CARRIER_BILLING.INVALID_AUTHORIZATION_ID`; correct id, wrong `code` →
+    `400 CARRIER_BILLING.INVALID_CODE` until the 3-attempt budget is spent, when
+    the last wrong code denies the reservation → `400
+    CARRIER_BILLING.VALIDATION_FAILED` (reservation → `denied`); a payment not
+    awaiting validation (already reserved / succeeded / denied) → `409
+    ALREADY_EXISTS`; an unknown `paymentId` → `404 NOT_FOUND`.
+
     ## Documented cuts (this slice)
 
     - `POST /payments` (`createPayment`), `GET /payments/{paymentId}`
-      (`retrievePayment`), `GET /payments` (`retrievePayments`, list), and
-      `POST /payments/prepare` (`preparePayment`) are implemented; the remaining
-      two-step validate / confirm / cancel operations are later slices.
-      `preparePayment` always reserves into the `reserved` state — the
-      `pending_validation` / `validationInfo` (OTP) path and the 409
-      `ALREADY_EXISTS` duplicate-session case are deferred to `validatePayment`.
+      (`retrievePayment`), `GET /payments` (`retrievePayments`, list),
+      `POST /payments/prepare` (`preparePayment`), and
+      `POST /payments/{paymentId}/validate` (`validatePayment`) are implemented;
+      the remaining two-step confirm / cancel operations are later slices.
+      `preparePayment` produces `pending_validation` (with `validationInfo`) for
+      the `…888` tail and `reserved` otherwise; the 409 `ALREADY_EXISTS`
+      duplicate-session case on `preparePayment` (a `clientCorrelator` already
+      in flight) is not modelled.
     - `retrievePayments` returns the full list unpaginated and unfiltered — its
       `page`/`perPage`, `paymentCreationDate.gte`/`.lte`, `paymentStatus`,
       `merchantIdentifier`, and `order` query parameters are accepted but not
@@ -440,12 +469,17 @@ paths:
           Same two control planes as `createPayment` (docs/DESIGN.md §7): the
           reserved phone number and the requested `amount`; the identifier plane
           is checked first. The happy path reserves into the `reserved` state
-          (nothing is charged). The `pending_validation` / `validationInfo` (OTP)
-          path and the 409 `ALREADY_EXISTS` duplicate-session case are later
-          slices (with `validatePayment`).
+          (nothing is charged), except a phone number ending in `888`, which
+          lands in `pending_validation` with a `validationInfo` for
+          `validatePayment` to clear. The 409 `ALREADY_EXISTS` duplicate-session
+          case (a `clientCorrelator` already in flight) is not modelled.
         cases:
           - input: phone number ending in a reserved error suffix (e.g. …404)
             result: the canonical CAMARA error for that status
+          - input: valid phone number ending in `888`, amount in `[0.001, 1000]`
+            result: >-
+              201 { paymentStatus: "pending_validation", validationInfo:
+              { action: "validate", authorizationId } } (persisted, no paymentDate)
           - input: valid phone number, amount in `[0.001, 1000]`
             result: '201 { paymentStatus: "reserved" } (persisted, no paymentDate)'
           - input: amount below `0.001`
@@ -454,6 +488,115 @@ paths:
             result: "422 CARRIER_BILLING.UNAUTHORIZED_AMOUNT"
           - input: no `phoneNumber` and a non-E.164 token subject
             result: "422 MISSING_IDENTIFIER"
+
+  /payments/{paymentId}/validate:
+    post:
+      operationId: validatePayment
+      summary: Validate a two-step reservation's OTP
+      description: |
+        Second step of the two-step flow: clears the OTP validation on a
+        `pending_validation` reservation (created by `preparePayment` for a phone
+        number ending in `888`). The caller submits the `authorizationId` echoed
+        in the reservation's `validationInfo` and the OTP `code`; on success the
+        reservation moves to `reserved` and this returns `204 No Content`.
+
+        The OTP `code` is deterministic from the reserved phone number — its last
+        six digits, zero-padded (there is no real SMS; mirrors One Time Password
+        SMS) — so a headless caller can compute what to submit. Requires the
+        `carrier-billing:payments:write` scope. There is no reserved-identifier
+        control plane here (the `paymentId` is opaque); the store state and the
+        submitted `code` drive the outcome.
+      security:
+        - openId:
+            - carrier-billing:payments:write
+      parameters:
+        - $ref: "#/components/parameters/PaymentId"
+        - $ref: "#/components/parameters/XCorrelator"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ValidatePayment"
+      responses:
+        "204":
+          description: Validation succeeded; the reservation is now `reserved`.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+        "400":
+          description: |
+            400 — invalid request. Beyond a malformed body (`INVALID_ARGUMENT`),
+            CamaraSim returns the Carrier-Billing-specific validation codes:
+            `CARRIER_BILLING.INVALID_AUTHORIZATION_ID` (the `authorizationId` does
+            not match), `CARRIER_BILLING.INVALID_CODE` (wrong `code`, an attempt
+            consumed), or `CARRIER_BILLING.VALIDATION_FAILED` (the attempt budget
+            is exhausted; the reservation is denied).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CarrierBillingError"
+              examples:
+                invalidCode:
+                  summary: Wrong OTP code
+                  value:
+                    status: 400
+                    code: CARRIER_BILLING.INVALID_CODE
+                    message: Invalid code.
+                invalidAuthorizationId:
+                  summary: Unknown authorizationId
+                  value:
+                    status: 400
+                    code: CARRIER_BILLING.INVALID_AUTHORIZATION_ID
+                    message: Invalid authorizationId.
+                validationFailed:
+                  summary: Attempt budget exhausted
+                  value:
+                    status: 400
+                    code: CARRIER_BILLING.VALIDATION_FAILED
+                    message: The maximum number of validation attempts has been consumed.
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "409":
+          description: |
+            409 — the payment is not awaiting validation (already `reserved`,
+            `succeeded`, or `denied`). CamaraSim returns `ALREADY_EXISTS`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CarrierBillingError"
+              example:
+                status: 409
+                code: ALREADY_EXISTS
+                message: The payment is not awaiting validation.
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          Keyed on the in-memory store state + the submitted `code` (no
+          reserved-identifier plane — the `paymentId` is opaque). The OTP `code`
+          is the reserved phone number's last six digits, zero-padded.
+        cases:
+          - input: correct `authorizationId` + `code` on a pending reservation
+            result: "204 (reservation → reserved)"
+          - input: wrong `authorizationId`
+            result: "400 CARRIER_BILLING.INVALID_AUTHORIZATION_ID"
+          - input: correct `authorizationId`, wrong `code` (budget remaining)
+            result: "400 CARRIER_BILLING.INVALID_CODE (an attempt is consumed)"
+          - input: wrong `code` spending the last of the 3-attempt budget
+            result: "400 CARRIER_BILLING.VALIDATION_FAILED (reservation → denied)"
+          - input: a payment not awaiting validation (already settled)
+            result: "409 ALREADY_EXISTS"
+          - input: an unknown `paymentId`
+            result: "404 NOT_FOUND"
 
   /payments/{paymentId}:
     get:
@@ -846,8 +989,9 @@ components:
         paymentStatus:
           type: string
           description: >-
-            The reservation's status. In this slice a happy path is always
-            `reserved`.
+            The reservation's status: `reserved` when no OTP validation is
+            required, or `pending_validation` when it is (a phone number ending
+            in `888`), in which case `validationInfo` is present.
           enum:
             - processing
             - pending_validation
@@ -859,6 +1003,51 @@ components:
           type: string
           format: date-time
           description: When the reservation was created (RFC 3339, `Z` offset).
+        validationInfo:
+          $ref: "#/components/schemas/ValidationInfo"
+
+    ValidationInfo:
+      type: object
+      description: |
+        Present on a `pending_validation` reservation: how the OTP validation is
+        to be performed. CamaraSim always uses the `validate` action (a `code`
+        submitted to `validatePayment`) — it never issues the `open` (browseable
+        URL) variant.
+      required:
+        - action
+        - authorizationId
+      properties:
+        action:
+          type: string
+          description: The validation action to perform.
+          enum:
+            - validate
+        authorizationId:
+          type: string
+          description: >-
+            Unique authorization identifier for this payment, submitted (with the
+            OTP `code`) to `validatePayment`.
+          example: "Fn34o8g239v3wrb3t"
+
+    ValidatePayment:
+      type: object
+      description: |
+        Request to validate a `pending_validation` reservation's OTP
+        (`validatePayment`). The `authorizationId` is the one echoed in the
+        reservation's `validationInfo`; the `code` is the OTP "received via SMS"
+        (deterministic here — the reserved phone number's last six digits).
+      required:
+        - authorizationId
+        - code
+      properties:
+        authorizationId:
+          type: string
+          description: Unique authorization identifier for a specific payment.
+          example: "Fn34o8g239v3wrb3t"
+        code:
+          type: string
+          description: Code received via SMS to validate and authorize the payment.
+          example: "789888"
 
     AmountTransaction:
       type: object
@@ -898,7 +1087,11 @@ components:
           enum:
             - SERVICE_NOT_APPLICABLE
             - MISSING_IDENTIFIER
+            - ALREADY_EXISTS
             - CARRIER_BILLING.UNAUTHORIZED_AMOUNT
+            - CARRIER_BILLING.INVALID_AUTHORIZATION_ID
+            - CARRIER_BILLING.INVALID_CODE
+            - CARRIER_BILLING.VALIDATION_FAILED
         message:
           type: string
           description: Human-readable explanation.

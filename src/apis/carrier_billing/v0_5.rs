@@ -66,12 +66,13 @@
 //! ## Documented cuts (this slice)
 //!
 //! - The one-step `createPayment`, read-back `retrievePayment`, list
-//!   `retrievePayments`, and the two-step flow's first step `preparePayment` are
-//!   implemented; the remaining two-step `validatePayment` / `confirmPayment` /
-//!   `cancelPayment` operations are later slices. `preparePayment` always
-//!   reserves into the `reserved` state — the `pending_validation` /
-//!   `validationInfo` (OTP) path and the 409 `ALREADY_EXISTS` duplicate-session
-//!   case are deferred to the `validatePayment` slice.
+//!   `retrievePayments`, and the two-step flow's reserve `preparePayment` +
+//!   validate `validatePayment` steps are implemented; the remaining two-step
+//!   `confirmPayment` / `cancelPayment` operations are later slices.
+//!   `preparePayment` lands a `…888`-tail reservation in `pending_validation`
+//!   (with `validationInfo`) for `validatePayment` to clear, and `reserved`
+//!   otherwise; the 409 `ALREADY_EXISTS` duplicate-session case on
+//!   `preparePayment` (a `clientCorrelator` already in flight) is not modelled.
 //! - `retrievePayments` returns the full list unpaginated and unfiltered: its
 //!   `page`/`perPage`, `paymentCreationDate.gte`/`.lte`, `paymentStatus`,
 //!   `merchantIdentifier`, and `order` query parameters are accepted but not
@@ -107,6 +108,23 @@ const CREATE_SCOPE: &str = "carrier-billing:payments:create";
 /// (CAMARA Carrier Billing 0.5.0).
 const READ_SCOPE: &str = "carrier-billing:payments:read";
 
+/// The OAuth2 scope the two-step write operations require (CAMARA Carrier
+/// Billing 0.5.0). `validatePayment` (and, in later slices, confirm / cancel)
+/// carry it.
+const WRITE_SCOPE: &str = "carrier-billing:payments:write";
+
+/// A reservation whose resolved phone number ends in this tail requires OTP
+/// **validation** before it can be confirmed: `preparePayment` lands it in
+/// `pending_validation` (with an `authorizationId`) instead of `reserved`, and a
+/// `validatePayment` must clear it. A deterministic functional case
+/// (docs/DESIGN.md §7); `888` is not a reserved-error suffix, so it never
+/// collides with the identifier error plane. E.g. `+123456789888`.
+const VALIDATION_REQUIRED_TAIL: &str = "888";
+
+/// How many OTP attempts a pending validation allows before the reservation is
+/// denied (mirrors One Time Password SMS's 3-attempt budget).
+const VALIDATION_ATTEMPTS: u32 = 3;
+
 /// The largest single `amount` CamaraSim treats as authorised. A request above
 /// it is refused with `422 CARRIER_BILLING.UNAUTHORIZED_AMOUNT` — a distinctive,
 /// deterministic Carrier Billing functional case (docs/DESIGN.md §7). Currency
@@ -135,6 +153,13 @@ pub fn routes() -> Router {
             "/carrier-billing/v0.5/payments/:payment_id",
             get(retrieve_payment),
         )
+        // The two-step OTP validation step. `matchit` disambiguates it from the
+        // `/payments/:payment_id` read (different path length) and from the
+        // static `/payments/prepare`.
+        .route(
+            "/carrier-billing/v0.5/payments/:payment_id/validate",
+            post(validate_payment),
+        )
 }
 
 /// `POST /payments` request body (CAMARA `CreatePayment`).
@@ -150,6 +175,18 @@ struct CreatePayment {
     #[serde(rename = "sinkCredential")]
     #[allow(dead_code)]
     sink_credential: Option<Value>,
+}
+
+/// `POST /payments/{paymentId}/validate` request body (CAMARA `ValidatePayment`).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ValidatePayment {
+    /// The `authorizationId` echoed to the caller in the reservation's
+    /// `validationInfo`.
+    #[serde(rename = "authorizationId")]
+    authorization_id: String,
+    /// The OTP `code` received "via SMS" to validate the payment.
+    code: String,
 }
 
 /// The CAMARA `AmountTransactionInput`: what to charge and to whom.
@@ -303,11 +340,41 @@ async fn prepare_payment(claims: Claims, headers: HeaderMap, body: Bytes) -> Res
         return resp;
     }
 
-    // Happy path — the amount is reserved, not charged: `reserved` status and no
-    // `paymentDate` (nothing has been billed yet).
+    // Happy path — the amount is reserved, not charged: no `paymentDate`
+    // (nothing has been billed yet). Either it is `reserved` immediately, or —
+    // when the resolved phone number requires OTP validation — it lands in
+    // `pending_validation` until a `validatePayment` clears it.
     let now = rfc3339_utc(now_unix_secs());
     let amount_tx = build_amount_tx(&req.amount_transaction, &phone);
     let payment_id = mint_uuid();
+
+    if phone.ends_with(VALIDATION_REQUIRED_TAIL) {
+        // OTP validation required first. Mint an `authorizationId` (echoed in
+        // `validationInfo`) and remember the expected code — deterministic from
+        // the phone number so a headless caller can compute it.
+        let validation = store::PendingValidation {
+            authorization_id: mint_uuid(),
+            code: otp_code(&phone),
+            attempts_left: VALIDATION_ATTEMPTS,
+        };
+        let pending = json!({
+            "paymentId": payment_id,
+            "amountTransaction": amount_tx,
+            "paymentStatus": "pending_validation",
+            "paymentCreationDate": now,
+            "validationInfo": {
+                "action": "validate",
+                "authorizationId": validation.authorization_id,
+            },
+        });
+        store::insert(payment_id.clone(), pending.clone());
+        store::insert_pending(payment_id, validation);
+        return with_correlator(
+            (StatusCode::CREATED, Json(pending)).into_response(),
+            &correlator,
+        );
+    }
+
     let reserved = json!({
         "paymentId": payment_id,
         "amountTransaction": amount_tx,
@@ -319,6 +386,101 @@ async fn prepare_payment(claims: Claims, headers: HeaderMap, body: Bytes) -> Res
     store::insert(payment_id, reserved.clone());
 
     with_correlator((StatusCode::CREATED, Json(reserved)).into_response(), &correlator)
+}
+
+/// `POST /carrier-billing/v0.5/payments/{paymentId}/validate` — validate a
+/// two-step reservation's OTP (operationId `validatePayment`), the second step
+/// of the reserve → validate → confirm / cancel flow.
+///
+/// A `preparePayment` for a phone number ending in
+/// [`VALIDATION_REQUIRED_TAIL`] lands in `pending_validation` carrying an
+/// `authorizationId`. This endpoint clears that validation: the caller submits
+/// the `authorizationId` and the OTP `code`, and on success the reservation
+/// moves to `reserved` (`204 No Content`). Requires the
+/// `carrier-billing:payments:write` scope.
+///
+/// ## Functional cases — the store state + submitted code are the control plane
+///
+/// Keyed only on the in-memory store (no reserved-identifier plane — the
+/// `paymentId` is opaque):
+///
+/// - correct `authorizationId` + `code` → `204` (reservation → `reserved`);
+/// - wrong `authorizationId` → `400 CARRIER_BILLING.INVALID_AUTHORIZATION_ID`;
+/// - correct `authorizationId`, wrong `code` → `400 CARRIER_BILLING.INVALID_CODE`
+///   (an attempt is consumed) until the [`VALIDATION_ATTEMPTS`]-attempt budget is
+///   spent, when the last wrong code denies the reservation →
+///   `400 CARRIER_BILLING.VALIDATION_FAILED` (reservation → `denied`);
+/// - a payment that is not awaiting validation (already reserved / succeeded /
+///   denied) → `409 ALREADY_EXISTS`;
+/// - an unknown `paymentId` → `404 NOT_FOUND`.
+///
+/// The OTP `code` is deterministic from the reserved phone number — its last six
+/// digits, zero-padded ([`otp_code`]) — so a headless caller can compute what to
+/// submit (there is no real SMS; mirrors One Time Password SMS).
+async fn validate_payment(
+    claims: Claims,
+    headers: HeaderMap,
+    Path(payment_id): Path<String>,
+    body: Bytes,
+) -> Response {
+    // Optional correlation header, echoed on every response (CAMARA Commonalities).
+    let correlator = headers.get("x-correlator").cloned();
+
+    // Endpoint authorisation: the token must carry this API's write scope.
+    if let Err(e) = claims.require_scope(WRITE_SCOPE) {
+        return with_correlator(e.into_response(), &correlator);
+    }
+
+    // The body is required and must parse as a ValidatePayment.
+    let req: ValidatePayment = match serde_json::from_slice(&body) {
+        Ok(req) => req,
+        Err(_) => {
+            return invalid_argument("Request body is not a valid ValidatePayment.", &correlator)
+        }
+    };
+
+    let resp = match store::validate_pending(&payment_id, &req.authorization_id, &req.code) {
+        store::ValidateOutcome::Validated => StatusCode::NO_CONTENT.into_response(),
+        store::ValidateOutcome::InvalidAuthId => CamaraError::new(
+            StatusCode::BAD_REQUEST,
+            "CARRIER_BILLING.INVALID_AUTHORIZATION_ID",
+            "Invalid authorizationId.",
+        )
+        .into_response(),
+        store::ValidateOutcome::InvalidCode => CamaraError::new(
+            StatusCode::BAD_REQUEST,
+            "CARRIER_BILLING.INVALID_CODE",
+            "Invalid code.",
+        )
+        .into_response(),
+        store::ValidateOutcome::ValidationFailed => CamaraError::new(
+            StatusCode::BAD_REQUEST,
+            "CARRIER_BILLING.VALIDATION_FAILED",
+            "The maximum number of validation attempts has been consumed.",
+        )
+        .into_response(),
+        store::ValidateOutcome::NotPending => CamaraError::new(
+            StatusCode::CONFLICT,
+            "ALREADY_EXISTS",
+            "The payment is not awaiting validation.",
+        )
+        .into_response(),
+        store::ValidateOutcome::Unknown => {
+            CamaraError::not_found("No payment found for the provided paymentId.").into_response()
+        }
+    };
+
+    with_correlator(resp, &correlator)
+}
+
+/// The OTP `code` CamaraSim "sends" for a pending-validation reservation: the
+/// resolved phone number's last six digits, zero-padded to six. Deterministic so
+/// a headless caller can compute what to submit to `validatePayment` (there is
+/// no real SMS; mirrors One Time Password SMS). E.g. `+123456789888` → `789888`.
+fn otp_code(phone: &str) -> String {
+    let digits: String = phone.chars().filter(char::is_ascii_digit).collect();
+    let start = digits.len().saturating_sub(6);
+    format!("{:0>6}", &digits[start..])
 }
 
 /// Build the echoed `amountTransaction` JSON for a resolved `phone`: the charge
@@ -1152,6 +1314,235 @@ mod tests {
         assert_eq!(
             headers.get("x-correlator").and_then(|v| v.to_str().ok()),
             Some("corr-prep-err")
+        );
+    }
+
+    // --- validatePayment (POST /payments/{paymentId}/validate) -------------
+
+    #[test]
+    fn otp_code_is_the_last_six_digits_zero_padded() {
+        assert_eq!(otp_code("+123456789888"), "789888");
+        assert_eq!(otp_code("+12888"), "012888"); // fewer than six digits → left-padded
+    }
+
+    /// POST a JSON body to `/payments/{paymentId}/validate`.
+    async fn post_validate(
+        token: Option<&str>,
+        payment_id: &str,
+        body: &str,
+        correlator: Option<&str>,
+    ) -> (StatusCode, HeaderMap, Value) {
+        let mut builder = Request::builder()
+            .method("POST")
+            .uri(format!("/carrier-billing/v0.5/payments/{payment_id}/validate"))
+            .header("host", HOST)
+            .header("content-type", "application/json");
+        if let Some(t) = token {
+            builder = builder.header("authorization", format!("Bearer {t}"));
+        }
+        if let Some(c) = correlator {
+            builder = builder.header("x-correlator", c);
+        }
+        let response = app()
+            .oneshot(builder.body(Body::from(body.to_string())).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let headers = response.headers().clone();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, headers, json)
+    }
+
+    /// A ValidatePayment request body.
+    fn validate_body(auth_id: &str, code: &str) -> String {
+        format!(r#"{{"authorizationId":"{auth_id}","code":"{code}"}}"#)
+    }
+
+    /// Reserve a payment for a `…888` phone number so it lands in
+    /// `pending_validation`, returning its `(paymentId, authorizationId)`.
+    async fn prepare_pending(phone: &str) -> (String, String) {
+        let (status, _, body) = prepare_ok_token(&payment_body(phone, 9.99)).await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(body["paymentStatus"], "pending_validation");
+        assert_eq!(body["validationInfo"]["action"], "validate");
+        let id = body["paymentId"].as_str().unwrap().to_string();
+        let auth = body["validationInfo"]["authorizationId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        (id, auth)
+    }
+
+    #[tokio::test]
+    async fn prepare_with_validation_tail_lands_in_pending_validation() {
+        let (status, _, body) = prepare_ok_token(&payment_body("+123456789888", 9.99)).await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(body["paymentStatus"], "pending_validation");
+        assert!(body["paymentDate"].is_null());
+        // The reservation carries a `validate`-action validationInfo with an id.
+        assert_eq!(body["validationInfo"]["action"], "validate");
+        assert!(body["validationInfo"]["authorizationId"]
+            .as_str()
+            .is_some_and(|s| !s.is_empty()));
+    }
+
+    #[tokio::test]
+    async fn validate_correct_code_moves_reservation_to_reserved() {
+        let (id, auth) = prepare_pending("+123456789888").await;
+        let write = mint_token(WRITE_SCOPE).await;
+        let (status, _, _) =
+            post_validate(Some(&write), &id, &validate_body(&auth, "789888"), None).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        // The reservation is now `reserved` and no longer carries validationInfo.
+        let read = mint_token(READ_SCOPE).await;
+        let (status, _, fetched) = get_payment(Some(&read), &id, None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(fetched["paymentStatus"], "reserved");
+        assert!(fetched["validationInfo"].is_null());
+    }
+
+    #[tokio::test]
+    async fn validate_wrong_authorization_id_is_rejected() {
+        let (id, _auth) = prepare_pending("+123456789888").await;
+        let write = mint_token(WRITE_SCOPE).await;
+        let (status, _, body) =
+            post_validate(Some(&write), &id, &validate_body("not-the-id", "789888"), None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "CARRIER_BILLING.INVALID_AUTHORIZATION_ID");
+    }
+
+    #[tokio::test]
+    async fn validate_wrong_code_is_invalid_then_fails_after_budget() {
+        let (id, auth) = prepare_pending("+123456789888").await;
+        let write = mint_token(WRITE_SCOPE).await;
+
+        // Two wrong attempts (budget 3) → INVALID_CODE each.
+        for _ in 0..2 {
+            let (status, _, body) =
+                post_validate(Some(&write), &id, &validate_body(&auth, "000000"), None).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(body["code"], "CARRIER_BILLING.INVALID_CODE");
+        }
+        // Third wrong attempt spends the budget → VALIDATION_FAILED, denied.
+        let (status, _, body) =
+            post_validate(Some(&write), &id, &validate_body(&auth, "000000"), None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "CARRIER_BILLING.VALIDATION_FAILED");
+
+        // The reservation is now `denied`.
+        let read = mint_token(READ_SCOPE).await;
+        let (_, _, fetched) = get_payment(Some(&read), &id, None).await;
+        assert_eq!(fetched["paymentStatus"], "denied");
+
+        // A correct code after denial no longer validates — nothing is pending.
+        let (status, _, body) =
+            post_validate(Some(&write), &id, &validate_body(&auth, "789888"), None).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["code"], "ALREADY_EXISTS");
+    }
+
+    #[tokio::test]
+    async fn validate_a_payment_not_awaiting_validation_is_conflict() {
+        // A plain reservation (no `…888` tail) is `reserved`, not pending.
+        let (status, _, reserved) = prepare_ok_token(&payment_body("+123456789012", 9.99)).await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(reserved["paymentStatus"], "reserved");
+        let id = reserved["paymentId"].as_str().unwrap().to_string();
+
+        let write = mint_token(WRITE_SCOPE).await;
+        let (status, _, body) =
+            post_validate(Some(&write), &id, &validate_body("anything", "789012"), None).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["code"], "ALREADY_EXISTS");
+    }
+
+    #[tokio::test]
+    async fn validate_already_validated_payment_is_conflict() {
+        let (id, auth) = prepare_pending("+123456789888").await;
+        let write = mint_token(WRITE_SCOPE).await;
+        let (status, _, _) =
+            post_validate(Some(&write), &id, &validate_body(&auth, "789888"), None).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        // A second validate on the now-`reserved` payment → 409.
+        let (status, _, body) =
+            post_validate(Some(&write), &id, &validate_body(&auth, "789888"), None).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["code"], "ALREADY_EXISTS");
+    }
+
+    #[tokio::test]
+    async fn validate_unknown_payment_is_not_found() {
+        let write = mint_token(WRITE_SCOPE).await;
+        let (status, _, body) = post_validate(
+            Some(&write),
+            "11111111-1111-4111-8111-111111111111",
+            &validate_body("x", "000000"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn validate_without_the_write_scope_is_forbidden() {
+        let (id, auth) = prepare_pending("+123456789888").await;
+        // A create-scoped token (used to prepare) cannot validate.
+        let create_only = mint_token(CREATE_SCOPE).await;
+        let (status, _, body) =
+            post_validate(Some(&create_only), &id, &validate_body(&auth, "789888"), None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["code"], "PERMISSION_DENIED");
+    }
+
+    #[tokio::test]
+    async fn validate_without_a_token_is_unauthenticated() {
+        let (status, _, body) = post_validate(
+            None,
+            "11111111-1111-4111-8111-111111111111",
+            &validate_body("x", "000000"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["code"], "UNAUTHENTICATED");
+    }
+
+    #[tokio::test]
+    async fn validate_echoes_x_correlator_on_success_and_error() {
+        let (id, auth) = prepare_pending("+123456789888").await;
+        let write = mint_token(WRITE_SCOPE).await;
+
+        // Error case first (wrong id), so the pending validation survives for the
+        // success case below.
+        let (status, headers, _) = post_validate(
+            Some(&write),
+            &id,
+            &validate_body("wrong", "789888"),
+            Some("corr-val-err"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-val-err")
+        );
+
+        let (status, headers, _) = post_validate(
+            Some(&write),
+            &id,
+            &validate_body(&auth, "789888"),
+            Some("corr-val-ok"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-val-ok")
         );
     }
 }

@@ -15,9 +15,11 @@
 //!
 //! One submodule per major version (docs/DESIGN.md §5, §9). So far:
 //! - [`v0_5`] — mounted at `/carrier-billing/v0.5`. `POST /payments`
-//!   (`createPayment`, the one-step charge) and `GET /payments/{paymentId}`
-//!   (`retrievePayment`, read-back) so far; the list / prepare / validate /
-//!   confirm / cancel operations are later slices.
+//!   (`createPayment`, the one-step charge), `GET /payments/{paymentId}`
+//!   (`retrievePayment`, read-back), `GET /payments` (`retrievePayments`, list),
+//!   `POST /payments/prepare` (`preparePayment`, reserve), and
+//!   `POST /payments/{paymentId}/validate` (`validatePayment`, OTP validation)
+//!   so far; the two-step confirm / cancel operations are later slices.
 //!
 //! Reading a payment back makes Carrier Billing **stateful**, so a shared
 //! in-memory [`store`] holds created payments keyed by `paymentId`.
