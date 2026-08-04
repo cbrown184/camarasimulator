@@ -178,6 +178,12 @@ async fn catalog() -> Json<Value> {
                 "version": "v0.2",
                 "base_path": "/connected-network-type/v0.2",
                 "spec_url": "/connected-network-type/v0.2/openapi.yaml",
+            },
+            {
+                "name": "connectivity-insights",
+                "version": "v0.6",
+                "base_path": "/connectivity-insights/v0.6",
+                "spec_url": "/connectivity-insights/v0.6/openapi.yaml",
             }
         ],
         "authorization_servers": [{
@@ -322,6 +328,10 @@ mod tests {
             && a["version"] == "v0.2"
             && a["base_path"] == "/customer-insights/v0.2"
             && a["spec_url"] == "/customer-insights/v0.2/openapi.yaml"));
+        assert!(apis.iter().any(|a| a["name"] == "connectivity-insights"
+            && a["version"] == "v0.6"
+            && a["base_path"] == "/connectivity-insights/v0.6"
+            && a["spec_url"] == "/connectivity-insights/v0.6/openapi.yaml"));
         assert!(apis.iter().any(|a| a["name"] == "connected-network-type"
             && a["version"] == "v0.2"
             && a["base_path"] == "/connected-network-type/v0.2"

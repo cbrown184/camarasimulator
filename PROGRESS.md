@@ -691,6 +691,33 @@ carries only phoneNumber). Only the base `POST /retrieve` is modelled; the
 API's separate event-subscription surface is out of scope. `x-correlator`
 echoed on every response. **This completes Connected Network Type v0.2.**
 
+**Phase 5 (other CAMARA APIs) — Connectivity Insights v0.6** is now live, a new
+stateless, non-spatial, device-keyed API mounted at its real published version
+`/connectivity-insights/v0.6` (CAMARA 0.6.0, release r3.2 — the latest published
+Fall25 version). `POST /check-network-quality` (scope
+`connectivity-insights:check`, operationId `checkNetworkQuality`) answers whether
+the network can meet an application's quality requirements for a device —
+per-KPI *policy-fulfilment* verdicts (`packetDelayBudget` /
+`targetMinDownstreamRate` / `targetMinUpstreamRate` / `packetlossErrorRate` /
+`jitter` → `"meets the application requirements"` / `"unable to meet…"`) plus
+coarse `additionalKPIs` (`signalStrength` / `connectivityType`), never raw
+measurements or a location. Device-object identifier resolution mirrors Connected
+Network Type / Simple Edge Discovery (submitted `device` id, else token subject);
+faithful to 0.6.0 there is **no** `UNNECESSARY_IDENTIFIER` (a device on a line
+token is simply used), and no device + a non-line subject → 422
+`MISSING_IDENTIFIER`. Required `applicationProfileId` is validated as a UUID but
+not resolved against a profile store (a documented cut — the sim has no
+Application Profiles store); required `applicationServer` needs ≥1 address;
+optional `applicationServerPorts` are range-checked (`0..=65535`, else 400
+`OUT_OF_RANGE`) and `monitoringTimeStamp` lightly validated. Two control planes
+(DESIGN §7): the identifier's reserved error suffix → canonical CAMARA error;
+else the identifier's trailing three digits' low five bits form an *unmet mask*
+(one bit per KPI, in the fixed order above) — `…000` → all KPIs met (a healthy
+default, `excellent` / `5G-SA`), `…031` → all unmet (`no signal` / `3G`) — with
+`additionalKPIs` degrading coherently with the count met. `device` echoed only
+for a phoneNumber request. No new dependency. `x-correlator` echoed on every
+response.
+
 ## In progress (claimed this pass)
 
 _None._  <!-- agent: put the claimed item + run timestamp here, clear it when done -->
@@ -1048,6 +1075,26 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     (RFC 3339 UTC), `null` for `UNKNOWN`. `device` echoed only for a phoneNumber
     request. No new dep. The event-subscription surface is out of scope.
     **Completes Connected Network Type v0.2.**
+- [x] Connectivity Insights v0.6 (`/connectivity-insights/v0.6`; CAMARA 0.6.0,
+  release r3.2; stateless, non-spatial, device-keyed network-quality insight):
+  - [x] `POST /check-network-quality` (`connectivity-insights:check`,
+    `checkNetworkQuality`) — per-KPI policy-fulfilment verdicts
+    (`packetDelayBudget`/`targetMinDownstreamRate`/`targetMinUpstreamRate`/
+    `packetlossErrorRate`/`jitter` → `meets`/`unable to meet…`) + coarse
+    `additionalKPIs` (`signalStrength`/`connectivityType`), never raw
+    measurements. Device-object identifier resolution (phoneNumber → NAI → IPv4
+    publicAddress → ipv6Address, else token subject); 0.6.0 has **no**
+    `UNNECESSARY_IDENTIFIER`, so a device on a line token is simply used; no
+    device + non-line subject → 422 `MISSING_IDENTIFIER`. Required
+    `applicationProfileId` (UUID; not resolved against a profile store — a cut)
+    and `applicationServer` (≥1 addr); optional `applicationServerPorts`
+    (0..=65535, else 400 OUT_OF_RANGE) / `monitoringTimeStamp`. Control planes
+    (DESIGN §7): identifier reserved-error suffix → canonical CAMARA error; else
+    the identifier's trailing three digits' low five bits are an *unmet mask*
+    (one bit per KPI; `…000` → all met, healthy default → excellent/5G-SA;
+    `…031` → all unmet → no signal/3G), and `additionalKPIs` degrade coherently
+    with the count met. `device` echoed only for a phoneNumber request. No new
+    dep. **Completes Connectivity Insights v0.6.**
 - [ ] Other CAMARA APIs as capacity allows
 
 ## Cross-cutting (do alongside the item that needs it)
@@ -1065,6 +1112,34 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 ## Scan journal
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
+
+- 2026-08-04 22:45Z — Phase 5 (other CAMARA APIs): **Connectivity Insights v0.6**
+  — new stateless, non-spatial, device-keyed network-quality API, **completes the
+  API in one pass** (single endpoint). Verified the authoritative CAMARA
+  ConnectivityInsights spec at tag **r3.2** via WebFetch (`info.version` "0.6.0",
+  base `/connectivity-insights/v0.6`, `POST /check-network-quality` =
+  `checkNetworkQuality`, scope `connectivity-insights:check`, request
+  `NetworkQualityInsightRequest {applicationProfileId(uuid,req), device?,
+  applicationServer(req), applicationServerPorts?, monitoringTimeStamp?}`, 200 →
+  `NetworkQualityInsightResponse` {five PolicyFulfilmentConfidence KPIs +
+  additionalKPIs(signalStrength/connectivityType) + device?}, errors
+  400(INVALID_ARGUMENT/OUT_OF_RANGE)/401/403(PERMISSION_DENIED/INVALID_TOKEN_
+  CONTEXT)/404(NOT_FOUND/IDENTIFIER_NOT_FOUND)/422(SERVICE_NOT_APPLICABLE/
+  MISSING_IDENTIFIER)/429). New `src/apis/connectivity_insights/{,v0_6}.rs` +
+  vendored/annotated `specs/connectivity-insights/v0.6/openapi.yaml`; wired into
+  apis/openapi/main catalog. Device-object identifier resolution mirrors Connected
+  Network Type; **no** UNNECESSARY_IDENTIFIER in 0.6.0 (device on a line token is
+  used); no device + non-line subject → 422 MISSING_IDENTIFIER. applicationProfileId
+  UUID-validated but not resolved against a profile store (documented cut — no
+  Application Profiles store); applicationServer needs ≥1 addr; ports range-checked
+  (0..=65535 → else 400 OUT_OF_RANGE); monitoringTimeStamp lightly validated. Two
+  control planes (DESIGN §7): reserved suffix → canonical error; else the tail's
+  low five bits are an unmet-mask over the five KPIs (`…000` → all met →
+  excellent/5G-SA; `…031` → all unmet → no signal/3G), additionalKPIs degrade
+  coherently with the count met. Device echoed only for phoneNumber requests. No
+  new dependency (reuses serde/serde_json/axum). 27 new tests; `cargo test` 872
+  passed (was 845); `cargo build --release` clean, no warnings.
+  — binary: 2,046,280 bytes (~2.0M)
 
 - 2026-08-04 21:45Z — Phase 5 (other CAMARA APIs): **Connected Network Type v0.2**
   — new stateless, non-spatial, device-keyed radio-access API, **completes the API

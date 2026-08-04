@@ -30,6 +30,7 @@
 //! - **Simple Edge Discovery v2** — `/simple-edge-discovery/v2/…`.
 //! - **Customer Insights v0.2** — `/customer-insights/v0.2/…`.
 //! - **Connected Network Type v0.2** — `/connected-network-type/v0.2/…`.
+//! - **Connectivity Insights v0.6** — `/connectivity-insights/v0.6/…`.
 //!
 //! Plus [`openapi`], which serves each mounted API's vendored OpenAPI spec at
 //! `/{api}/v{n}/openapi.yaml` (docs/DESIGN.md §9).
@@ -38,6 +39,7 @@ pub mod blockchain_public_address;
 pub mod call_forwarding_signal;
 pub mod carrier_billing;
 pub mod connected_network_type;
+pub mod connectivity_insights;
 pub mod customer_insights;
 pub mod device_identifier;
 pub mod device_swap;
@@ -89,5 +91,6 @@ pub fn routes() -> Router {
         .merge(simple_edge_discovery::routes())
         .merge(customer_insights::routes())
         .merge(connected_network_type::routes())
+        .merge(connectivity_insights::routes())
         .merge(openapi::routes())
 }
