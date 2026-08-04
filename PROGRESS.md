@@ -669,6 +669,28 @@ different value on each scale). `scoringType` is required (missing/unknown → 4
 chars. No new dependency. `x-correlator` echoed on every response. **This
 completes Customer Insights v0.2.**
 
+**Phase 5 (other CAMARA APIs) — Connected Network Type v0.2** is now live, a new
+stateless, non-spatial, device-keyed radio-access API mounted at its real
+published version `/connected-network-type/v0.2` (CAMARA 0.2.0, release r1.2 —
+the latest published, like Simple Edge Discovery / KYC Match). `POST /retrieve`
+(scope `connected-network-type:read`, operationId `getConnectedNetworkType`)
+answers which mobile technology a device is attached to —
+`{ connectedNetworkType: 2G|3G|4G|5G|UNKNOWN, lastStatusTime, device? }`, never
+its location. Device-object identifier resolution + the CAMARA two-legged /
+three-legged rule (mirrors Simple Edge Discovery): a submitted `device` on a
+three-legged **line** token (E.164 `sub`) → 422 `UNNECESSARY_IDENTIFIER`; no
+`device` + a non-line subject → 422 `MISSING_IDENTIFIER`; an empty `device`
+object → 400 `INVALID_ARGUMENT`. Two control planes (DESIGN §7): the
+identifier's reserved error suffix → canonical CAMARA error; else its trailing
+three digits index a fixed newest-first table (`digits % 5` over
+`[5G,4G,3G,2G,UNKNOWN]`; `…000`/no digits → `5G`), so the reported technology is
+a genuine second plane. `lastStatusTime` is the current instant (RFC 3339 UTC,
+self-contained formatter, no new dep) — `null` for an `UNKNOWN` attachment. The
+`device` is echoed only for a phoneNumber-keyed request (CAMARA `DeviceResponse`
+carries only phoneNumber). Only the base `POST /retrieve` is modelled; the
+API's separate event-subscription surface is out of scope. `x-correlator`
+echoed on every response. **This completes Connected Network Type v0.2.**
+
 ## In progress (claimed this pass)
 
 _None._  <!-- agent: put the claimed item + run timestamp here, clear it when done -->
@@ -1012,6 +1034,20 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     is a genuine second plane. `scoringType` required (missing/unknown → 400
     `INVALID_ARGUMENT`); `idDocument` non-empty ≤ 30 chars. No new dep.
     **Completes Customer Insights v0.2.**
+- [x] Connected Network Type v0.2 (`/connected-network-type/v0.2`; CAMARA 0.2.0,
+  release r1.2; stateless, non-spatial, device-keyed radio-access API):
+  - [x] `POST /retrieve` (`connected-network-type:read`, `getConnectedNetworkType`)
+    — `{ connectedNetworkType: 2G|3G|4G|5G|UNKNOWN, lastStatusTime, device? }`.
+    Device-object identifier resolution + the two-legged/three-legged rule
+    (mirrors Simple Edge Discovery): submitted `device` on a line token → 422
+    `UNNECESSARY_IDENTIFIER`; no `device` + non-line subject → 422
+    `MISSING_IDENTIFIER`; empty `device` → 400 `INVALID_ARGUMENT`. Two control
+    planes (DESIGN §7): identifier reserved-error suffix → canonical CAMARA
+    error; else trailing three digits index `[5G,4G,3G,2G,UNKNOWN]` (`% 5`;
+    `…000`/no digits → `5G` — type is a 2nd plane). `lastStatusTime` = now
+    (RFC 3339 UTC), `null` for `UNKNOWN`. `device` echoed only for a phoneNumber
+    request. No new dep. The event-subscription surface is out of scope.
+    **Completes Connected Network Type v0.2.**
 - [ ] Other CAMARA APIs as capacity allows
 
 ## Cross-cutting (do alongside the item that needs it)
@@ -1029,6 +1065,26 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 ## Scan journal
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
+
+- 2026-08-04 21:45Z — Phase 5 (other CAMARA APIs): **Connected Network Type v0.2**
+  — new stateless, non-spatial, device-keyed radio-access API, **completes the API
+  in one pass** (single endpoint). Verified the authoritative CAMARA
+  ConnectedNetworkType spec at tag **r1.2** via WebFetch (`info.version` "0.2.0",
+  base `/connected-network-type/v0.2`, `POST /retrieve` = `getConnectedNetworkType`,
+  scope `connected-network-type:read`, request `{device?}`, 200 →
+  `{connectedNetworkType: 2G|3G|4G|5G|UNKNOWN, lastStatusTime(nullable), device?}`,
+  errors 400/401/403/404/422 (MISSING/UNNECESSARY/UNSUPPORTED_IDENTIFIER)/429).
+  New `src/apis/connected_network_type/{,v0_2}.rs` + vendored/annotated
+  `specs/connected-network-type/v0.2/openapi.yaml`; wired into apis/openapi/main
+  catalog. Device-object identifier resolution + two-legged/three-legged rule
+  mirror Simple Edge Discovery (device on line token → 422 UNNECESSARY_IDENTIFIER;
+  no device + non-line subject → 422 MISSING_IDENTIFIER; empty device → 400). Two
+  control planes (DESIGN §7): reserved suffix → canonical error; else trailing
+  digits index `[5G,4G,3G,2G,UNKNOWN]` (`% 5`, `…000`→5G — type is a 2nd plane);
+  `lastStatusTime` now/`null` for UNKNOWN (self-contained RFC 3339 formatter, no
+  new dep). Device echoed only for phoneNumber requests. Subscription surface out
+  of scope. 21 new tests; `cargo test` 845 passed; `cargo build --release` ok.
+  — binary: 2,006,072 bytes (~1.9M)
 
 - 2026-08-04 20:45Z — Phase 5 (other CAMARA APIs): **Customer Insights v0.2** —
   new stateless, non-spatial, phone-number-keyed risk/trust-scoring API,

@@ -1,0 +1,322 @@
+# CamaraSim — Connected Network Type, API version v0.2 (CAMARA 0.2.0).
+#
+# Vendored from the CAMARA Connected Network Type API (connected-network-type
+# 0.2.0, meta-release r1.2 — the latest published version) and annotated with
+# CamaraSim's parameter-driven functional cases (docs/DESIGN.md §7, §9). Backed
+# by `src/apis/connected_network_type/v0_2.rs`; spec and code must not drift.
+#
+# Mounted under its real published name/version (mirroring the KYC Match v0.3 /
+# Device Identifier v0.3 / Simple Edge Discovery decisions — DESIGN §9).
+#
+# Serves `POST /retrieve`. The API's separate event-subscription surface is not
+# modelled.
+openapi: 3.0.3
+info:
+  title: Connected Network Type
+  description: |
+    Returns which mobile communication technology (`2G`/`3G`/`4G`/`5G`, or
+    `UNKNOWN`) a device is currently connected to — a coarse radio-access signal,
+    never the device's location.
+
+    This is the CamaraSim reference double for CAMARA Connected Network Type
+    0.2.0. The device can be identified either by the `device` object in the
+    request body (two-legged / CIBA) or by the identity a three-legged access
+    token authenticated (in which case `device` is omitted). The endpoint
+    requires the `connected-network-type:read` scope.
+
+    ## Identifier resolution (two-legged vs three-legged)
+
+    The `device` object is only meaningful in two-legged auth. In a three-legged
+    token the device is already identified by the token subject:
+
+    - `device` carries an identifier **and** the token subject is itself an
+      E.164 line (a device-authenticated three-legged token) →
+      `422 UNNECESSARY_IDENTIFIER`.
+    - `device` carries an identifier, subject not a line → that identifier is
+      used (two-legged). Precedence: `phoneNumber` → `networkAccessIdentifier` →
+      the IPv4 `publicAddress` → `ipv6Address`.
+    - `device` absent, subject is an E.164 line → the subject is the identifier
+      (three-legged).
+    - `device` absent **and** the subject is not a line → the device cannot be
+      identified → `422 MISSING_IDENTIFIER`.
+    - `device` present but carrying **no** identifier (`minProperties: 1`
+      violated) → `400 INVALID_ARGUMENT`.
+
+    ## Functional cases — the input is the control plane (docs/DESIGN.md §7)
+
+    Once the identifier is resolved, the answer is deterministic from it:
+
+    - **Reserved error suffix** — if the identifier's trailing three digits name
+      a reserved CAMARA status, the endpoint answers with that canonical CAMARA
+      error instead of a result (shared convention — see the referenced
+      `errors.yaml`): `…400`, `…401`, `…403`, `…404`, `…409`, `…422`, `…429`,
+      `…500`, `…503`.
+    - **Connected network type** — otherwise the identifier's trailing three
+      digits index a fixed newest-first table (`digits % 5` over
+      `[5G, 4G, 3G, 2G, UNKNOWN]`; `…000` / no digits → the first entry, `5G`),
+      so the reported technology is a genuine control plane (the same input
+      always returns the same type). The happy-path default is a modern `5G`
+      attachment.
+
+    `lastStatusTime` is the current instant (the simulator always treats status
+    as fresh) — except for an `UNKNOWN` attachment, where there is no known
+    status time and the field is `null`.
+
+    The response echoes the device back only when the identifier is a
+    `phoneNumber` (the CAMARA `DeviceResponse` carries only `phoneNumber`); for an
+    IP-/NAI-keyed request the `device` field is omitted.
+
+    Examples: `+123456789000` → `5G` (index 0); `+123456789002` → `3G`
+    (`2 % 5 == 2`); `+123456789004` → `UNKNOWN` with `lastStatusTime: null`;
+    `+123456789404` → `404 NOT_FOUND`.
+  version: "0.2.0"
+  license:
+    name: Apache-2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0.html
+
+servers:
+  - url: "{apiRoot}/connected-network-type/v0.2"
+    variables:
+      apiRoot:
+        default: http://localhost:8080
+        description: API root, e.g. the CamaraSim base URL.
+
+paths:
+  /retrieve:
+    post:
+      operationId: getConnectedNetworkType
+      summary: Get the connected network type
+      description: |
+        Returns the mobile communication technology the device is currently
+        connected to. Supply a `device`, or omit it to use the device identified
+        by a three-legged access token.
+
+        See the API description for the identifier-resolution rules and the
+        parameter-driven functional cases.
+      security:
+        - openId:
+            - connected-network-type:read
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ConnectedNetworkTypeRequest"
+      responses:
+        "200":
+          description: The device's connected network type.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConnectedNetworkTypeResponse"
+              examples:
+                phoneKeyed5G:
+                  summary: Phone-number-keyed request on 5G (device echoed)
+                  value:
+                    connectedNetworkType: 5G
+                    lastStatusTime: "2024-01-01T14:27:08Z"
+                    device:
+                      phoneNumber: "+123456789000"
+                ipKeyed3G:
+                  summary: IP-keyed request on 3G (no device echo)
+                  value:
+                    connectedNetworkType: 3G
+                    lastStatusTime: "2024-01-01T14:27:08Z"
+                unknown:
+                  summary: Unknown attachment (null status time)
+                  value:
+                    connectedNetworkType: UNKNOWN
+                    lastStatusTime: null
+        "400":
+          $ref: "../../shared/errors.yaml#/components/responses/InvalidArgument"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "409":
+          $ref: "../../shared/errors.yaml#/components/responses/Conflict"
+        "422":
+          description: |
+            422 — unprocessable. CamaraSim returns `MISSING_IDENTIFIER` when the
+            device cannot be identified (no `device` and a non-line subject),
+            `UNNECESSARY_IDENTIFIER` when a `device` is submitted on a
+            three-legged device token, or the reserved shared
+            `SERVICE_NOT_APPLICABLE` for the `…422` suffix.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "../../shared/errors.yaml#/components/schemas/CamaraError"
+              examples:
+                missingIdentifier:
+                  summary: The device cannot be identified
+                  value:
+                    status: 422
+                    code: MISSING_IDENTIFIER
+                    message: The device cannot be identified.
+                unnecessaryIdentifier:
+                  summary: The device is already identified by the token
+                  value:
+                    status: 422
+                    code: UNNECESSARY_IDENTIFIER
+                    message: The device is already identified by the access token.
+                serviceNotApplicable:
+                  summary: Reserved `…422` suffix
+                  value:
+                    status: 422
+                    code: SERVICE_NOT_APPLICABLE
+                    message: The service is not available for the provided identifier.
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          The connected network type is selected from the identifier (the first
+          present device identifier, else the access token subject) whose trailing
+          three digits drive the case (docs/DESIGN.md §7). Reserved error suffixes
+          come from the shared convention in errors.yaml. Note: canonical
+          Connected Network Type 0.2.0 declares 400/401/403/404/422/429; CamaraSim
+          exposes the full shared error set so every reserved case is reachable
+          (409/500/503 are CamaraSim extensions). CamaraSim does not model the
+          422 UNSUPPORTED_IDENTIFIER / 404 IDENTIFIER_NOT_FOUND sub-cases beyond
+          the shared reserved-suffix convention.
+        cases:
+          - input: identifier ending in a reserved error suffix (e.g. …404)
+            result: the canonical CAMARA error for that status
+          - input: "identifier ending in …000 (or no trailing digits)"
+            result: "200 — connectedNetworkType 5G (index 0), fresh lastStatusTime"
+          - input: "any other identifier"
+            result: "200 — type at index (trailing three digits % 5) of [5G,4G,3G,2G,UNKNOWN]"
+          - input: "identifier selecting UNKNOWN (…004, …009, …)"
+            result: "200 — connectedNetworkType UNKNOWN, lastStatusTime null"
+          - input: phoneNumber-keyed request
+            result: "200 with the device echoed (`device.phoneNumber`)"
+          - input: IP-/NAI-keyed request
+            result: "200 with no `device` field"
+          - input: "`device` present but carrying no identifier"
+            result: "400 INVALID_ARGUMENT"
+          - input: "`device` submitted on a three-legged line token"
+            result: "422 UNNECESSARY_IDENTIFIER"
+          - input: no `device` and a non-line token subject
+            result: "422 MISSING_IDENTIFIER"
+
+components:
+  securitySchemes:
+    openId:
+      $ref: "../../auth/openapi.yaml#/components/securitySchemes/camaraOAuth"
+
+  parameters:
+    XCorrelator:
+      name: x-correlator
+      in: header
+      required: false
+      description: Correlation id for the request, echoed back on the response.
+      schema:
+        type: string
+
+  headers:
+    XCorrelator:
+      description: The `x-correlator` from the request, echoed if one was sent.
+      required: false
+      schema:
+        type: string
+
+  schemas:
+    ConnectedNetworkTypeRequest:
+      type: object
+      description: Request the connected network type for a device.
+      properties:
+        device:
+          $ref: "#/components/schemas/Device"
+
+    Device:
+      type: object
+      description: >-
+        Identifies the device. At least one identifier must be present. Optional
+        at the request level: omit `device` to use the device identified by a
+        three-legged access token. CamaraSim keys its functional cases off the
+        first present identifier, in the order phoneNumber →
+        networkAccessIdentifier → ipv4Address.publicAddress → ipv6Address.
+      minProperties: 1
+      properties:
+        phoneNumber:
+          type: string
+          description: A phone number in E.164 format (starting with `+`).
+          pattern: '^\+[1-9][0-9]{4,14}$'
+          example: "+123456789000"
+        networkAccessIdentifier:
+          type: string
+          description: A network access identifier assigned by the operator.
+          example: "user012@example.com"
+        ipv4Address:
+          $ref: "#/components/schemas/DeviceIpv4Addr"
+        ipv6Address:
+          type: string
+          description: The device's IPv6 address.
+          example: "2001:db8::11"
+
+    DeviceIpv4Addr:
+      type: object
+      description: >-
+        The device's IPv4 address information. CamaraSim reads `publicAddress` as
+        the identifier; `privateAddress`/`publicPort` are accepted for fidelity.
+      properties:
+        publicAddress:
+          type: string
+          example: "203.0.113.12"
+        privateAddress:
+          type: string
+          example: "192.0.2.25"
+        publicPort:
+          type: integer
+          format: int32
+          minimum: 0
+          maximum: 65535
+          example: 59765
+
+    DeviceResponse:
+      type: object
+      description: >-
+        The device echoed back on the response. Present only for a
+        phone-number-keyed request (this schema carries only `phoneNumber`).
+      properties:
+        phoneNumber:
+          type: string
+          pattern: '^\+[1-9][0-9]{4,14}$'
+          example: "+123456789000"
+
+    ConnectedNetworkTypeResponse:
+      type: object
+      description: The device's current connected network type.
+      required:
+        - lastStatusTime
+        - connectedNetworkType
+      properties:
+        connectedNetworkType:
+          type: string
+          description: The mobile communication technology the device is connected to.
+          enum: [2G, 3G, 4G, 5G, UNKNOWN]
+          example: 5G
+        lastStatusTime:
+          type: string
+          format: date-time
+          nullable: true
+          description: >-
+            When the network type was last determined (RFC 3339, UTC). CamaraSim
+            returns the current instant for a known attachment and `null` for an
+            `UNKNOWN` one.
+          example: "2024-01-01T14:27:08Z"
+        device:
+          $ref: "#/components/schemas/DeviceResponse"
