@@ -47,6 +47,14 @@ pub const EVENT_TYPE_PAYMENT_COMPLETED: &str =
 pub const EVENT_TYPE_PAYMENT_RESERVED: &str =
     "org.camaraproject.carrier-billing.v0.payment-reserved";
 
+/// The CloudEvent `type` for a payment awaiting OTP validation (CAMARA
+/// carrier-billing v0). Fired by the two-step `preparePayment` when a reservation
+/// lands in `pending_validation` (the amount is neither charged nor reserved until
+/// the OTP is validated), so — like `payment-reserved` — the event carries no
+/// `paymentDate`.
+pub const EVENT_TYPE_PAYMENT_PENDING_VALIDATION: &str =
+    "org.camaraproject.carrier-billing.v0.payment-pending-validation";
+
 /// The CloudEvent `source` — a uri-reference identifying the simulator's Carrier
 /// Billing provider context (CloudEvents requires `id` to be unique in `source`).
 pub const SOURCE: &str = "//camarasimulator/carrier-billing";
@@ -98,6 +106,37 @@ pub fn payment_reserved_event(
         "id": event_id,
         "source": SOURCE,
         "type": EVENT_TYPE_PAYMENT_RESERVED,
+        "specversion": "1.0",
+        "datacontenttype": "application/json",
+        "time": time,
+        "data": {
+            "paymentId": payment_id,
+            "status": "succeeded",
+            "description": description,
+        },
+    })
+}
+
+/// Build the `payment-pending-validation` CloudEvent (CloudEvents 1.0 envelope).
+///
+/// Pure and deterministic (the caller supplies `event_id` and the RFC 3339
+/// `time`), mirroring [`payment_reserved_event`]. The `data` payload is the CAMARA
+/// `BasicEvent` for a payment awaiting validation — `status` is always `succeeded`
+/// here (the reservation was accepted into `pending_validation`), with the
+/// required `description`. Nothing is charged or reserved yet, so — like
+/// `payment-reserved`, and unlike `payment-completed` — there is no `paymentDate`
+/// field, and (per the CAMARA schema) no `validationInfo` in the notification (the
+/// `authorizationId` is delivered only in the synchronous `preparePayment` body).
+pub fn payment_pending_validation_event(
+    event_id: String,
+    time: String,
+    payment_id: &str,
+    description: &str,
+) -> Value {
+    json!({
+        "id": event_id,
+        "source": SOURCE,
+        "type": EVENT_TYPE_PAYMENT_PENDING_VALIDATION,
         "specversion": "1.0",
         "datacontenttype": "application/json",
         "time": time,
@@ -249,6 +288,29 @@ mod tests {
         );
         // A reservation charges nothing → no paymentDate (unlike payment-completed).
         assert!(e["data"].get("paymentDate").is_none(), "no paymentDate: {e}");
+    }
+
+    #[test]
+    fn pending_validation_event_has_the_camara_cloudevent_shape_without_a_payment_date() {
+        let e = payment_pending_validation_event(
+            "evt-pv".to_string(),
+            "2024-01-01T00:00:00Z".to_string(),
+            "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+            "The payment is pending validation.",
+        );
+        assert_eq!(e["id"], "evt-pv");
+        assert_eq!(e["source"], SOURCE);
+        assert_eq!(e["type"], EVENT_TYPE_PAYMENT_PENDING_VALIDATION);
+        assert_eq!(e["specversion"], "1.0");
+        assert_eq!(e["datacontenttype"], "application/json");
+        assert_eq!(e["time"], "2024-01-01T00:00:00Z");
+        assert_eq!(e["data"]["paymentId"], "3fa85f64-5717-4562-b3fc-2c963f66afa6");
+        assert_eq!(e["data"]["status"], "succeeded");
+        assert_eq!(e["data"]["description"], "The payment is pending validation.");
+        // Nothing charged/reserved yet → no paymentDate; the notification also
+        // carries no validationInfo (that is only in the synchronous body).
+        assert!(e["data"].get("paymentDate").is_none(), "no paymentDate: {e}");
+        assert!(e["data"].get("validationInfo").is_none(), "no validationInfo: {e}");
     }
 
     #[test]

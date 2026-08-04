@@ -436,11 +436,16 @@ two-step `preparePayment` that lands in the `reserved` state delivers a
 `payment-reserved` CloudEvent (`data.status: succeeded`, `paymentId`,
 `description`; no `paymentDate` — nothing is charged) to its `sink`, over the
 same fire-and-forget raw-TCP transport with the same ACCESSTOKEN `sinkCredential`
-bearer handling. A `…888` reservation lands in `pending_validation` and fires no
-`payment-reserved` (that is the separate `payment-pending-validation` event). The
-remaining two-step terminal events (`payment-completed` on confirm,
-`payment-cancelled`, `payment-denied`, `payment-pending-validation`) are the
-remaining slice.
+bearer handling. **`preparePayment` → `payment-pending-validation`** is now in
+place too: a `…888` reservation that lands in `pending_validation` delivers a
+`payment-pending-validation` CloudEvent (`data.status: succeeded`, no
+`paymentDate` and — per the CAMARA schema — no `validationInfo`) to its `sink`,
+over the same fire-and-forget raw-TCP transport with the same ACCESSTOKEN
+`sinkCredential` bearer handling; it is mutually exclusive with
+`payment-reserved`. The remaining two-step terminal events (`payment-completed`
+on confirm, `payment-cancelled`, `payment-denied`) are the remaining slice —
+each needs the `sink`/credential persisted from `preparePayment` (the
+confirm/cancel bodies carry no `sink`).
 
 ## In progress (claimed this pass)
 
@@ -581,8 +586,18 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
       HTTP-client dep; ACCESSTOKEN `sinkCredential` bearer applied,
       PLAIN/REFRESHTOKEN cut; a `…888` pending_validation reservation fires no
       payment-reserved — that is the separate payment-pending-validation event)
+    - [x] `payment-pending-validation` on `preparePayment` — a `…888`
+      reservation → `pending_validation` delivers a `payment-pending-validation`
+      CloudEvent to the request `sink` (fire-and-forget over raw TCP, no
+      HTTP-client dep; ACCESSTOKEN `sinkCredential` bearer applied,
+      PLAIN/REFRESHTOKEN cut). Mutually exclusive with `payment-reserved`; per the
+      CAMARA schema the event carries only paymentId/status/description (no
+      paymentDate, no validationInfo).
     - [ ] remaining two-step terminal events (`payment-completed` on confirm,
-      `payment-cancelled`, `payment-denied`, `payment-pending-validation`)
+      `payment-cancelled`, `payment-denied`) — each needs the `sink`/credential
+      persisted from `preparePayment` (a side-store keyed by `paymentId`,
+      mirroring QoD's credential side-store) since the confirm/cancel bodies
+      carry no `sink`.
 - [ ] Other CAMARA APIs as capacity allows
 
 ## Cross-cutting (do alongside the item that needs it)
@@ -600,6 +615,25 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 ## Scan journal
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
+
+- 2026-08-04 — Phase 5 (payments): **Carrier Billing v0.5** — **`preparePayment`
+  → `payment-pending-validation` notification**. Verified the real CAMARA
+  CarrierBilling r3.2 event: `payment-pending-validation` `data` =
+  paymentId/status/description only (**no** paymentDate, **no** validationInfo).
+  Added `payment_pending_validation_event` builder +
+  `EVENT_TYPE_PAYMENT_PENDING_VALIDATION` to `notifications.rs` (reuses the
+  fire-and-forget `spawn_delivery` + `sink_authorization`; **no new dep**), wired
+  into `prepare_payment`'s `…888` pending_validation branch (delivers before the
+  `insert_pending` move). A `…888` reservation now fires
+  `payment-pending-validation` instead of nothing (previously a documented cut) —
+  mutually exclusive with `payment-reserved`. Spec: `CloudEvent.type` enum + `data`
+  oneOf now include `payment-pending-validation`; new
+  `EventPaymentPendingValidation` schema; refreshed `preparePayment` scenarios +
+  the API-description charging-notifications note. 534 tests green (was 532; +2 net:
+  +1 unit [pending-validation event shape, no paymentDate/validationInfo]; the old
+  "fires no payment-reserved" integration test was rewritten into 2 [payment-
+  pending-validation received & sink not echoed & not payment-reserved; ACCESSTOKEN
+  sinkCredential → Bearer header & secret not echoed]). — binary: 1638640 B (+3928 B)
 
 - 2026-08-04 — Phase 5 (payments): **Carrier Billing v0.5** — **`preparePayment`
   → `payment-reserved` notification**. Verified the real CAMARA CarrierBilling

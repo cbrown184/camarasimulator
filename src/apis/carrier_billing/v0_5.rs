@@ -145,6 +145,12 @@ const PAYMENT_COMPLETED_DESCRIPTION: &str = "The payment has been completed succ
 /// `data` (fired by `preparePayment` when a reservation is created).
 const PAYMENT_RESERVED_DESCRIPTION: &str = "The payment has been reserved successfully.";
 
+/// The `description` carried by the `payment-pending-validation` charging
+/// notification's `data` (fired by `preparePayment` when a `…888` reservation
+/// lands in `pending_validation`, awaiting OTP validation).
+const PAYMENT_PENDING_VALIDATION_DESCRIPTION: &str =
+    "The payment is pending validation before it can be reserved.";
+
 /// Routes for Carrier Billing v0.5, mounted at their canonical URLs.
 pub fn routes() -> Router {
     Router::new()
@@ -445,6 +451,29 @@ async fn prepare_payment(claims: Claims, headers: HeaderMap, body: Bytes) -> Res
             },
         });
         store::insert(payment_id.clone(), pending.clone());
+
+        // Charging notification: when the caller supplied a `sink`, deliver a
+        // `payment-pending-validation` CloudEvent for this reservation now awaiting
+        // OTP validation. Delivery is fire-and-forget and off the request path
+        // (mirroring the `payment-reserved` path), so a slow or unreachable sink
+        // never delays this `201`. An ACCESSTOKEN `sinkCredential` yields a bearer
+        // `Authorization` header on the callback. (This reservation lands in
+        // `pending_validation`, not `reserved`, so it fires *no* `payment-reserved`
+        // — the two are mutually exclusive.)
+        if let Some(sink) = &req.sink {
+            let auth = req
+                .sink_credential
+                .as_ref()
+                .and_then(notifications::sink_authorization);
+            let event = notifications::payment_pending_validation_event(
+                mint_uuid(),
+                now.clone(),
+                &payment_id,
+                PAYMENT_PENDING_VALIDATION_DESCRIPTION,
+            );
+            notifications::spawn_delivery(sink.clone(), event, auth);
+        }
+
         store::insert_pending(payment_id, validation);
         return with_correlator(
             (StatusCode::CREATED, Json(pending)).into_response(),
@@ -2395,15 +2424,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_pending_validation_reservation_fires_no_payment_reserved_event() {
+    async fn a_pending_validation_reservation_fires_a_payment_pending_validation_event() {
+        use tokio::io::AsyncReadExt;
         use tokio::net::TcpListener;
 
-        // A loopback receiver that must never be POSTed to: a …888 tail lands in
-        // `pending_validation`, not `reserved`, so no payment-reserved is fired
-        // (payment-pending-validation is a separate event, a documented cut).
+        // A loopback receiver stands in for the merchant's `sink`. A …888 tail
+        // lands in `pending_validation` (not `reserved`), so it fires the separate
+        // `payment-pending-validation` event — never `payment-reserved`.
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let sink = format!("http://{addr}/cb-reserved-none");
+        let sink = format!("http://{addr}/cb-pending");
 
         let token = mint_token(CREATE_SCOPE).await;
         let body = format!(
@@ -2412,16 +2442,81 @@ mod tests {
         let (status, _, reserved) = post_prepare(Some(&token), &body, None).await;
         assert_eq!(status, StatusCode::CREATED);
         assert_eq!(reserved["paymentStatus"], "pending_validation");
+        let payment_id = reserved["paymentId"].as_str().unwrap().to_string();
+        assert!(reserved.get("sink").is_none(), "sink not echoed");
 
-        // No payment-reserved callback should arrive: a short accept() times out.
-        let accepted = tokio::time::timeout(
-            std::time::Duration::from_millis(300),
-            listener.accept(),
-        )
-        .await;
+        // Receive the fire-and-forget notification the handler spawned.
+        let (mut sock, _) = listener.accept().await.unwrap();
+        let mut buf = Vec::new();
+        sock.read_to_end(&mut buf).await.unwrap();
+        let raw = String::from_utf8(buf).unwrap();
+        let (head, event_body) = raw.split_once("\r\n\r\n").expect("headers then body");
         assert!(
-            accepted.is_err(),
-            "no payment-reserved for a pending_validation reservation"
+            head.starts_with("POST /cb-pending HTTP/1.1\r\n"),
+            "request line: {head}"
+        );
+        assert!(head.contains("Content-Type: application/cloudevents+json"));
+        assert!(!head.contains("Authorization:"), "unauthenticated: {head}");
+
+        let event: Value = serde_json::from_str(event_body).expect("body is JSON");
+        assert_eq!(
+            event["type"],
+            "org.camaraproject.carrier-billing.v0.payment-pending-validation"
+        );
+        // It is emphatically NOT the payment-reserved event.
+        assert_ne!(
+            event["type"],
+            "org.camaraproject.carrier-billing.v0.payment-reserved"
+        );
+        assert_eq!(event["source"], "//camarasimulator/carrier-billing");
+        assert_eq!(event["specversion"], "1.0");
+        assert_eq!(event["datacontenttype"], "application/json");
+        assert!(event["id"].is_string() && event["time"].is_string());
+        assert_eq!(event["data"]["paymentId"], json!(payment_id));
+        assert_eq!(event["data"]["status"], "succeeded");
+        assert!(event["data"]["description"].is_string());
+        // Nothing charged/reserved yet → no paymentDate; and the notification
+        // carries no validationInfo (that is only in the synchronous body).
+        assert!(
+            event["data"].get("paymentDate").is_none(),
+            "pending-validation event carries no paymentDate: {event}"
+        );
+        assert!(
+            event["data"].get("validationInfo").is_none(),
+            "pending-validation event carries no validationInfo: {event}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_sink_credential_authenticates_the_pending_validation_notification() {
+        use tokio::io::AsyncReadExt;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let sink = format!("http://{addr}/cb-pending-auth");
+
+        // A …888 reservation carrying a sink AND an ACCESSTOKEN sinkCredential.
+        let token = mint_token(CREATE_SCOPE).await;
+        let body = format!(
+            r#"{{"amountTransaction":{{"phoneNumber":"+123456789888","paymentAmount":{{"chargingInformation":{{"amount":1.0,"currency":"EUR","description":"x"}}}},"referenceCode":"ref-001"}},"sink":"{sink}","sinkCredential":{{"credentialType":"ACCESSTOKEN","accessToken":"cb-pending-secret","accessTokenType":"bearer"}}}}"#
+        );
+        let (status, _, reserved) = post_prepare(Some(&token), &body, None).await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(reserved["paymentStatus"], "pending_validation");
+        // The credential is a secret: it must never appear in the payment body.
+        assert!(reserved.get("sinkCredential").is_none(), "secret not echoed");
+        assert!(!reserved.to_string().contains("cb-pending-secret"));
+
+        // The notification carries the RFC 6750 bearer header.
+        let (mut sock, _) = listener.accept().await.unwrap();
+        let mut buf = Vec::new();
+        sock.read_to_end(&mut buf).await.unwrap();
+        let raw = String::from_utf8(buf).unwrap();
+        let (head, _) = raw.split_once("\r\n\r\n").expect("headers then body");
+        assert!(
+            head.contains("Authorization: Bearer cb-pending-secret\r\n"),
+            "authorization header present: {head}"
         );
     }
 }
