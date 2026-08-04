@@ -191,9 +191,14 @@ info:
       bearer) recorded at `preparePayment` is stashed in an in-memory side-store
       keyed by `paymentId` and taken single-use when the reservation is charged
       (so exactly one terminal event fires; the secret is never echoed by a
-      `retrievePayment`). The remaining two-step terminal events
-      (`payment-cancelled` on cancel, `payment-denied`) are not yet delivered
-      (later slices).
+      `retrievePayment`). A successful `cancelPayment` likewise delivers the
+      terminal `payment-cancelled` CloudEvent (`data.status: failed`, no
+      `paymentDate` — nothing is charged) to the `sink` recorded at
+      `preparePayment`, taken single-use from the same side-store (so a
+      reservation fires exactly one terminal event — confirm *or* cancel). The
+      one remaining two-step terminal event (`payment-denied`, on a
+      `validatePayment` that exhausts its OTP attempts) is not yet delivered
+      (a later slice).
   version: "0.5.0"
   license:
     name: Apache-2.0
@@ -888,6 +893,18 @@ paths:
         opaque); the store state drives the outcome. The optional `phoneNumber`
         body field (CAMARA `CancelPayment` / `PhoneNumber`) is accepted but not
         applied — the reservation is addressed by its `paymentId`.
+
+        **Charging notification.** When the reservation was created by
+        `preparePayment` with a `sink`, a successful cancel delivers the terminal
+        `payment-cancelled` CloudEvent (`data.status: failed`, no `paymentDate` —
+        nothing is charged) to that sink (see the operation's `callbacks`). The
+        cancel request body carries no `sink`, so CamaraSim uses the `sink` (and
+        any `ACCESSTOKEN` `sinkCredential` bearer) recorded at `preparePayment`,
+        held in an in-memory side-store keyed by `paymentId` and taken single-use
+        (so a reservation fires exactly one terminal event — confirm *or* cancel).
+        Delivery is best-effort, fire-and-forget, over raw TCP to an `http://`
+        sink only (no TLS client), off the request path; the `PLAIN`/`REFRESHTOKEN`
+        credential types are accepted but not applied.
       security:
         - openId:
             - carrier-billing:payments:write
@@ -966,6 +983,42 @@ paths:
             result: "409 CONFLICT"
           - input: an unknown `paymentId`
             result: "404 NOT_FOUND"
+          - input: cancelling a reservation that was prepared with an `http://` `sink`
+            result: "202; a payment-cancelled CloudEvent (data.status: failed) POSTed to that sink"
+          - input: >-
+              cancelling a reservation prepared with a `sink` + ACCESSTOKEN
+              `sinkCredential`
+            result: >-
+              the callback carries Authorization: Bearer <accessToken> (the
+              credential recorded at preparePayment)
+      callbacks:
+        chargingNotifications:
+          "{$request.body#/sink}":
+            post:
+              summary: Charging status notification
+              description: |
+                Delivered by the API provider to the `sink` URL recorded on the
+                originating `preparePayment` request (the `cancelPayment` request
+                body carries no `sink`) when the reserved payment is released. The
+                body is a CloudEvents 1.0 event.
+
+                CamaraSim delivers the `payment-cancelled` event
+                (`data.status: failed`, no `paymentDate`) on a successful cancel.
+                Delivery is best-effort, fire-and-forget, and only to an `http://`
+                sink (no TLS client). When the reservation was prepared with an
+                `ACCESSTOKEN` `sinkCredential`, the request carries an
+                `Authorization: Bearer <accessToken>` header (RFC 6750); the
+                `PLAIN` and `REFRESHTOKEN` credential types are accepted but not
+                applied (a documented cut).
+              requestBody:
+                required: true
+                content:
+                  application/cloudevents+json:
+                    schema:
+                      $ref: "#/components/schemas/CloudEvent"
+              responses:
+                "204":
+                  description: Notification received.
 
   /payments/{paymentId}:
     get:
@@ -1241,12 +1294,15 @@ components:
       type: object
       description: |
         A CloudEvents 1.0 event delivered to a payment's `sink`. CamaraSim emits
-        the `payment-completed` type (one-step `createPayment` charge; `data` is
-        `EventPaymentCompleted`), the `payment-reserved` type (two-step
-        `preparePayment` reservation → `reserved`; `data` is
-        `EventPaymentReserved`), and the `payment-pending-validation` type
-        (two-step `preparePayment` reservation → `pending_validation`, the `…888`
-        tail; `data` is `EventPaymentPendingValidation`).
+        the `payment-completed` type (one-step `createPayment` charge, or a
+        two-step `confirmPayment`; `data` is `EventPaymentCompleted`), the
+        `payment-reserved` type (two-step `preparePayment` reservation →
+        `reserved`; `data` is `EventPaymentReserved`), the
+        `payment-pending-validation` type (two-step `preparePayment` reservation →
+        `pending_validation`, the `…888` tail; `data` is
+        `EventPaymentPendingValidation`), and the `payment-cancelled` type
+        (two-step `cancelPayment` releasing a `reserved` payment; `data` is
+        `EventPaymentCancelled`).
       required:
         - id
         - source
@@ -1270,6 +1326,7 @@ components:
             - "org.camaraproject.carrier-billing.v0.payment-completed"
             - "org.camaraproject.carrier-billing.v0.payment-reserved"
             - "org.camaraproject.carrier-billing.v0.payment-pending-validation"
+            - "org.camaraproject.carrier-billing.v0.payment-cancelled"
         specversion:
           type: string
           enum:
@@ -1288,6 +1345,7 @@ components:
             - $ref: "#/components/schemas/EventPaymentCompleted"
             - $ref: "#/components/schemas/EventPaymentReserved"
             - $ref: "#/components/schemas/EventPaymentPendingValidation"
+            - $ref: "#/components/schemas/EventPaymentCancelled"
       example:
         id: "83a1c8e0-2b6a-4a2e-9c1f-0a1b2c3d4e5f"
         source: "//camarasimulator/carrier-billing"
@@ -1378,6 +1436,35 @@ components:
           description: >-
             The reservation outcome. `succeeded` — the reservation was accepted
             into `pending_validation`.
+          enum:
+            - succeeded
+            - failed
+        description:
+          type: string
+          description: Human-readable explanation of the outcome.
+
+    EventPaymentCancelled:
+      type: object
+      description: >-
+        The `data` payload of a `payment-cancelled` CloudEvent (the CAMARA
+        `BasicEvent` for a cancelled payment). `cancelPayment` releases a
+        `reserved` payment without charging it, so the flow ends without a
+        charge: `status` is `failed` and — like `EventPaymentReserved` — there is
+        no `paymentDate`.
+      required:
+        - paymentId
+        - status
+        - description
+      properties:
+        paymentId:
+          type: string
+          format: uuid
+          description: The payment that was cancelled.
+        status:
+          type: string
+          description: >-
+            The charging outcome. `failed` — the reservation was released
+            without a charge.
           enum:
             - succeeded
             - failed

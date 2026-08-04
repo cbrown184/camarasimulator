@@ -450,9 +450,13 @@ a successful `confirmPayment` delivers a `payment-completed` CloudEvent
 `paymentId`-keyed in-memory side-store (`store::insert_notify`/`take_notify`,
 mirroring QoD's credential side-store) and taken **single-use** when the charge
 goes through (so exactly one terminal event fires; the secret is never echoed by
-`retrievePayment`). The remaining terminal events (`payment-cancelled` on cancel,
-`payment-denied`) are the last slice — each reuses the same notify side-store
-(the cancel body also carries no `sink`).
+`retrievePayment`). The second **two-step terminal** event is now in place too:
+a successful `cancelPayment` delivers a `payment-cancelled` CloudEvent
+(`data.status: failed`, no `paymentDate` — nothing is charged) to the `sink`
+recorded at `preparePayment`, taken **single-use** from the same notify
+side-store (so a reservation fires exactly one terminal event — confirm *or*
+cancel). The one remaining terminal event (`payment-denied`, on a
+`validatePayment` that exhausts its OTP attempts) is the last slice.
 
 ## In progress (claimed this pass)
 
@@ -606,9 +610,14 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
       `sink`/derived credential are stashed at `preparePayment` in a `paymentId`
       side-store (`store::insert_notify`/`take_notify`, mirroring QoD's credential
       side-store) since the confirm body carries no `sink`; taken single-use.
-    - [ ] remaining two-step terminal events (`payment-cancelled` on cancel,
-      `payment-denied`) — each reuses the same `preparePayment` notify side-store
-      (`store::take_notify`); the cancel body likewise carries no `sink`.
+    - [x] `payment-cancelled` on `cancelPayment` — a reservation prepared with a
+      `sink` delivers the terminal `payment-cancelled` CloudEvent
+      (`data.status: failed`, no `paymentDate`) when released. Reuses the
+      `preparePayment` notify side-store (`store::take_notify`, single-use — so a
+      reservation fires exactly one terminal event, confirm *or* cancel); the
+      cancel body carries no `sink`. ACCESSTOKEN `sinkCredential` bearer applied.
+    - [ ] `payment-denied` — on a `validatePayment` that exhausts its OTP attempts
+      (reservation → `denied`); reuses the same `preparePayment` notify side-store.
 - [ ] Other CAMARA APIs as capacity allows
 
 ## Cross-cutting (do alongside the item that needs it)
@@ -627,6 +636,24 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-04 — Phase 5 (payments): **Carrier Billing v0.5** — **`payment-cancelled`
+  on `cancelPayment`** (second two-step *terminal* charging event). Added
+  `payment_cancelled_event` builder + `EVENT_TYPE_PAYMENT_CANCELLED` to
+  `notifications.rs` (mirrors `payment_reserved_event`; reuses the fire-and-forget
+  `spawn_delivery` + the `paymentId`-keyed notify side-store; **no new dep**). A
+  `cancelPayment` that releases a reservation prepared with a `sink` now takes the
+  stashed `NotifyTarget` single-use (so a reservation fires exactly one terminal
+  event — confirm *or* cancel; a prior confirm would already have taken it) and
+  delivers a `payment-cancelled` CloudEvent. Modelled `data.status: failed` (the
+  flow ends without a charge) and **no** `paymentDate` (nothing charged, like
+  payment-reserved) — documented in code + spec. ACCESSTOKEN `sinkCredential`
+  bearer applied; secret never echoed by `retrievePayment`. Tests: +4 (cancel-with-
+  sink delivers payment-cancelled [status failed, no paymentDate]; the bearer
+  persists prepare→cancel; a sink-less reservation stashes no target; + a
+  notifications unit test on the event shape). Spec: top-level notification note +
+  `cancelPayment` description/scenarios/`callbacks` + `CloudEvent.type` enum/`data`
+  oneOf + new `EventPaymentCancelled` schema. `cargo test` 542 green (was 538);
+  `cargo build --release` ok — binary: 1650824 bytes (1.65M, +6152 B).
 - 2026-08-04 — Phase 5 (payments): **Carrier Billing v0.5** — **`payment-completed`
   on `confirmPayment`** (first two-step *terminal* charging event). Added a
   `paymentId`-keyed notify side-store to `store.rs` (`NotifyTarget{sink, auth}`,

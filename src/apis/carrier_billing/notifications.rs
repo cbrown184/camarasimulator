@@ -55,6 +55,14 @@ pub const EVENT_TYPE_PAYMENT_RESERVED: &str =
 pub const EVENT_TYPE_PAYMENT_PENDING_VALIDATION: &str =
     "org.camaraproject.carrier-billing.v0.payment-pending-validation";
 
+/// The CloudEvent `type` for a **cancelled** (released) payment (CAMARA
+/// carrier-billing v0). Fired by the two-step `cancelPayment` when a `reserved`
+/// payment is released without ever being charged, so — like `payment-reserved`
+/// — the event carries no `paymentDate`. The flow ends without a charge, so its
+/// `data.status` is `failed` (not `succeeded`).
+pub const EVENT_TYPE_PAYMENT_CANCELLED: &str =
+    "org.camaraproject.carrier-billing.v0.payment-cancelled";
+
 /// The CloudEvent `source` — a uri-reference identifying the simulator's Carrier
 /// Billing provider context (CloudEvents requires `id` to be unique in `source`).
 pub const SOURCE: &str = "//camarasimulator/carrier-billing";
@@ -143,6 +151,34 @@ pub fn payment_pending_validation_event(
         "data": {
             "paymentId": payment_id,
             "status": "succeeded",
+            "description": description,
+        },
+    })
+}
+
+/// Build the `payment-cancelled` CloudEvent (CloudEvents 1.0 envelope).
+///
+/// Pure and deterministic (the caller supplies `event_id` and the RFC 3339
+/// `time`), mirroring [`payment_reserved_event`]. The `data` payload is the CAMARA
+/// `BasicEvent` for a cancelled payment — a `cancelPayment` releases a `reserved`
+/// payment without charging it, so the flow ended without a charge: `status` is
+/// `failed` and (like `payment-reserved`) there is no `paymentDate`.
+pub fn payment_cancelled_event(
+    event_id: String,
+    time: String,
+    payment_id: &str,
+    description: &str,
+) -> Value {
+    json!({
+        "id": event_id,
+        "source": SOURCE,
+        "type": EVENT_TYPE_PAYMENT_CANCELLED,
+        "specversion": "1.0",
+        "datacontenttype": "application/json",
+        "time": time,
+        "data": {
+            "paymentId": payment_id,
+            "status": "failed",
             "description": description,
         },
     })
@@ -311,6 +347,28 @@ mod tests {
         // carries no validationInfo (that is only in the synchronous body).
         assert!(e["data"].get("paymentDate").is_none(), "no paymentDate: {e}");
         assert!(e["data"].get("validationInfo").is_none(), "no validationInfo: {e}");
+    }
+
+    #[test]
+    fn cancelled_event_has_the_camara_cloudevent_shape_with_a_failed_status_and_no_date() {
+        let e = payment_cancelled_event(
+            "evt-c".to_string(),
+            "2024-01-01T00:00:00Z".to_string(),
+            "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+            "The payment has been cancelled.",
+        );
+        assert_eq!(e["id"], "evt-c");
+        assert_eq!(e["source"], SOURCE);
+        assert_eq!(e["type"], EVENT_TYPE_PAYMENT_CANCELLED);
+        assert_eq!(e["specversion"], "1.0");
+        assert_eq!(e["datacontenttype"], "application/json");
+        assert_eq!(e["time"], "2024-01-01T00:00:00Z");
+        assert_eq!(e["data"]["paymentId"], "3fa85f64-5717-4562-b3fc-2c963f66afa6");
+        // A cancellation ends the flow without a charge → status `failed`.
+        assert_eq!(e["data"]["status"], "failed");
+        assert_eq!(e["data"]["description"], "The payment has been cancelled.");
+        // Nothing charged → no paymentDate (like payment-reserved).
+        assert!(e["data"].get("paymentDate").is_none(), "no paymentDate: {e}");
     }
 
     #[test]

@@ -151,6 +151,10 @@ const PAYMENT_RESERVED_DESCRIPTION: &str = "The payment has been reserved succes
 const PAYMENT_PENDING_VALIDATION_DESCRIPTION: &str =
     "The payment is pending validation before it can be reserved.";
 
+/// The `description` carried by the `payment-cancelled` charging notification's
+/// `data` (fired by `cancelPayment` when a `reserved` payment is released).
+const PAYMENT_CANCELLED_DESCRIPTION: &str = "The payment has been cancelled.";
+
 /// Routes for Carrier Billing v0.5, mounted at their canonical URLs.
 pub fn routes() -> Router {
     Router::new()
@@ -727,6 +731,18 @@ async fn confirm_payment(
 ///   validated — or `denied`) → `409 CONFLICT` (not cancellable);
 /// - an unknown `paymentId` → `404 NOT_FOUND`.
 ///
+/// ## Charging notification
+///
+/// When the reservation was created by `preparePayment` with a `sink`, a
+/// successful cancel delivers the terminal `payment-cancelled` CloudEvent
+/// (`data.status: failed`, no `paymentDate` — nothing was charged) to that sink.
+/// The cancel request body carries no `sink`, so CamaraSim uses the `sink` (and
+/// any `ACCESSTOKEN` `sinkCredential` bearer) recorded at `preparePayment`, taken
+/// single-use from the `paymentId`-keyed side-store (so exactly one terminal
+/// event fires per reservation — a prior confirm would already have taken it).
+/// Delivery is best-effort, fire-and-forget, over raw TCP to an `http://` sink
+/// only, off the request path.
+///
 /// **Documented cut:** the optional `phoneNumber` body field (CAMARA
 /// `CancelPayment`) is accepted but not applied — the reservation is addressed
 /// by its opaque `paymentId`, so CamaraSim does not re-check the identifier.
@@ -751,7 +767,27 @@ async fn cancel_payment(
     }
 
     let resp = match store::cancel(&payment_id) {
-        store::CancelOutcome::Cancelled => StatusCode::ACCEPTED.into_response(),
+        store::CancelOutcome::Cancelled => {
+            // Charging notification: a two-step reservation created with a `sink`
+            // delivers a terminal `payment-cancelled` CloudEvent now that the
+            // reservation has been released. The sink (and any ACCESSTOKEN
+            // credential) were stashed at `preparePayment` — this cancel request
+            // carries no `sink` — so take them single-use (exactly one terminal
+            // outcome fires; a prior confirm would already have taken the target).
+            // Delivery is fire-and-forget and off the request path, so a slow or
+            // unreachable sink never delays this `202`.
+            if let Some(target) = store::take_notify(&payment_id) {
+                let now = rfc3339_utc(now_unix_secs());
+                let event = notifications::payment_cancelled_event(
+                    mint_uuid(),
+                    now,
+                    &payment_id,
+                    PAYMENT_CANCELLED_DESCRIPTION,
+                );
+                notifications::spawn_delivery(target.sink, event, target.auth);
+            }
+            StatusCode::ACCEPTED.into_response()
+        }
         store::CancelOutcome::AlreadyCancelled => CamaraError::new(
             StatusCode::CONFLICT,
             "CARRIER_BILLING.PAYMENT_CANCELLED",
@@ -2673,6 +2709,134 @@ mod tests {
         let id = prepare_reserved("+123456789012").await;
         let write = mint_token(WRITE_SCOPE).await;
         let (status, _, _) = post_confirm(Some(&write), &id, "", None).await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert!(
+            store::take_notify(&id).is_none(),
+            "no notify target for a sink-less reservation"
+        );
+    }
+
+    // --- Cancel notifications (payment-cancelled CloudEvent, two-step) --------
+
+    #[tokio::test]
+    async fn cancelling_a_reserved_payment_with_a_sink_fires_a_payment_cancelled_cloudevent() {
+        use tokio::io::AsyncReadExt;
+        use tokio::net::TcpListener;
+
+        // A loopback receiver stands in for the merchant's `sink`.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let sink = format!("http://{addr}/cb-cancel");
+
+        // Reserve with a sink (no OTP tail → `reserved`). This fires the
+        // synchronous-flow `payment-reserved` callback first; drain it below.
+        let create = mint_token(CREATE_SCOPE).await;
+        let body = format!(
+            r#"{{"amountTransaction":{{"phoneNumber":"+123456789012","paymentAmount":{{"chargingInformation":{{"amount":9.99,"currency":"EUR","description":"A digital good"}}}},"referenceCode":"ref-001"}},"sink":"{sink}"}}"#
+        );
+        let (status, _, reserved) = post_prepare(Some(&create), &body, None).await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(reserved["paymentStatus"], "reserved");
+        let payment_id = reserved["paymentId"].as_str().unwrap().to_string();
+
+        // Drain the `payment-reserved` callback the reservation fired.
+        let (mut sock, _) = listener.accept().await.unwrap();
+        let mut buf = Vec::new();
+        sock.read_to_end(&mut buf).await.unwrap();
+        assert!(
+            String::from_utf8(buf).unwrap().contains("payment-reserved"),
+            "prepare fires the reserved event first"
+        );
+
+        // Cancel (release). The cancel body carries no `sink`, yet the terminal
+        // `payment-cancelled` CloudEvent reaches the sink stashed at prepare-time.
+        let write = mint_token(WRITE_SCOPE).await;
+        let (status, _, _) = post_cancel(Some(&write), &payment_id, "", None).await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+
+        let (mut sock, _) = listener.accept().await.unwrap();
+        let mut buf = Vec::new();
+        sock.read_to_end(&mut buf).await.unwrap();
+        let raw = String::from_utf8(buf).unwrap();
+        let (head, event_body) = raw.split_once("\r\n\r\n").expect("headers then body");
+        assert!(
+            head.starts_with("POST /cb-cancel HTTP/1.1\r\n"),
+            "request line: {head}"
+        );
+        assert!(head.contains("Content-Type: application/cloudevents+json"));
+        // No sinkCredential was supplied at prepare → no Authorization header.
+        assert!(!head.contains("Authorization:"), "unauthenticated: {head}");
+
+        let event: Value = serde_json::from_str(event_body).expect("body is JSON");
+        assert_eq!(
+            event["type"],
+            "org.camaraproject.carrier-billing.v0.payment-cancelled"
+        );
+        assert_eq!(event["source"], "//camarasimulator/carrier-billing");
+        assert_eq!(event["specversion"], "1.0");
+        assert_eq!(event["data"]["paymentId"], json!(payment_id));
+        // A cancellation ends the flow without a charge → status `failed`.
+        assert_eq!(event["data"]["status"], "failed");
+        assert!(event["data"]["description"].is_string());
+        // Nothing charged → no paymentDate (unlike payment-completed).
+        assert!(
+            event["data"].get("paymentDate").is_none(),
+            "cancel event carries no paymentDate: {event}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_cancel_notification_uses_the_credential_persisted_from_prepare() {
+        use tokio::io::AsyncReadExt;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let sink = format!("http://{addr}/cb-cancel-auth");
+
+        // Reserve with a sink AND an ACCESSTOKEN sinkCredential.
+        let create = mint_token(CREATE_SCOPE).await;
+        let body = format!(
+            r#"{{"amountTransaction":{{"phoneNumber":"+123456789012","paymentAmount":{{"chargingInformation":{{"amount":1.0,"currency":"EUR","description":"x"}}}},"referenceCode":"ref-001"}},"sink":"{sink}","sinkCredential":{{"credentialType":"ACCESSTOKEN","accessToken":"cb-cancel-secret","accessTokenType":"bearer"}}}}"#
+        );
+        let (status, _, reserved) = post_prepare(Some(&create), &body, None).await;
+        assert_eq!(status, StatusCode::CREATED);
+        let payment_id = reserved["paymentId"].as_str().unwrap().to_string();
+
+        // Drain the `payment-reserved` callback.
+        let (mut sock, _) = listener.accept().await.unwrap();
+        let mut buf = Vec::new();
+        sock.read_to_end(&mut buf).await.unwrap();
+
+        // Cancel — the cancel request carries no `sinkCredential`, yet the terminal
+        // callback must carry the bearer derived at prepare-time.
+        let write = mint_token(WRITE_SCOPE).await;
+        let (status, _, _) = post_cancel(Some(&write), &payment_id, "", None).await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+
+        let (mut sock, _) = listener.accept().await.unwrap();
+        let mut buf = Vec::new();
+        sock.read_to_end(&mut buf).await.unwrap();
+        let raw = String::from_utf8(buf).unwrap();
+        let (head, event_body) = raw.split_once("\r\n\r\n").expect("headers then body");
+        assert!(
+            head.contains("Authorization: Bearer cb-cancel-secret\r\n"),
+            "cancel callback carries the bearer persisted from prepare: {head}"
+        );
+        let event: Value = serde_json::from_str(event_body).expect("body is JSON");
+        assert_eq!(
+            event["type"],
+            "org.camaraproject.carrier-billing.v0.payment-cancelled"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_sink_less_reservation_stores_no_notify_target() {
+        // A reservation prepared without a `sink` stashes no notify target, so a
+        // later cancel releases it (202) and delivers no terminal CloudEvent.
+        let id = prepare_reserved("+123456789012").await;
+        let write = mint_token(WRITE_SCOPE).await;
+        let (status, _, _) = post_cancel(Some(&write), &id, "", None).await;
         assert_eq!(status, StatusCode::ACCEPTED);
         assert!(
             store::take_notify(&id).is_none(),
