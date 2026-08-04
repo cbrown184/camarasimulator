@@ -467,6 +467,25 @@ deny). ACCESSTOKEN `sinkCredential` bearer applied. **This completes Carrier
 Billing v0.5 charging notifications** — only TLS (`https://`) sink delivery
 remains deferred across the stateful APIs.
 
+**Phase 5 (other CAMARA APIs) — Call Forwarding Signal v0.4** has begun, a new
+stateless, non-spatial, phone-number-keyed anti-fraud API mounted at its real
+published version `/call-forwarding-signal/v0.4` (CAMARA 0.4.0, release r3.3 —
+the latest published, like KYC Match / Location Retrieval). `POST
+/unconditional-call-forwardings` is live (scope
+`call-forwarding-signal:unconditional-call-forwardings:read`, operationId
+`retrieveUnconditionalCallForwarding`): it answers whether *unconditional* call
+forwarding is active for a line — `{active: boolean}`. Faithful to CAMARA's
+two-legged/three-legged identifier rule (the `phoneNumber` body is valid only in
+two-legged auth): a submitted `phoneNumber` on a three-legged **line** token
+(E.164 `sub`) → 422 `UNNECESSARY_IDENTIFIER`; no number + a non-line subject →
+422 `MISSING_IDENTIFIER`; otherwise the identifier is the submitted number
+(two-legged) or the E.164 subject (three-legged). Two control planes (DESIGN §7):
+the identifier's reserved error suffix → canonical CAMARA error, else its
+trailing three digits' parity — **odd → `active:true`** (forwarding on), **even
+(incl. `…000`) → `active:false`** (the common case). `x-correlator` echoed on
+every response. The companion `POST /call-forwardings` (the full
+`inactive`/`unconditional`/`conditional_*` forwarding-type list) is a later slice.
+
 ## In progress (claimed this pass)
 
 _None._  <!-- agent: put the claimed item + run timestamp here, clear it when done -->
@@ -628,6 +647,18 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     - [x] `payment-denied` — on a `validatePayment` that exhausts its OTP attempts
       (reservation → `denied`); reuses the same `preparePayment` notify side-store.
       **Completes Carrier Billing v0.5 charging notifications.**
+- [~] Call Forwarding Signal v0.4 (`/call-forwarding-signal/v0.4`; CAMARA 0.4.0,
+  release r3.3; stateless, non-spatial, phone-number-keyed):
+  - [x] `POST /unconditional-call-forwardings`
+    (`call-forwarding-signal:unconditional-call-forwardings:read`,
+    `retrieveUnconditionalCallForwarding`) — `{active: boolean}`; two-legged
+    (submitted `phoneNumber`) / three-legged (E.164 `sub`) identifier rule with
+    422 `UNNECESSARY_IDENTIFIER` / `MISSING_IDENTIFIER`; identifier reserved-error
+    + trailing-digit-parity control planes (DESIGN §7).
+  - [ ] `POST /call-forwardings` (`retrieveCallForwarding`,
+    `call-forwarding-signal:call-forwardings:read`) — the forwarding-type list
+    (`inactive`/`unconditional`/`conditional_busy`/`conditional_not_reachable`/
+    `conditional_no_answer`), later slice.
 - [ ] Other CAMARA APIs as capacity allows
 
 ## Cross-cutting (do alongside the item that needs it)
@@ -646,6 +677,32 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-04 — Phase 5 (other CAMARA APIs): **Call Forwarding Signal v0.4** — new
+  stateless, non-spatial, phone-number-keyed anti-fraud API begun. Verified the
+  real CAMARA CallForwardingSignal spec at release **r3.3 → v0.4.0** (latest
+  published; `main` is `wip`): op `retrieveUnconditionalCallForwarding`, scope
+  `call-forwarding-signal:unconditional-call-forwardings:read`, body
+  `CreateCallForwardingSignal{phoneNumber?}`, 200 `UnconditionalCallForwardingSignal
+  {active:boolean}`, and the 422 identifier codes `MISSING_IDENTIFIER` /
+  `UNNECESSARY_IDENTIFIER` (phoneNumber valid only in two-legged auth). New
+  `src/apis/call_forwarding_signal/{,v0_4}.rs` mirrors Number Verification / Carrier
+  Billing (no new dep): `POST /unconditional-call-forwardings` mounted at the real
+  `/call-forwarding-signal/v0.4`. Identifier = submitted `phoneNumber` (two-legged,
+  E.164-validated) else E.164 `sub` (three-legged); a number on a line token → 422
+  `UNNECESSARY_IDENTIFIER`, no number + non-line subject → 422 `MISSING_IDENTIFIER`.
+  Control planes: reserved error suffix → canonical CAMARA error; else trailing-
+  three-digit **parity** — odd → `active:true`, even (incl. `…000`) →
+  `active:false`. `x-correlator` echoed. Wired into `apis.rs`, `openapi.rs` (served
+  at `/call-forwarding-signal/v0.4/openapi.yaml`) and the `/` catalog. Spec:
+  vendored + annotated `specs/call-forwarding-signal/v0.4/openapi.yaml` (full
+  functional-case description, `x-camarasim-scenarios`, examples, local
+  `CallForwardingError` code enum; full shared reserved-error set exposed so every
+  suffix is reachable). Tests: +15 (1 e164 unit + 14 integration: even/odd/zero
+  tail, reserved suffix, three-legged subject-keyed + reserved subject,
+  UNNECESSARY_IDENTIFIER, MISSING_IDENTIFIER, invalid/unknown-field/malformed body,
+  no-scope→403, no-token→401, x-correlator echo) + the catalog assertion. `cargo
+  test` 561 green (was 546); `cargo build --release` ok — binary: 1674536 bytes
+  (1.67M, +17336 B). `POST /call-forwardings` (forwarding-type list) is next.
 - 2026-08-04 — Phase 5 (payments): **Carrier Billing v0.5** — **`payment-denied`
   on `validatePayment`** (final two-step *terminal* charging event; **completes
   Carrier Billing v0.5 charging notifications**). Added `payment_denied_event`
