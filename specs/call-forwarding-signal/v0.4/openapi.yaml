@@ -6,8 +6,8 @@
 # parameter-driven functional cases (docs/DESIGN.md §7, §9). Backed by
 # `src/apis/call_forwarding_signal/v0_4.rs`; spec and code must not drift.
 #
-# Serves `POST /unconditional-call-forwardings`. The companion
-# `POST /call-forwardings` (the full forwarding-type list) is a later slice.
+# Serves `POST /unconditional-call-forwardings` and `POST /call-forwardings`
+# (the full forwarding-type set).
 openapi: 3.0.3
 info:
   title: Call Forwarding Signal
@@ -19,7 +19,9 @@ info:
 
     This is the CamaraSim reference double for CAMARA Call Forwarding Signal
     0.4.0. The `/unconditional-call-forwardings` endpoint requires the
-    `call-forwarding-signal:unconditional-call-forwardings:read` scope.
+    `call-forwarding-signal:unconditional-call-forwardings:read` scope; the
+    `/call-forwardings` endpoint requires the
+    `call-forwarding-signal:call-forwardings:read` scope.
 
     ## Identifier resolution — two-legged vs three-legged
 
@@ -51,6 +53,27 @@ info:
 
     Examples: `+123456789013` → `true`; `+123456789012` → `false`;
     `+123456789404` → `404 NOT_FOUND`.
+
+    ### `/call-forwardings` — the forwarding-type set
+
+    `POST /call-forwardings` (`retrieveCallForwarding`) uses the same identifier
+    resolution and reserved-error convention, but answers the wider question: the
+    **set** of forwarding types active for the line (`CallForwardingSignal`).
+    Once the identifier is resolved, the set is deterministic from its trailing
+    three digits taken as a **4-bit mask** (`digits % 16`), one bit per active
+    type:
+
+    - bit 0 (`digits` odd) → `unconditional` (lines up with the unconditional
+      endpoint — an odd tail always includes `unconditional`)
+    - bit 1 → `conditional_busy`
+    - bit 2 → `conditional_not_reachable`
+    - bit 3 → `conditional_no_answer`
+
+    A zero mask (e.g. `…000`, or no digits) → `["inactive"]` (no forwarding — the
+    common case). The set is always non-empty (`minItems: 1`) and listed in the
+    enum's canonical order. Examples: `+123456789000` → `["inactive"]`;
+    `+123456789001` → `["unconditional"]`; `+123456789012` (12 = `0b1100`) →
+    `["conditional_not_reachable","conditional_no_answer"]`.
 
     CamaraSim exposes the full shared reserved-error set here so every reserved
     suffix is reachable; canonical CAMARA 0.4.0 declares a subset
@@ -173,6 +196,111 @@ paths:
           - input: no phoneNumber and a non-line token subject
             result: "422 MISSING_IDENTIFIER"
 
+  /call-forwardings:
+    post:
+      operationId: retrieveCallForwarding
+      summary: Retrieve the set of active call forwarding types
+      description: |
+        Answers the **set** of call-forwarding types currently active for the
+        line — any of `unconditional`, `conditional_busy`,
+        `conditional_not_reachable`, `conditional_no_answer`, or `inactive` when
+        none is configured (`CallForwardingSignal`).
+
+        The line is identified by the submitted `phoneNumber` (two-legged) or by
+        the access-token subject (three-legged) — see the API description for the
+        identifier-resolution rules and the parameter-driven functional cases
+        (the trailing three digits form a 4-bit mask over the active types).
+      security:
+        - openId:
+            - call-forwarding-signal:call-forwardings:read
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateCallForwardingSignal"
+      responses:
+        "200":
+          description: The set of call forwarding types active for the line.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CallForwardingSignal"
+              examples:
+                inactive:
+                  summary: No forwarding configured (zero mask — happy path)
+                  value: ["inactive"]
+                unconditional:
+                  summary: Unconditional forwarding only (odd tail, mask bit 0)
+                  value: ["unconditional"]
+                conditionalSet:
+                  summary: A conditional set (…012 → mask 0b1100)
+                  value: ["conditional_not_reachable", "conditional_no_answer"]
+        "400":
+          $ref: "../../shared/errors.yaml#/components/responses/InvalidArgument"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "409":
+          $ref: "../../shared/errors.yaml#/components/responses/Conflict"
+        "422":
+          description: |
+            422 — unprocessable. CamaraSim returns `MISSING_IDENTIFIER` when the
+            line cannot be identified (no `phoneNumber` and a non-line subject),
+            `UNNECESSARY_IDENTIFIER` when a `phoneNumber` is submitted on a
+            three-legged line token, or the reserved shared
+            `SERVICE_NOT_APPLICABLE` for the `…422` suffix.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CallForwardingError"
+              examples:
+                missingIdentifier:
+                  summary: The line cannot be identified
+                  value:
+                    status: 422
+                    code: MISSING_IDENTIFIER
+                    message: The phone number cannot be identified.
+                unnecessaryIdentifier:
+                  summary: The number is already identified by the token
+                  value:
+                    status: 422
+                    code: UNNECESSARY_IDENTIFIER
+                    message: The phone number is already identified by the access token.
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          Result selected from the resolved line identifier (docs/DESIGN.md §7).
+          The trailing three digits form a 4-bit mask (digits % 16) over the four
+          active forwarding types; a zero mask reports ["inactive"]. Reserved
+          error suffixes come from the shared convention in errors.yaml.
+        cases:
+          - input: identifier ending in a reserved error suffix (e.g. …404)
+            result: the canonical CAMARA error for that status
+          - input: identifier with a zero mask (…000, or no digits)
+            result: '200 ["inactive"]'
+          - input: identifier with an odd tail (mask bit 0)
+            result: '200 set including "unconditional"'
+          - input: '…012 (12 = 0b1100)'
+            result: '200 ["conditional_not_reachable","conditional_no_answer"]'
+          - input: phoneNumber submitted on a three-legged line token
+            result: "422 UNNECESSARY_IDENTIFIER"
+          - input: no phoneNumber and a non-line token subject
+            result: "422 MISSING_IDENTIFIER"
+
 components:
   securitySchemes:
     openId:
@@ -219,6 +347,24 @@ components:
           description: >-
             `true` if unconditional call forwarding is active for the line,
             `false` otherwise.
+
+    CallForwardingSignal:
+      description: >-
+        The set of call-forwarding types active for the line. `inactive` means no
+        forwarding is configured; it is reported alone (never combined). The set
+        is non-empty and its entries are unique.
+      type: array
+      minItems: 1
+      uniqueItems: true
+      items:
+        type: string
+        enum:
+          - inactive
+          - unconditional
+          - conditional_busy
+          - conditional_not_reachable
+          - conditional_no_answer
+      example: ["unconditional", "conditional_busy"]
 
     CallForwardingError:
       description: >-

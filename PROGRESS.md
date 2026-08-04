@@ -483,8 +483,15 @@ two-legged auth): a submitted `phoneNumber` on a three-legged **line** token
 the identifier's reserved error suffix → canonical CAMARA error, else its
 trailing three digits' parity — **odd → `active:true`** (forwarding on), **even
 (incl. `…000`) → `active:false`** (the common case). `x-correlator` echoed on
-every response. The companion `POST /call-forwardings` (the full
-`inactive`/`unconditional`/`conditional_*` forwarding-type list) is a later slice.
+every response. The companion `POST /call-forwardings` (`retrieveCallForwarding`,
+scope `call-forwarding-signal:call-forwardings:read`) is now live too, reporting
+the CAMARA `CallForwardingSignal` — the **set** of active forwarding types
+(`inactive`/`unconditional`/`conditional_busy`/`conditional_not_reachable`/
+`conditional_no_answer`). Same identifier resolution + reserved-error convention;
+the second control plane is the identifier's trailing three digits taken as a
+4-bit mask (`digits % 16`) over the four active types (bit 0 = `unconditional`, so
+an odd tail lines up with the unconditional endpoint), zero mask → `["inactive"]`.
+**This completes Call Forwarding Signal v0.4.**
 
 ## In progress (claimed this pass)
 
@@ -647,7 +654,7 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     - [x] `payment-denied` — on a `validatePayment` that exhausts its OTP attempts
       (reservation → `denied`); reuses the same `preparePayment` notify side-store.
       **Completes Carrier Billing v0.5 charging notifications.**
-- [~] Call Forwarding Signal v0.4 (`/call-forwarding-signal/v0.4`; CAMARA 0.4.0,
+- [x] Call Forwarding Signal v0.4 (`/call-forwarding-signal/v0.4`; CAMARA 0.4.0,
   release r3.3; stateless, non-spatial, phone-number-keyed):
   - [x] `POST /unconditional-call-forwardings`
     (`call-forwarding-signal:unconditional-call-forwardings:read`,
@@ -655,10 +662,14 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     (submitted `phoneNumber`) / three-legged (E.164 `sub`) identifier rule with
     422 `UNNECESSARY_IDENTIFIER` / `MISSING_IDENTIFIER`; identifier reserved-error
     + trailing-digit-parity control planes (DESIGN §7).
-  - [ ] `POST /call-forwardings` (`retrieveCallForwarding`,
-    `call-forwarding-signal:call-forwardings:read`) — the forwarding-type list
-    (`inactive`/`unconditional`/`conditional_busy`/`conditional_not_reachable`/
-    `conditional_no_answer`), later slice.
+  - [x] `POST /call-forwardings` (`retrieveCallForwarding`,
+    `call-forwarding-signal:call-forwardings:read`) — the forwarding-type **set**
+    (`CallForwardingSignal`: `inactive`/`unconditional`/`conditional_busy`/
+    `conditional_not_reachable`/`conditional_no_answer`). Same identifier
+    resolution + reserved-error convention; second control plane — the trailing
+    three digits as a 4-bit mask (`digits % 16`) over the four active types (bit 0
+    = `unconditional`, so an odd tail lines up with the unconditional endpoint);
+    zero mask → `["inactive"]`. **Completes Call Forwarding Signal v0.4.**
 - [ ] Other CAMARA APIs as capacity allows
 
 ## Cross-cutting (do alongside the item that needs it)
@@ -677,6 +688,26 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-04 — Phase 5 (other CAMARA APIs): **Call Forwarding Signal v0.4** —
+  **`POST /call-forwardings`** (`retrieveCallForwarding`, scope
+  `call-forwarding-signal:call-forwardings:read`) added, **completing the API**.
+  Reports the CAMARA `CallForwardingSignal` — the **set** of active forwarding
+  types (`inactive`/`unconditional`/`conditional_busy`/
+  `conditional_not_reachable`/`conditional_no_answer`). Reused the existing
+  `resolve_identifier` (two-legged/three-legged, 422 `UNNECESSARY_IDENTIFIER`/
+  `MISSING_IDENTIFIER`) and reserved-error convention; new control plane — the
+  identifier's trailing three digits as a 4-bit mask (`digits % 16`) over the four
+  active types via new `forwarding_set` helper (bit 0 = `unconditional`, so an odd
+  tail lines up with the unconditional endpoint), zero mask → `["inactive"]`, set
+  always non-empty + canonically ordered. `x-correlator` echoed. No new dep. Spec:
+  vendored spec extended — `/call-forwardings` path (full description, examples,
+  `x-camarasim-scenarios`, `call-forwardings:read` security) + new
+  `CallForwardingSignal` array schema (`minItems:1`, `uniqueItems`). Tests: +12
+  (1 unit on `forwarding_set` mask/order + 11 integration: inactive/unconditional/
+  conditional-set, reserved suffix, three-legged subject-keyed, UNNECESSARY_/
+  MISSING_IDENTIFIER, invalid phone, no-scope→403, no-token→401, x-correlator).
+  `cargo test` 573 green (was 561); `cargo build --release` ok — binary: 1685664
+  bytes (1.69M, +11128 B). Call Forwarding Signal v0.4 is now complete.
 - 2026-08-04 — Phase 5 (other CAMARA APIs): **Call Forwarding Signal v0.4** — new
   stateless, non-spatial, phone-number-keyed anti-fraud API begun. Verified the
   real CAMARA CallForwardingSignal spec at release **r3.3 → v0.4.0** (latest

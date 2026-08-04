@@ -1,8 +1,10 @@
 //! Call Forwarding Signal **v0.4** (CAMARA Call Forwarding Signal 0.4.0, r3.3).
 //!
-//! One endpoint so far:
+//! Two endpoints:
 //! - `POST /call-forwarding-signal/v0.4/unconditional-call-forwardings` —
 //!   report whether *unconditional* call forwarding is active for a line.
+//! - `POST /call-forwarding-signal/v0.4/call-forwardings` — report the full set
+//!   of call-forwarding types currently active for a line.
 //!
 //! ## What it does
 //!
@@ -11,9 +13,16 @@
 //! `{ "active": true|false }`. It is a fraud signal: a hijacked line often has
 //! forwarding switched on to intercept calls and one-time passwords.
 //!
-//! The endpoint is protected: it requires a valid access token
-//! ([`crate::auth::verify::Claims`]) carrying the
-//! `call-forwarding-signal:unconditional-call-forwardings:read` scope.
+//! The companion `POST /call-forwardings` (`retrieveCallForwarding`) reports the
+//! wider picture: the **set** of forwarding types in effect for the line, drawn
+//! from `inactive` / `unconditional` / `conditional_busy` /
+//! `conditional_not_reachable` / `conditional_no_answer` (CAMARA
+//! `CallForwardingSignal`). `inactive` means no forwarding is configured.
+//!
+//! Both endpoints are protected: they require a valid access token
+//! ([`crate::auth::verify::Claims`]) carrying the endpoint's scope
+//! (`call-forwarding-signal:unconditional-call-forwardings:read` /
+//! `call-forwarding-signal:call-forwardings:read`).
 //!
 //! ## Identifier resolution (two-legged vs three-legged)
 //!
@@ -44,6 +53,30 @@
 //!
 //! Examples: `+123456789013` → `true`; `+123456789012` → `false`;
 //! `+123456789404` → `404 NOT_FOUND`.
+//!
+//! ## `POST /call-forwardings` — the forwarding-type set
+//!
+//! Same identifier resolution (two-legged / three-legged) and the same
+//! reserved-error convention. Once resolved, the *set* of active forwarding
+//! types is deterministic from the identifier's trailing three digits taken as a
+//! **4-bit mask** (`digits % 16`), one bit per active type — so every
+//! combination is reachable from the input:
+//!
+//! - bit 0 (`digits` odd) → `unconditional`
+//! - bit 1 → `conditional_busy`
+//! - bit 2 → `conditional_not_reachable`
+//! - bit 3 → `conditional_no_answer`
+//!
+//! A zero mask (mask == 0, e.g. `…000`, or no digits) → `["inactive"]` (no
+//! forwarding — the common case). The reported set is always non-empty (CAMARA
+//! `minItems: 1`) and listed in the enum's canonical order. Bit 0 lines up with
+//! the unconditional endpoint: an **odd** tail always includes `unconditional`.
+//!
+//! Examples: `+123456789000` → `["inactive"]`; `+123456789001` →
+//! `["unconditional"]`; `+123456789012` (12 = `0b1100`) →
+//! `["conditional_not_reachable","conditional_no_answer"]`;
+//! `+123456789013` (13 = `0b1101`) →
+//! `["unconditional","conditional_not_reachable","conditional_no_answer"]`.
 
 use axum::body::Bytes;
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
@@ -61,12 +94,32 @@ use crate::scenarios;
 /// (CAMARA Call Forwarding Signal 0.4.0).
 const UNCONDITIONAL_SCOPE: &str = "call-forwarding-signal:unconditional-call-forwardings:read";
 
+/// The OAuth2 scope the `POST /call-forwardings` endpoint requires
+/// (CAMARA Call Forwarding Signal 0.4.0).
+const CALL_FORWARDINGS_SCOPE: &str = "call-forwarding-signal:call-forwardings:read";
+
+/// The four *active* CAMARA forwarding types, in canonical enum order. Each maps
+/// to one bit of the identifier's `digits % 16` mask (index = bit position), so
+/// `POST /call-forwardings` reports them deterministically from the identifier.
+/// An empty selection is reported as `["inactive"]` (see [`forwarding_set`]).
+const ACTIVE_FORWARDING_TYPES: [&str; 4] = [
+    "unconditional",             // bit 0 (odd tail) — matches the unconditional endpoint
+    "conditional_busy",          // bit 1
+    "conditional_not_reachable", // bit 2
+    "conditional_no_answer",     // bit 3
+];
+
 /// Routes for Call Forwarding Signal v0.4, mounted at their canonical URLs.
 pub fn routes() -> Router {
-    Router::new().route(
-        "/call-forwarding-signal/v0.4/unconditional-call-forwardings",
-        post(unconditional_call_forwardings),
-    )
+    Router::new()
+        .route(
+            "/call-forwarding-signal/v0.4/unconditional-call-forwardings",
+            post(unconditional_call_forwardings),
+        )
+        .route(
+            "/call-forwarding-signal/v0.4/call-forwardings",
+            post(call_forwardings),
+        )
 }
 
 /// `POST /unconditional-call-forwardings` request body
@@ -116,6 +169,66 @@ async fn unconditional_call_forwardings(claims: Claims, headers: HeaderMap, body
         (StatusCode::OK, Json(json!({ "active": active }))).into_response(),
         &correlator,
     )
+}
+
+/// `POST /call-forwarding-signal/v0.4/call-forwardings` — the set of active
+/// forwarding types (CAMARA `retrieveCallForwarding`).
+async fn call_forwardings(claims: Claims, headers: HeaderMap, body: Bytes) -> Response {
+    // Optional correlation header, echoed on every response (CAMARA Commonalities).
+    let correlator = headers.get("x-correlator").cloned();
+
+    // Endpoint authorisation: the token must carry this API's scope.
+    if let Err(e) = claims.require_scope(CALL_FORWARDINGS_SCOPE) {
+        return with_correlator(e.into_response(), &correlator);
+    }
+
+    let req: CreateCallForwardingSignal = match serde_json::from_slice(&body) {
+        Ok(req) => req,
+        Err(_) => {
+            return invalid_argument(
+                "Request body is not a valid CreateCallForwardingSignal.",
+                &correlator,
+            )
+        }
+    };
+
+    // Resolve the line identifier, honouring the two-legged / three-legged rule.
+    let identifier = match resolve_identifier(&req, &claims, &correlator) {
+        Ok(id) => id,
+        Err(resp) => return resp,
+    };
+
+    // The identifier is the control plane (docs/DESIGN.md §7).
+    if let Some(err) = scenarios::reserved_error(&identifier) {
+        return with_correlator(err.into_response(), &correlator);
+    }
+
+    let signal = forwarding_set(scenarios::trailing_three_digits(&identifier));
+
+    with_correlator(
+        (StatusCode::OK, Json(json!(signal))).into_response(),
+        &correlator,
+    )
+}
+
+/// Map an identifier's trailing three digits to the set of active CAMARA
+/// forwarding types (`CallForwardingSignal`). The low four bits of `digits`
+/// (`digits % 16`) form a mask over [`ACTIVE_FORWARDING_TYPES`]; a zero mask (or
+/// no digits) reports `["inactive"]`. The result is always non-empty
+/// (CAMARA `minItems: 1`) and ordered canonically.
+fn forwarding_set(digits: Option<u16>) -> Vec<&'static str> {
+    let mask = digits.unwrap_or(0) % 16;
+    let active: Vec<&'static str> = ACTIVE_FORWARDING_TYPES
+        .iter()
+        .enumerate()
+        .filter(|(bit, _)| mask & (1 << bit) != 0)
+        .map(|(_, name)| *name)
+        .collect();
+    if active.is_empty() {
+        vec!["inactive"]
+    } else {
+        active
+    }
 }
 
 /// Resolve the line identifier from the request body and the token subject,
@@ -208,6 +321,40 @@ mod tests {
     use tower::ServiceExt; // for `oneshot`
 
     const HOST: &str = "sim.local:8080";
+
+    #[test]
+    fn forwarding_set_masks_the_active_types() {
+        // No digits / zero mask → inactive.
+        assert_eq!(forwarding_set(None), vec!["inactive"]);
+        assert_eq!(forwarding_set(Some(0)), vec!["inactive"]);
+        assert_eq!(forwarding_set(Some(16)), vec!["inactive"]); // 16 % 16 == 0
+        // bit 0 only → unconditional (odd tail).
+        assert_eq!(forwarding_set(Some(1)), vec!["unconditional"]);
+        // 12 = 0b1100 → conditional_not_reachable + conditional_no_answer.
+        assert_eq!(
+            forwarding_set(Some(12)),
+            vec!["conditional_not_reachable", "conditional_no_answer"]
+        );
+        // 13 = 0b1101 → unconditional + not_reachable + no_answer.
+        assert_eq!(
+            forwarding_set(Some(13)),
+            vec![
+                "unconditional",
+                "conditional_not_reachable",
+                "conditional_no_answer"
+            ]
+        );
+        // 15 = 0b1111 → all four, in canonical order.
+        assert_eq!(
+            forwarding_set(Some(15)),
+            vec![
+                "unconditional",
+                "conditional_busy",
+                "conditional_not_reachable",
+                "conditional_no_answer"
+            ]
+        );
+    }
 
     #[test]
     fn e164_validation_follows_the_camara_pattern() {
@@ -430,6 +577,153 @@ mod tests {
         assert_eq!(
             headers.get("x-correlator").and_then(|v| v.to_str().ok()),
             Some("corr-err")
+        );
+    }
+
+    // --- POST /call-forwardings (the forwarding-type set) ------------------
+
+    /// POST to `/call-forwardings` with an optional Bearer token and optional
+    /// `x-correlator`. Returns (status, headers, json-or-null).
+    async fn post_call_forwardings(
+        token: Option<&str>,
+        body: &str,
+        correlator: Option<&str>,
+    ) -> (StatusCode, HeaderMap, Value) {
+        let mut builder = Request::builder()
+            .method("POST")
+            .uri("/call-forwarding-signal/v0.4/call-forwardings")
+            .header("host", HOST)
+            .header("content-type", "application/json");
+        if let Some(t) = token {
+            builder = builder.header("authorization", format!("Bearer {t}"));
+        }
+        if let Some(c) = correlator {
+            builder = builder.header("x-correlator", c);
+        }
+        let response = app()
+            .oneshot(builder.body(Body::from(body.to_string())).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let headers = response.headers().clone();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, headers, json)
+    }
+
+    /// Mint a scoped (two-legged, non-line subject) token and call the endpoint.
+    async fn call_cf(body: &str) -> (StatusCode, HeaderMap, Value) {
+        let token = mint_token(CALL_FORWARDINGS_SCOPE).await;
+        post_call_forwardings(Some(&token), body, None).await
+    }
+
+    #[tokio::test]
+    async fn zero_tail_is_inactive_set() {
+        // …000 → mask 0 → ["inactive"].
+        let (status, _, body) = call_cf(r#"{"phoneNumber":"+123456789000"}"#).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, json!(["inactive"]));
+    }
+
+    #[tokio::test]
+    async fn odd_tail_includes_unconditional() {
+        // …001 → mask 1 → ["unconditional"]. Consistent with the unconditional
+        // endpoint (odd tail → unconditional active).
+        let (status, _, body) = call_cf(r#"{"phoneNumber":"+123456789001"}"#).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, json!(["unconditional"]));
+    }
+
+    #[tokio::test]
+    async fn mixed_tail_selects_a_conditional_set() {
+        // …012 (12 = 0b1100) → not_reachable + no_answer, no unconditional.
+        let (status, _, body) = call_cf(r#"{"phoneNumber":"+123456789012"}"#).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body,
+            json!(["conditional_not_reachable", "conditional_no_answer"])
+        );
+    }
+
+    #[tokio::test]
+    async fn cf_reserved_suffix_selects_a_canonical_camara_error() {
+        let (status, _, body) = call_cf(r#"{"phoneNumber":"+123456789404"}"#).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn cf_three_legged_keys_off_the_subject() {
+        // No phoneNumber; subject is an E.164 line …013 → mask 13.
+        let token = mint_token_with_client(CALL_FORWARDINGS_SCOPE, "+123456789013").await;
+        let (status, _, body) = post_call_forwardings(Some(&token), r#"{}"#, None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body,
+            json!([
+                "unconditional",
+                "conditional_not_reachable",
+                "conditional_no_answer"
+            ])
+        );
+    }
+
+    #[tokio::test]
+    async fn cf_resubmitting_the_number_on_a_line_token_is_unnecessary() {
+        let token = mint_token_with_client(CALL_FORWARDINGS_SCOPE, "+123456789012").await;
+        let (status, _, body) =
+            post_call_forwardings(Some(&token), r#"{"phoneNumber":"+123456789012"}"#, None).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["code"], "UNNECESSARY_IDENTIFIER");
+    }
+
+    #[tokio::test]
+    async fn cf_no_number_and_non_line_subject_is_missing_identifier() {
+        let (status, _, body) = call_cf(r#"{}"#).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["code"], "MISSING_IDENTIFIER");
+    }
+
+    #[tokio::test]
+    async fn cf_invalid_phone_format_is_rejected() {
+        let (status, _, body) = call_cf(r#"{"phoneNumber":"0123"}"#).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "INVALID_ARGUMENT");
+    }
+
+    #[tokio::test]
+    async fn cf_token_without_the_scope_is_forbidden() {
+        // A token carrying only the *unconditional* scope must not reach this endpoint.
+        let token = mint_token(UNCONDITIONAL_SCOPE).await;
+        let (status, _, body) =
+            post_call_forwardings(Some(&token), r#"{"phoneNumber":"+123456789012"}"#, None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["code"], "PERMISSION_DENIED");
+    }
+
+    #[tokio::test]
+    async fn cf_missing_token_is_unauthenticated() {
+        let (status, _, body) =
+            post_call_forwardings(None, r#"{"phoneNumber":"+123456789012"}"#, None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["code"], "UNAUTHENTICATED");
+    }
+
+    #[tokio::test]
+    async fn cf_x_correlator_is_echoed() {
+        let token = mint_token(CALL_FORWARDINGS_SCOPE).await;
+        let (status, headers, _) = post_call_forwardings(
+            Some(&token),
+            r#"{"phoneNumber":"+123456789001"}"#,
+            Some("corr-cf"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-cf")
         );
     }
 }
