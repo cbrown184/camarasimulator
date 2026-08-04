@@ -25,6 +25,7 @@
 //! - **KYC Fill-in v0.3** — `/kyc-fill-in/v0.3/…`.
 //! - **Home Devices QoD v0.4** — `/home-devices-qod/v0.4/…`.
 //! - **QoS Profiles v1** — `/qos-profiles/v1/…`.
+//! - **KYC Tenure v0.2** — `/kyc-tenure/v0.2/…`.
 //!
 //! Plus [`openapi`], which serves each mounted API's vendored OpenAPI spec at
 //! `/{api}/v{n}/openapi.yaml` (docs/DESIGN.md §9).
@@ -40,6 +41,7 @@ pub mod home_devices_qod;
 pub mod kyc_age_verification;
 pub mod kyc_fill_in;
 pub mod kyc_match;
+pub mod kyc_tenure;
 pub mod location_retrieval;
 pub mod location_verification;
 pub mod number_recycling;
@@ -74,5 +76,6 @@ pub fn routes() -> Router {
         .merge(kyc_fill_in::routes())
         .merge(home_devices_qod::routes())
         .merge(qos_profiles::routes())
+        .merge(kyc_tenure::routes())
         .merge(openapi::routes())
 }

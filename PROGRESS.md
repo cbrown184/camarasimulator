@@ -562,6 +562,27 @@ operations agree), else `null`. `monitoredPeriod` (10 days) is always returned. 
 self-contained RFC 3339 UTC formatter (no new dependency, mirroring SIM Swap's
 `retrieve-date`) renders the timestamp.
 
+**Phase 5 (other CAMARA APIs) — KYC Tenure v0.2** is now live, a new stateless,
+non-spatial, phone-number-keyed identity/anti-fraud API (part of Know Your
+Customer) mounted at its real published version `/kyc-tenure/v0.2` (CAMARA
+0.2.0, release r2.2; `main` is `wip`). `POST /check-tenure` (scope
+`kyc-tenure:check-tenure`, operationId `checkTenure`) establishes a level of
+trust by answering whether the current end user has held the line **since at
+least** a caller-supplied `tenureDate` — a privacy-preserving
+`{ tenureDateCheck: boolean, contractType: PAYG|PAYM|Business }`, never the
+actual tenure length. Faithful to CAMARA's two-legged/three-legged identifier
+rule (a `phoneNumber` on a line token → 422 `UNNECESSARY_IDENTIFIER`; no number
++ a non-line subject → 422 `MISSING_IDENTIFIER`). Two control planes (DESIGN
+§7): the identifier's reserved error suffix → canonical CAMARA error; else its
+trailing three digits read as **days of tenure** — `tenureDateCheck` is true iff
+the tenure started on or before `tenureDate` (`(today − tenureDate) <= digits`),
+so `tenureDate` is a genuine second plane (the same number flips true↔false as
+the date moves). `tenureDate` validated: malformed/impossible → 400
+`INVALID_ARGUMENT`; future → 400 `OUT_OF_RANGE`. `contractType` is derived
+deterministically from the same trailing digits (`digits % 3`). A self-contained
+civil-date parser (no new dependency, mirroring Number Recycling) does the date
+maths. `x-correlator` echoed on every response.
+
 ## In progress (claimed this pass)
 
 _None._  <!-- agent: put the claimed item + run timestamp here, clear it when done -->
@@ -823,6 +844,21 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     NOT_FOUND` (unlike the list, which returns `[]`); a name violating the
     `QosProfileName` schema (`^[a-zA-Z0-9_.-]+$`, len 3–256) → `400
     INVALID_ARGUMENT`. `x-correlator` echoed. **Completes QoS Profiles v1.**
+- [x] KYC Tenure v0.2 (`/kyc-tenure/v0.2`; CAMARA 0.2.0, release r2.2; stateless,
+  non-spatial, phone-number-keyed identity/anti-fraud API — part of Know Your
+  Customer):
+  - [x] `POST /check-tenure` (`kyc-tenure:check-tenure`, `checkTenure`) —
+    `{ tenureDateCheck: boolean, contractType: PAYG|PAYM|Business }`; two-legged
+    (submitted `phoneNumber`) / three-legged (E.164 `sub`) identifier rule with
+    422 `UNNECESSARY_IDENTIFIER` / `MISSING_IDENTIFIER`; two control planes
+    (DESIGN §7): identifier reserved-error suffix, and identifier trailing digits
+    (days-of-tenure) vs `tenureDate` — `tenureDateCheck` true iff the tenure
+    started on or before the date (`(today − tenureDate) <= digits`), so
+    `tenureDate` is a genuine second control plane. `tenureDate` validated:
+    malformed → 400 `INVALID_ARGUMENT`, future → 400 `OUT_OF_RANGE`.
+    `contractType` derived deterministically (`digits % 3`). Self-contained
+    civil-date parser (no new dep, mirroring Number Recycling).
+    **Completes KYC Tenure v0.2.**
 - [ ] Other CAMARA APIs as capacity allows
 
 ## Cross-cutting (do alongside the item that needs it)
@@ -841,6 +877,33 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-04 — Phase 5 (other CAMARA APIs): **KYC Tenure v0.2** — new stateless,
+  non-spatial, phone-number-keyed identity/anti-fraud API (part of Know Your
+  Customer), **completes the API in one pass** (single endpoint). Verified the
+  authoritative CAMARA Tenure r2.2 spec (`kyc-tenure` 0.2.0) via WebFetch: base
+  `/kyc-tenure/v0.2`, `POST /check-tenure` (`checkTenure`, scope
+  `kyc-tenure:check-tenure`), request `Tenure {phoneNumber?, tenureDate}`
+  (tenureDate required, `date`), 200 `TenureInfo {tenureDateCheck, contractType?
+  enum PAYG/PAYM/Business}`, errors 400 INVALID_ARGUMENT/OUT_OF_RANGE, 404, 422
+  MISSING/UNNECESSARY_IDENTIFIER. New `src/apis/kyc_tenure/{,v0_2}.rs` (**no new
+  dep**): reuses the two-legged/three-legged identifier rule (422
+  UNNECESSARY_/MISSING_IDENTIFIER) and shared reserved-error convention. Two
+  control planes (DESIGN §7): identifier reserved suffix → canonical error; else
+  trailing digits = days-of-tenure vs `tenureDate` → tenureDateCheck true iff
+  tenure started on/before the date (`(today − tenureDate) <= digits`), so
+  `tenureDate` is a real second plane. `contractType` derived (`digits % 3`).
+  tenureDate validated (malformed → 400 INVALID_ARGUMENT, future → 400
+  OUT_OF_RANGE). Self-contained civil-date parser (mirrors Number Recycling).
+  `x-correlator` echoed. Wired into `apis.rs`, `openapi.rs` (served at
+  `/kyc-tenure/v0.2/openapi.yaml`) and the `/` catalog. Spec vendored + annotated
+  (`specs/kyc-tenure/v0.2/openapi.yaml`) with functional cases,
+  `x-camarasim-scenarios`, examples, full `Tenure`/`TenureInfo` schemas. Tests:
+  +23 (units: date round-trip, parse validation, contractType, E.164; integration:
+  tenure verdict recent/old/boundary, tenureDate second-plane, contractType,
+  reserved suffix, three-legged subject/reserved/unnecessary, missing-identifier,
+  future/malformed/missing tenureDate, bad phone, unknown field, malformed JSON,
+  no-scope→403, no-token→401, x-correlator echo). `cargo test` 743 green;
+  `cargo build --release` ok. — binary: 1.9M (1892592 B)
 - 2026-08-04 — Phase 5: **QoS Profiles v1 completed** — added the single-profile
   lookup `GET /qos-profiles/{name}` (`getQosProfile`, scope `qos-profiles:read`),
   mounted at `/qos-profiles/v1/qos-profiles/:name` (axum `matchit`; distinct first

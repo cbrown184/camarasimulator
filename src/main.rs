@@ -148,6 +148,12 @@ async fn catalog() -> Json<Value> {
                 "version": "v1",
                 "base_path": "/qos-profiles/v1",
                 "spec_url": "/qos-profiles/v1/openapi.yaml",
+            },
+            {
+                "name": "kyc-tenure",
+                "version": "v0.2",
+                "base_path": "/kyc-tenure/v0.2",
+                "spec_url": "/kyc-tenure/v0.2/openapi.yaml",
             }
         ],
         "authorization_servers": [{
@@ -276,6 +282,10 @@ mod tests {
             && a["version"] == "v1"
             && a["base_path"] == "/qos-profiles/v1"
             && a["spec_url"] == "/qos-profiles/v1/openapi.yaml"));
+        assert!(apis.iter().any(|a| a["name"] == "kyc-tenure"
+            && a["version"] == "v0.2"
+            && a["base_path"] == "/kyc-tenure/v0.2"
+            && a["spec_url"] == "/kyc-tenure/v0.2/openapi.yaml"));
         assert_eq!(
             body["authorization_servers"][0]["openid_configuration"],
             "/.well-known/openid-configuration"
