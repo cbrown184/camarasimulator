@@ -63,6 +63,14 @@ pub const EVENT_TYPE_PAYMENT_PENDING_VALIDATION: &str =
 pub const EVENT_TYPE_PAYMENT_CANCELLED: &str =
     "org.camaraproject.carrier-billing.v0.payment-cancelled";
 
+/// The CloudEvent `type` for a **denied** payment (CAMARA carrier-billing v0).
+/// Fired by the two-step `validatePayment` when a `pending_validation`
+/// reservation exhausts its OTP-attempt budget and is denied without ever being
+/// charged, so — like `payment-cancelled` — the flow ends without a charge: the
+/// event's `data.status` is `failed` and there is no `paymentDate`.
+pub const EVENT_TYPE_PAYMENT_DENIED: &str =
+    "org.camaraproject.carrier-billing.v0.payment-denied";
+
 /// The CloudEvent `source` — a uri-reference identifying the simulator's Carrier
 /// Billing provider context (CloudEvents requires `id` to be unique in `source`).
 pub const SOURCE: &str = "//camarasimulator/carrier-billing";
@@ -173,6 +181,35 @@ pub fn payment_cancelled_event(
         "id": event_id,
         "source": SOURCE,
         "type": EVENT_TYPE_PAYMENT_CANCELLED,
+        "specversion": "1.0",
+        "datacontenttype": "application/json",
+        "time": time,
+        "data": {
+            "paymentId": payment_id,
+            "status": "failed",
+            "description": description,
+        },
+    })
+}
+
+/// Build the `payment-denied` CloudEvent (CloudEvents 1.0 envelope).
+///
+/// Pure and deterministic (the caller supplies `event_id` and the RFC 3339
+/// `time`), mirroring [`payment_cancelled_event`]. The `data` payload is the
+/// CAMARA `BasicEvent` for a denied payment — a `validatePayment` that exhausts
+/// its OTP-attempt budget denies a `pending_validation` reservation without ever
+/// charging it, so the flow ended without a charge: `status` is `failed` and
+/// (like `payment-cancelled`) there is no `paymentDate`.
+pub fn payment_denied_event(
+    event_id: String,
+    time: String,
+    payment_id: &str,
+    description: &str,
+) -> Value {
+    json!({
+        "id": event_id,
+        "source": SOURCE,
+        "type": EVENT_TYPE_PAYMENT_DENIED,
         "specversion": "1.0",
         "datacontenttype": "application/json",
         "time": time,
@@ -368,6 +405,28 @@ mod tests {
         assert_eq!(e["data"]["status"], "failed");
         assert_eq!(e["data"]["description"], "The payment has been cancelled.");
         // Nothing charged → no paymentDate (like payment-reserved).
+        assert!(e["data"].get("paymentDate").is_none(), "no paymentDate: {e}");
+    }
+
+    #[test]
+    fn denied_event_has_the_camara_cloudevent_shape_with_a_failed_status_and_no_date() {
+        let e = payment_denied_event(
+            "evt-d".to_string(),
+            "2024-01-01T00:00:00Z".to_string(),
+            "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+            "The payment has been denied.",
+        );
+        assert_eq!(e["id"], "evt-d");
+        assert_eq!(e["source"], SOURCE);
+        assert_eq!(e["type"], EVENT_TYPE_PAYMENT_DENIED);
+        assert_eq!(e["specversion"], "1.0");
+        assert_eq!(e["datacontenttype"], "application/json");
+        assert_eq!(e["time"], "2024-01-01T00:00:00Z");
+        assert_eq!(e["data"]["paymentId"], "3fa85f64-5717-4562-b3fc-2c963f66afa6");
+        // A denied validation ends the flow without a charge → status `failed`.
+        assert_eq!(e["data"]["status"], "failed");
+        assert_eq!(e["data"]["description"], "The payment has been denied.");
+        // Nothing charged → no paymentDate (like payment-cancelled).
         assert!(e["data"].get("paymentDate").is_none(), "no paymentDate: {e}");
     }
 

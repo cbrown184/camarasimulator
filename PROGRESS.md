@@ -455,8 +455,17 @@ a successful `cancelPayment` delivers a `payment-cancelled` CloudEvent
 (`data.status: failed`, no `paymentDate` — nothing is charged) to the `sink`
 recorded at `preparePayment`, taken **single-use** from the same notify
 side-store (so a reservation fires exactly one terminal event — confirm *or*
-cancel). The one remaining terminal event (`payment-denied`, on a
-`validatePayment` that exhausts its OTP attempts) is the last slice.
+cancel).
+
+The final terminal event, **`payment-denied`**, is now in place too: a
+`validatePayment` that exhausts its OTP-attempt budget denies the reservation
+(→ `denied`) and delivers a `payment-denied` CloudEvent (`data.status: failed`,
+no `paymentDate` — nothing is charged) to the `sink` recorded at
+`preparePayment`, taken **single-use** from the same notify side-store (so a
+`…888` reservation fires exactly one terminal event — confirm, cancel, *or*
+deny). ACCESSTOKEN `sinkCredential` bearer applied. **This completes Carrier
+Billing v0.5 charging notifications** — only TLS (`https://`) sink delivery
+remains deferred across the stateful APIs.
 
 ## In progress (claimed this pass)
 
@@ -616,8 +625,9 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
       `preparePayment` notify side-store (`store::take_notify`, single-use — so a
       reservation fires exactly one terminal event, confirm *or* cancel); the
       cancel body carries no `sink`. ACCESSTOKEN `sinkCredential` bearer applied.
-    - [ ] `payment-denied` — on a `validatePayment` that exhausts its OTP attempts
+    - [x] `payment-denied` — on a `validatePayment` that exhausts its OTP attempts
       (reservation → `denied`); reuses the same `preparePayment` notify side-store.
+      **Completes Carrier Billing v0.5 charging notifications.**
 - [ ] Other CAMARA APIs as capacity allows
 
 ## Cross-cutting (do alongside the item that needs it)
@@ -636,6 +646,25 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-04 — Phase 5 (payments): **Carrier Billing v0.5** — **`payment-denied`
+  on `validatePayment`** (final two-step *terminal* charging event; **completes
+  Carrier Billing v0.5 charging notifications**). Added `payment_denied_event`
+  builder + `EVENT_TYPE_PAYMENT_DENIED` to `notifications.rs` (mirrors
+  `payment_cancelled_event`; reuses the fire-and-forget `spawn_delivery` + the
+  `paymentId`-keyed notify side-store stashed at `preparePayment`; **no new dep**).
+  A `validatePayment` whose `ValidationFailed` outcome denies a `…888` reservation
+  prepared with a `sink` now takes the stashed `NotifyTarget` single-use (so a
+  reservation fires exactly one terminal event — confirm, cancel, *or* deny) and
+  delivers a `payment-denied` CloudEvent. Modelled `data.status: failed` (the flow
+  ends without a charge) and **no** `paymentDate` (nothing charged, like
+  payment-cancelled) — documented in code + spec. ACCESSTOKEN `sinkCredential`
+  bearer applied; secret never echoed by `retrievePayment`. Tests: +4 (deny-with-
+  sink delivers payment-denied [status failed, no paymentDate]; the bearer persists
+  prepare→deny; a sink-less reservation stashes no target; + a notifications unit
+  test on the event shape). Spec: top-level notification note + `validatePayment`
+  description/scenarios/`callbacks` + `CloudEvent.type` enum/`data` oneOf + new
+  `EventPaymentDenied` schema. `cargo test` 546 green (was 542); `cargo build
+  --release` ok — binary: 1657200 bytes (1.58M, +6376 B).
 - 2026-08-04 — Phase 5 (payments): **Carrier Billing v0.5** — **`payment-cancelled`
   on `cancelPayment`** (second two-step *terminal* charging event). Added
   `payment_cancelled_event` builder + `EVENT_TYPE_PAYMENT_CANCELLED` to

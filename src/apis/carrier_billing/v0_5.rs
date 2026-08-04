@@ -155,6 +155,11 @@ const PAYMENT_PENDING_VALIDATION_DESCRIPTION: &str =
 /// `data` (fired by `cancelPayment` when a `reserved` payment is released).
 const PAYMENT_CANCELLED_DESCRIPTION: &str = "The payment has been cancelled.";
 
+/// The `description` carried by the `payment-denied` charging notification's
+/// `data` (fired by `validatePayment` when a `pending_validation` reservation
+/// exhausts its OTP-attempt budget and is denied).
+const PAYMENT_DENIED_DESCRIPTION: &str = "The payment has been denied.";
+
 /// Routes for Carrier Billing v0.5, mounted at their canonical URLs.
 pub fn routes() -> Router {
     Router::new()
@@ -596,12 +601,33 @@ async fn validate_payment(
             "Invalid code.",
         )
         .into_response(),
-        store::ValidateOutcome::ValidationFailed => CamaraError::new(
-            StatusCode::BAD_REQUEST,
-            "CARRIER_BILLING.VALIDATION_FAILED",
-            "The maximum number of validation attempts has been consumed.",
-        )
-        .into_response(),
+        store::ValidateOutcome::ValidationFailed => {
+            // Terminal charging notification: the OTP budget is spent, so this
+            // reservation is now `denied` (charged nothing). A two-step reservation
+            // created with a `sink` delivers a terminal `payment-denied` CloudEvent.
+            // The sink (and any ACCESSTOKEN credential) were stashed at
+            // `preparePayment` — this validate request carries no `sink` — so take
+            // them single-use (exactly one terminal outcome fires; a denied
+            // reservation can no longer be confirmed or cancelled). Delivery is
+            // fire-and-forget and off the request path, so a slow or unreachable
+            // sink never delays this `400`.
+            if let Some(target) = store::take_notify(&payment_id) {
+                let now = rfc3339_utc(now_unix_secs());
+                let event = notifications::payment_denied_event(
+                    mint_uuid(),
+                    now,
+                    &payment_id,
+                    PAYMENT_DENIED_DESCRIPTION,
+                );
+                notifications::spawn_delivery(target.sink, event, target.auth);
+            }
+            CamaraError::new(
+                StatusCode::BAD_REQUEST,
+                "CARRIER_BILLING.VALIDATION_FAILED",
+                "The maximum number of validation attempts has been consumed.",
+            )
+            .into_response()
+        }
         store::ValidateOutcome::NotPending => CamaraError::new(
             StatusCode::CONFLICT,
             "ALREADY_EXISTS",
@@ -2838,6 +2864,159 @@ mod tests {
         let write = mint_token(WRITE_SCOPE).await;
         let (status, _, _) = post_cancel(Some(&write), &id, "", None).await;
         assert_eq!(status, StatusCode::ACCEPTED);
+        assert!(
+            store::take_notify(&id).is_none(),
+            "no notify target for a sink-less reservation"
+        );
+    }
+
+    // --- Deny notifications (payment-denied CloudEvent, two-step OTP) ---------
+
+    /// Reserve a `…888` payment with `sink` (and optional extra body fields so a
+    /// `sinkCredential` can be supplied), landing it in `pending_validation`,
+    /// then drain the synchronous `payment-pending-validation` callback. Returns
+    /// `(paymentId, authorizationId)`.
+    async fn prepare_pending_with_sink(
+        listener: &tokio::net::TcpListener,
+        body: &str,
+    ) -> (String, String) {
+        use tokio::io::AsyncReadExt;
+        let create = mint_token(CREATE_SCOPE).await;
+        let (status, _, pending) = post_prepare(Some(&create), body, None).await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(pending["paymentStatus"], "pending_validation");
+        let id = pending["paymentId"].as_str().unwrap().to_string();
+        let auth = pending["validationInfo"]["authorizationId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        // Drain the `payment-pending-validation` callback the reservation fired.
+        let (mut sock, _) = listener.accept().await.unwrap();
+        let mut buf = Vec::new();
+        sock.read_to_end(&mut buf).await.unwrap();
+        assert!(
+            String::from_utf8(buf).unwrap().contains("payment-pending-validation"),
+            "prepare fires the pending-validation event first"
+        );
+        (id, auth)
+    }
+
+    #[tokio::test]
+    async fn exhausting_the_otp_budget_with_a_sink_fires_a_payment_denied_cloudevent() {
+        use tokio::io::AsyncReadExt;
+        use tokio::net::TcpListener;
+
+        // A loopback receiver stands in for the merchant's `sink`.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let sink = format!("http://{addr}/cb-deny");
+
+        // Reserve a `…888` payment with a sink → `pending_validation`.
+        let body = format!(
+            r#"{{"amountTransaction":{{"phoneNumber":"+123456789888","paymentAmount":{{"chargingInformation":{{"amount":9.99,"currency":"EUR","description":"A digital good"}}}},"referenceCode":"ref-001"}},"sink":"{sink}"}}"#
+        );
+        let (id, auth) = prepare_pending_with_sink(&listener, &body).await;
+
+        // Spend the whole OTP budget with wrong codes → VALIDATION_FAILED, denied.
+        let write = mint_token(WRITE_SCOPE).await;
+        for _ in 0..2 {
+            let (status, _, err) =
+                post_validate(Some(&write), &id, &validate_body(&auth, "000000"), None).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(err["code"], "CARRIER_BILLING.INVALID_CODE");
+        }
+        let (status, _, err) =
+            post_validate(Some(&write), &id, &validate_body(&auth, "000000"), None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(err["code"], "CARRIER_BILLING.VALIDATION_FAILED");
+
+        // The denial delivers the terminal `payment-denied` CloudEvent to the
+        // sink stashed at prepare-time (the validate request carries no `sink`).
+        let (mut sock, _) = listener.accept().await.unwrap();
+        let mut buf = Vec::new();
+        sock.read_to_end(&mut buf).await.unwrap();
+        let raw = String::from_utf8(buf).unwrap();
+        let (head, event_body) = raw.split_once("\r\n\r\n").expect("headers then body");
+        assert!(
+            head.starts_with("POST /cb-deny HTTP/1.1\r\n"),
+            "request line: {head}"
+        );
+        assert!(head.contains("Content-Type: application/cloudevents+json"));
+        // No sinkCredential was supplied at prepare → no Authorization header.
+        assert!(!head.contains("Authorization:"), "unauthenticated: {head}");
+
+        let event: Value = serde_json::from_str(event_body).expect("body is JSON");
+        assert_eq!(
+            event["type"],
+            "org.camaraproject.carrier-billing.v0.payment-denied"
+        );
+        assert_eq!(event["source"], "//camarasimulator/carrier-billing");
+        assert_eq!(event["specversion"], "1.0");
+        assert_eq!(event["data"]["paymentId"], json!(id));
+        // A denied validation ends the flow without a charge → status `failed`.
+        assert_eq!(event["data"]["status"], "failed");
+        assert!(event["data"]["description"].is_string());
+        // Nothing charged → no paymentDate (unlike payment-completed).
+        assert!(
+            event["data"].get("paymentDate").is_none(),
+            "deny event carries no paymentDate: {event}"
+        );
+
+        // The terminal event is single-use: the notify target is now gone.
+        assert!(
+            store::take_notify(&id).is_none(),
+            "the denied reservation took its notify target single-use"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_deny_notification_uses_the_credential_persisted_from_prepare() {
+        use tokio::io::AsyncReadExt;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let sink = format!("http://{addr}/cb-deny-auth");
+
+        // Reserve a `…888` payment with a sink AND an ACCESSTOKEN sinkCredential.
+        let body = format!(
+            r#"{{"amountTransaction":{{"phoneNumber":"+123456789888","paymentAmount":{{"chargingInformation":{{"amount":1.0,"currency":"EUR","description":"x"}}}},"referenceCode":"ref-001"}},"sink":"{sink}","sinkCredential":{{"credentialType":"ACCESSTOKEN","accessToken":"cb-deny-secret","accessTokenType":"bearer"}}}}"#
+        );
+        let (id, auth) = prepare_pending_with_sink(&listener, &body).await;
+
+        // Spend the OTP budget → VALIDATION_FAILED, denied.
+        let write = mint_token(WRITE_SCOPE).await;
+        for _ in 0..3 {
+            let _ = post_validate(Some(&write), &id, &validate_body(&auth, "000000"), None).await;
+        }
+
+        // The validate request carries no `sinkCredential`, yet the terminal
+        // callback must carry the bearer derived at prepare-time.
+        let (mut sock, _) = listener.accept().await.unwrap();
+        let mut buf = Vec::new();
+        sock.read_to_end(&mut buf).await.unwrap();
+        let raw = String::from_utf8(buf).unwrap();
+        let (head, event_body) = raw.split_once("\r\n\r\n").expect("headers then body");
+        assert!(
+            head.contains("Authorization: Bearer cb-deny-secret\r\n"),
+            "deny callback carries the bearer persisted from prepare: {head}"
+        );
+        let event: Value = serde_json::from_str(event_body).expect("body is JSON");
+        assert_eq!(
+            event["type"],
+            "org.camaraproject.carrier-billing.v0.payment-denied"
+        );
+    }
+
+    #[tokio::test]
+    async fn denying_a_sink_less_reservation_stores_no_notify_target() {
+        // A `…888` reservation prepared without a `sink` stashes no notify target,
+        // so exhausting its OTP budget denies it (400) and delivers no CloudEvent.
+        let (id, auth) = prepare_pending("+123456789888").await;
+        let write = mint_token(WRITE_SCOPE).await;
+        for _ in 0..3 {
+            let _ = post_validate(Some(&write), &id, &validate_body(&auth, "000000"), None).await;
+        }
         assert!(
             store::take_notify(&id).is_none(),
             "no notify target for a sink-less reservation"
