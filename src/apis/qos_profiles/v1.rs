@@ -1,12 +1,15 @@
 //! QoS Profiles **v1** (CAMARA QoS Profiles 1.1.0, release r3.2).
 //!
-//! One endpoint (this pass):
+//! Two endpoints:
 //! - `POST /qos-profiles/v1/retrieve-qos-profiles` — list the QoS profiles the
 //!   operator offers, optionally narrowed by `name`, `status`, and `device`
 //!   (operationId `retrieveQoSProfiles`).
-//!
-//! The single-profile lookup `GET /qos-profiles/{name}` (`getQosProfile`) is a
-//! later pass.
+//! - `GET /qos-profiles/v1/qos-profiles/{name}` — look up a single profile by
+//!   its exact name (operationId `getQosProfile`). The `name` path parameter is
+//!   the control plane (DESIGN §7): a known name → `200` with that profile, an
+//!   unknown (but well-formed) name → `404 NOT_FOUND` (unlike the list, which
+//!   never 404s), a malformed name → `400 INVALID_ARGUMENT`. It reads the same
+//!   fixed catalog as the list; there is no `device`/body, so no error plane.
 //!
 //! ## What it does
 //!
@@ -48,9 +51,10 @@
 //! `{"device":{"phoneNumber":"+123456789404"}}` → `404 NOT_FOUND`.
 
 use axum::body::Bytes;
+use axum::extract::Path;
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::post;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -59,16 +63,21 @@ use crate::auth::verify::Claims;
 use crate::errors::CamaraError;
 use crate::scenarios;
 
-/// The OAuth2 scope the `POST /retrieve-qos-profiles` endpoint requires (CAMARA
-/// QoS Profiles 1.1.0).
+/// The OAuth2 scope both QoS Profiles v1 endpoints require (CAMARA QoS Profiles
+/// 1.1.0). `retrieveQoSProfiles` and `getQosProfile` share `qos-profiles:read`.
 const RETRIEVE_SCOPE: &str = "qos-profiles:read";
 
 /// Routes for QoS Profiles v1, mounted at their canonical URLs.
 pub fn routes() -> Router {
-    Router::new().route(
-        "/qos-profiles/v1/retrieve-qos-profiles",
-        post(retrieve_qos_profiles),
-    )
+    Router::new()
+        .route(
+            "/qos-profiles/v1/retrieve-qos-profiles",
+            post(retrieve_qos_profiles),
+        )
+        // Single-profile lookup by name. The static `/retrieve-qos-profiles`
+        // above and this `/qos-profiles/:name` param route live under different
+        // first segments, so `matchit` never has to disambiguate them.
+        .route("/qos-profiles/v1/qos-profiles/:name", get(get_qos_profile))
 }
 
 /// `POST /retrieve-qos-profiles` request body (CAMARA `QosProfileDeviceRequest`).
@@ -192,6 +201,44 @@ async fn retrieve_qos_profiles(claims: Claims, headers: HeaderMap, body: Bytes) 
         .collect();
 
     with_correlator((StatusCode::OK, Json(Value::Array(profiles))).into_response(), &correlator)
+}
+
+/// `GET /qos-profiles/v1/qos-profiles/{name}` — the single-profile lookup
+/// (`getQosProfile`).
+///
+/// Unlike the list, this operation *does* 404: the `name` path parameter is the
+/// sole control plane (DESIGN §7). A well-formed name that names a catalog entry
+/// returns that entry (`200`); a well-formed name that does not → `404
+/// NOT_FOUND`; a name violating the CAMARA `QosProfileName` schema → `400
+/// INVALID_ARGUMENT`. There is no request body and no `device`, so no error
+/// plane beyond the name itself.
+async fn get_qos_profile(claims: Claims, headers: HeaderMap, Path(name): Path<String>) -> Response {
+    // Optional correlation header, echoed on every response (CAMARA Commonalities).
+    let correlator = headers.get("x-correlator").cloned();
+
+    // Endpoint authorisation: the token must carry this API's scope.
+    if let Err(e) = claims.require_scope(RETRIEVE_SCOPE) {
+        return with_correlator(e.into_response(), &correlator);
+    }
+
+    // The path segment must satisfy the CAMARA QosProfileName pattern/length.
+    if !is_valid_profile_name(&name) {
+        return invalid_argument(
+            "`name` must match ^[a-zA-Z0-9_.-]+$ and be 3–256 characters.",
+            &correlator,
+        );
+    }
+
+    // Look the name up in the fixed catalog; found → the profile, else 404.
+    match catalog().into_iter().find(|p| p["name"] == name) {
+        Some(profile) => {
+            with_correlator((StatusCode::OK, Json(profile)).into_response(), &correlator)
+        }
+        None => with_correlator(
+            CamaraError::not_found("No QoS profile with the given name exists.").into_response(),
+            &correlator,
+        ),
+    }
 }
 
 /// Apply the `device` error plane: resolve its identifier and enforce the CAMARA
@@ -673,6 +720,112 @@ mod tests {
         let (status, _, body) = post_retrieve(None, "{}", None).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
         assert_eq!(body["code"], "UNAUTHENTICATED");
+    }
+
+    // --- getQosProfile (GET /qos-profiles/{name}) --------------------------
+
+    async fn get_profile(
+        token: Option<&str>,
+        name: &str,
+        correlator: Option<&str>,
+    ) -> (StatusCode, HeaderMap, Value) {
+        let mut builder = Request::builder()
+            .method("GET")
+            .uri(format!("/qos-profiles/v1/qos-profiles/{name}"))
+            .header("host", HOST);
+        if let Some(t) = token {
+            builder = builder.header("authorization", format!("Bearer {t}"));
+        }
+        if let Some(c) = correlator {
+            builder = builder.header("x-correlator", c);
+        }
+        let response = app()
+            .oneshot(builder.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let headers = response.headers().clone();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, headers, json)
+    }
+
+    async fn get_profile_ok(name: &str) -> (StatusCode, HeaderMap, Value) {
+        let token = mint_token(RETRIEVE_SCOPE).await;
+        get_profile(Some(&token), name, None).await
+    }
+
+    #[tokio::test]
+    async fn get_known_profile_returns_the_single_object() {
+        let (status, _, body) = get_profile_ok("voice").await;
+        assert_eq!(status, StatusCode::OK);
+        // A single object, not an array (unlike the list endpoint).
+        assert!(body.is_object());
+        assert_eq!(body["name"], "voice");
+        assert_eq!(body["status"], "ACTIVE");
+        assert_eq!(body["serviceClass"], "real_time_interactive");
+    }
+
+    #[tokio::test]
+    async fn get_every_catalog_name_succeeds() {
+        let token = mint_token(RETRIEVE_SCOPE).await;
+        for p in catalog() {
+            let name = p["name"].as_str().unwrap();
+            let (status, _, body) = get_profile(Some(&token), name, None).await;
+            assert_eq!(status, StatusCode::OK, "GET {name}");
+            assert_eq!(body["name"], name);
+        }
+    }
+
+    #[tokio::test]
+    async fn get_unknown_but_valid_name_is_404() {
+        // Unlike the list (which returns []), the single lookup 404s.
+        let (status, _, body) = get_profile_ok("no-such-profile").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn get_malformed_name_is_400() {
+        // Too short (< 3) violates the QosProfileName schema.
+        let (status, _, body) = get_profile_ok("ab").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "INVALID_ARGUMENT");
+    }
+
+    #[tokio::test]
+    async fn get_without_the_scope_is_forbidden() {
+        let token = mint_token("some:other-scope").await;
+        let (status, _, body) = get_profile(Some(&token), "voice", None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["code"], "PERMISSION_DENIED");
+    }
+
+    #[tokio::test]
+    async fn get_missing_token_is_unauthenticated() {
+        let (status, _, body) = get_profile(None, "voice", None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["code"], "UNAUTHENTICATED");
+    }
+
+    #[tokio::test]
+    async fn get_echoes_x_correlator_on_success_and_404() {
+        let token = mint_token(RETRIEVE_SCOPE).await;
+        let (status, headers, _) = get_profile(Some(&token), "voice", Some("corr-get")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-get")
+        );
+
+        let (status, headers, _) = get_profile(Some(&token), "nope", Some("corr-404")).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-404")
+        );
     }
 
     #[tokio::test]

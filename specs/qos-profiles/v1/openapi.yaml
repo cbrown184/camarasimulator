@@ -10,9 +10,9 @@
 # CamaraSim serves a fixed, in-memory catalog (there is no upstream network to
 # query — DESIGN §7).
 #
-# Serves `POST /retrieve-qos-profiles`. The single-profile lookup
-# `GET /qos-profiles/{name}` (`getQosProfile`) is a later pass and is not yet
-# mounted.
+# Serves `POST /retrieve-qos-profiles` (list) and `GET /qos-profiles/{name}`
+# (`getQosProfile`, single-profile lookup — the list returns `[]` for an unknown
+# name, but the single lookup 404s).
 openapi: 3.0.3
 info:
   title: QoS Profiles
@@ -183,6 +183,82 @@ paths:
             result: '400 INVALID_ARGUMENT'
           - input: '`device` supplied on a three-legged line token (E.164 subject)'
             result: '422 UNNECESSARY_IDENTIFIER'
+
+  /qos-profiles/{name}:
+    get:
+      operationId: getQosProfile
+      summary: Retrieve a single QoS profile by name
+      description: |
+        Returns the QoS profile with the exact `name`, or `404 NOT_FOUND` if no
+        such profile exists. Reads the same fixed catalog as
+        `retrieveQoSProfiles`; unlike the list — which returns an empty array for
+        an unknown name — this single-profile lookup 404s.
+
+        The `name` path parameter is the sole control plane (docs/DESIGN.md §7):
+        there is no request body and no `device`, so no reserved-identifier error
+        plane applies here.
+      security:
+        - openId:
+            - qos-profiles:read
+      parameters:
+        - name: name
+          in: path
+          required: true
+          description: The exact name of the QoS profile to retrieve.
+          schema:
+            $ref: "#/components/schemas/QosProfileName"
+        - $ref: "#/components/parameters/XCorrelator"
+      responses:
+        "200":
+          description: The QoS profile with the given name.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QosProfile"
+              examples:
+                voice:
+                  summary: The `voice` profile
+                  value:
+                    name: voice
+                    description: Low-latency profile for real-time interactive voice.
+                    status: ACTIVE
+                    targetMinDownstreamRate: { value: 64, unit: kbps }
+                    maxDownstreamRate: { value: 128, unit: kbps }
+                    priority: 20
+                    packetDelayBudget: { value: 100, unit: Milliseconds }
+                    serviceClass: real_time_interactive
+        "400":
+          $ref: "../../shared/errors.yaml#/components/responses/InvalidArgument"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          The `name` path parameter is the only control plane (docs/DESIGN.md §7):
+          a well-formed name that names a catalog entry returns it, a well-formed
+          name that does not 404s, and a name violating the QosProfileName schema
+          is rejected before the lookup. Canonical QoS Profiles 1.1.0 declares
+          400/401/403/404/429 here; 500/503 are CamaraSim extensions from the
+          shared error set.
+        cases:
+          - input: '`name` = a known catalog profile (e.g. `voice`)'
+            result: '200 — that single QosProfile object'
+          - input: '`name` = a well-formed but unknown profile'
+            result: '404 NOT_FOUND'
+          - input: '`name` violating ^[a-zA-Z0-9_.-]+$ / length 3–256'
+            result: '400 INVALID_ARGUMENT'
 
 components:
   securitySchemes:

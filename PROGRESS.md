@@ -804,7 +804,7 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     and `serviceClass` (second plane: `…247` conflicts as QOS_ALREADY_SET_TO_DEFAULT
     only when restoring `standard`). Bad body / unknown `serviceClass` / non-IPv4
     `ipAddress` → 400 INVALID_ARGUMENT. **Completes Home Devices QoD v0.4.**
-- [~] QoS Profiles v1 (`/qos-profiles/v1`; CAMARA 1.1.0, r3.2; stateless catalog —
+- [x] QoS Profiles v1 (`/qos-profiles/v1`; CAMARA 1.1.0, r3.2; stateless catalog —
   the read-only companion to Quality on Demand):
   - [x] `POST /retrieve-qos-profiles` (`qos-profiles:read`, `retrieveQoSProfiles`)
     — lists the operator's fixed in-memory QoS-profile catalog as a JSON array
@@ -816,8 +816,13 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     unknown `status` enum / empty `device` / malformed `phoneNumber` → 400
     `INVALID_ARGUMENT`. `x-correlator` echoed. Catalog covers all three
     `QosProfileStatusEnum` states + a spread of service classes / L4S queue types.
-  - [ ] `GET /qos-profiles/{name}` (`getQosProfile`) — single-profile lookup
-    (404 on unknown name); deferred to a later pass.
+  - [x] `GET /qos-profiles/{name}` (`qos-profiles:read`, `getQosProfile`) —
+    single-profile lookup over the same fixed catalog. The `name` path parameter
+    is the sole control plane (DESIGN §7; no body/`device`, so no error plane): a
+    known name → `200` that `QosProfile`; a well-formed unknown name → `404
+    NOT_FOUND` (unlike the list, which returns `[]`); a name violating the
+    `QosProfileName` schema (`^[a-zA-Z0-9_.-]+$`, len 3–256) → `400
+    INVALID_ARGUMENT`. `x-correlator` echoed. **Completes QoS Profiles v1.**
 - [ ] Other CAMARA APIs as capacity allows
 
 ## Cross-cutting (do alongside the item that needs it)
@@ -836,6 +841,23 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-04 — Phase 5: **QoS Profiles v1 completed** — added the single-profile
+  lookup `GET /qos-profiles/{name}` (`getQosProfile`, scope `qos-profiles:read`),
+  mounted at `/qos-profiles/v1/qos-profiles/:name` (axum `matchit`; distinct first
+  segment from `/retrieve-qos-profiles`, no route collision). Reads the same fixed
+  catalog as the list; the `name` path parameter is the sole control plane (DESIGN
+  §7, no body/`device` → no error plane): known name → `200` that `QosProfile`
+  (single object, not an array); well-formed unknown name → `404 NOT_FOUND` (the
+  list returns `[]` — the deliberate list/lookup contrast); malformed name (fails
+  `QosProfileName` `^[a-zA-Z0-9_.-]+$` / len 3–256) → `400 INVALID_ARGUMENT`.
+  Reuses `is_valid_profile_name`/`catalog`/`with_correlator` + `CamaraError::
+  not_found`; `x-correlator` echoed on success and 404; non-blocking, stateless
+  (**no new dep**). Spec updated (`specs/qos-profiles/v1/openapi.yaml`): added the
+  `/qos-profiles/{name}` GET path (params, 200 `QosProfile` example, 400/401/403/
+  404/429/500/503 error set, `x-camarasim-scenarios`) + header note. Tests: +7
+  integration (known name→object, every catalog name→200, unknown→404, malformed→
+  400, no-scope→403, no-token→401, x-correlator echo on 200+404). `cargo test` 720
+  green; `cargo build --release` ok. — binary: 1.8M (1869632 B)
 - 2026-08-04 — Phase 5 (other CAMARA APIs): **QoS Profiles v1** — new stateless
   catalog API, the read-only companion to Quality on Demand (QoD *applies* a
   `qosProfile`; QoS Profiles *lists* them). Verified the authoritative CAMARA
