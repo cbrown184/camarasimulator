@@ -1,0 +1,334 @@
+# CamaraSim — Customer Insights, API version v0.2 (CAMARA 0.2.0, r2.2).
+#
+# Vendored from the CAMARA Customer Insights API (release r2.2 → customer-insights
+# 0.2.0, the latest published version — so mounted at its real sub-1.0 base path
+# `/v0.2`, like KYC Match / KYC Tenure / Number Recycling) and annotated with
+# CamaraSim's parameter-driven functional cases (docs/DESIGN.md §7, §9). Backed by
+# `src/apis/customer_insights/v0_2.rs`; spec and code must not drift.
+#
+# Serves `POST /scoring/retrieve`.
+openapi: 3.0.3
+info:
+  title: Customer Insights
+  description: |
+    Service that returns a privacy-preserving risk/trust **score** for the line
+    behind a phone number — a single number on a caller-chosen scale, never the
+    underlying data. It is a low-friction anti-fraud / onboarding signal.
+
+    Two scales are offered (`scoringType`):
+
+    - `gaugeMetric` — a credit-style score ranging from `850` (lowest risk) down
+      to `300` (highest risk).
+    - `veritasIndex` — a compact index ranging from `0` (lowest risk) to `19`
+      (highest risk).
+
+    This is the CamaraSim reference double for CAMARA Customer Insights 0.2.0. The
+    `/scoring/retrieve` endpoint requires the `customer-insights:scoring:read`
+    scope.
+
+    ## Identifier resolution — two-legged vs three-legged
+
+    Faithful to CAMARA, the `phoneNumber` in the request body is valid *only* in
+    two-legged auth. In a three-legged token the line is already identified by
+    the token **subject** (`sub`), so the number must not be resubmitted:
+
+    - `phoneNumber` present **and** the token subject is itself an E.164 number
+      (a line-authenticated three-legged token) → `422 UNNECESSARY_IDENTIFIER`.
+    - `phoneNumber` present, subject not a line → the submitted number is the
+      identifier (two-legged).
+    - `phoneNumber` absent, subject is an E.164 number → the subject is the
+      identifier (three-legged).
+    - `phoneNumber` absent **and** the subject is not a line → the line cannot be
+      identified from a number. With an `idDocument` supplied CamaraSim cannot
+      score by document alone → `422 CUSTOMER_INSIGHTS.ID_DOCUMENT_NOT_SUPPORTED`;
+      with neither → `422 MISSING_IDENTIFIER`.
+
+    ## Functional cases — the input is the control plane (docs/DESIGN.md §7)
+
+    Two independent control planes drive the answer:
+
+    - **Reserved error suffix (identifier).** If the resolved identifier's
+      trailing three digits name a reserved CAMARA status, the endpoint answers
+      with that canonical CAMARA error (shared convention — see the referenced
+      `errors.yaml`): `…400`, `…401`, `…403`, `…404`, `…409`, `…422`, `…429`,
+      `…500`, `…503`.
+    - **Score (identifier digits × `scoringType`).** Otherwise the identifier's
+      trailing three digits `d` (`0`–`999`) fix the score on the requested scale:
+      `gaugeMetric` → `300 + (d % 551)` (300–850), `veritasIndex` → `d % 20`
+      (0–19). This makes `scoringType` a genuine second control plane: the
+      **same** number reads a different value on each scale. An identifier with
+      no digits scores at the scale's floor (`d = 0`).
+
+    `scoringType` is required and must be one of the two known scales; a missing
+    or unknown value → `400 INVALID_ARGUMENT`. `idDocument`, when supplied, must
+    be a non-empty string of at most 30 characters, else `400 INVALID_ARGUMENT`.
+
+    Example: `+123456789740` on `gaugeMetric` → `scoringValue: 489`
+    (`300 + 740 % 551`); the same number on `veritasIndex` → `0` (`740 % 20`);
+    `+123456789404` → `404 NOT_FOUND`.
+
+    CamaraSim exposes the full shared reserved-error set here so every reserved
+    suffix is reachable; canonical Customer Insights 0.2.0 declares a subset
+    (400/401/403/404/422/429). The 422 `CUSTOMER_INSIGHTS.SCALE_TYPE_NOT_SUPPORTED`,
+    `INVALID_IDENTIFIERS` and `ID_DOCUMENT_REQUIRED` codes are catalogued but not
+    reached, because CamaraSim supports both scales and scores by phone number
+    only (a documented cut, DESIGN §7).
+  version: "0.2.0"
+  license:
+    name: Apache-2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0.html
+
+servers:
+  - url: "{apiRoot}/customer-insights/v0.2"
+    variables:
+      apiRoot:
+        default: http://localhost:8080
+        description: API root, e.g. the CamaraSim base URL.
+
+paths:
+  /scoring/retrieve:
+    post:
+      operationId: retrieveScoring
+      summary: Retrieve a risk/trust score for a line
+      description: |
+        Returns a single risk/trust score for the line on the requested scale
+        (`{ "scoringType": …, "scoringValue": … }`).
+
+        The line is identified by the submitted `phoneNumber` (two-legged) or by
+        the access-token subject (three-legged) — see the API description for the
+        identifier-resolution rules and the parameter-driven functional cases
+        (the trailing three digits fix the score; `scoringType` selects the
+        scale).
+      security:
+        - openId:
+            - customer-insights:scoring:read
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ScoringRequest"
+      responses:
+        "200":
+          description: The score for the line on the requested scale.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ScoringResponse"
+              examples:
+                gauge:
+                  summary: gaugeMetric score (300–850)
+                  value:
+                    scoringType: gaugeMetric
+                    scoringValue: 489
+                veritas:
+                  summary: veritasIndex score (0–19)
+                  value:
+                    scoringType: veritasIndex
+                    scoringValue: 0
+        "400":
+          description: |
+            400 — invalid request. CamaraSim returns `INVALID_ARGUMENT` for a
+            malformed body, a missing/unknown `scoringType`, a malformed
+            `phoneNumber`, or an empty/over-long `idDocument`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CustomerInsightsError"
+              examples:
+                invalidArgument:
+                  summary: Malformed body or unknown `scoringType`
+                  value:
+                    status: 400
+                    code: INVALID_ARGUMENT
+                    message: "Request body is not a valid ScoringRequest (a known `scoringType` is required)."
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "409":
+          $ref: "../../shared/errors.yaml#/components/responses/Conflict"
+        "422":
+          description: |
+            422 — unprocessable. CamaraSim returns `MISSING_IDENTIFIER` when the
+            line cannot be identified (no `phoneNumber` and a non-line subject),
+            `UNNECESSARY_IDENTIFIER` when a `phoneNumber` is submitted on a
+            three-legged line token, `CUSTOMER_INSIGHTS.ID_DOCUMENT_NOT_SUPPORTED`
+            when only an `idDocument` identifies the caller, or the reserved
+            shared `SERVICE_NOT_APPLICABLE` for the `…422` suffix.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CustomerInsightsError"
+              examples:
+                missingIdentifier:
+                  summary: The line cannot be identified
+                  value:
+                    status: 422
+                    code: MISSING_IDENTIFIER
+                    message: The phone number cannot be identified.
+                unnecessaryIdentifier:
+                  summary: The number is already identified by the token
+                  value:
+                    status: 422
+                    code: UNNECESSARY_IDENTIFIER
+                    message: The phone number is already identified by the access token.
+                idDocumentNotSupported:
+                  summary: Scoring by `idDocument` alone is not supported
+                  value:
+                    status: 422
+                    code: CUSTOMER_INSIGHTS.ID_DOCUMENT_NOT_SUPPORTED
+                    message: Scoring by `idDocument` alone is not supported.
+                serviceNotApplicable:
+                  summary: Reserved `…422` suffix
+                  value:
+                    status: 422
+                    code: SERVICE_NOT_APPLICABLE
+                    message: The service is not available for the provided identifier.
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          Result selected from the resolved line identifier and `scoringType`
+          (docs/DESIGN.md §7). The identifier's trailing three digits fix the
+          score; `scoringType` selects the scale (`gaugeMetric` → 300 + d%551,
+          `veritasIndex` → d%20). Reserved error suffixes come from the shared
+          convention in errors.yaml.
+        cases:
+          - input: identifier ending in a reserved error suffix (e.g. …404)
+            result: the canonical CAMARA error for that status
+          - input: "identifier with trailing digits d, scoringType gaugeMetric"
+            result: "200 { scoringType: gaugeMetric, scoringValue: 300 + (d % 551) }"
+          - input: "identifier with trailing digits d, scoringType veritasIndex"
+            result: "200 { scoringType: veritasIndex, scoringValue: d % 20 }"
+          - input: same number on gaugeMetric vs veritasIndex
+            result: scoringValue differs (scoringType is a control plane)
+          - input: no phoneNumber, an E.164 token subject (three-legged)
+            result: same cases, driven by the subject's trailing three digits
+          - input: phoneNumber submitted on a three-legged line token
+            result: "422 UNNECESSARY_IDENTIFIER"
+          - input: no phoneNumber, a non-line subject, an idDocument supplied
+            result: "422 CUSTOMER_INSIGHTS.ID_DOCUMENT_NOT_SUPPORTED"
+          - input: no phoneNumber, a non-line subject, no idDocument
+            result: "422 MISSING_IDENTIFIER"
+          - input: missing or unknown scoringType
+            result: "400 INVALID_ARGUMENT"
+          - input: empty or over-long (>30 chars) idDocument
+            result: "400 INVALID_ARGUMENT"
+
+components:
+  securitySchemes:
+    openId:
+      $ref: "../../auth/openapi.yaml#/components/securitySchemes/camaraOAuth"
+
+  parameters:
+    XCorrelator:
+      name: x-correlator
+      in: header
+      required: false
+      description: Correlation id for the request, echoed back on the response.
+      schema:
+        type: string
+
+  headers:
+    XCorrelator:
+      description: The `x-correlator` from the request, echoed if one was sent.
+      required: false
+      schema:
+        type: string
+
+  schemas:
+    ScoringType:
+      type: string
+      description: The scale to score the line on.
+      enum:
+        - gaugeMetric
+        - veritasIndex
+
+    ScoringRequest:
+      type: object
+      description: |
+        Request for a line's score. `scoringType` is required. The `phoneNumber`
+        is valued only in two-legged authentication; supplying it with a
+        three-legged (line) token yields `422 UNNECESSARY_IDENTIFIER`. In
+        CamaraSim `idDocument` is accepted but only used to reach the
+        `ID_DOCUMENT_NOT_SUPPORTED` case (scoring is by phone number only).
+      required:
+        - scoringType
+      properties:
+        phoneNumber:
+          type: string
+          description: A phone number in E.164 format (starting with `+`).
+          pattern: '^\+[1-9][0-9]{4,14}$'
+          example: "+123456789012"
+        idDocument:
+          type: string
+          description: >-
+            An identification number from an official identity document. Accepted
+            but not used as a scoring key in CamaraSim.
+          minLength: 1
+          maxLength: 30
+          example: "AB1234567"
+        scoringType:
+          $ref: "#/components/schemas/ScoringType"
+
+    ScoringResponse:
+      type: object
+      description: >-
+        The score for the line. `scoringValue` is a `gaugeMetric` band value
+        (300–850) or a `veritasIndex` value (0–19), per `scoringType`.
+      required:
+        - scoringType
+        - scoringValue
+      properties:
+        scoringType:
+          $ref: "#/components/schemas/ScoringType"
+        scoringValue:
+          type: integer
+          description: >-
+            The score on the requested scale — `gaugeMetric`: 300 (highest risk)
+            to 850 (lowest risk); `veritasIndex`: 0 (lowest risk) to 19 (highest
+            risk).
+          minimum: 0
+          maximum: 850
+          example: 489
+
+    CustomerInsightsError:
+      description: >-
+        The CAMARA error body for this API — the shared `CamaraError` shape with
+        the Customer Insights `code` set (adds the 422 identifier codes and the
+        `CUSTOMER_INSIGHTS.*` codes).
+      allOf:
+        - $ref: "../../shared/errors.yaml#/components/schemas/CamaraError"
+        - type: object
+          properties:
+            code:
+              type: string
+              enum:
+                - INVALID_ARGUMENT
+                - UNAUTHENTICATED
+                - PERMISSION_DENIED
+                - NOT_FOUND
+                - IDENTIFIER_NOT_FOUND
+                - MISSING_IDENTIFIER
+                - UNNECESSARY_IDENTIFIER
+                - SERVICE_NOT_APPLICABLE
+                - CUSTOMER_INSIGHTS.SCALE_TYPE_NOT_SUPPORTED
+                - CUSTOMER_INSIGHTS.INVALID_IDENTIFIERS
+                - CUSTOMER_INSIGHTS.ID_DOCUMENT_NOT_SUPPORTED
+                - CUSTOMER_INSIGHTS.ID_DOCUMENT_REQUIRED
+                - CONFLICT
+                - TOO_MANY_REQUESTS
+                - INTERNAL
+                - UNAVAILABLE

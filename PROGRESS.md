@@ -647,6 +647,28 @@ dependency). The `device` is echoed back only for a phoneNumber-keyed request
 (the CAMARA `DeviceResponse` carries only `phoneNumber`). `x-correlator` echoed
 on every response. **This completes Simple Edge Discovery v2.**
 
+**Phase 5 (other CAMARA APIs) — Customer Insights v0.2** is now live, a new
+stateless, non-spatial, phone-number-keyed identity/anti-fraud API mounted at its
+real published version `/customer-insights/v0.2` (CAMARA 0.2.0, release r2.2 —
+the latest published, like KYC Match / KYC Tenure / Number Recycling). `POST
+/scoring/retrieve` (scope `customer-insights:scoring:read`, operationId
+`retrieveScoring`) returns a privacy-preserving risk/trust **score** for a line —
+`{ scoringType, scoringValue }`, a single number on a caller-chosen scale, never
+the underlying data: `gaugeMetric` (a 300 highest-risk … 850 lowest-risk band) or
+`veritasIndex` (a 0 lowest-risk … 19 highest-risk index). Faithful to CAMARA's
+two-legged/three-legged identifier rule (a `phoneNumber` on a line token → 422
+`UNNECESSARY_IDENTIFIER`; no number + a non-line subject → 422
+`MISSING_IDENTIFIER`, or — when only an `idDocument` is supplied — 422
+`CUSTOMER_INSIGHTS.ID_DOCUMENT_NOT_SUPPORTED`, since the sim scores by phone
+number only). Two control planes (DESIGN §7): the identifier's reserved error
+suffix → canonical CAMARA error; else its trailing three digits `d` fix the score
+on the requested scale (`gaugeMetric` → `300 + (d % 551)`, `veritasIndex` →
+`d % 20`), so `scoringType` is a genuine second plane (the same number reads a
+different value on each scale). `scoringType` is required (missing/unknown → 400
+`INVALID_ARGUMENT`); `idDocument`, when supplied, must be a non-empty string ≤ 30
+chars. No new dependency. `x-correlator` echoed on every response. **This
+completes Customer Insights v0.2.**
+
 ## In progress (claimed this pass)
 
 _None._  <!-- agent: put the claimed item + run timestamp here, clear it when done -->
@@ -974,6 +996,22 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     (SHA-256, no new dep). The `device` is echoed only for a phoneNumber-keyed
     request (CAMARA `DeviceResponse` carries only phoneNumber). `x-correlator`
     echoed. **Completes Simple Edge Discovery v2.**
+- [x] Customer Insights v0.2 (`/customer-insights/v0.2`; CAMARA 0.2.0, release
+  r2.2; stateless, non-spatial, phone-number-keyed identity/anti-fraud API):
+  - [x] `POST /scoring/retrieve` (`customer-insights:scoring:read`,
+    `retrieveScoring`) — `{ scoringType, scoringValue }`, a privacy-preserving
+    risk/trust score on a caller-chosen scale (`gaugeMetric` 300–850 or
+    `veritasIndex` 0–19), never the underlying data. Two-legged (submitted
+    `phoneNumber`) / three-legged (E.164 `sub`) identifier rule with 422
+    `UNNECESSARY_IDENTIFIER` / `MISSING_IDENTIFIER`, plus 422
+    `CUSTOMER_INSIGHTS.ID_DOCUMENT_NOT_SUPPORTED` when only an `idDocument`
+    identifies the caller (the sim scores by phone number only). Two control
+    planes (DESIGN §7): identifier reserved-error suffix → canonical CAMARA
+    error; and identifier trailing digits `d` × `scoringType` fix the score
+    (`gaugeMetric` → `300 + d%551`, `veritasIndex` → `d%20`), so `scoringType`
+    is a genuine second plane. `scoringType` required (missing/unknown → 400
+    `INVALID_ARGUMENT`); `idDocument` non-empty ≤ 30 chars. No new dep.
+    **Completes Customer Insights v0.2.**
 - [ ] Other CAMARA APIs as capacity allows
 
 ## Cross-cutting (do alongside the item that needs it)
@@ -992,6 +1030,23 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-04 20:45Z — Phase 5 (other CAMARA APIs): **Customer Insights v0.2** —
+  new stateless, non-spatial, phone-number-keyed risk/trust-scoring API,
+  **completes the API in one pass** (single endpoint). Verified the authoritative
+  CAMARA CustomerInsights spec at tag **r2.2** via WebFetch: `info.version`
+  "0.2.0", base `/customer-insights/v0.2`, `POST /scoring/retrieve`
+  (`retrieveScoring`, scope `customer-insights:scoring:read`), request
+  `{ idDocument?, phoneNumber?, scoringType }` (scoringType required:
+  gaugeMetric|veritasIndex), 200 → `{ scoringType, scoringValue }` (gaugeMetric
+  300–850, veritasIndex 0–19), errors 400/401/403/404/422 (MISSING/UNNECESSARY_
+  IDENTIFIER, CUSTOMER_INSIGHTS.*)/429. New `src/apis/customer_insights/{,v0_2}.rs`
+  + vendored/annotated `specs/customer-insights/v0.2/openapi.yaml`; wired into
+  apis/openapi/main catalog. Identifier resolution + two-legged/three-legged rule
+  mirror KYC Tenure; id-document-alone → 422 ID_DOCUMENT_NOT_SUPPORTED. Two
+  control planes (DESIGN §7): reserved suffix → canonical error; else trailing
+  digits × scoringType fix the score (`gaugeMetric` 300+d%551, `veritasIndex`
+  d%20 — scoringType is a real second plane). No new dependency. 24 new tests;
+  `cargo test` 824 passed; `cargo build --release` ok. — binary: 1,983,776 bytes (~1.9M)
 - 2026-08-04 19:45Z — Phase 5 (other CAMARA APIs): **Simple Edge Discovery v2** —
   new stateless, non-spatial, device-keyed edge/MEC-discovery API, **completes the
   API in one pass** (single endpoint). Verified the authoritative CAMARA

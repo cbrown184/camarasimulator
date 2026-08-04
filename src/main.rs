@@ -166,6 +166,12 @@ async fn catalog() -> Json<Value> {
                 "version": "v2",
                 "base_path": "/simple-edge-discovery/v2",
                 "spec_url": "/simple-edge-discovery/v2/openapi.yaml",
+            },
+            {
+                "name": "customer-insights",
+                "version": "v0.2",
+                "base_path": "/customer-insights/v0.2",
+                "spec_url": "/customer-insights/v0.2/openapi.yaml",
             }
         ],
         "authorization_servers": [{
@@ -306,6 +312,10 @@ mod tests {
             && a["version"] == "v2"
             && a["base_path"] == "/simple-edge-discovery/v2"
             && a["spec_url"] == "/simple-edge-discovery/v2/openapi.yaml"));
+        assert!(apis.iter().any(|a| a["name"] == "customer-insights"
+            && a["version"] == "v0.2"
+            && a["base_path"] == "/customer-insights/v0.2"
+            && a["spec_url"] == "/customer-insights/v0.2/openapi.yaml"));
         assert_eq!(
             body["authorization_servers"][0]["openid_configuration"],
             "/.well-known/openid-configuration"
