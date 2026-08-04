@@ -26,10 +26,12 @@
 //! - **Home Devices QoD v0.4** — `/home-devices-qod/v0.4/…`.
 //! - **QoS Profiles v1** — `/qos-profiles/v1/…`.
 //! - **KYC Tenure v0.2** — `/kyc-tenure/v0.2/…`.
+//! - **Blockchain Public Address v0.3** — `/blockchain-public-address/v0.3/…`.
 //!
 //! Plus [`openapi`], which serves each mounted API's vendored OpenAPI spec at
 //! `/{api}/v{n}/openapi.yaml` (docs/DESIGN.md §9).
 
+pub mod blockchain_public_address;
 pub mod call_forwarding_signal;
 pub mod carrier_billing;
 pub mod device_identifier;
@@ -77,5 +79,6 @@ pub fn routes() -> Router {
         .merge(home_devices_qod::routes())
         .merge(qos_profiles::routes())
         .merge(kyc_tenure::routes())
+        .merge(blockchain_public_address::routes())
         .merge(openapi::routes())
 }

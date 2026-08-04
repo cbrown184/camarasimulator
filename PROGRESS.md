@@ -583,6 +583,26 @@ deterministically from the same trailing digits (`digits % 3`). A self-contained
 civil-date parser (no new dependency, mirroring Number Recycling) does the date
 maths. `x-correlator` echoed on every response.
 
+**Phase 5 (other CAMARA APIs) — Blockchain Public Address v0.3** has begun, a new
+stateless, non-spatial, phone-number-keyed Web3-onboarding API mounted at its real
+published version `/blockchain-public-address/v0.3` (CAMARA 0.3.0, release r2.2 —
+the latest published, like KYC Match / KYC Tenure). `POST
+/blockchain-public-addresses/retrieve-blockchains` (scope
+`blockchain-public-address:read`, operationId `retrieveBlockchainPublicAddress`)
+is live: it returns the array of `BlockchainPublicAddressResponse` records
+(`id` / `blockchainPublicAddress` / `blockchainNetworkId` / `currency`) the
+subscriber behind a phone number has bound to their line. Faithful to the 0.3.0
+schema, `phoneNumber` is **required** (no three-legged fallback; missing/malformed
+→ 400 `INVALID_ARGUMENT`). Two control planes (DESIGN §7): the number's reserved
+error suffix → canonical CAMARA error; else its trailing three digits `d` decide
+the address set — `d == 0` (`…000`/no digits) → `200 []` (nothing bound, a list
+never 404s), else `((d - 1) % 3) + 1` addresses (1–3), the `i`-th on
+`NETWORKS[(d + i) % 6]` from a fixed 6-entry CAIP-2 EVM table (so the chain is a
+genuine second plane). Each `0x…` address and UUID-shaped `id` is deterministic
+(SHA-256, no new dep); addresses are lowercase (not EIP-55 checksummed — a
+documented cut). The stateful `bind`/`delete` operations are deferred to a later
+slice. `x-correlator` echoed on every response.
+
 ## In progress (claimed this pass)
 
 _None._  <!-- agent: put the claimed item + run timestamp here, clear it when done -->
@@ -859,6 +879,24 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     `contractType` derived deterministically (`digits % 3`). Self-contained
     civil-date parser (no new dep, mirroring Number Recycling).
     **Completes KYC Tenure v0.2.**
+- [~] Blockchain Public Address v0.3 (`/blockchain-public-address/v0.3`; CAMARA
+  0.3.0, release r2.2; phone-number-keyed Web3 onboarding — link a line to
+  on-chain addresses):
+  - [x] `POST /blockchain-public-addresses/retrieve-blockchains`
+    (`blockchain-public-address:read`, `retrieveBlockchainPublicAddress`) —
+    stateless read; returns the array of `BlockchainPublicAddressResponse`
+    (`id`, `blockchainPublicAddress`, `blockchainNetworkId`, `currency`) bound
+    to the required `phoneNumber` (no three-legged fallback — the 0.3.0 schema
+    marks `phoneNumber` required; missing/malformed → 400 INVALID_ARGUMENT). Two
+    control planes (DESIGN §7): identifier reserved-error suffix → canonical
+    CAMARA error; else trailing three digits `d` → `[]` when `d == 0`, else
+    `((d - 1) % 3) + 1` addresses (1–3), the `i`-th on `NETWORKS[(d + i) % 6]`
+    (fixed CAIP-2 EVM table → the chain is a second plane). Deterministic
+    `0x…`/UUID via SHA-256 (no new dep); addresses lowercase (not EIP-55) —
+    documented cut. `x-correlator` echoed.
+  - [ ] stateful `POST /blockchain-public-addresses` (`bindBlockchainPublicAddress`)
+    + `DELETE /blockchain-public-addresses/{id}` (`deleteBlockchainPublicAddress`)
+    — deferred (adds an in-memory store, mirroring QoD / Carrier Billing slicing).
 - [ ] Other CAMARA APIs as capacity allows
 
 ## Cross-cutting (do alongside the item that needs it)
@@ -877,6 +915,33 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-04 — Phase 5 (other CAMARA APIs): **Blockchain Public Address v0.3** —
+  new stateless, non-spatial, phone-number-keyed Web3-onboarding API. Verified the
+  authoritative CAMARA BlockchainPublicAddress r2.2 spec (`blockchain-public-address`
+  0.3.0) via WebFetch: base `/blockchain-public-address/v0.3`, `POST
+  /blockchain-public-addresses/retrieve-blockchains` (`retrieveBlockchainPublicAddress`,
+  scope `blockchain-public-address:read`), request `PhoneNumber {phoneNumber (required)}`,
+  200 → array of `BlockchainPublicAddressResponse {id, blockchainPublicAddress,
+  blockchainNetworkId, currency?}`, errors 400/401/403/404/429. Scoped this pass to
+  the stateless read op; the stateful `bind`(POST)/`delete`(DELETE) ops deferred to a
+  later slice (need an in-memory store, mirroring QoD/Carrier Billing slicing). New
+  `src/apis/blockchain_public_address/{,v0_3}.rs` (**no new dep** — reuses `sha2`).
+  `phoneNumber` required (no three-legged fallback — the 0.3.0 schema marks it
+  required; missing/malformed → 400 INVALID_ARGUMENT). Two control planes (DESIGN
+  §7): reserved suffix → canonical error; else trailing digits `d` → `[]` when
+  `d==0`, else `((d-1)%3)+1` addresses (1–3), `i`-th on `NETWORKS[(d+i)%6]` (fixed
+  CAIP-2 EVM table → chain is a 2nd plane). Deterministic `0x…`/UUID via SHA-256;
+  addresses lowercase (not EIP-55) — documented cut. `x-correlator` echoed. Wired
+  into `apis.rs`, `openapi.rs` (served at `/blockchain-public-address/v0.3/openapi.yaml`)
+  and the `/` catalog. Spec vendored + annotated
+  (`specs/blockchain-public-address/v0.3/openapi.yaml`) with functional cases,
+  `x-camarasim-scenarios`, examples, full `PhoneNumber`/`BlockchainPublicAddressResponse`
+  schemas (read op only; bind/delete intentionally omitted until implemented). Tests:
+  +16 (units: empty-for-zero-tail, count-from-digits, deterministic well-shaped
+  records, network 2nd plane, E.164; integration: bound addresses, empty list,
+  count tracks digits, reserved suffix→404/429, missing/malformed phone→400, unknown
+  field, malformed JSON, no-scope→403, no-token→401, x-correlator echo on 200+error).
+  `cargo test` 759 green (was 743); `cargo build --release` ok. — binary: 1.9M (1911600 B)
 - 2026-08-04 — Phase 5 (other CAMARA APIs): **KYC Tenure v0.2** — new stateless,
   non-spatial, phone-number-keyed identity/anti-fraud API (part of Know Your
   Customer), **completes the API in one pass** (single endpoint). Verified the

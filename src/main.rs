@@ -154,6 +154,12 @@ async fn catalog() -> Json<Value> {
                 "version": "v0.2",
                 "base_path": "/kyc-tenure/v0.2",
                 "spec_url": "/kyc-tenure/v0.2/openapi.yaml",
+            },
+            {
+                "name": "blockchain-public-address",
+                "version": "v0.3",
+                "base_path": "/blockchain-public-address/v0.3",
+                "spec_url": "/blockchain-public-address/v0.3/openapi.yaml",
             }
         ],
         "authorization_servers": [{
@@ -286,6 +292,10 @@ mod tests {
             && a["version"] == "v0.2"
             && a["base_path"] == "/kyc-tenure/v0.2"
             && a["spec_url"] == "/kyc-tenure/v0.2/openapi.yaml"));
+        assert!(apis.iter().any(|a| a["name"] == "blockchain-public-address"
+            && a["version"] == "v0.3"
+            && a["base_path"] == "/blockchain-public-address/v0.3"
+            && a["spec_url"] == "/blockchain-public-address/v0.3/openapi.yaml"));
         assert_eq!(
             body["authorization_servers"][0]["openid_configuration"],
             "/.well-known/openid-configuration"
