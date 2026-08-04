@@ -493,6 +493,27 @@ the second control plane is the identifier's trailing three digits taken as a
 an odd tail lines up with the unconditional endpoint), zero mask → `["inactive"]`.
 **This completes Call Forwarding Signal v0.4.**
 
+**Phase 5 (other CAMARA APIs) — Number Recycling v0.2** is now live, a new
+stateless, non-spatial, phone-number-keyed account-integrity API mounted at its
+real published version `/number-recycling/v0.2` (CAMARA 0.2.0, release r2.2 —
+the latest published, like KYC Match / Call Forwarding Signal). `POST /check`
+(scope `number-recycling:check`, operationId `checkNumberRecycling`) answers
+whether the **subscriber** behind a phone number changed after a caller-supplied
+`specifiedDate` (an anti-fraud signal) — `{ "phoneNumberRecycled": boolean }`.
+Faithful to CAMARA's two-legged/three-legged identifier rule (the `phoneNumber`
+body is valid only in two-legged auth): a submitted `phoneNumber` on a
+three-legged **line** token (E.164 `sub`) → 422 `UNNECESSARY_IDENTIFIER`; no
+number + a non-line subject → 422 `MISSING_IDENTIFIER`. **Two** control planes
+(DESIGN §7): the identifier's reserved error suffix → canonical CAMARA error;
+else its trailing three digits read as **days since the subscriber last changed**
+compared against `specifiedDate` — recycled iff the change is strictly after the
+reference date (`(today − specifiedDate) > digits`), so `specifiedDate` is a
+genuine second control plane (the *same* number flips true↔false as the date
+moves). `specifiedDate` is validated: malformed/impossible → 400
+`INVALID_ARGUMENT`; future → 400 `OUT_OF_RANGE`. A self-contained civil-date
+parser/formatter (Howard Hinnant `days_from_civil`/`civil_from_days`, no new
+dependency) does the date maths. `x-correlator` echoed on every response.
+
 ## In progress (claimed this pass)
 
 _None._  <!-- agent: put the claimed item + run timestamp here, clear it when done -->
@@ -670,6 +691,15 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     three digits as a 4-bit mask (`digits % 16`) over the four active types (bit 0
     = `unconditional`, so an odd tail lines up with the unconditional endpoint);
     zero mask → `["inactive"]`. **Completes Call Forwarding Signal v0.4.**
+- [x] Number Recycling v0.2 (`/number-recycling/v0.2`; CAMARA 0.2.0, release
+  r2.2; stateless, non-spatial, phone-number-keyed):
+  - [x] `POST /check` (`number-recycling:check`, `checkNumberRecycling`) —
+    `{ phoneNumberRecycled: boolean }`; two-legged (submitted `phoneNumber`) /
+    three-legged (E.164 `sub`) identifier rule with 422 `UNNECESSARY_IDENTIFIER`
+    / `MISSING_IDENTIFIER`; two control planes (DESIGN §7): identifier
+    reserved-error suffix, and identifier trailing digits (days-since-change) vs
+    `specifiedDate` (recycled iff change strictly after the date). `specifiedDate`
+    validated: malformed → 400 `INVALID_ARGUMENT`, future → 400 `OUT_OF_RANGE`.
 - [ ] Other CAMARA APIs as capacity allows
 
 ## Cross-cutting (do alongside the item that needs it)
@@ -688,6 +718,37 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-04 — Phase 5 (other CAMARA APIs): **Number Recycling v0.2** — new
+  stateless, non-spatial, phone-number-keyed account-integrity API. Verified the
+  latest published CAMARA NumberRecycling spec (release **r2.2 → v0.2.0**; `main`
+  is `wip`): op `checkNumberRecycling`, scope `number-recycling:check`, body
+  `CreateCheckNumRecycling{phoneNumber?, specifiedDate(date, required)}`, 200
+  `CheckNumRecyclingInfo{phoneNumberRecycled: boolean}`, and the two-legged /
+  three-legged identifier rule (422 `MISSING_IDENTIFIER` / `UNNECESSARY_IDENTIFIER`).
+  New `src/apis/number_recycling/{,v0_2}.rs` (mirrors Call Forwarding Signal, no
+  new dep): `POST /check` mounted at the real `/number-recycling/v0.2`. Identifier
+  = submitted `phoneNumber` (two-legged) else E.164 `sub` (three-legged). Two
+  control planes (DESIGN §7): reserved error suffix → canonical CAMARA error; else
+  the identifier's trailing three digits are days-since-the-last-subscriber-change,
+  recycled iff strictly after `specifiedDate` — so `specifiedDate` is a genuine
+  second plane (same number flips true↔false as the date moves). `specifiedDate`
+  validated with a self-contained civil-date parser (Howard Hinnant
+  `days_from_civil`/`civil_from_days`, no dep): malformed/impossible → 400
+  `INVALID_ARGUMENT`, future → 400 `OUT_OF_RANGE`. `x-correlator` echoed. Wired
+  into `apis.rs`, `openapi.rs` (served at `/number-recycling/v0.2/openapi.yaml`)
+  and the `/` catalog. Spec: vendored + annotated
+  `specs/number-recycling/v0.2/openapi.yaml` (full functional-case description,
+  `x-camarasim-scenarios`, examples, local `NumberRecyclingError` code enum incl.
+  `OUT_OF_RANGE` + the 422 identifier codes; full shared reserved-error set
+  exposed). Tests: +20 (3 units [civil-date round-trip, `parse_date`
+  valid/malformed/impossible, e164] + 17 integration: old-date→recycled,
+  today→not-recycled, same-number date-flip [specifiedDate control plane],
+  reserved suffix, three-legged subject-keyed + reserved subject,
+  UNNECESSARY_/MISSING_IDENTIFIER, future→OUT_OF_RANGE, malformed/missing date,
+  invalid phone, unknown-field, malformed json, no-scope→403, no-token→401,
+  x-correlator echo) + catalog + openapi serving assertions. `cargo test` 593
+  green (was 573); `cargo build --release` ok — binary: 1707992 bytes (1.71M,
+  +22328 B).
 - 2026-08-04 — Phase 5 (other CAMARA APIs): **Call Forwarding Signal v0.4** —
   **`POST /call-forwardings`** (`retrieveCallForwarding`, scope
   `call-forwarding-signal:call-forwardings:read`) added, **completing the API**.

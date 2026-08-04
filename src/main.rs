@@ -112,6 +112,12 @@ async fn catalog() -> Json<Value> {
                 "version": "v0.4",
                 "base_path": "/call-forwarding-signal/v0.4",
                 "spec_url": "/call-forwarding-signal/v0.4/openapi.yaml",
+            },
+            {
+                "name": "number-recycling",
+                "version": "v0.2",
+                "base_path": "/number-recycling/v0.2",
+                "spec_url": "/number-recycling/v0.2/openapi.yaml",
             }
         ],
         "authorization_servers": [{
@@ -216,6 +222,10 @@ mod tests {
             && a["version"] == "v0.4"
             && a["base_path"] == "/call-forwarding-signal/v0.4"
             && a["spec_url"] == "/call-forwarding-signal/v0.4/openapi.yaml"));
+        assert!(apis.iter().any(|a| a["name"] == "number-recycling"
+            && a["version"] == "v0.2"
+            && a["base_path"] == "/number-recycling/v0.2"
+            && a["spec_url"] == "/number-recycling/v0.2/openapi.yaml"));
         assert_eq!(
             body["authorization_servers"][0]["openid_configuration"],
             "/.well-known/openid-configuration"

@@ -19,6 +19,7 @@
 //! - **Geofencing Subscriptions v0.4** — `/geofencing-subscriptions/v0.4/…`.
 //! - **Carrier Billing v0.5** — `/carrier-billing/v0.5/…`.
 //! - **Call Forwarding Signal v0.4** — `/call-forwarding-signal/v0.4/…`.
+//! - **Number Recycling v0.2** — `/number-recycling/v0.2/…`.
 //!
 //! Plus [`openapi`], which serves each mounted API's vendored OpenAPI spec at
 //! `/{api}/v{n}/openapi.yaml` (docs/DESIGN.md §9).
@@ -32,6 +33,7 @@ pub mod geofencing_subscriptions;
 pub mod kyc_match;
 pub mod location_retrieval;
 pub mod location_verification;
+pub mod number_recycling;
 pub mod number_verification;
 pub mod one_time_password_sms;
 pub mod openapi;
@@ -56,5 +58,6 @@ pub fn routes() -> Router {
         .merge(geofencing_subscriptions::routes())
         .merge(carrier_billing::routes())
         .merge(call_forwarding_signal::routes())
+        .merge(number_recycling::routes())
         .merge(openapi::routes())
 }
