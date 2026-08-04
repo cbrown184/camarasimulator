@@ -550,8 +550,17 @@ identifier's reserved error suffix → canonical CAMARA error; else its trailing
 three digits are **hours since the last device swap** and `swapped = hoursAgo <
 maxAge`, making `maxAge` (1–2400, default 240) a genuine second control plane
 (out-of-range `maxAge` → 400 `OUT_OF_RANGE`; an identifier with no digits →
-never swapped). `x-correlator` echoed on every response. `POST /retrieve-date`
-is a later slice.
+never swapped). `x-correlator` echoed on every response. Device Swap v1 is now
+**complete**: `POST /retrieve-date` (`device-swap:retrieve-date`,
+`retrieveDeviceSwapDate`) is live too — the companion to `check`, reporting *when*
+the device was last swapped as `{ latestDeviceChange: <RFC 3339 UTC | null>,
+monitoredPeriod: <days> }`. Same identifier resolution and reserved-error
+convention as `check`; the identifier's trailing three digits are hours-since-swap,
+so `latestDeviceChange` = *now − hoursAgo h* when that swap is inside the fixed
+monitored period (240 h = 10 days, aligned to `check`'s default `maxAge` so the two
+operations agree), else `null`. `monitoredPeriod` (10 days) is always returned. A
+self-contained RFC 3339 UTC formatter (no new dependency, mirroring SIM Swap's
+`retrieve-date`) renders the timestamp.
 
 ## In progress (claimed this pass)
 
@@ -751,7 +760,7 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     fields driven by the body: `identityMatchScore`=90 (any identity attribute),
     `verifiedStatus`=true (`idDocument`), `contentLock`/`parentalControl` (opt-in
     via `include*`, minor `< 18` → `"true"`).
-- [~] Device Swap v1 (`/device-swap/v1`; CAMARA 1.0.0, release r3.2; stateless,
+- [x] Device Swap v1 (`/device-swap/v1`; CAMARA 1.0.0, release r3.2; stateless,
   non-spatial, phone-number-keyed; the device counterpart of SIM Swap):
   - [x] `POST /check` (`device-swap:check`, `checkDeviceSwap`) —
     `{ swapped: boolean }`; two-legged (submitted `phoneNumber`) / three-legged
@@ -760,7 +769,15 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     suffix, and identifier trailing digits (hours-since-last-swap) vs `maxAge`
     (`swapped = hoursAgo < maxAge`; 1–2400, default 240, else 400 `OUT_OF_RANGE`;
     no digits → never swapped).
-  - [ ] `POST /retrieve-date` (`device-swap:retrieve-date`, `retrieveDeviceSwapDate`)
+  - [x] `POST /retrieve-date` (`device-swap:retrieve-date`, `retrieveDeviceSwapDate`)
+    — `{ latestDeviceChange: <RFC 3339 UTC | null>, monitoredPeriod: <days> }`;
+    same two-legged / three-legged identifier rule (422 `UNNECESSARY_IDENTIFIER`
+    / `MISSING_IDENTIFIER`) and reserved-error convention as `check`. Identifier
+    trailing digits = hours-since-swap → `latestDeviceChange` = now − hoursAgo h
+    when inside the fixed monitored period (240 h = 10 days, aligned to `check`'s
+    default `maxAge`), else `null`; `monitoredPeriod` (10 days) always reported.
+    Self-contained RFC 3339 formatter (no new dep, mirroring SIM Swap).
+    **Completes Device Swap v1.**
 - [ ] Other CAMARA APIs as capacity allows
 
 ## Cross-cutting (do alongside the item that needs it)
@@ -778,6 +795,31 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 ## Scan journal
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
+
+- 2026-08-04 — Phase 5 (other CAMARA APIs): **Device Swap v1 `POST /retrieve-date`**
+  — **completes Device Swap v1**. Verified the authoritative CAMARA DeviceSwap r3.2
+  spec for `retrieveDeviceSwapDate`: scope `device-swap:retrieve-date`, base
+  `/device-swap/v1`, body `CreateDeviceSwapDate {phoneNumber?}` (no `maxAge`), 200
+  `DeviceSwapInfo {latestDeviceChange: string date-time nullable (required),
+  monitoredPeriod?: integer days}`, plus the 422 identifier codes. Added `POST
+  /retrieve-date` to `src/apis/device_swap/v1.rs` (mirrors SIM Swap v2's
+  `retrieve-date`; **no new dep**): same two-legged/three-legged identifier rule as
+  `check` (refactored `resolve_identifier` to take `Option<&str>` so both endpoints
+  share it — 422 `UNNECESSARY_IDENTIFIER`/`MISSING_IDENTIFIER`), reserved-error
+  suffix → canonical CAMARA error; the identifier's trailing three digits =
+  hours-since-swap, `latestDeviceChange` = now − hoursAgo h when inside the fixed
+  240 h (10-day) monitored period (aligned to `check`'s default `maxAge`), else
+  `null`; `monitoredPeriod` (10 days) always reported. Self-contained RFC 3339 UTC
+  formatter (Hinnant `civil_from_days`, no new dep). `x-correlator` echoed. Spec:
+  vendored + annotated `specs/device-swap/v1/openapi.yaml` (new `/retrieve-date`
+  path, `CreateDeviceSwapDate`/`DeviceSwapInfo` schemas, `x-camarasim-scenarios`,
+  examples). Tests: +15 (4 units [rfc3339 known epochs, civil_from_days leap
+  boundaries, last_swap_timestamp null-outside-period, now−hoursAgo monotonic] + 11
+  integration: recent→timestamp+monitoredPeriod, old→null, reserved suffix,
+  rejects-maxAge, invalid phone, three-legged empty-body subject fallback,
+  UNNECESSARY_/MISSING_IDENTIFIER, wrong-scope→403, no-token→401, x-correlator).
+  `cargo test` 654 green (was 639); `cargo build --release` ok — binary: 1772848
+  bytes (1.77M, +13656 B).
 
 - 2026-08-04 — Phase 5 (other CAMARA APIs): **Device Swap v1** — new stateless,
   non-spatial, phone-number-keyed anti-fraud API, the **device** counterpart of

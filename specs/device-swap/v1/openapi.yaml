@@ -5,7 +5,7 @@
 # with CamaraSim's parameter-driven functional cases (docs/DESIGN.md §7, §9).
 # Backed by `src/apis/device_swap/v1.rs`; spec and code must not drift.
 #
-# Serves `POST /check`. (`POST /retrieve-date` is a later slice.)
+# Serves `POST /check` and `POST /retrieve-date`.
 openapi: 3.0.3
 info:
   title: Device Swap
@@ -16,7 +16,8 @@ info:
     before a sensitive operation is a fraud indicator.
 
     This is the CamaraSim reference double for CAMARA Device Swap 1.0.0. The
-    `/check` endpoint requires the `device-swap:check` scope.
+    `/check` endpoint requires the `device-swap:check` scope and the
+    `/retrieve-date` endpoint the `device-swap:retrieve-date` scope.
 
     ## Identifier resolution — two-legged vs three-legged
 
@@ -211,6 +212,137 @@ paths:
           - input: maxAge outside [1, 2400]
             result: "400 OUT_OF_RANGE"
 
+  /retrieve-date:
+    post:
+      operationId: retrieveDeviceSwapDate
+      summary: Retrieve the timestamp of the last device swap for a phone number
+      description: |
+        Answers **when** the device bound to the phone number was last swapped
+        (`{ "latestDeviceChange": <RFC 3339 UTC | null>, "monitoredPeriod":
+        <days> }`) — the companion to `/check`, which answers a boolean against a
+        `maxAge` window.
+
+        The line is identified by the submitted `phoneNumber` (two-legged) or by
+        the access-token subject (three-legged) — the same identifier-resolution
+        rules as `/check` (see the API description). There is no `maxAge`: the
+        window is the fixed `monitoredPeriod`.
+
+        Functional cases (docs/DESIGN.md §7): the resolved identifier drives the
+        result. A reserved error suffix selects the canonical CAMARA error; else
+        the identifier's trailing three digits are read as hours-since-the-last
+        swap, and `latestDeviceChange` is *now* minus that many hours when the
+        swap is inside the monitored period (`< 240` h), otherwise `null`. An
+        identifier with no trailing digits reports `null`. `monitoredPeriod`
+        (10 days — 240 h, aligned to `/check`'s default `maxAge` so the two
+        operations agree) is always reported.
+      security:
+        - openId:
+            - device-swap:retrieve-date
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateDeviceSwapDate"
+      responses:
+        "200":
+          description: The timestamp of the last device swap for the line.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeviceSwapInfo"
+              examples:
+                recentSwap:
+                  summary: Device swapped inside the monitored period
+                  value:
+                    latestDeviceChange: "2026-08-02T14:27:08Z"
+                    monitoredPeriod: 10
+                noRecentSwap:
+                  summary: No swap inside the monitored period (happy path)
+                  value:
+                    latestDeviceChange: null
+                    monitoredPeriod: 10
+        "400":
+          description: |
+            400 — invalid request. CamaraSim returns `INVALID_ARGUMENT` for a
+            malformed body or a `phoneNumber` that is not valid E.164.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeviceSwapError"
+              examples:
+                invalidArgument:
+                  summary: Malformed body or `phoneNumber`
+                  value:
+                    status: 400
+                    code: INVALID_ARGUMENT
+                    message: "`phoneNumber` must be in E.164 format (e.g. +123456789)."
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "409":
+          $ref: "../../shared/errors.yaml#/components/responses/Conflict"
+        "422":
+          description: |
+            422 — unprocessable. CamaraSim returns `MISSING_IDENTIFIER` when the
+            line cannot be identified (no `phoneNumber` and a non-line subject),
+            `UNNECESSARY_IDENTIFIER` when a `phoneNumber` is submitted on a
+            three-legged line token, or the reserved shared
+            `SERVICE_NOT_APPLICABLE` for the `…422` suffix.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeviceSwapError"
+              examples:
+                missingIdentifier:
+                  summary: The line cannot be identified
+                  value:
+                    status: 422
+                    code: MISSING_IDENTIFIER
+                    message: The phone number cannot be identified.
+                unnecessaryIdentifier:
+                  summary: The number is already identified by the token
+                  value:
+                    status: 422
+                    code: UNNECESSARY_IDENTIFIER
+                    message: The phone number is already identified by the access token.
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          Result selected from the resolved line identifier (docs/DESIGN.md §7).
+          The identifier's trailing three digits are hours-since-the-last-swap;
+          the timestamp is now minus that many hours when inside the fixed
+          monitored period (240 h), else null. Reserved error suffixes come from
+          the shared convention in errors.yaml.
+        cases:
+          - input: identifier ending in a reserved error suffix (e.g. …404)
+            result: the canonical CAMARA error for that status
+          - input: "identifier whose trailing digits (hoursAgo) < 240"
+            result: "200 { latestDeviceChange: now − hoursAgo h, monitoredPeriod: 10 }"
+          - input: "identifier whose trailing digits (hoursAgo) >= 240"
+            result: "200 { latestDeviceChange: null, monitoredPeriod: 10 }"
+          - input: identifier with no trailing digits
+            result: "200 { latestDeviceChange: null, monitoredPeriod: 10 }"
+          - input: no phoneNumber, an E.164 token subject (three-legged)
+            result: same cases, driven by the subject's trailing three digits
+          - input: phoneNumber submitted on a three-legged line token
+            result: "422 UNNECESSARY_IDENTIFIER"
+          - input: no phoneNumber and a non-line token subject
+            result: "422 MISSING_IDENTIFIER"
+
 components:
   securitySchemes:
     openId:
@@ -267,6 +399,43 @@ components:
           description: >-
             `true` when the device bound to the phone number was swapped within
             the `maxAge` window, `false` otherwise.
+
+    CreateDeviceSwapDate:
+      type: object
+      description: |
+        Request for the timestamp of the last device swap for a line. The
+        `phoneNumber` is valued only in two-legged authentication; supplying it
+        with a three-legged (line) token yields `422 UNNECESSARY_IDENTIFIER`.
+        The body may be omitted entirely on a three-legged token.
+      properties:
+        phoneNumber:
+          type: string
+          description: A phone number in E.164 format (starting with `+`).
+          pattern: '^\+[1-9][0-9]{4,14}$'
+          example: "+123456789012"
+
+    DeviceSwapInfo:
+      type: object
+      description: The timestamp of the last device swap for the line.
+      required:
+        - latestDeviceChange
+      properties:
+        latestDeviceChange:
+          type: string
+          format: date-time
+          nullable: true
+          description: >-
+            Timestamp of the latest device swap (RFC 3339, with time zone), or
+            `null` when the last swap is older than `monitoredPeriod` or the line
+            has no recorded swap.
+          example: "2026-08-02T14:27:08Z"
+        monitoredPeriod:
+          type: integer
+          description: >-
+            Timeframe in days over which device changes are supervised for the
+            phone number. CamaraSim fixes this at 10 days (240 h), aligned to
+            `/check`'s default `maxAge`.
+          example: 10
 
     DeviceSwapError:
       description: >-
