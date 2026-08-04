@@ -778,6 +778,21 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     default `maxAge`), else `null`; `monitoredPeriod` (10 days) always reported.
     Self-contained RFC 3339 formatter (no new dep, mirroring SIM Swap).
     **Completes Device Swap v1.**
+- [x] KYC Fill-in v0.3 (`/kyc-fill-in/v0.3`; CAMARA 0.3.0; stateless,
+  non-spatial, phone-number-keyed identity API — the *return-attributes*
+  counterpart of KYC Match):
+  - [x] `POST /fill-in` (`KYC_Fill-in`, scope `kyc-fill-in:set-all` **or** any
+    per-attribute `kyc-fill-in:<attribute>`) — returns the operator-verified
+    identity attributes so a caller can pre-fill a form. Two-legged (submitted
+    `phoneNumber`) / three-legged (E.164 `sub`) identifier rule with 422
+    `UNNECESSARY_IDENTIFIER` / `MISSING_IDENTIFIER`; a token with no
+    `kyc-fill-in:*` scope → 403 `PERMISSION_DENIED`. Control planes (DESIGN §7):
+    identifier reserved-error suffix → canonical CAMARA error; identifier
+    trailing three digits pick one of 3 fixed personas (`% 3`, covering the 3
+    `gender` values); and the **granted scope set** shapes the response —
+    `set-all` → all 20 attributes, else only the per-attribute-scoped ones (a
+    genuine second control plane over the body). Synthetic data only.
+    **Completes KYC Fill-in v0.3.**
 - [ ] Other CAMARA APIs as capacity allows
 
 ## Cross-cutting (do alongside the item that needs it)
@@ -795,6 +810,33 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 ## Scan journal
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
+
+- 2026-08-04 — Phase 5 (other CAMARA APIs): **KYC Fill-in v0.3** — new stateless,
+  non-spatial, phone-number-keyed identity API (the *return-attributes* counterpart
+  of KYC Match), **completes the API in one pass** (single endpoint). Verified the
+  authoritative CAMARA KnowYourCustomer spec (`kyc-fill-in` 0.3.0) via WebFetch: op
+  `KYC_Fill-in`, base `/kyc-fill-in/v0.3`, `POST /fill-in`, scopes
+  `kyc-fill-in:set-all` + per-attribute `kyc-fill-in:<attr>`, request
+  `KYC_FillinRequest {phoneNumber?}`, 200 `KYC_FillinResponse` (20 optional identity
+  attributes incl. Kana names, address parts, birthdate, email, gender enum), 422
+  identifier codes. New `src/apis/kyc_fill_in/{,v0_3}.rs` (**no new dep**): reuses the
+  two-legged/three-legged identifier rule (422 `UNNECESSARY_/MISSING_IDENTIFIER`) and
+  shared reserved-error convention. Three control planes (DESIGN §7): identifier
+  reserved suffix → canonical error; identifier trailing three digits pick 1 of 3
+  fixed synthetic personas (`% 3`, one per gender); and the **granted scope set**
+  filters the response (`set-all` → all 20 fields, else only per-attribute-scoped
+  ones — a real second plane over the body). No `kyc-fill-in:*` scope → 403
+  PERMISSION_DENIED. `x-correlator` echoed. Wired into `apis.rs`, `openapi.rs` (served
+  at `/kyc-fill-in/v0.3/openapi.yaml`) and the `/` catalog. Spec: vendored + annotated
+  `specs/kyc-fill-in/v0.3/openapi.yaml` (full functional-case description,
+  `x-camarasim-scenarios`, examples, `KYC_FillinError` code enum). Tests: +20 (3 units
+  [persona selection mod 3, all-persona-fields-non-empty, E.164] + 17 integration:
+  set-all→20 fields, persona-by-digits + mod-3 collision, per-attribute scope
+  narrowing, phoneNumber-needs-own-scope, set-all-alone, reserved suffix, three-legged
+  subject/reserved-subject, UNNECESSARY_/MISSING_IDENTIFIER, empty-body subject
+  fallback, invalid phone, unknown field, malformed json, no-scope→403, no-token→401,
+  x-correlator). `cargo test` 674 green (was 654); `cargo build --release` ok —
+  binary: 1801240 bytes (1.80M, +28392 B).
 
 - 2026-08-04 — Phase 5 (other CAMARA APIs): **Device Swap v1 `POST /retrieve-date`**
   — **completes Device Swap v1**. Verified the authoritative CAMARA DeviceSwap r3.2

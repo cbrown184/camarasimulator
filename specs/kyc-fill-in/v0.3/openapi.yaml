@@ -1,0 +1,426 @@
+# CamaraSim — KYC Fill-in, API version v0.3 (CAMARA 0.3.0).
+#
+# Vendored from the CAMARA KnowYourCustomer "KYC Fill-in" API (kyc-fill-in
+# 0.3.0, the latest published version, mounted at its real sub-1.0 base path
+# `/v0.3` like KYC Match / KYC Age Verification) and annotated with CamaraSim's
+# parameter-driven functional cases (docs/DESIGN.md §7, §9). Backed by
+# `src/apis/kyc_fill_in/v0_3.rs`; spec and code must not drift.
+#
+# Serves `POST /fill-in`.
+openapi: 3.0.3
+info:
+  title: KYC Fill-in
+  description: |
+    Retrieve the operator-verified identity attributes for a line (name,
+    address, birthdate, e-mail, gender, …) so a caller can **pre-fill** a
+    sign-up / KYC form. Unlike KYC Match — which only *confirms* attributes the
+    caller already holds — KYC Fill-in *returns* them.
+
+    This is the CamaraSim reference double for CAMARA KYC Fill-in 0.3.0.
+
+    ## Authorisation & scopes
+
+    The endpoint requires a token carrying **at least one** KYC Fill-in scope:
+
+    - `kyc-fill-in:set-all` — return **every** attribute; or
+    - one or more per-attribute scopes `kyc-fill-in:<attribute>` (e.g.
+      `kyc-fill-in:name`, `kyc-fill-in:email`) — return **only** those
+      attributes.
+
+    A token with none of these scopes → `403 PERMISSION_DENIED`. The granted
+    scope set therefore shapes the response body (see the functional cases).
+
+    ## Identifier resolution — two-legged vs three-legged
+
+    Faithful to CAMARA, the `phoneNumber` in the request body is valid *only* in
+    two-legged auth. In a three-legged token the line is already identified by
+    the token **subject** (`sub`), so the number must not be resubmitted:
+
+    - `phoneNumber` present **and** the token subject is itself an E.164 number
+      (a line-authenticated three-legged token) → `422 UNNECESSARY_IDENTIFIER`.
+    - `phoneNumber` present, subject not a line → the submitted number is the
+      identifier (two-legged).
+    - `phoneNumber` absent, subject is an E.164 number → the subject is the
+      identifier (three-legged).
+    - `phoneNumber` absent **and** the subject is not a line → the line cannot be
+      identified → `422 MISSING_IDENTIFIER`.
+
+    ## Functional cases — the input is the control plane (docs/DESIGN.md §7)
+
+    Two independent control planes drive the response:
+
+    - **Reserved error suffix (identifier).** If the resolved identifier's
+      trailing three digits name a reserved CAMARA status (`…400`, `…401`,
+      `…403`, `…404`, `…409`, `…422`, `…429`, `…500`, `…503`), the endpoint
+      answers with that canonical CAMARA error (shared convention — see the
+      referenced `errors.yaml`).
+    - **Persona (identifier digits).** Otherwise the identifier's trailing three
+      digits select one of three fixed personas (`digits % 3`), so the returned
+      identity is deterministic from the number: `+1…000` → persona 0 (a
+      `FEMALE` holder), `+1…001` → persona 1 (`MALE`), `+1…002` → persona 2
+      (`OTHER`); `+1…003`/`+1…006` collide with `+1…000` (mod 3). The `phoneNumber`
+      attribute (when returned) echoes the resolved identifier.
+    - **Granted scopes (response shape).** The response includes only the
+      attributes the token authorises: `kyc-fill-in:set-all` → all 20 attributes;
+      otherwise only the attributes whose per-attribute scope is granted. The same
+      line therefore yields a wider or narrower body as the token's scopes change.
+
+    Example: `+123456789000` with `kyc-fill-in:set-all` → the full persona-0
+    identity; the same number with only `kyc-fill-in:name kyc-fill-in:email` → just
+    those two fields; `+123456789404` → `404 NOT_FOUND`.
+
+    CamaraSim exposes the full shared reserved-error set here so every reserved
+    suffix is reachable; canonical KYC Fill-in 0.3.0 declares a subset
+    (400/401/403/404/422).
+
+    Personal data returned by this simulator is entirely synthetic — no real
+    subscriber data is held or served.
+  version: "0.3.0"
+  license:
+    name: Apache-2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0.html
+
+servers:
+  - url: "{apiRoot}/kyc-fill-in/v0.3"
+    variables:
+      apiRoot:
+        default: http://localhost:8080
+        description: API root, e.g. the CamaraSim base URL.
+
+paths:
+  /fill-in:
+    post:
+      operationId: KYC_Fill-in
+      summary: Retrieve the operator-verified identity attributes for a line
+      description: |
+        Returns the identity attributes the operator holds for the line, so a
+        caller can pre-fill a form.
+
+        The line is identified by the submitted `phoneNumber` (two-legged) or by
+        the access-token subject (three-legged) — see the API description for the
+        identifier-resolution rules. The response is filtered to the attributes
+        the token's scopes authorise (`kyc-fill-in:set-all` for all, or the
+        matching `kyc-fill-in:<attribute>` scopes), and the persona is selected
+        from the identifier's trailing three digits (the parameter-driven
+        functional cases).
+      security:
+        - openId:
+            - kyc-fill-in:set-all
+        - openId:
+            - kyc-fill-in:phoneNumber
+            - kyc-fill-in:idDocument
+            - kyc-fill-in:name
+            - kyc-fill-in:givenName
+            - kyc-fill-in:familyName
+            - kyc-fill-in:nameKanaHankaku
+            - kyc-fill-in:nameKanaZenkaku
+            - kyc-fill-in:middleNames
+            - kyc-fill-in:familyNameAtBirth
+            - kyc-fill-in:address
+            - kyc-fill-in:streetName
+            - kyc-fill-in:streetNumber
+            - kyc-fill-in:postalCode
+            - kyc-fill-in:region
+            - kyc-fill-in:locality
+            - kyc-fill-in:country
+            - kyc-fill-in:houseNumberExtension
+            - kyc-fill-in:birthdate
+            - kyc-fill-in:email
+            - kyc-fill-in:gender
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/KYC_FillinRequest"
+      responses:
+        "200":
+          description: The identity attributes the token is authorised to receive.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/KYC_FillinResponse"
+              examples:
+                setAll:
+                  summary: set-all scope — every attribute (persona 0)
+                  value:
+                    phoneNumber: "+123456789000"
+                    idDocument: GB-PP-100045
+                    name: Alice Wonderland
+                    givenName: Alice
+                    familyName: Wonderland
+                    nameKanaHankaku: "ｱﾘｽ ﾜﾝﾀﾞｰﾗﾝﾄﾞ"
+                    nameKanaZenkaku: アリス ワンダーランド
+                    middleNames: Marie
+                    familyNameAtBirth: Liddell
+                    address: 10 Rabbit Hole Lane, Oxford OX1 2JD, GB
+                    streetName: Rabbit Hole Lane
+                    streetNumber: "10"
+                    postalCode: OX1 2JD
+                    region: Oxfordshire
+                    locality: Oxford
+                    country: GB
+                    houseNumberExtension: A
+                    birthdate: "1990-05-04"
+                    email: alice.wonderland@example.com
+                    gender: FEMALE
+                narrowScopes:
+                  summary: Only name + email scopes granted
+                  value:
+                    name: Alice Wonderland
+                    email: alice.wonderland@example.com
+        "400":
+          description: |
+            400 — invalid request. CamaraSim returns `INVALID_ARGUMENT` for a
+            malformed body or a `phoneNumber` that is not valid E.164.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/KYC_FillinError"
+              examples:
+                invalidArgument:
+                  summary: Malformed body or `phoneNumber`
+                  value:
+                    status: 400
+                    code: INVALID_ARGUMENT
+                    message: "`phoneNumber` must be in E.164 format (e.g. +123456789)."
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          description: |
+            403 — the token does not carry any `kyc-fill-in:*` scope.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/KYC_FillinError"
+              examples:
+                permissionDenied:
+                  summary: No KYC Fill-in scope granted
+                  value:
+                    status: 403
+                    code: PERMISSION_DENIED
+                    message: "Access token does not carry any 'kyc-fill-in:*' scope."
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "409":
+          $ref: "../../shared/errors.yaml#/components/responses/Conflict"
+        "422":
+          description: |
+            422 — unprocessable. CamaraSim returns `MISSING_IDENTIFIER` when the
+            line cannot be identified (no `phoneNumber` and a non-line subject),
+            `UNNECESSARY_IDENTIFIER` when a `phoneNumber` is submitted on a
+            three-legged line token, or the reserved shared `SERVICE_NOT_APPLICABLE`
+            for the `…422` suffix.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/KYC_FillinError"
+              examples:
+                missingIdentifier:
+                  summary: The line cannot be identified
+                  value:
+                    status: 422
+                    code: MISSING_IDENTIFIER
+                    message: The phone number cannot be identified.
+                unnecessaryIdentifier:
+                  summary: The number is already identified by the token
+                  value:
+                    status: 422
+                    code: UNNECESSARY_IDENTIFIER
+                    message: The phone number is already identified by the access token.
+                serviceNotApplicable:
+                  summary: Reserved `…422` suffix
+                  value:
+                    status: 422
+                    code: SERVICE_NOT_APPLICABLE
+                    message: The service is not available for the provided identifier.
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          Result selected from the resolved line identifier and the granted
+          scopes (docs/DESIGN.md §7). The identifier's trailing three digits pick
+          a fixed persona (mod 3); the granted scopes decide which of that
+          persona's attributes are returned. Reserved error suffixes come from the
+          shared convention in errors.yaml.
+        cases:
+          - input: identifier ending in a reserved error suffix (e.g. …404)
+            result: the canonical CAMARA error for that status
+          - input: "identifier + kyc-fill-in:set-all"
+            result: "200 — every attribute of the persona (digits % 3)"
+          - input: "identifier + only per-attribute scopes (e.g. name, email)"
+            result: "200 — only those attributes of the persona"
+          - input: same identifier, wider vs narrower scope set
+            result: response attribute set widens/narrows (scopes are a control plane)
+          - input: no phoneNumber, an E.164 token subject (three-legged)
+            result: same cases, driven by the subject's trailing three digits
+          - input: phoneNumber submitted on a three-legged line token
+            result: "422 UNNECESSARY_IDENTIFIER"
+          - input: no phoneNumber and a non-line token subject
+            result: "422 MISSING_IDENTIFIER"
+          - input: token with no kyc-fill-in scope
+            result: "403 PERMISSION_DENIED"
+
+components:
+  securitySchemes:
+    openId:
+      $ref: "../../auth/openapi.yaml#/components/securitySchemes/camaraOAuth"
+
+  parameters:
+    XCorrelator:
+      name: x-correlator
+      in: header
+      required: false
+      description: Correlation id for the request, echoed back on the response.
+      schema:
+        type: string
+
+  headers:
+    XCorrelator:
+      description: The `x-correlator` from the request, echoed if one was sent.
+      required: false
+      schema:
+        type: string
+
+  schemas:
+    KYC_FillinRequest:
+      type: object
+      description: |
+        Request for the identity attributes of a line. The `phoneNumber` is
+        valued only in two-legged authentication; supplying it with a
+        three-legged (line) token yields `422 UNNECESSARY_IDENTIFIER`. The body
+        may be omitted entirely on a three-legged token.
+      properties:
+        phoneNumber:
+          type: string
+          description: A phone number in E.164 format (starting with `+`).
+          pattern: '^\+[1-9][0-9]{4,14}$'
+          example: "+123456789000"
+
+    KYC_FillinResponse:
+      type: object
+      description: |
+        The operator-verified identity attributes for the line. Every property is
+        optional: CamaraSim returns only the attributes the token's scopes
+        authorise (all of them under `kyc-fill-in:set-all`, otherwise the subset
+        matching the granted `kyc-fill-in:<attribute>` scopes).
+      properties:
+        phoneNumber:
+          type: string
+          description: The resolved line identifier, in E.164 format.
+          example: "+123456789000"
+        idDocument:
+          type: string
+          description: Identification of the official identity document.
+          example: GB-PP-100045
+        name:
+          type: string
+          description: Full name of the customer.
+          example: Alice Wonderland
+        givenName:
+          type: string
+          description: First / given name(s) of the customer.
+          example: Alice
+        familyName:
+          type: string
+          description: Last name / surname / family name of the customer.
+          example: Wonderland
+        nameKanaHankaku:
+          type: string
+          description: Full name in Hankaku-Kana format (Japan).
+          example: "ｱﾘｽ ﾜﾝﾀﾞｰﾗﾝﾄﾞ"
+        nameKanaZenkaku:
+          type: string
+          description: Full name in Zenkaku-Kana format (Japan).
+          example: アリス ワンダーランド
+        middleNames:
+          type: string
+          description: Middle name(s) of the customer.
+          example: Marie
+        familyNameAtBirth:
+          type: string
+          description: Family name at birth of the customer.
+          example: Liddell
+        address:
+          type: string
+          description: The full address of the customer.
+          example: 10 Rabbit Hole Lane, Oxford OX1 2JD, GB
+        streetName:
+          type: string
+          description: Name of the street of the customer's address.
+          example: Rabbit Hole Lane
+        streetNumber:
+          type: string
+          description: Number of the street of the customer's address.
+          example: "10"
+        postalCode:
+          type: string
+          description: Zip / postal code of the customer's address.
+          example: OX1 2JD
+        region:
+          type: string
+          description: Region / province / state of the customer's address.
+          example: Oxfordshire
+        locality:
+          type: string
+          description: Locality / town / city of the customer's address.
+          example: Oxford
+        country:
+          type: string
+          description: The country of the customer's address (ISO 3166-1 alpha-2).
+          example: GB
+        houseNumberExtension:
+          type: string
+          description: House number extension of the customer's address.
+          example: A
+        birthdate:
+          type: string
+          format: date
+          description: The birthdate of the customer (`YYYY-MM-DD`).
+          example: "1990-05-04"
+        email:
+          type: string
+          format: email
+          description: Email address of the customer.
+          example: alice.wonderland@example.com
+        gender:
+          type: string
+          enum:
+            - MALE
+            - FEMALE
+            - OTHER
+          description: Gender of the customer.
+          example: FEMALE
+
+    KYC_FillinError:
+      description: >-
+        The CAMARA error body for this API — the shared `CamaraError` shape with
+        the KYC Fill-in `code` set (adds the 422 identifier codes).
+      allOf:
+        - $ref: "../../shared/errors.yaml#/components/schemas/CamaraError"
+        - type: object
+          properties:
+            code:
+              type: string
+              enum:
+                - INVALID_ARGUMENT
+                - UNAUTHENTICATED
+                - PERMISSION_DENIED
+                - NOT_FOUND
+                - IDENTIFIER_NOT_FOUND
+                - MISSING_IDENTIFIER
+                - UNNECESSARY_IDENTIFIER
+                - SERVICE_NOT_APPLICABLE
+                - CONFLICT
+                - TOO_MANY_REQUESTS
+                - INTERNAL
+                - UNAVAILABLE

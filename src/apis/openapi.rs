@@ -111,6 +111,10 @@ const SPECS: &[(&str, &str)] = &[
         include_str!("../../specs/device-swap/v1/openapi.yaml"),
     ),
     (
+        "/kyc-fill-in/v0.3/openapi.yaml",
+        include_str!("../../specs/kyc-fill-in/v0.3/openapi.yaml"),
+    ),
+    (
         "/auth/openapi.yaml",
         include_str!("../../specs/auth/openapi.yaml"),
     ),
@@ -189,6 +193,7 @@ mod tests {
             "/number-recycling/v0.2/openapi.yaml",
             "/kyc-age-verification/v0.1/openapi.yaml",
             "/device-swap/v1/openapi.yaml",
+            "/kyc-fill-in/v0.3/openapi.yaml",
         ] {
             let (status, content_type, body) = fetch(path).await;
             assert_eq!(status, StatusCode::OK, "spec {path} should be served");
