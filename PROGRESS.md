@@ -442,10 +442,17 @@ place too: a `…888` reservation that lands in `pending_validation` delivers a
 `paymentDate` and — per the CAMARA schema — no `validationInfo`) to its `sink`,
 over the same fire-and-forget raw-TCP transport with the same ACCESSTOKEN
 `sinkCredential` bearer handling; it is mutually exclusive with
-`payment-reserved`. The remaining two-step terminal events (`payment-completed`
-on confirm, `payment-cancelled`, `payment-denied`) are the remaining slice —
-each needs the `sink`/credential persisted from `preparePayment` (the
-confirm/cancel bodies carry no `sink`).
+`payment-reserved`. The first **two-step terminal** event is now in place too:
+a successful `confirmPayment` delivers a `payment-completed` CloudEvent
+(`data.status: succeeded`, with `paymentDate`) to the `sink` recorded at
+`preparePayment`. Because the confirm body carries no `sink`, the sink and any
+`ACCESSTOKEN` `sinkCredential` bearer are stashed at prepare-time in a
+`paymentId`-keyed in-memory side-store (`store::insert_notify`/`take_notify`,
+mirroring QoD's credential side-store) and taken **single-use** when the charge
+goes through (so exactly one terminal event fires; the secret is never echoed by
+`retrievePayment`). The remaining terminal events (`payment-cancelled` on cancel,
+`payment-denied`) are the last slice — each reuses the same notify side-store
+(the cancel body also carries no `sink`).
 
 ## In progress (claimed this pass)
 
@@ -593,11 +600,15 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
       PLAIN/REFRESHTOKEN cut). Mutually exclusive with `payment-reserved`; per the
       CAMARA schema the event carries only paymentId/status/description (no
       paymentDate, no validationInfo).
-    - [ ] remaining two-step terminal events (`payment-completed` on confirm,
-      `payment-cancelled`, `payment-denied`) — each needs the `sink`/credential
-      persisted from `preparePayment` (a side-store keyed by `paymentId`,
-      mirroring QoD's credential side-store) since the confirm/cancel bodies
-      carry no `sink`.
+    - [x] `payment-completed` on `confirmPayment` — a reservation prepared with a
+      `sink` now delivers the terminal `payment-completed` CloudEvent
+      (`data.status: succeeded`, with `paymentDate`) when charged. The
+      `sink`/derived credential are stashed at `preparePayment` in a `paymentId`
+      side-store (`store::insert_notify`/`take_notify`, mirroring QoD's credential
+      side-store) since the confirm body carries no `sink`; taken single-use.
+    - [ ] remaining two-step terminal events (`payment-cancelled` on cancel,
+      `payment-denied`) — each reuses the same `preparePayment` notify side-store
+      (`store::take_notify`); the cancel body likewise carries no `sink`.
 - [ ] Other CAMARA APIs as capacity allows
 
 ## Cross-cutting (do alongside the item that needs it)
@@ -616,6 +627,19 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-04 — Phase 5 (payments): **Carrier Billing v0.5** — **`payment-completed`
+  on `confirmPayment`** (first two-step *terminal* charging event). Added a
+  `paymentId`-keyed notify side-store to `store.rs` (`NotifyTarget{sink, auth}`,
+  `insert_notify`/`take_notify`, mirroring QoD's credential side-store, **no new
+  dep**): `preparePayment` stashes the request `sink` + derived ACCESSTOKEN bearer
+  (both `reserved` and `pending_validation` branches) since the confirm body has
+  no `sink`; `confirmPayment`'s `Confirmed` transition takes it single-use and
+  fire-and-forgets a `payment-completed` CloudEvent (reuses `spawn_delivery`).
+  Secret never echoed by `retrievePayment`. Tests: confirm-with-sink delivers
+  payment-completed (with paymentDate), the bearer persists from prepare→confirm,
+  a sink-less reservation stashes no target, + a store unit test. Spec: top-level
+  notification note + `confirmPayment` description/scenarios/`callbacks` updated.
+  `cargo test` 538 green; `cargo build --release` ok — binary: 1644672 bytes (1.6M).
 - 2026-08-04 — Phase 5 (payments): **Carrier Billing v0.5** — **`preparePayment`
   → `payment-pending-validation` notification**. Verified the real CAMARA
   CarrierBilling r3.2 event: `payment-pending-validation` `data` =

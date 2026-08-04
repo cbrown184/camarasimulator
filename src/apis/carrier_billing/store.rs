@@ -290,6 +290,55 @@ fn settle(id: &str, status: &str) {
     }
 }
 
+// --- Notify-target side-store (two-step terminal charging notifications) --
+//
+// The two-step *terminal* charging events (`payment-completed` on confirm,
+// `payment-cancelled`, `payment-denied`) fire from `confirmPayment` /
+// `cancelPayment` / `validatePayment` requests whose bodies carry **no** `sink`.
+// So when `preparePayment` records a `sink` (and any derived credential), the
+// delivery target is stashed here, keyed by `paymentId`, apart from the echoed
+// payment JSON — the credential is a secret and must never be rendered to a
+// client. A terminal transition **takes** it (single-use: exactly one terminal
+// outcome fires for a reservation). Mirrors QoD's credential side-store.
+
+/// A stored CloudEvents delivery target for a payment's later terminal event.
+pub struct NotifyTarget {
+    /// The consumer-supplied `sink` URL from the `preparePayment` request.
+    pub sink: String,
+    /// The derived `Authorization` header (e.g. `"Bearer <token>"`) when the
+    /// reservation carried a usable `ACCESSTOKEN` `sinkCredential`, else `None`. A
+    /// secret — held here, never in the payment JSON.
+    pub auth: Option<String>,
+}
+
+/// The process-global notify-target side-store: `paymentId` → [`NotifyTarget`].
+/// Kept apart from the payment JSON map so the credential is never rendered to a
+/// client. In-memory only (single node, per DESIGN §4).
+fn notify_targets() -> &'static Mutex<HashMap<String, NotifyTarget>> {
+    static TARGETS: OnceLock<Mutex<HashMap<String, NotifyTarget>>> = OnceLock::new();
+    TARGETS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Remember the delivery `target` (sink + optional auth) for reservation `id`'s
+/// later terminal charging notification. Called by `preparePayment` when the
+/// reservation carried a `sink` (the confirm / cancel / validate requests that
+/// drive the terminal transition carry none).
+pub fn insert_notify(id: String, target: NotifyTarget) {
+    notify_targets()
+        .lock()
+        .expect("carrier-billing notify-target store not poisoned")
+        .insert(id, target);
+}
+
+/// Remove and return the delivery target for `id`, if any. A terminal transition
+/// takes it (single-use), so the secret drops from memory as the payment settles.
+pub fn take_notify(id: &str) -> Option<NotifyTarget> {
+    notify_targets()
+        .lock()
+        .expect("carrier-billing notify-target store not poisoned")
+        .remove(id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -411,5 +460,24 @@ mod tests {
             cancel("cb-store-cancel-unit-no-such"),
             CancelOutcome::Unknown
         ));
+    }
+
+    #[test]
+    fn notify_target_can_be_stored_and_taken_single_use() {
+        // Uniquely-keyed so this shares the process-global side-store with nothing else.
+        let id = "cb-store-notify-unit-0001".to_string();
+        assert!(take_notify(&id).is_none(), "not stored yet → None");
+        insert_notify(
+            id.clone(),
+            NotifyTarget {
+                sink: "http://sink.test/cb".to_string(),
+                auth: Some("Bearer sekret".to_string()),
+            },
+        );
+        let taken = take_notify(&id).expect("stored → Some");
+        assert_eq!(taken.sink, "http://sink.test/cb");
+        assert_eq!(taken.auth.as_deref(), Some("Bearer sekret"));
+        // Single-use: a second take finds nothing (the secret is gone).
+        assert!(take_notify(&id).is_none(), "taken once → None thereafter");
     }
 }

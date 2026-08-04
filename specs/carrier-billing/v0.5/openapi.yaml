@@ -184,9 +184,16 @@ info:
       handling) — the two are mutually exclusive. Per the CAMARA schema this
       notification carries only `paymentId`/`status`/`description` (no
       `validationInfo`; the `authorizationId` is delivered only in the
-      synchronous `preparePayment` body). The remaining two-step terminal events
-      (`payment-completed` on confirm, `payment-cancelled`, `payment-denied`) are
-      not yet delivered (later slices).
+      synchronous `preparePayment` body). A successful `confirmPayment` now
+      delivers the terminal `payment-completed` CloudEvent (`data.status:
+      succeeded`, with a `paymentDate`): because the `confirmPayment` request
+      body carries no `sink`, the `sink` (and any `ACCESSTOKEN` `sinkCredential`
+      bearer) recorded at `preparePayment` is stashed in an in-memory side-store
+      keyed by `paymentId` and taken single-use when the reservation is charged
+      (so exactly one terminal event fires; the secret is never echoed by a
+      `retrievePayment`). The remaining two-step terminal events
+      (`payment-cancelled` on cancel, `payment-denied`) are not yet delivered
+      (later slices).
   version: "0.5.0"
   license:
     name: Apache-2.0
@@ -741,6 +748,17 @@ paths:
         opaque); the store state drives the outcome. The optional `phoneNumber`
         body field (CAMARA `ConfirmPayment` / `PhoneNumber`) is accepted but not
         applied — the reservation is addressed by its `paymentId`.
+
+        **Charging notification.** When the reservation was created by
+        `preparePayment` with a `sink`, a successful confirm delivers the terminal
+        `payment-completed` CloudEvent (`data.status: succeeded`, with a
+        `paymentDate`) to that sink (see the operation's `callbacks`). The confirm
+        request body carries no `sink`, so CamaraSim uses the `sink` (and any
+        `ACCESSTOKEN` `sinkCredential` bearer) recorded at `preparePayment`, held
+        in an in-memory side-store keyed by `paymentId` and taken single-use when
+        the charge goes through. Delivery is best-effort, fire-and-forget, over raw
+        TCP to an `http://` sink only (no TLS client), off the request path; the
+        `PLAIN`/`REFRESHTOKEN` credential types are accepted but not applied.
       security:
         - openId:
             - carrier-billing:payments:write
@@ -819,6 +837,42 @@ paths:
             result: "409 CONFLICT"
           - input: an unknown `paymentId`
             result: "404 NOT_FOUND"
+          - input: confirming a reservation that was prepared with an `http://` `sink`
+            result: "202; a payment-completed CloudEvent POSTed to that sink"
+          - input: >-
+              confirming a reservation prepared with a `sink` + ACCESSTOKEN
+              `sinkCredential`
+            result: >-
+              the callback carries Authorization: Bearer <accessToken> (the
+              credential recorded at preparePayment)
+      callbacks:
+        chargingNotifications:
+          "{$request.body#/sink}":
+            post:
+              summary: Charging status notification
+              description: |
+                Delivered by the API provider to the `sink` URL recorded on the
+                originating `preparePayment` request (the `confirmPayment` request
+                body carries no `sink`) when the reserved payment is charged. The
+                body is a CloudEvents 1.0 event.
+
+                CamaraSim delivers the `payment-completed` event
+                (`data.status: succeeded`, with a `paymentDate`) on a successful
+                confirm. Delivery is best-effort, fire-and-forget, and only to an
+                `http://` sink (no TLS client). When the reservation was prepared
+                with an `ACCESSTOKEN` `sinkCredential`, the request carries an
+                `Authorization: Bearer <accessToken>` header (RFC 6750); the
+                `PLAIN` and `REFRESHTOKEN` credential types are accepted but not
+                applied (a documented cut).
+              requestBody:
+                required: true
+                content:
+                  application/cloudevents+json:
+                    schema:
+                      $ref: "#/components/schemas/CloudEvent"
+              responses:
+                "204":
+                  description: Notification received.
 
   /payments/{paymentId}/cancel:
     post:

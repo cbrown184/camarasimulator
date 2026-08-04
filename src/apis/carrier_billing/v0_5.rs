@@ -471,7 +471,14 @@ async fn prepare_payment(claims: Claims, headers: HeaderMap, body: Bytes) -> Res
                 &payment_id,
                 PAYMENT_PENDING_VALIDATION_DESCRIPTION,
             );
-            notifications::spawn_delivery(sink.clone(), event, auth);
+            notifications::spawn_delivery(sink.clone(), event, auth.clone());
+            // Stash the sink + derived credential so that once this reservation is
+            // validated (`pending_validation` → `reserved`) a later `confirmPayment`
+            // can deliver the terminal `payment-completed` event to the same target.
+            store::insert_notify(
+                payment_id.clone(),
+                store::NotifyTarget { sink: sink.clone(), auth },
+            );
         }
 
         store::insert_pending(payment_id, validation);
@@ -496,6 +503,9 @@ async fn prepare_payment(claims: Claims, headers: HeaderMap, body: Bytes) -> Res
     // fire-and-forget and off the request path (mirroring `createPayment`), so a
     // slow or unreachable sink never delays this `201`. An ACCESSTOKEN
     // `sinkCredential` yields a bearer `Authorization` header on the callback.
+    // The sink + derived credential are also stashed (keyed by `paymentId`) so a
+    // later `confirmPayment` — whose request body carries no `sink` — can deliver
+    // the terminal `payment-completed` event to the same target.
     if let Some(sink) = &req.sink {
         let auth = req
             .sink_credential
@@ -507,7 +517,11 @@ async fn prepare_payment(claims: Claims, headers: HeaderMap, body: Bytes) -> Res
             &payment_id,
             PAYMENT_RESERVED_DESCRIPTION,
         );
-        notifications::spawn_delivery(sink.clone(), event, auth);
+        notifications::spawn_delivery(sink.clone(), event, auth.clone());
+        store::insert_notify(
+            payment_id.clone(),
+            store::NotifyTarget { sink: sink.clone(), auth },
+        );
     }
 
     with_correlator((StatusCode::CREATED, Json(reserved)).into_response(), &correlator)
@@ -644,7 +658,26 @@ async fn confirm_payment(
 
     let now = rfc3339_utc(now_unix_secs());
     let resp = match store::confirm(&payment_id, &now) {
-        store::ConfirmOutcome::Confirmed => StatusCode::ACCEPTED.into_response(),
+        store::ConfirmOutcome::Confirmed => {
+            // Charging notification: a two-step reservation created with a `sink`
+            // delivers a terminal `payment-completed` CloudEvent now that the
+            // charge has gone through. The sink (and any ACCESSTOKEN credential)
+            // were stashed at `preparePayment` — this confirm request carries no
+            // `sink` — so take them single-use (exactly one terminal outcome
+            // fires). Delivery is fire-and-forget and off the request path, so a
+            // slow or unreachable sink never delays this `202`.
+            if let Some(target) = store::take_notify(&payment_id) {
+                let event = notifications::payment_completed_event(
+                    mint_uuid(),
+                    now.clone(),
+                    &payment_id,
+                    PAYMENT_COMPLETED_DESCRIPTION,
+                    &now,
+                );
+                notifications::spawn_delivery(target.sink, event, target.auth);
+            }
+            StatusCode::ACCEPTED.into_response()
+        }
         store::ConfirmOutcome::AlreadyConfirmed => CamaraError::new(
             StatusCode::CONFLICT,
             "CARRIER_BILLING.PAYMENT_CONFIRMED",
@@ -2517,6 +2550,133 @@ mod tests {
         assert!(
             head.contains("Authorization: Bearer cb-pending-secret\r\n"),
             "authorization header present: {head}"
+        );
+    }
+
+    // --- Confirm terminal notifications (payment-completed on confirm) -------
+
+    #[tokio::test]
+    async fn confirming_a_reserved_payment_with_a_sink_fires_a_payment_completed_cloudevent() {
+        use tokio::io::AsyncReadExt;
+        use tokio::net::TcpListener;
+
+        // A loopback receiver stands in for the merchant's `sink`.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let sink = format!("http://{addr}/cb-confirm");
+
+        // Reserve with a sink (no OTP tail → `reserved`). This fires the
+        // synchronous-flow `payment-reserved` callback first; drain it below.
+        let create = mint_token(CREATE_SCOPE).await;
+        let body = format!(
+            r#"{{"amountTransaction":{{"phoneNumber":"+123456789012","paymentAmount":{{"chargingInformation":{{"amount":9.99,"currency":"EUR","description":"A digital good"}}}},"referenceCode":"ref-001"}},"sink":"{sink}"}}"#
+        );
+        let (status, _, reserved) = post_prepare(Some(&create), &body, None).await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(reserved["paymentStatus"], "reserved");
+        let payment_id = reserved["paymentId"].as_str().unwrap().to_string();
+
+        // Drain the `payment-reserved` callback the reservation fired.
+        let (mut sock, _) = listener.accept().await.unwrap();
+        let mut buf = Vec::new();
+        sock.read_to_end(&mut buf).await.unwrap();
+        assert!(
+            String::from_utf8(buf).unwrap().contains("payment-reserved"),
+            "prepare fires the reserved event first"
+        );
+
+        // Confirm (charge). The confirm body carries no `sink`, yet the terminal
+        // `payment-completed` CloudEvent reaches the sink stashed at prepare-time.
+        let write = mint_token(WRITE_SCOPE).await;
+        let (status, _, _) = post_confirm(Some(&write), &payment_id, "", None).await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+
+        let (mut sock, _) = listener.accept().await.unwrap();
+        let mut buf = Vec::new();
+        sock.read_to_end(&mut buf).await.unwrap();
+        let raw = String::from_utf8(buf).unwrap();
+        let (head, event_body) = raw.split_once("\r\n\r\n").expect("headers then body");
+        assert!(
+            head.starts_with("POST /cb-confirm HTTP/1.1\r\n"),
+            "request line: {head}"
+        );
+        assert!(head.contains("Content-Type: application/cloudevents+json"));
+        // No sinkCredential was supplied at prepare → no Authorization header.
+        assert!(!head.contains("Authorization:"), "unauthenticated: {head}");
+
+        let event: Value = serde_json::from_str(event_body).expect("body is JSON");
+        assert_eq!(
+            event["type"],
+            "org.camaraproject.carrier-billing.v0.payment-completed"
+        );
+        assert_eq!(event["source"], "//camarasimulator/carrier-billing");
+        assert_eq!(event["specversion"], "1.0");
+        assert_eq!(event["data"]["paymentId"], json!(payment_id));
+        assert_eq!(event["data"]["status"], "succeeded");
+        assert!(event["data"]["description"].is_string());
+        // A charged payment → a `paymentDate` is present (unlike payment-reserved).
+        assert!(
+            event["data"]["paymentDate"].as_str().unwrap().ends_with('Z'),
+            "confirm event carries a paymentDate: {event}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_confirm_notification_uses_the_credential_persisted_from_prepare() {
+        use tokio::io::AsyncReadExt;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let sink = format!("http://{addr}/cb-confirm-auth");
+
+        // Reserve with a sink AND an ACCESSTOKEN sinkCredential.
+        let create = mint_token(CREATE_SCOPE).await;
+        let body = format!(
+            r#"{{"amountTransaction":{{"phoneNumber":"+123456789012","paymentAmount":{{"chargingInformation":{{"amount":1.0,"currency":"EUR","description":"x"}}}},"referenceCode":"ref-001"}},"sink":"{sink}","sinkCredential":{{"credentialType":"ACCESSTOKEN","accessToken":"cb-confirm-secret","accessTokenType":"bearer"}}}}"#
+        );
+        let (status, _, reserved) = post_prepare(Some(&create), &body, None).await;
+        assert_eq!(status, StatusCode::CREATED);
+        let payment_id = reserved["paymentId"].as_str().unwrap().to_string();
+
+        // Drain the `payment-reserved` callback.
+        let (mut sock, _) = listener.accept().await.unwrap();
+        let mut buf = Vec::new();
+        sock.read_to_end(&mut buf).await.unwrap();
+
+        // Confirm — the confirm request carries no `sinkCredential`, yet the
+        // terminal callback must carry the bearer derived at prepare-time.
+        let write = mint_token(WRITE_SCOPE).await;
+        let (status, _, _) = post_confirm(Some(&write), &payment_id, "", None).await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+
+        let (mut sock, _) = listener.accept().await.unwrap();
+        let mut buf = Vec::new();
+        sock.read_to_end(&mut buf).await.unwrap();
+        let raw = String::from_utf8(buf).unwrap();
+        let (head, event_body) = raw.split_once("\r\n\r\n").expect("headers then body");
+        assert!(
+            head.contains("Authorization: Bearer cb-confirm-secret\r\n"),
+            "confirm callback carries the bearer persisted from prepare: {head}"
+        );
+        let event: Value = serde_json::from_str(event_body).expect("body is JSON");
+        assert_eq!(
+            event["type"],
+            "org.camaraproject.carrier-billing.v0.payment-completed"
+        );
+    }
+
+    #[tokio::test]
+    async fn confirming_a_sink_less_reservation_stores_no_notify_target() {
+        // A reservation prepared without a `sink` stashes no notify target, so a
+        // later confirm charges (202) and delivers no terminal CloudEvent.
+        let id = prepare_reserved("+123456789012").await;
+        let write = mint_token(WRITE_SCOPE).await;
+        let (status, _, _) = post_confirm(Some(&write), &id, "", None).await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert!(
+            store::take_notify(&id).is_none(),
+            "no notify target for a sink-less reservation"
         );
     }
 }
