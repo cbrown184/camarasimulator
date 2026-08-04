@@ -431,9 +431,16 @@ sinks only, mirroring QoD/Geofencing), off the request path so a slow sink never
 delays the `201`. An `ACCESSTOKEN` `sinkCredential`'s bearer token is applied as
 an `Authorization: Bearer` header (RFC 6750); the `sink` is used only to notify
 and never persisted with the payment (so `retrievePayment` still omits it).
-`preparePayment` notifications and the two-step terminal events
-(`payment-reserved`/`-cancelled`/`-denied`/`-pending-validation` and
-`payment-completed` on confirm) are the remaining slice.
+**`preparePayment` → `payment-reserved`** is now in place too: a successful
+two-step `preparePayment` that lands in the `reserved` state delivers a
+`payment-reserved` CloudEvent (`data.status: succeeded`, `paymentId`,
+`description`; no `paymentDate` — nothing is charged) to its `sink`, over the
+same fire-and-forget raw-TCP transport with the same ACCESSTOKEN `sinkCredential`
+bearer handling. A `…888` reservation lands in `pending_validation` and fires no
+`payment-reserved` (that is the separate `payment-pending-validation` event). The
+remaining two-step terminal events (`payment-completed` on confirm,
+`payment-cancelled`, `payment-denied`, `payment-pending-validation`) are the
+remaining slice.
 
 ## In progress (claimed this pass)
 
@@ -569,9 +576,13 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     - [x] `createPayment` → `payment-completed` CloudEvent on a successful
       one-step charge (http sink, fire-and-forget over raw TCP, no HTTP-client
       dep; ACCESSTOKEN `sinkCredential` bearer applied; PLAIN/REFRESHTOKEN cut).
-    - [ ] `preparePayment` notify + two-step terminal events (`payment-reserved`,
-      `payment-completed` on confirm, `payment-cancelled`, `payment-denied`,
-      `payment-pending-validation`)
+    - [x] `preparePayment` → `payment-reserved` CloudEvent on a successful
+      `reserved` reservation (http sink, fire-and-forget over raw TCP, no
+      HTTP-client dep; ACCESSTOKEN `sinkCredential` bearer applied,
+      PLAIN/REFRESHTOKEN cut; a `…888` pending_validation reservation fires no
+      payment-reserved — that is the separate payment-pending-validation event)
+    - [ ] remaining two-step terminal events (`payment-completed` on confirm,
+      `payment-cancelled`, `payment-denied`, `payment-pending-validation`)
 - [ ] Other CAMARA APIs as capacity allows
 
 ## Cross-cutting (do alongside the item that needs it)
@@ -589,6 +600,24 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 ## Scan journal
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
+
+- 2026-08-04 — Phase 5 (payments): **Carrier Billing v0.5** — **`preparePayment`
+  → `payment-reserved` notification**. Verified the real CAMARA CarrierBilling
+  r3.2 notification set (5 event types: payment-reserved/-completed/-cancelled/
+  -denied/-pending-validation; `payment-reserved` `data` = paymentId/status/
+  description, **no** paymentDate). Added `payment_reserved_event` builder +
+  `EVENT_TYPE_PAYMENT_RESERVED` to `notifications.rs` (reuses the existing
+  fire-and-forget `spawn_delivery` + `sink_authorization`; **no new dep**), wired
+  into `prepare_payment` on the `reserved` happy path (a `…888` pending_validation
+  reservation fires nothing — that is the separate payment-pending-validation
+  event, deferred). Spec: `preparePayment` gains a `reserveNotifications`
+  `callbacks` block + 3 scenario cases; `CloudEvent.type` enum + `data` oneOf now
+  include `payment-reserved`; new `EventPaymentReserved` schema; refreshed the
+  API-description charging-notifications note. 532 tests green (was 528; +4: 1
+  unit [reserved event shape, no paymentDate] + 3 integration [reserve+http sink →
+  payment-reserved received & sink not echoed; ACCESSTOKEN sinkCredential → Bearer
+  header & secret not echoed; a …888 pending_validation reservation fires no
+  payment-reserved]). — binary: 1634712 B (+4680 B)
 
 - 2026-08-03 — Phase 5 (payments): **Carrier Billing v0.5** — **charging
   notifications on `sink` begun**: a successful one-step `createPayment` charge

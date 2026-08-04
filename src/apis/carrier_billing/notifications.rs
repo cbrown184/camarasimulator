@@ -40,6 +40,13 @@ use tokio::net::TcpStream;
 pub const EVENT_TYPE_PAYMENT_COMPLETED: &str =
     "org.camaraproject.carrier-billing.v0.payment-completed";
 
+/// The CloudEvent `type` for a **reserved** payment (CAMARA carrier-billing v0).
+/// Fired by the two-step `preparePayment` when a reservation is created (the
+/// amount is held but not yet charged, so — unlike `payment-completed` — the
+/// event carries no `paymentDate`).
+pub const EVENT_TYPE_PAYMENT_RESERVED: &str =
+    "org.camaraproject.carrier-billing.v0.payment-reserved";
+
 /// The CloudEvent `source` — a uri-reference identifying the simulator's Carrier
 /// Billing provider context (CloudEvents requires `id` to be unique in `source`).
 pub const SOURCE: &str = "//camarasimulator/carrier-billing";
@@ -69,6 +76,35 @@ pub fn payment_completed_event(
             "status": "succeeded",
             "description": description,
             "paymentDate": payment_date,
+        },
+    })
+}
+
+/// Build the `payment-reserved` CloudEvent (CloudEvents 1.0 envelope).
+///
+/// Pure and deterministic (the caller supplies `event_id` and the RFC 3339
+/// `time`), mirroring [`payment_completed_event`]. The `data` payload is the
+/// CAMARA `BasicEvent` for a reserved payment — `status` is always `succeeded`
+/// here (the reservation was created), with the required `description`. A
+/// reservation has charged nothing, so — unlike `payment-completed` — there is
+/// no `paymentDate` field.
+pub fn payment_reserved_event(
+    event_id: String,
+    time: String,
+    payment_id: &str,
+    description: &str,
+) -> Value {
+    json!({
+        "id": event_id,
+        "source": SOURCE,
+        "type": EVENT_TYPE_PAYMENT_RESERVED,
+        "specversion": "1.0",
+        "datacontenttype": "application/json",
+        "time": time,
+        "data": {
+            "paymentId": payment_id,
+            "status": "succeeded",
+            "description": description,
         },
     })
 }
@@ -189,6 +225,30 @@ mod tests {
             "The payment has been completed successfully."
         );
         assert_eq!(e["data"]["paymentDate"], "2024-01-01T00:00:00Z");
+    }
+
+    #[test]
+    fn reserved_event_has_the_camara_cloudevent_shape_without_a_payment_date() {
+        let e = payment_reserved_event(
+            "evt-r".to_string(),
+            "2024-01-01T00:00:00Z".to_string(),
+            "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+            "The payment has been reserved successfully.",
+        );
+        assert_eq!(e["id"], "evt-r");
+        assert_eq!(e["source"], SOURCE);
+        assert_eq!(e["type"], EVENT_TYPE_PAYMENT_RESERVED);
+        assert_eq!(e["specversion"], "1.0");
+        assert_eq!(e["datacontenttype"], "application/json");
+        assert_eq!(e["time"], "2024-01-01T00:00:00Z");
+        assert_eq!(e["data"]["paymentId"], "3fa85f64-5717-4562-b3fc-2c963f66afa6");
+        assert_eq!(e["data"]["status"], "succeeded");
+        assert_eq!(
+            e["data"]["description"],
+            "The payment has been reserved successfully."
+        );
+        // A reservation charges nothing → no paymentDate (unlike payment-completed).
+        assert!(e["data"].get("paymentDate").is_none(), "no paymentDate: {e}");
     }
 
     #[test]

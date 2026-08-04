@@ -174,11 +174,15 @@ info:
       token applied as an `Authorization` header (`PLAIN`/`REFRESHTOKEN` accepted
       but not applied). The `sink` is used only to notify — it is never persisted
       with the payment, so a `retrievePayment` response omits it (the `Payment`
-      schema's `sink` is optional). `preparePayment` still accepts `sink` /
-      `sinkCredential` for schema fidelity but does not yet notify (a later
-      slice), and the two-step terminal events (`payment-reserved`,
-      `payment-completed` on confirm, `payment-cancelled`, `payment-denied`,
-      `payment-pending-validation`) are not yet delivered.
+      schema's `sink` is optional). A successful two-step `preparePayment`
+      **reservation** now likewise delivers a `payment-reserved` CloudEvent to
+      the request's `sink` (see the operation's `callbacks`; same transport and
+      `sinkCredential` handling as `createPayment`). A `preparePayment` that
+      lands in `pending_validation` (the `…888` tail) fires **no**
+      `payment-reserved` (that is `payment-pending-validation`, a separate
+      event). The remaining two-step terminal events (`payment-completed` on
+      confirm, `payment-cancelled`, `payment-denied`,
+      `payment-pending-validation`) are not yet delivered (later slices).
   version: "0.5.0"
   license:
     name: Apache-2.0
@@ -562,6 +566,46 @@ paths:
             result: "422 CARRIER_BILLING.UNAUTHORIZED_AMOUNT"
           - input: no `phoneNumber` and a non-E.164 token subject
             result: "422 MISSING_IDENTIFIER"
+          - input: successful `reserved` reservation with an `http://` `sink`
+            result: "201; a payment-reserved CloudEvent POSTed to the sink"
+          - input: successful reservation with a `sink` + ACCESSTOKEN `sinkCredential`
+            result: "the callback carries Authorization: Bearer <accessToken>"
+          - input: >-
+              `…888` (pending_validation) reservation with a `sink`
+            result: >-
+              201; NO payment-reserved fired (payment-pending-validation is a
+              separate event, not yet delivered)
+      callbacks:
+        reserveNotifications:
+          "{$request.body#/sink}":
+            post:
+              summary: Reservation status notification
+              description: |
+                Delivered by the API provider to the `sink` URL supplied in the
+                `preparePayment` request when the reservation reaches a terminal
+                outcome. The body is a CloudEvents 1.0 event.
+
+                CamaraSim delivers the `payment-reserved` event
+                (`data.status: succeeded`) when a reservation is created in the
+                `reserved` state. A reservation that lands in
+                `pending_validation` (the `…888` tail) fires **no**
+                `payment-reserved` — that is the separate
+                `payment-pending-validation` event, not yet delivered.
+                Delivery is best-effort, fire-and-forget, and only to an
+                `http://` sink (no TLS client). When the payment was created with
+                an `ACCESSTOKEN` `sinkCredential`, the request carries an
+                `Authorization: Bearer <accessToken>` header (RFC 6750); the
+                `PLAIN` and `REFRESHTOKEN` credential types are accepted but not
+                applied (a documented cut).
+              requestBody:
+                required: true
+                content:
+                  application/cloudevents+json:
+                    schema:
+                      $ref: "#/components/schemas/CloudEvent"
+              responses:
+                "204":
+                  description: Notification received.
 
   /payments/{paymentId}/validate:
     post:
@@ -1132,8 +1176,9 @@ components:
       type: object
       description: |
         A CloudEvents 1.0 event delivered to a payment's `sink`. CamaraSim emits
-        the `payment-completed` type; the `data` payload is
-        `EventPaymentCompleted`.
+        the `payment-completed` type (one-step `createPayment` charge; `data` is
+        `EventPaymentCompleted`) and the `payment-reserved` type (two-step
+        `preparePayment` reservation; `data` is `EventPaymentReserved`).
       required:
         - id
         - source
@@ -1155,6 +1200,7 @@ components:
           type: string
           enum:
             - "org.camaraproject.carrier-billing.v0.payment-completed"
+            - "org.camaraproject.carrier-billing.v0.payment-reserved"
         specversion:
           type: string
           enum:
@@ -1169,7 +1215,9 @@ components:
           description: RFC 3339 timestamp (with time zone) of the occurrence.
           example: "2024-01-01T14:27:08Z"
         data:
-          $ref: "#/components/schemas/EventPaymentCompleted"
+          oneOf:
+            - $ref: "#/components/schemas/EventPaymentCompleted"
+            - $ref: "#/components/schemas/EventPaymentReserved"
       example:
         id: "83a1c8e0-2b6a-4a2e-9c1f-0a1b2c3d4e5f"
         source: "//camarasimulator/carrier-billing"
@@ -1211,6 +1259,31 @@ components:
           type: string
           format: date-time
           description: When the payment was charged (RFC 3339, `Z` offset).
+
+    EventPaymentReserved:
+      type: object
+      description: >-
+        The `data` payload of a `payment-reserved` CloudEvent (the CAMARA
+        `BasicEvent` for a reserved payment). A reservation charges nothing, so —
+        unlike `EventPaymentCompleted` — there is no `paymentDate`.
+      required:
+        - paymentId
+        - status
+        - description
+      properties:
+        paymentId:
+          type: string
+          format: uuid
+          description: The payment that was reserved.
+        status:
+          type: string
+          description: The reservation outcome. `succeeded` for a created reservation.
+          enum:
+            - succeeded
+            - failed
+        description:
+          type: string
+          description: Human-readable explanation of the outcome.
 
     PaymentCreated:
       type: object
