@@ -1,0 +1,295 @@
+# CamaraSim — Device Swap, API version v1 (CAMARA 1.0.0, r3.2).
+#
+# Vendored from the CAMARA Device Swap API (release r3.2 → device-swap 1.0.0, the
+# latest published version, so mounted at its real base path `/v1`) and annotated
+# with CamaraSim's parameter-driven functional cases (docs/DESIGN.md §7, §9).
+# Backed by `src/apis/device_swap/v1.rs`; spec and code must not drift.
+#
+# Serves `POST /check`. (`POST /retrieve-date` is a later slice.)
+openapi: 3.0.3
+info:
+  title: Device Swap
+  description: |
+    Service that answers whether the **device** bound to a phone number has been
+    changed ("swapped") within a recent window — the device counterpart of SIM
+    Swap. It is an anti-fraud / account-recovery signal: a device changed just
+    before a sensitive operation is a fraud indicator.
+
+    This is the CamaraSim reference double for CAMARA Device Swap 1.0.0. The
+    `/check` endpoint requires the `device-swap:check` scope.
+
+    ## Identifier resolution — two-legged vs three-legged
+
+    Faithful to CAMARA, the `phoneNumber` in the request body is valid *only* in
+    two-legged auth. In a three-legged token the line is already identified by
+    the token **subject** (`sub`), so the number must not be resubmitted:
+
+    - `phoneNumber` present **and** the token subject is itself an E.164 number
+      (a line-authenticated three-legged token) → `422 UNNECESSARY_IDENTIFIER`.
+    - `phoneNumber` present, subject not a line → the submitted number is the
+      identifier (two-legged).
+    - `phoneNumber` absent, subject is an E.164 number → the subject is the
+      identifier (three-legged).
+    - `phoneNumber` absent **and** the subject is not a line → the line cannot be
+      identified → `422 MISSING_IDENTIFIER`.
+
+    ## Functional cases — the input is the control plane (docs/DESIGN.md §7)
+
+    Two independent control planes drive the answer:
+
+    - **Reserved error suffix (identifier).** If the resolved identifier's
+      trailing three digits name a reserved CAMARA status, the endpoint answers
+      with that canonical CAMARA error (shared convention — see the referenced
+      `errors.yaml`): `…400`, `…401`, `…403`, `…404`, `…409`, `…422`, `…429`,
+      `…500`, `…503`.
+    - **Swap recency (identifier digits × `maxAge`).** Otherwise the identifier's
+      trailing three digits are read as **hours since the device was last
+      swapped** (`0`–`999`), and `swapped = hoursAgo < maxAge` — the swap falls
+      inside the queried window. This makes `maxAge` a genuine second control
+      plane: the **same** number reads `swapped: true` under the default 240 h
+      window (`+123456789012`, 12 h ago) and `swapped: false` under `maxAge: 1`,
+      while a device changed `+123456789365` (365 h ago) needs a `maxAge` past
+      365 to read `true`. An identifier with no trailing digits is treated as
+      never swapped (`swapped: false`).
+
+    `maxAge` is validated: outside the CAMARA range `[1, 2400]` hours →
+    `400 OUT_OF_RANGE`. When omitted it defaults to `240` hours.
+
+    Example: `+123456789012` (device changed 12 h ago) → `swapped: true` at the
+    default window; the same number with `maxAge: 1` → `swapped: false`;
+    `+123456789404` → `404 NOT_FOUND`.
+
+    CamaraSim exposes the full shared reserved-error set here so every reserved
+    suffix is reachable; canonical Device Swap 1.0.0 declares a subset
+    (400/401/403/404/422/429).
+  version: "1.0.0"
+  license:
+    name: Apache-2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0.html
+
+servers:
+  - url: "{apiRoot}/device-swap/v1"
+    variables:
+      apiRoot:
+        default: http://localhost:8080
+        description: API root, e.g. the CamaraSim base URL.
+
+paths:
+  /check:
+    post:
+      operationId: checkDeviceSwap
+      summary: Check whether the device bound to the phone number was swapped recently
+      description: |
+        Answers whether the device bound to the phone number was swapped within
+        the last `maxAge` hours (`{ "swapped": true|false }`).
+
+        The line is identified by the submitted `phoneNumber` (two-legged) or by
+        the access-token subject (three-legged) — see the API description for the
+        identifier-resolution rules and the parameter-driven functional cases
+        (the trailing three digits encode hours-since-the-last-swap, compared
+        against `maxAge`).
+      security:
+        - openId:
+            - device-swap:check
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateCheckDeviceSwap"
+      responses:
+        "200":
+          description: The device-swap verdict for the line.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CheckDeviceSwapInfo"
+              examples:
+                swapped:
+                  summary: Device swapped inside the window
+                  value:
+                    swapped: true
+                notSwapped:
+                  summary: No swap inside the window (happy path)
+                  value:
+                    swapped: false
+        "400":
+          description: |
+            400 — invalid request. CamaraSim returns `INVALID_ARGUMENT` for a
+            malformed body or a `phoneNumber` that is not valid E.164, and
+            `OUT_OF_RANGE` when `maxAge` is outside `[1, 2400]`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeviceSwapError"
+              examples:
+                invalidArgument:
+                  summary: Malformed body or `phoneNumber`
+                  value:
+                    status: 400
+                    code: INVALID_ARGUMENT
+                    message: "`phoneNumber` must be in E.164 format (e.g. +123456789)."
+                outOfRange:
+                  summary: `maxAge` outside the allowed range
+                  value:
+                    status: 400
+                    code: OUT_OF_RANGE
+                    message: "`maxAge` must be between 1 and 2400 hours."
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "409":
+          $ref: "../../shared/errors.yaml#/components/responses/Conflict"
+        "422":
+          description: |
+            422 — unprocessable. CamaraSim returns `MISSING_IDENTIFIER` when the
+            line cannot be identified (no `phoneNumber` and a non-line subject),
+            `UNNECESSARY_IDENTIFIER` when a `phoneNumber` is submitted on a
+            three-legged line token, or the reserved shared
+            `SERVICE_NOT_APPLICABLE` for the `…422` suffix.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeviceSwapError"
+              examples:
+                missingIdentifier:
+                  summary: The line cannot be identified
+                  value:
+                    status: 422
+                    code: MISSING_IDENTIFIER
+                    message: The phone number cannot be identified.
+                unnecessaryIdentifier:
+                  summary: The number is already identified by the token
+                  value:
+                    status: 422
+                    code: UNNECESSARY_IDENTIFIER
+                    message: The phone number is already identified by the access token.
+                serviceNotApplicable:
+                  summary: Reserved `…422` suffix
+                  value:
+                    status: 422
+                    code: SERVICE_NOT_APPLICABLE
+                    message: The service is not available for the provided identifier.
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          Result selected from the resolved line identifier and `maxAge`
+          (docs/DESIGN.md §7). The identifier's trailing three digits are
+          hours-since-the-last-swap; swapped iff that is strictly less than
+          `maxAge`. Reserved error suffixes come from the shared convention in
+          errors.yaml.
+        cases:
+          - input: identifier ending in a reserved error suffix (e.g. …404)
+            result: the canonical CAMARA error for that status
+          - input: "identifier whose trailing digits (hoursAgo) < maxAge"
+            result: "200 { swapped: true }"
+          - input: "identifier whose trailing digits (hoursAgo) >= maxAge"
+            result: "200 { swapped: false }"
+          - input: same number, a wide maxAge vs a narrow one
+            result: swapped flips (maxAge is a control plane)
+          - input: identifier with no trailing digits
+            result: "200 { swapped: false } (never swapped)"
+          - input: no phoneNumber, an E.164 token subject (three-legged)
+            result: same cases, driven by the subject's trailing three digits
+          - input: phoneNumber submitted on a three-legged line token
+            result: "422 UNNECESSARY_IDENTIFIER"
+          - input: no phoneNumber and a non-line token subject
+            result: "422 MISSING_IDENTIFIER"
+          - input: maxAge outside [1, 2400]
+            result: "400 OUT_OF_RANGE"
+
+components:
+  securitySchemes:
+    openId:
+      $ref: "../../auth/openapi.yaml#/components/securitySchemes/camaraOAuth"
+
+  parameters:
+    XCorrelator:
+      name: x-correlator
+      in: header
+      required: false
+      description: Correlation id for the request, echoed back on the response.
+      schema:
+        type: string
+
+  headers:
+    XCorrelator:
+      description: The `x-correlator` from the request, echoed if one was sent.
+      required: false
+      schema:
+        type: string
+
+  schemas:
+    CreateCheckDeviceSwap:
+      type: object
+      description: |
+        Request to check whether the device bound to a phone number was swapped
+        within the last `maxAge` hours. The `phoneNumber` is valued only in
+        two-legged authentication; supplying it with a three-legged (line) token
+        yields `422 UNNECESSARY_IDENTIFIER`.
+      properties:
+        phoneNumber:
+          type: string
+          description: A phone number in E.164 format (starting with `+`).
+          pattern: '^\+[1-9][0-9]{4,14}$'
+          example: "+123456789012"
+        maxAge:
+          type: integer
+          format: int32
+          minimum: 1
+          maximum: 2400
+          default: 240
+          description: >-
+            Period in hours to be checked for a device swap. Defaults to 240 h.
+          example: 240
+
+    CheckDeviceSwapInfo:
+      type: object
+      description: The device-swap verdict for the line.
+      required:
+        - swapped
+      properties:
+        swapped:
+          type: boolean
+          description: >-
+            `true` when the device bound to the phone number was swapped within
+            the `maxAge` window, `false` otherwise.
+
+    DeviceSwapError:
+      description: >-
+        The CAMARA error body for this API — the shared `CamaraError` shape with
+        the Device Swap `code` set (adds `OUT_OF_RANGE` and the 422 identifier
+        codes).
+      allOf:
+        - $ref: "../../shared/errors.yaml#/components/schemas/CamaraError"
+        - type: object
+          properties:
+            code:
+              type: string
+              enum:
+                - INVALID_ARGUMENT
+                - OUT_OF_RANGE
+                - UNAUTHENTICATED
+                - PERMISSION_DENIED
+                - NOT_FOUND
+                - IDENTIFIER_NOT_FOUND
+                - MISSING_IDENTIFIER
+                - UNNECESSARY_IDENTIFIER
+                - SERVICE_NOT_APPLICABLE
+                - CONFLICT
+                - TOO_MANY_REQUESTS
+                - INTERNAL
+                - UNAVAILABLE

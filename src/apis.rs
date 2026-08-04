@@ -21,6 +21,7 @@
 //! - **Call Forwarding Signal v0.4** — `/call-forwarding-signal/v0.4/…`.
 //! - **Number Recycling v0.2** — `/number-recycling/v0.2/…`.
 //! - **KYC Age Verification v0.1** — `/kyc-age-verification/v0.1/…`.
+//! - **Device Swap v1** — `/device-swap/v1/…`.
 //!
 //! Plus [`openapi`], which serves each mounted API's vendored OpenAPI spec at
 //! `/{api}/v{n}/openapi.yaml` (docs/DESIGN.md §9).
@@ -28,6 +29,7 @@
 pub mod call_forwarding_signal;
 pub mod carrier_billing;
 pub mod device_identifier;
+pub mod device_swap;
 pub mod device_reachability_status;
 pub mod device_roaming_status;
 pub mod geofencing_subscriptions;
@@ -62,5 +64,6 @@ pub fn routes() -> Router {
         .merge(call_forwarding_signal::routes())
         .merge(number_recycling::routes())
         .merge(kyc_age_verification::routes())
+        .merge(device_swap::routes())
         .merge(openapi::routes())
 }

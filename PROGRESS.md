@@ -536,6 +536,23 @@ fields: any of `idDocument`/`name`/`givenName`/…/`email` → `identityMatchSco
 `contentLock`/`parentalControl` (a minor `< 18` → `"true"`, adult → `"false"`,
 unknown age → `"not_available"`). `x-correlator` echoed on every response.
 
+**Phase 5 (other CAMARA APIs) — Device Swap v1** has begun, a new stateless,
+non-spatial, phone-number-keyed anti-fraud API — the **device** counterpart of
+SIM Swap — mounted at its real published version `/device-swap/v1` (CAMARA
+1.0.0, release r3.2; `main` is `wip`). `POST /check` (scope `device-swap:check`,
+operationId `checkDeviceSwap`) answers whether the device bound to a line was
+swapped within the last `maxAge` hours — `{ "swapped": boolean }`. Faithful to
+CAMARA's two-legged/three-legged identifier rule (the `phoneNumber` body is valid
+only in two-legged auth): a submitted `phoneNumber` on a three-legged **line**
+token (E.164 `sub`) → 422 `UNNECESSARY_IDENTIFIER`; no number + a non-line
+subject → 422 `MISSING_IDENTIFIER`. Two control planes (DESIGN §7): the
+identifier's reserved error suffix → canonical CAMARA error; else its trailing
+three digits are **hours since the last device swap** and `swapped = hoursAgo <
+maxAge`, making `maxAge` (1–2400, default 240) a genuine second control plane
+(out-of-range `maxAge` → 400 `OUT_OF_RANGE`; an identifier with no digits →
+never swapped). `x-correlator` echoed on every response. `POST /retrieve-date`
+is a later slice.
+
 ## In progress (claimed this pass)
 
 _None._  <!-- agent: put the claimed item + run timestamp here, clear it when done -->
@@ -734,6 +751,16 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     fields driven by the body: `identityMatchScore`=90 (any identity attribute),
     `verifiedStatus`=true (`idDocument`), `contentLock`/`parentalControl` (opt-in
     via `include*`, minor `< 18` → `"true"`).
+- [~] Device Swap v1 (`/device-swap/v1`; CAMARA 1.0.0, release r3.2; stateless,
+  non-spatial, phone-number-keyed; the device counterpart of SIM Swap):
+  - [x] `POST /check` (`device-swap:check`, `checkDeviceSwap`) —
+    `{ swapped: boolean }`; two-legged (submitted `phoneNumber`) / three-legged
+    (E.164 `sub`) identifier rule with 422 `UNNECESSARY_IDENTIFIER` /
+    `MISSING_IDENTIFIER`; two control planes (DESIGN §7): identifier reserved-error
+    suffix, and identifier trailing digits (hours-since-last-swap) vs `maxAge`
+    (`swapped = hoursAgo < maxAge`; 1–2400, default 240, else 400 `OUT_OF_RANGE`;
+    no digits → never swapped).
+  - [ ] `POST /retrieve-date` (`device-swap:retrieve-date`, `retrieveDeviceSwapDate`)
 - [ ] Other CAMARA APIs as capacity allows
 
 ## Cross-cutting (do alongside the item that needs it)
@@ -751,6 +778,37 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 ## Scan journal
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
+
+- 2026-08-04 — Phase 5 (other CAMARA APIs): **Device Swap v1** — new stateless,
+  non-spatial, phone-number-keyed anti-fraud API, the **device** counterpart of
+  SIM Swap. Verified the latest published CAMARA DeviceSwap spec (release **r3.2 →
+  device-swap 1.0.0**; `main` is `wip`): op `checkDeviceSwap`, scope
+  `device-swap:check`, base `/device-swap/v1`, body `CreateCheckDeviceSwap
+  {phoneNumber?, maxAge?(1–2400, default 240)}`, 200 `CheckDeviceSwapInfo
+  {swapped: boolean}`, and the 422 identifier codes `MISSING_IDENTIFIER` /
+  `UNNECESSARY_IDENTIFIER` / `SERVICE_NOT_APPLICABLE`. New
+  `src/apis/device_swap/{,v1}.rs` (combines Number Recycling's two/three-legged
+  identifier rule with SIM Swap's `maxAge`/hours-ago logic; **no new dep**): `POST
+  /check`. Identifier = submitted `phoneNumber` (two-legged) else E.164 `sub`
+  (three-legged); a number on a line token → 422 `UNNECESSARY_IDENTIFIER`, no
+  number + non-line subject → 422 `MISSING_IDENTIFIER`. Two control planes
+  (DESIGN §7): reserved error suffix → canonical CAMARA error; else the
+  identifier's trailing three digits are hours-since-last-swap, `swapped = hoursAgo
+  < maxAge` (so `maxAge` is a real second plane — same number flips true↔false as
+  the window moves), no digits → never swapped; out-of-range `maxAge` → 400
+  `OUT_OF_RANGE`. `x-correlator` echoed. Wired into `apis.rs`, `openapi.rs` (served
+  at `/device-swap/v1/openapi.yaml`) and the `/` catalog. Spec: vendored +
+  annotated `specs/device-swap/v1/openapi.yaml` (full functional-case description,
+  `x-camarasim-scenarios`, examples, local `DeviceSwapError` code enum incl.
+  `OUT_OF_RANGE` + the 422 identifier codes; full shared reserved-error set
+  exposed). Tests: +19 (2 units [is_swapped recency × maxAge incl. strict
+  boundary, e164] + 17 integration: recently/not-recently swapped,
+  maxAge-widens/narrows [control plane], maxAge out-of-range/at-bounds, reserved
+  suffix, three-legged subject-keyed + reserved subject, UNNECESSARY_/
+  MISSING_IDENTIFIER, invalid phone, unknown-field, malformed json, no-scope→403,
+  no-token→401, x-correlator echo) + catalog + openapi serving assertions. `cargo
+  test` 639 green (was 620); `cargo build --release` ok — binary: 1759192 bytes
+  (1.76M, +19528 B). `POST /retrieve-date` (device-swap:retrieve-date) is next.
 
 - 2026-08-04 — Phase 5 (other CAMARA APIs): **KYC Age Verification v0.1** — new
   stateless, non-spatial, phone-number-keyed identity API. Verified the latest
