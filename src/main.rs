@@ -142,6 +142,12 @@ async fn catalog() -> Json<Value> {
                 "version": "v0.4",
                 "base_path": "/home-devices-qod/v0.4",
                 "spec_url": "/home-devices-qod/v0.4/openapi.yaml",
+            },
+            {
+                "name": "qos-profiles",
+                "version": "v1",
+                "base_path": "/qos-profiles/v1",
+                "spec_url": "/qos-profiles/v1/openapi.yaml",
             }
         ],
         "authorization_servers": [{
@@ -266,6 +272,10 @@ mod tests {
             && a["version"] == "v0.4"
             && a["base_path"] == "/home-devices-qod/v0.4"
             && a["spec_url"] == "/home-devices-qod/v0.4/openapi.yaml"));
+        assert!(apis.iter().any(|a| a["name"] == "qos-profiles"
+            && a["version"] == "v1"
+            && a["base_path"] == "/qos-profiles/v1"
+            && a["spec_url"] == "/qos-profiles/v1/openapi.yaml"));
         assert_eq!(
             body["authorization_servers"][0]["openid_configuration"],
             "/.well-known/openid-configuration"

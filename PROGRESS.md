@@ -804,6 +804,20 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     and `serviceClass` (second plane: `…247` conflicts as QOS_ALREADY_SET_TO_DEFAULT
     only when restoring `standard`). Bad body / unknown `serviceClass` / non-IPv4
     `ipAddress` → 400 INVALID_ARGUMENT. **Completes Home Devices QoD v0.4.**
+- [~] QoS Profiles v1 (`/qos-profiles/v1`; CAMARA 1.1.0, r3.2; stateless catalog —
+  the read-only companion to Quality on Demand):
+  - [x] `POST /retrieve-qos-profiles` (`qos-profiles:read`, `retrieveQoSProfiles`)
+    — lists the operator's fixed in-memory QoS-profile catalog as a JSON array
+    (`200`), narrowed by the optional `name`/`status` filters (a real control
+    plane; an unknown `name` → empty array, a list never 404s). `device` is an
+    optional *error plane* only (DESIGN §7): its first present identifier's
+    reserved suffix → canonical CAMARA error, and a `device` on a three-legged
+    line token (E.164 `sub`) → 422 `UNNECESSARY_IDENTIFIER`. Bad `name` pattern /
+    unknown `status` enum / empty `device` / malformed `phoneNumber` → 400
+    `INVALID_ARGUMENT`. `x-correlator` echoed. Catalog covers all three
+    `QosProfileStatusEnum` states + a spread of service classes / L4S queue types.
+  - [ ] `GET /qos-profiles/{name}` (`getQosProfile`) — single-profile lookup
+    (404 on unknown name); deferred to a later pass.
 - [ ] Other CAMARA APIs as capacity allows
 
 ## Cross-cutting (do alongside the item that needs it)
@@ -822,6 +836,34 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-04 — Phase 5 (other CAMARA APIs): **QoS Profiles v1** — new stateless
+  catalog API, the read-only companion to Quality on Demand (QoD *applies* a
+  `qosProfile`; QoS Profiles *lists* them). Verified the authoritative CAMARA
+  QualityOnDemand r3.2 spec via WebFetch: `qos-profiles` 1.1.0, base
+  `/qos-profiles/v1`, `POST /retrieve-qos-profiles` (`retrieveQoSProfiles`, scope
+  `qos-profiles:read`), request `QosProfileDeviceRequest {device?,name?,status?}`,
+  200 → array of `QosProfile`, error set incl. 422 SERVICE_NOT_APPLICABLE /
+  UNSUPPORTED_IDENTIFIER / UNNECESSARY_IDENTIFIER. Scoped this pass to the list
+  endpoint; `GET /qos-profiles/{name}` (`getQosProfile`) deferred. New
+  `src/apis/qos_profiles/{,v1}.rs` (**no new dep**): serves a fixed in-memory
+  catalog (6 profiles covering all 3 `QosProfileStatusEnum` states + a spread of
+  service classes / L4S queue types), filtered by `name`/`status` (genuine control
+  planes; unknown `name` → `[]`, a list never 404s). `device` is an optional error
+  plane only (DESIGN §7): first present identifier's reserved suffix → canonical
+  CAMARA error; `device` on a three-legged line token (E.164 `sub`) → 422
+  UNNECESSARY_IDENTIFIER. Bad `name` pattern / unknown `status` enum / empty
+  `device` / malformed `phoneNumber` → 400 INVALID_ARGUMENT. `x-correlator` echoed.
+  Non-blocking, stateless (no store). Wired into `apis.rs`, `openapi.rs` (served at
+  `/qos-profiles/v1/openapi.yaml`) and the `/` catalog. Spec vendored + annotated
+  (`specs/qos-profiles/v1/openapi.yaml`) with functional cases, `x-camarasim-
+  scenarios`, examples, full `QosProfile`/`Rate`/`Duration` schemas. Tests: +21 (2
+  units [catalog covers every status + unique names, name-pattern validation] + 19
+  integration: empty-body/`{}`→full catalog, name filter→1, unknown name→`[]`,
+  status filter, name+status AND, device reserved suffix (404/422), device happy
+  path→catalog, non-phone device id, three-legged UNNECESSARY, no-device line
+  token→catalog, empty device→400, bad phone→400, bad name→400, unknown status→400,
+  unknown field→400, no-scope→403, no-token→401, x-correlator echo). `cargo test`
+  713 green; `cargo build --release` ok. — binary: 1.8M (1862592 B)
 - 2026-08-04 — Phase 5 (other CAMARA APIs): **Home Devices QoD v0.4** — new
   stateless, non-spatial, **ipAddress-keyed** API (raise/restore per-device QoS on
   the subscriber's home LAN, distinct from network-side QoD). `PUT /qos` (`setQos`,

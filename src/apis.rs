@@ -24,6 +24,7 @@
 //! - **Device Swap v1** — `/device-swap/v1/…`.
 //! - **KYC Fill-in v0.3** — `/kyc-fill-in/v0.3/…`.
 //! - **Home Devices QoD v0.4** — `/home-devices-qod/v0.4/…`.
+//! - **QoS Profiles v1** — `/qos-profiles/v1/…`.
 //!
 //! Plus [`openapi`], which serves each mounted API's vendored OpenAPI spec at
 //! `/{api}/v{n}/openapi.yaml` (docs/DESIGN.md §9).
@@ -45,6 +46,7 @@ pub mod number_recycling;
 pub mod number_verification;
 pub mod one_time_password_sms;
 pub mod openapi;
+pub mod qos_profiles;
 pub mod quality_on_demand;
 pub mod sim_swap;
 
@@ -71,5 +73,6 @@ pub fn routes() -> Router {
         .merge(device_swap::routes())
         .merge(kyc_fill_in::routes())
         .merge(home_devices_qod::routes())
+        .merge(qos_profiles::routes())
         .merge(openapi::routes())
 }
