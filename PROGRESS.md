@@ -614,8 +614,15 @@ address → 400 `INVALID_ARGUMENT`, lone `nonce`/`signature` → 400
 since the simulator has no chain for enhanced ownership validation); and the
 store (re-binding the same triple → 409 `ALREADY_EXISTS`). The `retrieve` read
 op still answers from the deterministic-synthetic model (it does not read the
-store — a deferred reconciliation); `DELETE …/{id}`
-(`deleteBlockchainPublicAddress`) is the remaining slice.
+store — a deferred reconciliation). `DELETE /blockchain-public-addresses/{id}`
+(`deleteBlockchainPublicAddress`, scope `blockchain-public-address:delete`) is
+now live too — it unbinds the stored binding named by the opaque `id` from the
+same store (new `store::remove`): present → `204 No Content` (single-use),
+absent → `404 NOT_FOUND`. Keyed only on store state (the `id` is opaque, so no
+reserved-identifier plane, mirroring QoD `deleteSession` / Carrier Billing);
+bindings aren't scoped per subscriber, so the spec's `sub`-ownership check isn't
+enforced (a documented cut). `x-correlator` echoed on every response. **This
+completes Blockchain Public Address v0.3.**
 
 ## In progress (claimed this pass)
 
@@ -920,9 +927,14 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     `…BOTH_NONCE_SIGNATURE_REQUIRED`; both → 422
     `…UNSUPPORTED_ENHANCED_VALIDATION`); store state (re-bind same triple → 409
     ALREADY_EXISTS). `x-correlator` echoed. (No new dep — reuses `sha2`.)
-  - [ ] stateful `DELETE /blockchain-public-addresses/{id}`
+  - [x] stateful `DELETE /blockchain-public-addresses/{id}`
     (`deleteBlockchainPublicAddress`, `blockchain-public-address:delete`) —
-    deferred (reads the same in-memory store; `204` / `404 NOT_FOUND`).
+    unbinds the stored binding named by the opaque `id` from the same in-memory
+    store (new `store::remove`): present → `204 No Content` (single-use), absent
+    → `404 NOT_FOUND`. Keyed only on store state — the `id` is opaque, so no
+    reserved-identifier plane. Bindings aren't scoped per subscriber, so the
+    spec's `sub`-ownership check isn't enforced (documented cut). `x-correlator`
+    echoed. **This completes Blockchain Public Address v0.3.**
 - [ ] Other CAMARA APIs as capacity allows
 
 ## Cross-cutting (do alongside the item that needs it)
@@ -941,6 +953,21 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-04 — Phase 5: **Blockchain Public Address v0.3 — stateful unbind**
+  (`DELETE /blockchain-public-addresses/{id}`, `deleteBlockchainPublicAddress`,
+  scope `blockchain-public-address:delete`), **completing Blockchain Public
+  Address v0.3**. Verified the op against the authoritative CAMARA r2.2 spec via
+  WebFetch: `DELETE …/{id}` (path param `id`: string), scope
+  `…:delete`, responses `204`/400/401/403/404/429. Keyed only on the in-memory
+  store (new `store::remove` — single lock hold, `.remove().is_some()`): present
+  → `204 No Content` (single-use), absent/unknown → `404 NOT_FOUND`. The `id` is
+  opaque, so no reserved-identifier plane (mirrors QoD `deleteSession` / Carrier
+  Billing). Bindings aren't scoped per subscriber, so the spec's `sub`-ownership
+  check is a documented cut. Spec updated: new `DELETE …/{id}` path, `BindingId`
+  path param, `x-camarasim-scenarios`; header comment now says v0.3 complete. No
+  new dep. Tests: +6 (204 evict + store-gone; single-use → 404; unknown id →
+  404; wrong scope → 403 + binding survives; no token → 401; x-correlator echoed
+  on 204 and 404). `cargo test`: 781 pass. binary (release): 1.9M (1,936,520 B).
 - 2026-08-04 — Phase 5: **Blockchain Public Address v0.3 — stateful bind**
   (`POST /blockchain-public-addresses`, `bindBlockchainPublicAddress`, scope
   `blockchain-public-address:create`). Verified the op against the authoritative

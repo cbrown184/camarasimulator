@@ -8,8 +8,10 @@
 //! - `POST …/blockchain-public-addresses` (`bindBlockchainPublicAddress`) — bind
 //!   an on-chain address to a phone number, persisting it in [`super::store`] and
 //!   returning a `201` with the minted binding `id`.
-//!
-//! (`DELETE …/blockchain-public-addresses/{id}` is a later slice.)
+//! - `DELETE …/blockchain-public-addresses/{id}`
+//!   (`deleteBlockchainPublicAddress`) — unbind a stored binding named by its
+//!   `id`, evicting it from [`super::store`] → `204 No Content`, or `404
+//!   NOT_FOUND` when no such binding exists.
 //!
 //! ## What it does
 //!
@@ -59,9 +61,10 @@
 //! [CAIP-2]: https://chainagnostic.org/CAIPs/caip-2
 
 use axum::body::Bytes;
+use axum::extract::Path;
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::post;
+use axum::routing::{delete, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -78,6 +81,10 @@ const READ_SCOPE: &str = "blockchain-public-address:read";
 /// The OAuth2 scope the bind endpoint requires (CAMARA Blockchain Public
 /// Address 0.3.0).
 const CREATE_SCOPE: &str = "blockchain-public-address:create";
+
+/// The OAuth2 scope the delete endpoint requires (CAMARA Blockchain Public
+/// Address 0.3.0).
+const DELETE_SCOPE: &str = "blockchain-public-address:delete";
 
 /// The blockchain networks the simulator can report, as `(CAIP-2 id, currency)`.
 /// All are EVM chains so a single `0x…` address form suffices. Indexed
@@ -102,6 +109,10 @@ pub fn routes() -> Router {
         .route(
             "/blockchain-public-address/v0.3/blockchain-public-addresses",
             post(bind_blockchain_public_address),
+        )
+        .route(
+            "/blockchain-public-address/v0.3/blockchain-public-addresses/:id",
+            delete(delete_blockchain_public_address),
         )
 }
 
@@ -293,6 +304,49 @@ async fn bind_blockchain_public_address(
         (StatusCode::CREATED, Json(json!({ "id": id }))).into_response(),
         &correlator,
     )
+}
+
+/// `DELETE /blockchain-public-address/v0.3/blockchain-public-addresses/{id}`
+/// (`deleteBlockchainPublicAddress`).
+///
+/// Removes ("unbinds") the stored binding named by the path `id`, releasing the
+/// link between a phone number and an on-chain address. Requires the
+/// `blockchain-public-address:delete` scope.
+///
+/// The `id` is an opaque, UUID-shaped binding token, so — unlike the
+/// `phoneNumber`-keyed bind/retrieve operations — there is **no**
+/// reserved-identifier control plane here; the store state is the only one
+/// (docs/DESIGN.md §7):
+/// - the binding exists → it is evicted, `204 No Content` (single-use: a second
+///   delete of the same id → `404`);
+/// - no such binding (unknown, or already deleted) → `404 NOT_FOUND`.
+///
+/// (CamaraSim does not scope bindings per subscriber, so it does not enforce the
+/// spec's "the id must belong to the token's `sub`" ownership check — a
+/// documented simplification, mirroring the other unscoped stores.)
+async fn delete_blockchain_public_address(
+    claims: Claims,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Response {
+    // Optional correlation header, echoed on every response (CAMARA Commonalities).
+    let correlator = headers.get("x-correlator").cloned();
+
+    // Endpoint authorisation: the token must carry this API's delete scope.
+    if let Err(e) = claims.require_scope(DELETE_SCOPE) {
+        return with_correlator(e.into_response(), &correlator);
+    }
+
+    // The store state is the only control plane: present → 204, absent → 404.
+    if super::store::remove(&id) {
+        with_correlator(StatusCode::NO_CONTENT.into_response(), &correlator)
+    } else {
+        with_correlator(
+            CamaraError::not_found("No blockchain public address binding found for the provided id.")
+                .into_response(),
+            &correlator,
+        )
+    }
 }
 
 /// A deterministic, UUID-shaped binding `id` for the
@@ -922,6 +976,133 @@ mod tests {
         assert_eq!(
             headers.get("x-correlator").and_then(|v| v.to_str().ok()),
             Some("corr-bind")
+        );
+    }
+
+    // --- deleteBlockchainPublicAddress (DELETE …/{id}) ----------------------
+
+    /// The DELETE path for a binding `id`.
+    fn delete_path(id: &str) -> String {
+        format!("/blockchain-public-address/v0.3/blockchain-public-addresses/{id}")
+    }
+
+    async fn delete_binding(
+        token: Option<&str>,
+        id: &str,
+        correlator: Option<&str>,
+    ) -> (StatusCode, HeaderMap, Value) {
+        let mut builder = Request::builder()
+            .method("DELETE")
+            .uri(delete_path(id))
+            .header("host", HOST);
+        if let Some(t) = token {
+            builder = builder.header("authorization", format!("Bearer {t}"));
+        }
+        if let Some(c) = correlator {
+            builder = builder.header("x-correlator", c);
+        }
+        let response = app()
+            .oneshot(builder.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let headers = response.headers().clone();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, headers, json)
+    }
+
+    /// Bind a fresh address and return its minted binding `id`, so the delete
+    /// tests operate on a binding they created (isolating them from the
+    /// process-global store).
+    async fn bind_and_get_id(phone: &str) -> String {
+        let body = format!(
+            r#"{{"phoneNumber":"{phone}","blockchainPublicAddress":"{ADDR}","blockchainNetworkId":"evm:1"}}"#
+        );
+        let (status, _, out) = bind_ok(&body).await;
+        assert_eq!(status, StatusCode::CREATED);
+        out["id"].as_str().unwrap().to_string()
+    }
+
+    #[tokio::test]
+    async fn delete_evicts_an_existing_binding_and_is_no_content() {
+        let id = bind_and_get_id("+123456781001").await;
+        assert!(super::super::store::get(&id).is_some(), "binding present pre-delete");
+
+        let token = mint_token(DELETE_SCOPE).await;
+        let (status, _, body) = delete_binding(Some(&token), &id, None).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(body, Value::Null); // 204 has no body
+
+        // The binding is gone from the store afterwards.
+        assert!(super::super::store::get(&id).is_none(), "binding evicted");
+    }
+
+    #[tokio::test]
+    async fn delete_is_single_use_second_delete_is_not_found() {
+        let id = bind_and_get_id("+123456781002").await;
+        let token = mint_token(DELETE_SCOPE).await;
+
+        let (status, _, _) = delete_binding(Some(&token), &id, None).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        // A second delete of the same id no longer finds it.
+        let (status, _, body) = delete_binding(Some(&token), &id, None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn delete_unknown_id_is_not_found() {
+        let token = mint_token(DELETE_SCOPE).await;
+        let (status, _, body) =
+            delete_binding(Some(&token), "does-not-exist-0000-0000-0000-000000000000", None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn delete_without_the_delete_scope_is_forbidden() {
+        // A binding created with the create scope cannot be removed with a
+        // create-scoped token — delete requires its own scope. The binding must
+        // survive the refused attempt.
+        let id = bind_and_get_id("+123456781003").await;
+        let token = mint_token(CREATE_SCOPE).await;
+        let (status, _, body) = delete_binding(Some(&token), &id, None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["code"], "PERMISSION_DENIED");
+        assert!(super::super::store::get(&id).is_some(), "binding not deleted");
+    }
+
+    #[tokio::test]
+    async fn delete_missing_token_is_unauthenticated() {
+        let (status, _, body) =
+            delete_binding(None, "3f2a9c1b-7d4e-4a11-9c02-8e6f5a1b2c3d", None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["code"], "UNAUTHENTICATED");
+    }
+
+    #[tokio::test]
+    async fn delete_echoes_x_correlator_on_success_and_error() {
+        let id = bind_and_get_id("+123456781004").await;
+        let token = mint_token(DELETE_SCOPE).await;
+
+        // 204 success still echoes the correlator.
+        let (status, headers, _) = delete_binding(Some(&token), &id, Some("corr-del")).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-del")
+        );
+
+        // 404 error also echoes it.
+        let (status, headers, _) = delete_binding(Some(&token), &id, Some("corr-del2")).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-del2")
         );
     }
 }

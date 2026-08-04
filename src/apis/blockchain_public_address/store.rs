@@ -4,8 +4,9 @@
 //! Blockchain Public Address becomes **stateful** the moment a caller can *bind*
 //! an on-chain address to their line: `POST /blockchain-public-addresses`
 //! (`bindBlockchainPublicAddress`) mints a binding `id` and remembers the
-//! relationship so a later `DELETE /blockchain-public-addresses/{id}`
-//! (`deleteBlockchainPublicAddress`, a later slice) can address it. This module
+//! relationship so `DELETE /blockchain-public-addresses/{id}`
+//! (`deleteBlockchainPublicAddress`) can address it — reading it back
+//! (`204`) or reporting it absent (`404 NOT_FOUND`). This module
 //! is that state. It mirrors [`crate::apis::carrier_billing::store`]: a
 //! process-global `HashMap` guarded by a `std::sync::Mutex`, the lock held only
 //! for the map read/write and never across an `.await`, so it never blocks the
@@ -59,10 +60,7 @@ pub fn insert(id: String, binding: Value) -> bool {
 }
 
 /// Fetch the binding stored under `id`, or `None` if no such binding exists.
-/// Used by the tests to assert persistence; `deleteBlockchainPublicAddress` (a
-/// later slice) will use the same distinction to answer `204` vs `404
-/// NOT_FOUND`, so it is retained now even though the request path does not yet
-/// call it.
+/// Used by the tests to assert persistence.
 #[cfg_attr(not(test), allow(dead_code))]
 pub fn get(id: &str) -> Option<Value> {
     store()
@@ -70,4 +68,18 @@ pub fn get(id: &str) -> Option<Value> {
         .expect("blockchain-public-address binding store not poisoned")
         .get(id)
         .cloned()
+}
+
+/// Remove the binding stored under `id`, returning `true` when one was present
+/// (and is now gone) or `false` when no such binding existed.
+/// `deleteBlockchainPublicAddress` maps the former to `204 No Content` and the
+/// latter to `404 NOT_FOUND`. Because the whole take-out runs under a single
+/// lock hold (never across an `.await`), two concurrent deletes of the same id
+/// can't both report success — only the first sees `true`.
+pub fn remove(id: &str) -> bool {
+    store()
+        .lock()
+        .expect("blockchain-public-address binding store not poisoned")
+        .remove(id)
+        .is_some()
 }

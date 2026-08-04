@@ -7,13 +7,11 @@
 # Backed by `src/apis/blockchain_public_address/v0_3.rs`; spec and code must not
 # drift.
 #
-# Implemented so far: the stateless read op `retrieveBlockchainPublicAddress`
-# (POST …/retrieve-blockchains) and the stateful bind op
-# `bindBlockchainPublicAddress` (POST …/blockchain-public-addresses), the latter
-# backed by an in-memory binding store. `deleteBlockchainPublicAddress` (DELETE
-# …/{id}) is deferred to a later slice and intentionally omitted from this
-# vendored spec until then, so the served contract never advertises an
-# unimplemented path.
+# Implemented: the stateless read op `retrieveBlockchainPublicAddress` (POST
+# …/retrieve-blockchains), the stateful bind op `bindBlockchainPublicAddress`
+# (POST …/blockchain-public-addresses) and the stateful unbind op
+# `deleteBlockchainPublicAddress` (DELETE …/{id}), the latter two backed by an
+# in-memory binding store. This completes Blockchain Public Address v0.3.
 openapi: 3.0.3
 info:
   title: Blockchain Public Address
@@ -248,6 +246,62 @@ paths:
           - input: missing or malformed phoneNumber
             result: "400 INVALID_ARGUMENT"
 
+  /blockchain-public-addresses/{id}:
+    delete:
+      operationId: deleteBlockchainPublicAddress
+      summary: Unbind a blockchain public address from a phone number
+      description: |
+        Removes ("unbinds") the stored binding named by the path `id`, releasing
+        the link between a phone number and its on-chain address. Requires the
+        `blockchain-public-address:delete` scope.
+
+        The `id` is an opaque, UUID-shaped binding token (minted at bind time),
+        so — unlike the `phoneNumber`-keyed read/bind operations — there is no
+        reserved-identifier control plane here; the in-memory store state is the
+        only control plane (docs/DESIGN.md §7):
+          - the binding exists → it is evicted, `204 No Content` (single-use: a
+            second delete of the same `id` → `404`);
+          - no such binding (unknown, or already deleted) → `404 NOT_FOUND`.
+
+        CamaraSim does not scope bindings per subscriber, so it does not enforce
+        the canonical spec's ownership check (that the `id` belongs to the access
+        token's `sub`) — a documented simplification, mirroring the other
+        unscoped in-memory stores.
+      security:
+        - openId:
+            - blockchain-public-address:delete
+      parameters:
+        - $ref: "#/components/parameters/BindingId"
+        - $ref: "#/components/parameters/XCorrelator"
+      responses:
+        "204":
+          description: The binding was removed. No response body.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+        "400":
+          $ref: "../../shared/errors.yaml#/components/responses/InvalidArgument"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+      x-camarasim-scenarios:
+        description: >-
+          Delete outcome selected only from the in-memory store state
+          (docs/DESIGN.md §7). The binding `id` is opaque, so there is no
+          reserved-identifier plane here.
+        cases:
+          - input: id of an existing binding
+            result: "204 No Content (the binding is evicted)"
+          - input: the same id deleted a second time
+            result: "404 NOT_FOUND (single-use)"
+          - input: an unknown / never-created id
+            result: "404 NOT_FOUND"
+
 components:
   securitySchemes:
     openId:
@@ -261,6 +315,17 @@ components:
       description: Correlation id for the request, echoed back on the response.
       schema:
         type: string
+
+    BindingId:
+      name: id
+      in: path
+      required: true
+      description: >-
+        Unique identifier of the bind relationship between a `phoneNumber` and a
+        blockchain public address, as minted by `bindBlockchainPublicAddress`.
+      schema:
+        type: string
+      example: "3f2a9c1b-7d4e-4a11-9c02-8e6f5a1b2c3d"
 
   headers:
     XCorrelator:
