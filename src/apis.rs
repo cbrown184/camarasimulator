@@ -27,6 +27,7 @@
 //! - **QoS Profiles v1** — `/qos-profiles/v1/…`.
 //! - **KYC Tenure v0.2** — `/kyc-tenure/v0.2/…`.
 //! - **Blockchain Public Address v0.3** — `/blockchain-public-address/v0.3/…`.
+//! - **Simple Edge Discovery v2** — `/simple-edge-discovery/v2/…`.
 //!
 //! Plus [`openapi`], which serves each mounted API's vendored OpenAPI spec at
 //! `/{api}/v{n}/openapi.yaml` (docs/DESIGN.md §9).
@@ -53,6 +54,7 @@ pub mod openapi;
 pub mod qos_profiles;
 pub mod quality_on_demand;
 pub mod sim_swap;
+pub mod simple_edge_discovery;
 
 use axum::Router;
 
@@ -80,5 +82,6 @@ pub fn routes() -> Router {
         .merge(qos_profiles::routes())
         .merge(kyc_tenure::routes())
         .merge(blockchain_public_address::routes())
+        .merge(simple_edge_discovery::routes())
         .merge(openapi::routes())
 }

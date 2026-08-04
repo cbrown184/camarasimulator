@@ -624,6 +624,29 @@ bindings aren't scoped per subscriber, so the spec's `sub`-ownership check isn't
 enforced (a documented cut). `x-correlator` echoed on every response. **This
 completes Blockchain Public Address v0.3.**
 
+**Phase 5 (other CAMARA APIs) — Simple Edge Discovery v2** is now live, a new
+stateless, non-spatial, **device-keyed** edge/MEC-discovery API mounted at its
+real published version `/simple-edge-discovery/v2` (CAMARA 2.0.1, meta-release
+r2.3 — the latest published, like KYC Match / Blockchain Public Address). `POST
+/retrieve-closest-edge-cloud-zone` (scope `simple-edge-discovery:read`,
+operationId `readClosestEdgeCloudZone`) returns the `EdgeCloudZone`
+(`{edgeCloudZoneId, edgeCloudZoneName, edgeCloudProvider}`) with the lowest
+network latency to a device — a zone identity, never the device's location. The
+device is resolved from the submitted `device` object (phoneNumber → NAI → IPv4
+`publicAddress` → ipv6Address; mirroring the device-status family), else the
+token subject, honouring the CAMARA two-legged/three-legged rule (a `device`
+submitted on a three-legged **device** token → 422 `UNNECESSARY_IDENTIFIER`; no
+`device` + a non-device subject → 422 `MISSING_IDENTIFIER`; a `device` carrying
+no identifier → 400 `INVALID_ARGUMENT`). Two control planes (DESIGN §7): the
+identifier's reserved error suffix → canonical CAMARA error; else its trailing
+three digits index a fixed 6-entry edge-zone table (`% 6`; `…000`/no-digits →
+entry 0), so the reported zone is a genuine second plane. The `edgeCloudZoneId`
+is UUID-shaped and derived from the zone via SHA-256 (deterministic and **stable
+per zone** — a zone has one id regardless of which device resolves to it; no new
+dependency). The `device` is echoed back only for a phoneNumber-keyed request
+(the CAMARA `DeviceResponse` carries only `phoneNumber`). `x-correlator` echoed
+on every response. **This completes Simple Edge Discovery v2.**
+
 ## In progress (claimed this pass)
 
 _None._  <!-- agent: put the claimed item + run timestamp here, clear it when done -->
@@ -935,6 +958,22 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     reserved-identifier plane. Bindings aren't scoped per subscriber, so the
     spec's `sub`-ownership check isn't enforced (documented cut). `x-correlator`
     echoed. **This completes Blockchain Public Address v0.3.**
+- [x] Simple Edge Discovery v2 (`/simple-edge-discovery/v2`; CAMARA 2.0.1,
+  release r2.3; stateless, non-spatial, device-keyed edge/MEC discovery):
+  - [x] `POST /retrieve-closest-edge-cloud-zone` (`simple-edge-discovery:read`,
+    `readClosestEdgeCloudZone`) — returns the closest `EdgeCloudZone`
+    (`{edgeCloudZoneId, edgeCloudZoneName, edgeCloudProvider}`), never the
+    device's location. Device-object identifier resolution (phoneNumber → NAI →
+    IPv4 publicAddress → ipv6Address, else token subject) with the CAMARA
+    two-legged / three-legged rule (422 `UNNECESSARY_IDENTIFIER` /
+    `MISSING_IDENTIFIER`; empty `device` → 400 INVALID_ARGUMENT). Two control
+    planes (DESIGN §7): identifier reserved-error suffix → canonical CAMARA
+    error; else trailing three digits index a fixed 6-entry edge-zone table
+    (`% 6`; `…000`/no-digits → entry 0), so the zone is a genuine second plane.
+    `edgeCloudZoneId` is UUID-shaped, deterministic and stable per zone
+    (SHA-256, no new dep). The `device` is echoed only for a phoneNumber-keyed
+    request (CAMARA `DeviceResponse` carries only phoneNumber). `x-correlator`
+    echoed. **Completes Simple Edge Discovery v2.**
 - [ ] Other CAMARA APIs as capacity allows
 
 ## Cross-cutting (do alongside the item that needs it)
@@ -953,6 +992,33 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-04 19:45Z — Phase 5 (other CAMARA APIs): **Simple Edge Discovery v2** —
+  new stateless, non-spatial, device-keyed edge/MEC-discovery API, **completes the
+  API in one pass** (single endpoint). Verified the authoritative CAMARA
+  SimpleEdgeDiscovery spec at tag **r2.3** via WebFetch: `info.version` "2.0.1",
+  base `/simple-edge-discovery/v2`, `POST /retrieve-closest-edge-cloud-zone`
+  (`readClosestEdgeCloudZone`, scope `simple-edge-discovery:read`), request
+  `{device?: {phoneNumber?/networkAccessIdentifier?/ipv4Address?/ipv6Address?}}`,
+  200 → `EdgeCloudZone {edgeCloudZoneId(uuid), edgeCloudZoneName, edgeCloudProvider,
+  device?}`, errors 400/401/403/404/422 (MISSING/UNNECESSARY_IDENTIFIER)/429. New
+  `src/apis/simple_edge_discovery/{,v2}.rs`. Device-object identifier resolution
+  (mirrors device-reachability) + the two-legged/three-legged rule (mirrors
+  call-forwarding): device id + line subject → 422 UNNECESSARY_IDENTIFIER; no
+  device + non-line subject → 422 MISSING_IDENTIFIER; empty device → 400. Two
+  control planes (DESIGN §7): reserved suffix → canonical error; else trailing
+  digits index a fixed 6-entry edge-zone table (`% 6`, `…000`→entry 0 — zone is a
+  2nd plane). `edgeCloudZoneId` UUID-shaped, deterministic + stable per zone
+  (SHA-256; **no new dep** — reuses sha2). Device echoed only for phoneNumber
+  requests. Wired into `apis.rs`, `openapi.rs` (served at
+  `/simple-edge-discovery/v2/openapi.yaml`) and the `/` catalog. Spec vendored +
+  annotated (`specs/simple-edge-discovery/v2/openapi.yaml`) with functional cases,
+  `x-camarasim-scenarios`, examples, full schemas. Tests: +19 (units: zone index
+  by digits, deterministic stable-per-zone UUID, E.164, device precedence;
+  integration: closest-zone fields, distinct zones per tail, no device echo for
+  IP, reserved→404/429, three-legged subject + reserved subject,
+  UNNECESSARY/MISSING_IDENTIFIER, empty/invalid/unknown-field/malformed body → 400,
+  no-scope→403, no-token→401, x-correlator echo). `cargo test` 800 green (was 781);
+  `cargo build --release` clean. — binary: 1.9M (1959280 B)
 - 2026-08-04 — Phase 5: **Blockchain Public Address v0.3 — stateful unbind**
   (`DELETE /blockchain-public-addresses/{id}`, `deleteBlockchainPublicAddress`,
   scope `blockchain-public-address:delete`), **completing Blockchain Public
