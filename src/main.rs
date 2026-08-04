@@ -184,6 +184,12 @@ async fn catalog() -> Json<Value> {
                 "version": "v0.6",
                 "base_path": "/connectivity-insights/v0.6",
                 "spec_url": "/connectivity-insights/v0.6/openapi.yaml",
+            },
+            {
+                "name": "region-device-count",
+                "version": "v0.2",
+                "base_path": "/region-device-count/v0.2",
+                "spec_url": "/region-device-count/v0.2/openapi.yaml",
             }
         ],
         "authorization_servers": [{
@@ -336,6 +342,10 @@ mod tests {
             && a["version"] == "v0.2"
             && a["base_path"] == "/connected-network-type/v0.2"
             && a["spec_url"] == "/connected-network-type/v0.2/openapi.yaml"));
+        assert!(apis.iter().any(|a| a["name"] == "region-device-count"
+            && a["version"] == "v0.2"
+            && a["base_path"] == "/region-device-count/v0.2"
+            && a["spec_url"] == "/region-device-count/v0.2/openapi.yaml"));
         assert_eq!(
             body["authorization_servers"][0]["openid_configuration"],
             "/.well-known/openid-configuration"

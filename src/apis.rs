@@ -31,6 +31,7 @@
 //! - **Customer Insights v0.2** — `/customer-insights/v0.2/…`.
 //! - **Connected Network Type v0.2** — `/connected-network-type/v0.2/…`.
 //! - **Connectivity Insights v0.6** — `/connectivity-insights/v0.6/…`.
+//! - **Region Device Count v0.2** — `/region-device-count/v0.2/…`.
 //!
 //! Plus [`openapi`], which serves each mounted API's vendored OpenAPI spec at
 //! `/{api}/v{n}/openapi.yaml` (docs/DESIGN.md §9).
@@ -59,6 +60,7 @@ pub mod one_time_password_sms;
 pub mod openapi;
 pub mod qos_profiles;
 pub mod quality_on_demand;
+pub mod region_device_count;
 pub mod sim_swap;
 pub mod simple_edge_discovery;
 
@@ -92,5 +94,6 @@ pub fn routes() -> Router {
         .merge(customer_insights::routes())
         .merge(connected_network_type::routes())
         .merge(connectivity_insights::routes())
+        .merge(region_device_count::routes())
         .merge(openapi::routes())
 }

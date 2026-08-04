@@ -718,6 +718,33 @@ default, `excellent` / `5G-SA`), `…031` → all unmet (`no signal` / `3G`) —
 for a phoneNumber request. No new dependency. `x-correlator` echoed on every
 response.
 
+**Phase 5 (other CAMARA APIs) — Region Device Count v0.2** is now live, a new
+**area-keyed** (not identifier-keyed), stateless aggregate-count API mounted at
+its real published version `/region-device-count/v0.2` (CAMARA 0.2.0, release
+r2.2 — the latest published, like Customer Insights / Connectivity Insights).
+`POST /count` (scope `region-device-count:count`, operationId `count`) answers
+how many devices are in a geographic region (a `CIRCLE` or a `POLYGON`) during an
+optional time interval — a privacy-preserving `{ count?, status }`, never a
+per-device location. Because there is no phone/device identifier, its control
+planes (DESIGN §7) key off the **area geometry**: the region's characteristic
+radius `r` (a circle's `radius`; a polygon's `sqrt(area/π)`, area by a
+self-contained equirectangular shoelace, no new dep) drives both a **size plane**
+(`r > 1 000 000 m` → 400 `REGION_DEVICE_COUNT.UNSUPPPORTED_REQUEST`;
+`500 000 < r ≤ 1 000 000 m` with no `sink` → 400
+`REGION_DEVICE_COUNT.UNSUPPORTED_SYNC_RESPONSE`, with a `sink` answered sync) and
+a **status/count plane** keyed on `round(r)`'s trailing three digits (`…429` →
+429; `…001` → `PART_OF_AREA_NOT_SUPPORTED`; `…002` → `AREA_NOT_SUPPORTED`; `…003`
+→ `DENSITY_BELOW_PRIVACY_THRESHOLD`; `…004` → `TIME_INTERVAL_NO_DATA_FOUND`; else
+→ `SUPPORTED_AREA`). When a `count` is returned it is proportional to the area at
+a fixed 500 devices/km² and **narrowed by `filter`** (a genuine second plane —
+each `roamingStatus`/`deviceType` category contributes its fixed share). Full
+CAMARA validation: `INVALID_CIRCLE_AREA`/`INVALID_POLYGON_AREA`, the both-or-
+neither time rule (`TIME_INVALID_ARGUMENT`) + `INVALID_END_DATE` (self-contained
+RFC 3339 parser, no new dep), empty/bad `filter` → `INVALID_ARGUMENT`, and
+`sinkCredential` → `INVALID_CREDENTIAL`/`INVALID_TOKEN`. The asynchronous
+`sink`/CloudEvents delivery surface (and its 410 GONE) is a documented cut. No
+new dependency. `x-correlator` echoed on every response.
+
 ## In progress (claimed this pass)
 
 _None._  <!-- agent: put the claimed item + run timestamp here, clear it when done -->
@@ -1095,6 +1122,23 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     `…031` → all unmet → no signal/3G), and `additionalKPIs` degrade coherently
     with the count met. `device` echoed only for a phoneNumber request. No new
     dep. **Completes Connectivity Insights v0.6.**
+- [x] Region Device Count v0.2 (`/region-device-count/v0.2`; CAMARA 0.2.0,
+  release r2.2; stateless, **area-keyed** aggregate count):
+  - [x] `POST /count` (`region-device-count:count`, `count`) — `{ count?,
+    status }` device count for a `CIRCLE`/`POLYGON` region over an optional time
+    interval. No identifier: control planes (DESIGN §7) key off the geometry —
+    the characteristic radius `r` drives a size plane (`r > 1e6 m` → 400
+    `REGION_DEVICE_COUNT.UNSUPPPORTED_REQUEST`; `5e5 < r ≤ 1e6 m`, no `sink` → 400
+    `REGION_DEVICE_COUNT.UNSUPPORTED_SYNC_RESPONSE`, with `sink` → sync) and a
+    status/count plane on `round(r)`'s trailing digits (`…429`→429; `…001`→
+    PART_OF_AREA_NOT_SUPPORTED; `…002`→AREA_NOT_SUPPORTED; `…003`→DENSITY_BELOW_
+    PRIVACY_THRESHOLD; `…004`→TIME_INTERVAL_NO_DATA_FOUND; else→SUPPORTED_AREA).
+    `count` = area × 500 dev/km², narrowed by `filter` (second plane). Validation:
+    INVALID_CIRCLE_AREA/INVALID_POLYGON_AREA, TIME_INVALID_ARGUMENT/INVALID_END_
+    DATE (self-contained RFC 3339 parser), filter → INVALID_ARGUMENT,
+    sinkCredential → INVALID_CREDENTIAL/INVALID_TOKEN. Shoelace area, no new dep.
+    Async `sink`/CloudEvents (+ 410 GONE) a documented cut. **Completes Region
+    Device Count v0.2.**
 - [ ] Other CAMARA APIs as capacity allows
 
 ## Cross-cutting (do alongside the item that needs it)
@@ -1112,6 +1156,34 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 ## Scan journal
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
+
+- 2026-08-04 23:45Z — Phase 5 (other CAMARA APIs): **Region Device Count v0.2**
+  — new stateless, **area-keyed** (not identifier-keyed) aggregate-count API,
+  **completes the API in one pass** (single endpoint). The published stateless
+  non-spatial CAMARA set is now essentially exhausted; RDC is spatial-input but
+  stateless and single-endpoint (Phase 4 spatial work already complete). Verified
+  the authoritative CAMARA RegionDeviceCount spec at tag **r2.2** via WebFetch
+  (`info.version` "0.2.0", base `/region-device-count/v0.2`, `POST /count` =
+  `count`, scope `region-device-count:count`; request `RegionDeviceCountRequestBody
+  {area(CIRCLE center+radius / POLYGON boundary), starttime?, endtime?, filter?,
+  sink?, sinkCredential?}`; 200 → `{count?, status}` with status enum SUPPORTED_AREA
+  / PART_OF_AREA_NOT_SUPPORTED / AREA_NOT_SUPPORTED / DENSITY_BELOW_PRIVACY_THRESHOLD
+  / TIME_INTERVAL_NO_DATA_FOUND; errors 400 [INVALID_ARGUMENT + RDC-specific
+  INVALID_CIRCLE_AREA/INVALID_POLYGON_AREA/TIME_INVALID_ARGUMENT/INVALID_END_DATE/
+  UNSUPPORTED_SYNC_RESPONSE/UNSUPPPORTED_REQUEST(triple-P)/INVALID_CREDENTIAL/
+  INVALID_TOKEN]/401/403/410(async)/429). New `src/apis/region_device_count/{,v0_2}.rs`
+  + vendored/annotated `specs/region-device-count/v0.2/openapi.yaml`; wired into
+  apis/openapi/main catalog. No phone/device identifier, so control planes
+  (DESIGN §7) key off the area: characteristic radius `r` (circle radius; polygon
+  `sqrt(area/π)` via a self-contained equirectangular shoelace) drives a size plane
+  (`>1e6 m` → UNSUPPPORTED_REQUEST; `5e5–1e6 m` no sink → UNSUPPORTED_SYNC_RESPONSE,
+  with sink → sync) and a status/count plane on `round(r)`'s trailing three digits
+  (…429→429; …001..004 → the four non-count statuses; else SUPPORTED_AREA); count =
+  area×500 dev/km² narrowed by `filter` (2nd plane). Self-contained RFC 3339 parser
+  for the time-interval validation; async `sink`/CloudEvents (+410) a documented cut.
+  No new dependency (serde/serde_json/axum + std f64 maths). 34 new tests; `cargo test`
+  906 passed (was 872); `cargo build --release` clean, no warnings.
+  — binary: 2,093,848 bytes (~2.0M)
 
 - 2026-08-04 22:45Z — Phase 5 (other CAMARA APIs): **Connectivity Insights v0.6**
   — new stateless, non-spatial, device-keyed network-quality API, **completes the
