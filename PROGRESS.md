@@ -514,6 +514,28 @@ moves). `specifiedDate` is validated: malformed/impossible → 400
 parser/formatter (Howard Hinnant `days_from_civil`/`civil_from_days`, no new
 dependency) does the date maths. `x-correlator` echoed on every response.
 
+**Phase 5 (other CAMARA APIs) — KYC Age Verification v0.1** is now live, a new
+stateless, non-spatial, phone-number-keyed identity API mounted at its real
+published version `/kyc-age-verification/v0.1` (CAMARA 0.1.0, release r2.2 —
+the latest published, like KYC Match / Number Recycling). `POST /verify` (scope
+`kyc-age-verification:verify`, operationId `verifyAge`) answers whether the
+line's holder is **at or above** a caller-supplied `ageThreshold` — a
+privacy-preserving `{ ageCheck: "true"|"false"|"not_available" }`, never a
+birthdate. Faithful to CAMARA's two-legged/three-legged identifier rule (a
+`phoneNumber` on a line token → 422 `UNNECESSARY_IDENTIFIER`; no number + a
+non-line subject → 422 `MISSING_IDENTIFIER`). **Three** control planes (DESIGN
+§7): `ageThreshold` range (`0..=120`, else 400 `OUT_OF_RANGE`); the identifier's
+reserved error suffix → canonical CAMARA error; and the identifier's trailing
+three digits read as the **held age** (`d % 100`) compared to `ageThreshold`
+(`held ≥ threshold` → `"true"`, else `"false"`; `…000` → `"not_available"`), so
+`ageThreshold` is a genuine second plane (the same number flips true↔false as
+the threshold moves). The body's identity attributes add optional response
+fields: any of `idDocument`/`name`/`givenName`/…/`email` → `identityMatchScore`
+(fixed 90, no real backend); `idDocument` → `verifiedStatus: true`; and the
+`includeContentLock`/`includeParentalControl` toggles opt into
+`contentLock`/`parentalControl` (a minor `< 18` → `"true"`, adult → `"false"`,
+unknown age → `"not_available"`). `x-correlator` echoed on every response.
+
 ## In progress (claimed this pass)
 
 _None._  <!-- agent: put the claimed item + run timestamp here, clear it when done -->
@@ -700,6 +722,18 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     reserved-error suffix, and identifier trailing digits (days-since-change) vs
     `specifiedDate` (recycled iff change strictly after the date). `specifiedDate`
     validated: malformed → 400 `INVALID_ARGUMENT`, future → 400 `OUT_OF_RANGE`.
+- [x] KYC Age Verification v0.1 (`/kyc-age-verification/v0.1`; CAMARA 0.1.0,
+  release r2.2; stateless, non-spatial, phone-number-keyed):
+  - [x] `POST /verify` (`kyc-age-verification:verify`, `verifyAge`) —
+    `{ ageCheck: "true"|"false"|"not_available" }`; two-legged (submitted
+    `phoneNumber`) / three-legged (E.164 `sub`) identifier rule with 422
+    `UNNECESSARY_IDENTIFIER` / `MISSING_IDENTIFIER`; three control planes
+    (DESIGN §7): `ageThreshold` range (0..=120, else 400 `OUT_OF_RANGE`),
+    identifier reserved-error suffix, and identifier trailing digits (held age =
+    `d % 100`) vs `ageThreshold` (`…000` → `not_available`). Optional response
+    fields driven by the body: `identityMatchScore`=90 (any identity attribute),
+    `verifiedStatus`=true (`idDocument`), `contentLock`/`parentalControl` (opt-in
+    via `include*`, minor `< 18` → `"true"`).
 - [ ] Other CAMARA APIs as capacity allows
 
 ## Cross-cutting (do alongside the item that needs it)
@@ -718,6 +752,44 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-04 — Phase 5 (other CAMARA APIs): **KYC Age Verification v0.1** — new
+  stateless, non-spatial, phone-number-keyed identity API. Verified the latest
+  published CAMARA KnowYourCustomer spec (release **r2.2 → kyc-age-verification
+  v0.1.0**; `main` is `wip` 0.1.0): op `verifyAge`, scope
+  `kyc-age-verification:verify`, base `/kyc-age-verification/v0.1`, body
+  `{ageThreshold(0–120, required), phoneNumber?, idDocument?, name?/givenName?/
+  familyName?/middleNames?/familyNameAtBirth?/birthdate?/email?,
+  includeContentLock?, includeParentalControl?}`, 200
+  `{ageCheck: "true"|"false"|"not_available", verifiedStatus?,
+  identityMatchScore?, contentLock?, parentalControl?}`, and the 422 identifier
+  codes `MISSING_IDENTIFIER`/`UNNECESSARY_IDENTIFIER`. New
+  `src/apis/kyc_age_verification/{,v0_1}.rs` (mirrors Number Recycling, **no new
+  dep**): `POST /verify`. Identifier = submitted `phoneNumber` (two-legged) else
+  E.164 `sub` (three-legged); a number on a line token → 422
+  `UNNECESSARY_IDENTIFIER`, no number + non-line subject → 422
+  `MISSING_IDENTIFIER`. Three control planes (DESIGN §7): `ageThreshold` range
+  (0..=120, else 400 `OUT_OF_RANGE`); reserved error suffix → canonical CAMARA
+  error; else the identifier's trailing three digits are the held age (`d % 100`),
+  `ageCheck = held ≥ ageThreshold ? "true" : "false"` (so `ageThreshold` is a real
+  second plane), `…000` tail → `"not_available"`. Optional response fields driven
+  by the body: `identityMatchScore`=90 (any identity attribute), `verifiedStatus`
+  =true (`idDocument`), `contentLock`/`parentalControl` (opt-in via `include*`,
+  minor `< 18` → `"true"`, adult → `"false"`, unknown age → `"not_available"`).
+  `x-correlator` echoed. Wired into `apis.rs`, `openapi.rs` (served at
+  `/kyc-age-verification/v0.1/openapi.yaml`) and the `/` catalog. Spec: vendored +
+  annotated `specs/kyc-age-verification/v0.1/openapi.yaml` (full functional-case
+  description, `x-camarasim-scenarios`, examples, local `AgeVerificationError`
+  code enum incl. `OUT_OF_RANGE` + the 422 identifier codes; full shared
+  reserved-error set exposed). Tests: +27 (3 units [age_check, minor_signal, e164]
+  + 24 integration: above/below/boundary threshold, ageThreshold-as-control-plane
+  flip, `…000`→not_available, identity attrs→score+verifiedStatus, name-only
+  scores-not-verified, content-lock/parental opt-in age-driven, lock
+  not_available on unknown age, toggles-off-add-nothing, reserved suffix,
+  threshold out-of-range/at-bounds/missing, three-legged subject-keyed + reserved
+  subject, UNNECESSARY_/MISSING_IDENTIFIER, invalid phone, unknown-field, malformed
+  json, no-scope→403, no-token→401, x-correlator echo) + catalog + openapi serving
+  assertions. `cargo test` 620 green (was 593); `cargo build --release` ok —
+  binary: 1739664 bytes (1.74M, +31672 B).
 - 2026-08-04 — Phase 5 (other CAMARA APIs): **Number Recycling v0.2** — new
   stateless, non-spatial, phone-number-keyed account-integrity API. Verified the
   latest published CAMARA NumberRecycling spec (release **r2.2 → v0.2.0**; `main`

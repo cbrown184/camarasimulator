@@ -118,6 +118,12 @@ async fn catalog() -> Json<Value> {
                 "version": "v0.2",
                 "base_path": "/number-recycling/v0.2",
                 "spec_url": "/number-recycling/v0.2/openapi.yaml",
+            },
+            {
+                "name": "kyc-age-verification",
+                "version": "v0.1",
+                "base_path": "/kyc-age-verification/v0.1",
+                "spec_url": "/kyc-age-verification/v0.1/openapi.yaml",
             }
         ],
         "authorization_servers": [{
@@ -226,6 +232,10 @@ mod tests {
             && a["version"] == "v0.2"
             && a["base_path"] == "/number-recycling/v0.2"
             && a["spec_url"] == "/number-recycling/v0.2/openapi.yaml"));
+        assert!(apis.iter().any(|a| a["name"] == "kyc-age-verification"
+            && a["version"] == "v0.1"
+            && a["base_path"] == "/kyc-age-verification/v0.1"
+            && a["spec_url"] == "/kyc-age-verification/v0.1/openapi.yaml"));
         assert_eq!(
             body["authorization_servers"][0]["openid_configuration"],
             "/.well-known/openid-configuration"
