@@ -11,11 +11,18 @@
 //!   Public Address 0.3.0, release r2.2 — the latest published version, so
 //!   mounted at its real sub-1.0 base path like KYC Match / KYC Tenure).
 //!
-//! Only the **stateless read** operation (`retrieveBlockchainPublicAddress`) is
-//! implemented so far; the stateful `bind`/`delete` operations are deferred to a
-//! later slice (they add an in-memory store, mirroring how QoD / Carrier Billing
-//! were grown endpoint-by-endpoint).
+//! Implemented so far:
+//! - the **stateless read** op `retrieveBlockchainPublicAddress`, and
+//! - the **stateful bind** op `bindBlockchainPublicAddress`
+//!   (`POST /blockchain-public-addresses`), which persists the binding in an
+//!   in-memory [`store`] so a later `deleteBlockchainPublicAddress` slice can
+//!   address it by `id`.
+//!
+//! The `DELETE /blockchain-public-addresses/{id}` op is deferred to a later
+//! slice (it reads the same [`store`], mirroring how QoD / Carrier Billing were
+//! grown endpoint-by-endpoint).
 
+pub mod store;
 pub mod v0_3;
 
 use axum::Router;

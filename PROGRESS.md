@@ -600,8 +600,22 @@ never 404s), else `((d - 1) % 3) + 1` addresses (1–3), the `i`-th on
 `NETWORKS[(d + i) % 6]` from a fixed 6-entry CAIP-2 EVM table (so the chain is a
 genuine second plane). Each `0x…` address and UUID-shaped `id` is deterministic
 (SHA-256, no new dep); addresses are lowercase (not EIP-55 checksummed — a
-documented cut). The stateful `bind`/`delete` operations are deferred to a later
-slice. `x-correlator` echoed on every response.
+documented cut). `x-correlator` echoed on every response. The API is now
+**stateful**: `POST /blockchain-public-addresses` (`bindBlockchainPublicAddress`,
+scope `blockchain-public-address:create`) binds an on-chain address to a phone
+number, persisting it in a new in-memory store
+(`src/apis/blockchain_public_address/store.rs`; `Mutex<HashMap>`, the binding
+`id` derived from the `(phoneNumber, network, address)` triple so a re-bind
+collides), returning `201 {id}`. Three control planes (DESIGN §7): the
+phoneNumber reserved-error suffix → canonical error; request validation (bad
+`blockchainNetworkId` → 400 `…INVALID_BLOCKCHAIN_NETWORK_IDENTIFIER`, bad EVM
+address → 400 `INVALID_ARGUMENT`, lone `nonce`/`signature` → 400
+`…BOTH_NONCE_SIGNATURE_REQUIRED`, both → 422 `…UNSUPPORTED_ENHANCED_VALIDATION`
+since the simulator has no chain for enhanced ownership validation); and the
+store (re-binding the same triple → 409 `ALREADY_EXISTS`). The `retrieve` read
+op still answers from the deterministic-synthetic model (it does not read the
+store — a deferred reconciliation); `DELETE …/{id}`
+(`deleteBlockchainPublicAddress`) is the remaining slice.
 
 ## In progress (claimed this pass)
 
@@ -894,9 +908,21 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     (fixed CAIP-2 EVM table → the chain is a second plane). Deterministic
     `0x…`/UUID via SHA-256 (no new dep); addresses lowercase (not EIP-55) —
     documented cut. `x-correlator` echoed.
-  - [ ] stateful `POST /blockchain-public-addresses` (`bindBlockchainPublicAddress`)
-    + `DELETE /blockchain-public-addresses/{id}` (`deleteBlockchainPublicAddress`)
-    — deferred (adds an in-memory store, mirroring QoD / Carrier Billing slicing).
+  - [x] stateful `POST /blockchain-public-addresses` (`bindBlockchainPublicAddress`,
+    scope `blockchain-public-address:create`) — binds an on-chain address to a
+    phone number, persisting it in a new in-memory store
+    (`src/apis/blockchain_public_address/store.rs`; `Mutex<HashMap>`, id derived
+    from the triple so a duplicate collides), `201 {id}`. Three control planes
+    (DESIGN §7): identifier reserved-error suffix → canonical error; request
+    validation (bad `blockchainNetworkId` → 400
+    `…INVALID_BLOCKCHAIN_NETWORK_IDENTIFIER`; bad EVM address → 400
+    INVALID_ARGUMENT; lone `nonce`/`signature` → 400
+    `…BOTH_NONCE_SIGNATURE_REQUIRED`; both → 422
+    `…UNSUPPORTED_ENHANCED_VALIDATION`); store state (re-bind same triple → 409
+    ALREADY_EXISTS). `x-correlator` echoed. (No new dep — reuses `sha2`.)
+  - [ ] stateful `DELETE /blockchain-public-addresses/{id}`
+    (`deleteBlockchainPublicAddress`, `blockchain-public-address:delete`) —
+    deferred (reads the same in-memory store; `204` / `404 NOT_FOUND`).
 - [ ] Other CAMARA APIs as capacity allows
 
 ## Cross-cutting (do alongside the item that needs it)
@@ -915,6 +941,33 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-04 — Phase 5: **Blockchain Public Address v0.3 — stateful bind**
+  (`POST /blockchain-public-addresses`, `bindBlockchainPublicAddress`, scope
+  `blockchain-public-address:create`). Verified the op against the authoritative
+  CAMARA r2.2 spec via WebFetch: request `BindBlockchainPublicAddressRequest
+  {phoneNumber, blockchainPublicAddress, blockchainNetworkId (all required),
+  currency?, nonce?, signature?}`, 201 → `BindBlockchainPublicAddressResponse
+  {id}`, errors incl. 400 `…INVALID_BLOCKCHAIN_NETWORK_IDENTIFIER`/
+  `…BOTH_NONCE_SIGNATURE_REQUIRED`, 409 `ALREADY_EXISTS`, 422
+  `…UNSUPPORTED_ENHANCED_VALIDATION`. Makes the API **stateful**: new in-memory
+  binding store (`src/apis/blockchain_public_address/store.rs`; `Mutex<HashMap>`,
+  lock never held across await, id derived from the triple so a duplicate
+  collides → 409). Three control planes (DESIGN §7): phoneNumber reserved-error
+  suffix → canonical error; request validation (network-id format, EVM-address
+  form, nonce/signature pairing → 400s, both → 422 unsupported-enhanced); store
+  duplicate → 409. `nonce+signature` (enhanced ownership validation) is
+  unsupported (no chain) → 422 — a faithful, documented behaviour. `retrieve`
+  read op left deterministic-synthetic (does not read the store — a deferred
+  reconciliation); `DELETE …/{id}` deferred (will reuse `store::get`). **No new
+  dep** (reuses `sha2`). Spec updated: new POST path, `x-camarasim-scenarios`,
+  `BindBlockchainPublicAddress{Request,Response}` schemas; `DELETE` still omitted
+  so the contract advertises no unimplemented path. Tests: +16 (units: network-id
+  + EVM-address validation, deterministic UUID-shaped binding id; integration:
+  persist+mint id, 409 re-bind, different-address-same-line ok, reserved→404,
+  malformed phone→400, bad network-id→400, bad address→400, lone nonce→400, both
+  →422, unknown field→400, no create-scope→403, no token→401, x-correlator echo).
+  `cargo test` 775 green (was 759); `cargo build --release` clean (no warnings).
+  — binary: 1.9M (1930656 B)
 - 2026-08-04 — Phase 5 (other CAMARA APIs): **Blockchain Public Address v0.3** —
   new stateless, non-spatial, phone-number-keyed Web3-onboarding API. Verified the
   authoritative CAMARA BlockchainPublicAddress r2.2 spec (`blockchain-public-address`

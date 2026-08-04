@@ -7,10 +7,11 @@
 # Backed by `src/apis/blockchain_public_address/v0_3.rs`; spec and code must not
 # drift.
 #
-# Only the stateless read operation `retrieveBlockchainPublicAddress` is
-# implemented so far. The stateful `bindBlockchainPublicAddress` (POST) and
-# `deleteBlockchainPublicAddress` (DELETE) operations are deferred to a later
-# slice (they add an in-memory store) and are intentionally omitted from this
+# Implemented so far: the stateless read op `retrieveBlockchainPublicAddress`
+# (POST …/retrieve-blockchains) and the stateful bind op
+# `bindBlockchainPublicAddress` (POST …/blockchain-public-addresses), the latter
+# backed by an in-memory binding store. `deleteBlockchainPublicAddress` (DELETE
+# …/{id}) is deferred to a later slice and intentionally omitted from this
 # vendored spec until then, so the served contract never advertises an
 # unimplemented path.
 openapi: 3.0.3
@@ -158,6 +159,95 @@ paths:
           - input: missing or malformed phoneNumber
             result: "400 INVALID_ARGUMENT"
 
+  /blockchain-public-addresses:
+    post:
+      operationId: bindBlockchainPublicAddress
+      summary: Bind a blockchain public address to a phone number
+      description: |
+        Binds an on-chain `blockchainPublicAddress` (on `blockchainNetworkId`) to
+        the subscriber behind `phoneNumber`, persisting the relationship in an
+        in-memory store and returning a minted binding `id`. Requires the
+        `blockchain-public-address:create` scope.
+
+        Control planes (docs/DESIGN.md §7):
+          - **`phoneNumber` reserved error suffix** → canonical CAMARA error; a
+            malformed `phoneNumber` → `400 INVALID_ARGUMENT`.
+          - **Request validation** (second plane): a `blockchainNetworkId` that is
+            not `<ecosystem>:<sub_id>` (e.g. `evm:1`) → `400
+            BLOCKCHAIN_PUBLIC_ADDRESS.INVALID_BLOCKCHAIN_NETWORK_IDENTIFIER`; a
+            `blockchainPublicAddress` that is not an EVM `0x…` (40-hex) address →
+            `400 INVALID_ARGUMENT`; exactly one of `nonce`/`signature` → `400
+            BLOCKCHAIN_PUBLIC_ADDRESS.BOTH_NONCE_SIGNATURE_REQUIRED`; **both**
+            `nonce` and `signature` request enhanced on-chain ownership
+            validation, which the simulator cannot perform → `422
+            BLOCKCHAIN_PUBLIC_ADDRESS.UNSUPPORTED_ENHANCED_VALIDATION`.
+          - **Store state** (third plane): re-binding the same
+            `(phoneNumber, blockchainNetworkId, blockchainPublicAddress)` triple →
+            `409 ALREADY_EXISTS` (the binding `id` is derived from the triple, so
+            a duplicate collides).
+      security:
+        - openId:
+            - blockchain-public-address:create
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BindBlockchainPublicAddressRequest"
+      responses:
+        "201":
+          description: The address was bound; the response carries the binding id.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BindBlockchainPublicAddressResponse"
+              examples:
+                bound:
+                  summary: A newly minted binding
+                  value:
+                    id: "3f2a9c1b-7d4e-4a11-9c02-8e6f5a1b2c3d"
+        "400":
+          $ref: "../../shared/errors.yaml#/components/responses/InvalidArgument"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "409":
+          $ref: "../../shared/errors.yaml#/components/responses/Conflict"
+        "422":
+          $ref: "../../shared/errors.yaml#/components/responses/ServiceNotApplicable"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+      x-camarasim-scenarios:
+        description: >-
+          Bind outcome selected from the request body + store state
+          (docs/DESIGN.md §7). The identifier plane is checked first, then request
+          validation, then the store (duplicate) plane.
+        cases:
+          - input: phoneNumber ending in a reserved error suffix (e.g. …404)
+            result: the canonical CAMARA error for that status
+          - input: a valid, not-yet-bound (phoneNumber, network, address) triple
+            result: "201 with the minted binding id"
+          - input: the same triple bound a second time
+            result: "409 ALREADY_EXISTS"
+          - input: blockchainNetworkId not of the form <ecosystem>:<sub_id>
+            result: "400 BLOCKCHAIN_PUBLIC_ADDRESS.INVALID_BLOCKCHAIN_NETWORK_IDENTIFIER"
+          - input: blockchainPublicAddress not a 0x + 40-hex EVM address
+            result: "400 INVALID_ARGUMENT"
+          - input: exactly one of nonce / signature supplied
+            result: "400 BLOCKCHAIN_PUBLIC_ADDRESS.BOTH_NONCE_SIGNATURE_REQUIRED"
+          - input: both nonce and signature supplied (enhanced validation)
+            result: "422 BLOCKCHAIN_PUBLIC_ADDRESS.UNSUPPORTED_ENHANCED_VALIDATION"
+          - input: missing or malformed phoneNumber
+            result: "400 INVALID_ARGUMENT"
+
 components:
   securitySchemes:
     openId:
@@ -232,3 +322,67 @@ components:
             type: string
           example:
             - ETH
+
+    BindBlockchainPublicAddressRequest:
+      type: object
+      description: |
+        A request to bind an on-chain public address to a phone number.
+        `phoneNumber`, `blockchainPublicAddress` and `blockchainNetworkId` are
+        required. The optional `nonce`/`signature` pair requests enhanced on-chain
+        ownership validation; CamaraSim does not support it (both supplied → `422
+        UNSUPPORTED_ENHANCED_VALIDATION`), and exactly one is a `400`.
+      required:
+        - phoneNumber
+        - blockchainPublicAddress
+        - blockchainNetworkId
+      properties:
+        phoneNumber:
+          type: string
+          description: >-
+            A public identifier addressing a telephone subscription, in E.164
+            format (starting with `+`).
+          pattern: '^\+[1-9][0-9]{4,14}$'
+          example: "+123456789012"
+        blockchainPublicAddress:
+          type: string
+          description: >-
+            The user's blockchain public address to bind. In CamaraSim this must
+            be an EVM address (`0x` + 40 hex digits).
+          example: "0x9f8a7b6c5d4e3f2a1b0c9d8e7f6a5b4c3d2e1f00"
+        blockchainNetworkId:
+          type: string
+          description: >-
+            The blockchain network identifier, as `<L1_Ecosystem>:<sub_id>`
+            (e.g. `evm:1`).
+          example: "evm:1"
+        currency:
+          type: array
+          description: The currencies (symbols) supported on the blockchain.
+          items:
+            type: string
+          example:
+            - ETH
+        nonce:
+          type: string
+          description: >-
+            One-time challenge for enhanced ownership validation. Must be supplied
+            together with `signature`. Not supported by CamaraSim.
+        signature:
+          type: string
+          description: >-
+            Cryptographic proof created by signing the `nonce` off-chain. Must be
+            supplied together with `nonce`. Not supported by CamaraSim.
+
+    BindBlockchainPublicAddressResponse:
+      type: object
+      description: The result of a successful bind — the minted binding id.
+      required:
+        - id
+      properties:
+        id:
+          type: string
+          description: >-
+            The opaque identifier of the newly created binding. In CamaraSim it is
+            a deterministic UUID-shaped token derived (SHA-256) from the
+            `(phoneNumber, blockchainNetworkId, blockchainPublicAddress)` triple.
+          example: "3f2a9c1b-7d4e-4a11-9c02-8e6f5a1b2c3d"
