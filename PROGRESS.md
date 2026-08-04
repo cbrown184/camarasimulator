@@ -793,6 +793,17 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     `set-all` → all 20 attributes, else only the per-attribute-scoped ones (a
     genuine second control plane over the body). Synthetic data only.
     **Completes KYC Fill-in v0.3.**
+- [x] Home Devices QoD v0.4 (`/home-devices-qod/v0.4`; CAMARA 0.4.0; stateless,
+  non-spatial, **ipAddress-keyed** home-LAN QoS — distinct from network-side QoD):
+  - [x] `PUT /qos` (`home-devices-qod:qos:write`, `setQos`) — apply a
+    `serviceClass` to the home device at `ipAddress` → `204 No Content`. Stateless
+    (no store). Control planes (DESIGN §7): the `ipAddress` **last octet** (happy
+    path unless a reserved `…240`–`…253` octet names a specific CAMARA 0.4.0
+    condition: `404 DEVICE_NOT_FOUND`, the `409 HOME_DEVICES_QOD.*` conflict set,
+    `503 ROUTER_OFFLINE`, `504 TIMEOUT`, `500 INTERNAL`, plus generic 409/404/503),
+    and `serviceClass` (second plane: `…247` conflicts as QOS_ALREADY_SET_TO_DEFAULT
+    only when restoring `standard`). Bad body / unknown `serviceClass` / non-IPv4
+    `ipAddress` → 400 INVALID_ARGUMENT. **Completes Home Devices QoD v0.4.**
 - [ ] Other CAMARA APIs as capacity allows
 
 ## Cross-cutting (do alongside the item that needs it)
@@ -811,6 +822,26 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-04 — Phase 5 (other CAMARA APIs): **Home Devices QoD v0.4** — new
+  stateless, non-spatial, **ipAddress-keyed** API (raise/restore per-device QoS on
+  the subscriber's home LAN, distinct from network-side QoD). `PUT /qos` (`setQos`,
+  scope `home-devices-qod:qos:write`) live at `/home-devices-qod/v0.4/qos`; applies
+  `serviceClass` to the device at `ipAddress` → `204 No Content`. Control planes
+  (DESIGN §7): the device is the internal LAN `ipAddress` and its **last octet** is
+  the control plane — happy path (`204`) unless a reserved octet (`…240`–`…253`)
+  names a specific home-network condition mapping to the CAMARA 0.4.0 error set
+  (`404 DEVICE_NOT_FOUND`; the `409 HOME_DEVICES_QOD.*` conflicts TOO_MANY_DEVICES/
+  RSSI_BELOW_THRESHOLD/QOS_TOO_HIGH/OCCUPANCY_ABOVE_THRESHOLD/NOT_CONNECTED_/
+  NOT_SUPPORTED_REQUIRED_INTERFACE/QOS_ALREADY_SET_TO_DEFAULT; `503 ROUTER_OFFLINE`;
+  `504 TIMEOUT`; `500 INTERNAL`; plus generic 409/404/503). `serviceClass` is a
+  genuine second control plane: `…247` only conflicts (QOS_ALREADY_SET_TO_DEFAULT)
+  when restoring `standard`, else it's a happy path. Validation first: bad body /
+  unknown `serviceClass` / non-IPv4 `ipAddress` → 400 INVALID_ARGUMENT. Stateless
+  (no store — no session to read back); non-blocking; std `Ipv4Addr` parse, no new
+  dep. `x-correlator` echoed on every response incl. `204`. Spec vendored +
+  annotated (`specs/home-devices-qod/v0.4/openapi.yaml`) with functional cases +
+  served at `/home-devices-qod/v0.4/openapi.yaml`; catalog + openapi wiring updated.
+  18 new tests (692 total, all green). — binary: 1.8M (1824520 B)
 - 2026-08-04 — Phase 5 (other CAMARA APIs): **KYC Fill-in v0.3** — new stateless,
   non-spatial, phone-number-keyed identity API (the *return-attributes* counterpart
   of KYC Match), **completes the API in one pass** (single endpoint). Verified the

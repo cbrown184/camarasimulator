@@ -23,6 +23,7 @@
 //! - **KYC Age Verification v0.1** — `/kyc-age-verification/v0.1/…`.
 //! - **Device Swap v1** — `/device-swap/v1/…`.
 //! - **KYC Fill-in v0.3** — `/kyc-fill-in/v0.3/…`.
+//! - **Home Devices QoD v0.4** — `/home-devices-qod/v0.4/…`.
 //!
 //! Plus [`openapi`], which serves each mounted API's vendored OpenAPI spec at
 //! `/{api}/v{n}/openapi.yaml` (docs/DESIGN.md §9).
@@ -34,6 +35,7 @@ pub mod device_swap;
 pub mod device_reachability_status;
 pub mod device_roaming_status;
 pub mod geofencing_subscriptions;
+pub mod home_devices_qod;
 pub mod kyc_age_verification;
 pub mod kyc_fill_in;
 pub mod kyc_match;
@@ -68,5 +70,6 @@ pub fn routes() -> Router {
         .merge(kyc_age_verification::routes())
         .merge(device_swap::routes())
         .merge(kyc_fill_in::routes())
+        .merge(home_devices_qod::routes())
         .merge(openapi::routes())
 }

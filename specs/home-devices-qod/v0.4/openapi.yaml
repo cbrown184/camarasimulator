@@ -1,0 +1,318 @@
+# CamaraSim — Home Devices QoD, API version v0.4 (CAMARA 0.4.0).
+#
+# Vendored from the CAMARA Home Devices QoD API (home-devices-qod 0.4.0, the
+# latest published version, so mounted at its real base path `/v0.4`) and
+# annotated with CamaraSim's parameter-driven functional cases (docs/DESIGN.md
+# §7, §9). Backed by `src/apis/home_devices_qod/v0_4.rs`; spec and code must not
+# drift.
+#
+# Serves `PUT /qos`.
+openapi: 3.0.3
+info:
+  title: Home Devices QoD
+  description: |
+    Set the desired Quality-of-Service (QoS) treatment a specific device on the
+    subscriber's **home** network receives from the home router — for example,
+    prioritise a games console for `real_time_interactive` traffic. QoS treatment
+    is downstream-only, applies only to WiFi-connected devices, and lives entirely
+    inside the home network between the router and the device (it does not affect
+    the operator's access network).
+
+    This is the CamaraSim reference double for CAMARA Home Devices QoD 0.4.0. The
+    `/qos` endpoint requires the `home-devices-qod:qos:write` scope. Setting the
+    special `standard` service class restores the router's default treatment.
+
+    ## Functional cases — the input is the control plane (docs/DESIGN.md §7)
+
+    There is no phone number here; the device is identified by its internal LAN
+    `ipAddress`, which is also the control plane. The **last octet** of the
+    `ipAddress` selects the outcome, so every declared functional case is
+    reachable from the request alone:
+
+    - **Happy path.** Any address whose last octet is not reserved below →
+      `204 No Content` (the treatment is applied).
+    - **Reserved last octets** name a specific home-network condition and return
+      that condition's canonical error (all `409` conditions carry the
+      `HOME_DEVICES_QOD.` code prefix, per CAMARA 0.4.0):
+      - `…240` → `404 DEVICE_NOT_FOUND`
+      - `…241` → `409 HOME_DEVICES_QOD.TOO_MANY_DEVICES`
+      - `…242` → `409 HOME_DEVICES_QOD.RSSI_BELOW_THRESHOLD`
+      - `…243` → `409 HOME_DEVICES_QOD.QOS_TOO_HIGH`
+      - `…244` → `409 HOME_DEVICES_QOD.OCCUPANCY_ABOVE_THRESHOLD`
+      - `…245` → `409 HOME_DEVICES_QOD.NOT_CONNECTED_TO_REQUIRED_INTERFACE`
+      - `…246` → `409 HOME_DEVICES_QOD.NOT_SUPPORTED_REQUIRED_INTERFACE`
+      - `…247` → `409 HOME_DEVICES_QOD.QOS_ALREADY_SET_TO_DEFAULT` **only when**
+        `serviceClass` is `standard` (restoring an already-default device);
+        otherwise this address is a happy path (`204`), so `serviceClass` is a
+        genuine second control plane
+      - `…248` → `503 HOME_DEVICES_QOD.ROUTER_OFFLINE`
+      - `…249` → `504 TIMEOUT`
+      - `…250` → `500 INTERNAL`
+      - `…251` → `409 CONFLICT` (the generic base code)
+      - `…252` → `404 NOT_FOUND` (the generic base code)
+      - `…253` → `503 UNAVAILABLE` (the generic base code)
+
+    Validation runs first: an unknown/malformed body, a `serviceClass` outside the
+    enum, or an `ipAddress` that is not a valid IPv4 address → `400
+    INVALID_ARGUMENT`.
+
+    Example: `{ serviceClass: real_time_interactive, ipAddress: 192.168.1.42 }` →
+    `204`; the same request to `192.168.1.248` → `503 HOME_DEVICES_QOD.ROUTER_OFFLINE`.
+  version: "0.4.0"
+  license:
+    name: Apache-2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0.html
+
+servers:
+  - url: "{apiRoot}/home-devices-qod/v0.4"
+    variables:
+      apiRoot:
+        default: http://localhost:8080
+        description: API root, e.g. the CamaraSim base URL.
+
+paths:
+  /qos:
+    put:
+      operationId: setQos
+      summary: Set the desired QoS behaviour for a user home device
+      description: |
+        Applies the desired `serviceClass` to the home device identified by its
+        internal `ipAddress`, and answers `204 No Content` on success.
+
+        The device is identified by its LAN `ipAddress`, which is also the
+        parameter-driven control plane — see the API description. The address's
+        last octet selects the outcome (happy path vs a specific home-network
+        error); `serviceClass` is a second control plane for the
+        already-default (`…247`) case.
+      security:
+        - openId:
+            - home-devices-qod:qos:write
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/QosOnDemandUpdate"
+      responses:
+        "204":
+          description: The QoS treatment was applied to the device. No content.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+        "400":
+          description: |
+            400 — invalid request. CamaraSim returns `INVALID_ARGUMENT` for a
+            malformed/unknown body, a `serviceClass` outside the enum, or an
+            `ipAddress` that is not a valid IPv4 address.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HomeDevicesQodError"
+              examples:
+                invalidArgument:
+                  summary: Malformed body / bad serviceClass / bad ipAddress
+                  value:
+                    status: 400
+                    code: INVALID_ARGUMENT
+                    message: "`ipAddress` must be a valid IPv4 address."
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          description: |
+            404 — the device was not found on the home network. CamaraSim returns
+            `DEVICE_NOT_FOUND` for the reserved `…240` address and the generic
+            `NOT_FOUND` for `…252`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HomeDevicesQodError"
+              examples:
+                deviceNotFound:
+                  summary: No device at the given ipAddress
+                  value:
+                    status: 404
+                    code: DEVICE_NOT_FOUND
+                    message: No device with the given ipAddress was found on the home network.
+        "409":
+          description: |
+            409 — a home-network condition prevents applying the QoS. CamaraSim
+            returns one of the `HOME_DEVICES_QOD.*` conflict codes for the
+            reserved `…241`–`…247` addresses, or the generic `CONFLICT` for `…251`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HomeDevicesQodError"
+              examples:
+                tooManyDevices:
+                  summary: Too many devices already have a QoS set
+                  value:
+                    status: 409
+                    code: HOME_DEVICES_QOD.TOO_MANY_DEVICES
+                    message: Too many devices already have a QoS treatment set on the home network.
+                qosTooHigh:
+                  summary: Requested class exceeds home-network capability
+                  value:
+                    status: 409
+                    code: HOME_DEVICES_QOD.QOS_TOO_HIGH
+                    message: The requested service class exceeds what the home network can provide.
+                alreadyDefault:
+                  summary: Restoring a device already at default
+                  value:
+                    status: 409
+                    code: HOME_DEVICES_QOD.QOS_ALREADY_SET_TO_DEFAULT
+                    message: The device is already using the default QoS treatment.
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          description: |
+            503 — the home router could not be reached. CamaraSim returns
+            `HOME_DEVICES_QOD.ROUTER_OFFLINE` for the reserved `…248` address and
+            the generic `UNAVAILABLE` for `…253`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HomeDevicesQodError"
+              examples:
+                routerOffline:
+                  summary: The home router is offline
+                  value:
+                    status: 503
+                    code: HOME_DEVICES_QOD.ROUTER_OFFLINE
+                    message: The home router is offline and cannot apply the QoS.
+        "504":
+          description: |
+            504 — the home router did not respond in time. CamaraSim returns
+            `TIMEOUT` for the reserved `…249` address.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HomeDevicesQodError"
+              examples:
+                timeout:
+                  summary: The home router timed out
+                  value:
+                    status: 504
+                    code: TIMEOUT
+                    message: The home router did not respond in time.
+      x-camarasim-scenarios:
+        description: >-
+          Outcome selected from the device `ipAddress` (docs/DESIGN.md §7). The
+          address's last octet selects the case; `serviceClass` is a second
+          control plane for the already-default case.
+        cases:
+          - input: "ipAddress whose last octet is not reserved (e.g. …42)"
+            result: "204 No Content (QoS applied)"
+          - input: "ipAddress ending …240"
+            result: "404 DEVICE_NOT_FOUND"
+          - input: "ipAddress ending …241"
+            result: "409 HOME_DEVICES_QOD.TOO_MANY_DEVICES"
+          - input: "ipAddress ending …242"
+            result: "409 HOME_DEVICES_QOD.RSSI_BELOW_THRESHOLD"
+          - input: "ipAddress ending …243"
+            result: "409 HOME_DEVICES_QOD.QOS_TOO_HIGH"
+          - input: "ipAddress ending …244"
+            result: "409 HOME_DEVICES_QOD.OCCUPANCY_ABOVE_THRESHOLD"
+          - input: "ipAddress ending …245"
+            result: "409 HOME_DEVICES_QOD.NOT_CONNECTED_TO_REQUIRED_INTERFACE"
+          - input: "ipAddress ending …246"
+            result: "409 HOME_DEVICES_QOD.NOT_SUPPORTED_REQUIRED_INTERFACE"
+          - input: "ipAddress ending …247 with serviceClass=standard"
+            result: "409 HOME_DEVICES_QOD.QOS_ALREADY_SET_TO_DEFAULT"
+          - input: "ipAddress ending …247 with any other serviceClass"
+            result: "204 No Content (serviceClass is a control plane)"
+          - input: "ipAddress ending …248"
+            result: "503 HOME_DEVICES_QOD.ROUTER_OFFLINE"
+          - input: "ipAddress ending …249"
+            result: "504 TIMEOUT"
+          - input: "ipAddress ending …250"
+            result: "500 INTERNAL"
+          - input: "ipAddress ending …251 / …252 / …253"
+            result: "generic 409 CONFLICT / 404 NOT_FOUND / 503 UNAVAILABLE"
+          - input: "malformed body, bad serviceClass, or non-IPv4 ipAddress"
+            result: "400 INVALID_ARGUMENT"
+
+components:
+  securitySchemes:
+    openId:
+      $ref: "../../auth/openapi.yaml#/components/securitySchemes/camaraOAuth"
+
+  parameters:
+    XCorrelator:
+      name: x-correlator
+      in: header
+      required: false
+      description: Correlation id for the request, echoed back on the response.
+      schema:
+        type: string
+
+  headers:
+    XCorrelator:
+      description: The `x-correlator` from the request, echoed if one was sent.
+      required: false
+      schema:
+        type: string
+
+  schemas:
+    QosOnDemandUpdate:
+      type: object
+      description: |
+        Request to set the desired QoS treatment for one device on the home
+        network. Both fields are required.
+      required:
+        - serviceClass
+        - ipAddress
+      properties:
+        serviceClass:
+          type: string
+          description: >-
+            The desired QoS treatment. `standard` restores the router's default
+            treatment; the others raise QoS for a traffic profile.
+          enum:
+            - real_time_interactive
+            - multimedia_streaming
+            - broadcast_video
+            - low_latency_data
+            - high_throughput_data
+            - low_priority_data
+            - standard
+          example: real_time_interactive
+        ipAddress:
+          type: string
+          format: ipv4
+          description: The internal LAN IPv4 address of the target home device.
+          example: "192.168.1.42"
+
+    HomeDevicesQodError:
+      description: >-
+        The CAMARA error body for this API — the shared `CamaraError` shape with
+        the Home Devices QoD 0.4.0 `code` set (adds `DEVICE_NOT_FOUND`, `TIMEOUT`,
+        and the `HOME_DEVICES_QOD.*` conflict/unavailable codes).
+      allOf:
+        - $ref: "../../shared/errors.yaml#/components/schemas/CamaraError"
+        - type: object
+          properties:
+            code:
+              type: string
+              enum:
+                - INVALID_ARGUMENT
+                - UNAUTHENTICATED
+                - PERMISSION_DENIED
+                - INVALID_TOKEN_CONTEXT
+                - NOT_FOUND
+                - DEVICE_NOT_FOUND
+                - CONFLICT
+                - HOME_DEVICES_QOD.TOO_MANY_DEVICES
+                - HOME_DEVICES_QOD.RSSI_BELOW_THRESHOLD
+                - HOME_DEVICES_QOD.QOS_TOO_HIGH
+                - HOME_DEVICES_QOD.OCCUPANCY_ABOVE_THRESHOLD
+                - HOME_DEVICES_QOD.NOT_CONNECTED_TO_REQUIRED_INTERFACE
+                - HOME_DEVICES_QOD.NOT_SUPPORTED_REQUIRED_INTERFACE
+                - HOME_DEVICES_QOD.QOS_ALREADY_SET_TO_DEFAULT
+                - INTERNAL
+                - UNAVAILABLE
+                - HOME_DEVICES_QOD.ROUTER_OFFLINE
+                - TIMEOUT
