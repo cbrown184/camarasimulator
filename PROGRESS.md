@@ -798,6 +798,24 @@ a `qosProfile` name containing `unavailable` → 422
 applied; `DELETE`/retrieve-by-device/notifications are deferred. `x-correlator`
 echoed on every response.
 
+**CloudEvents notifications on `sink`** have begun for QoS Provisioning
+(`src/apis/qos_provisioning/notifications.rs`, event type
+`org.camaraproject.qos-provisioning.v0.status-changed`, mirroring QoD). The first
+transition is **`DELETE_REQUESTED` on `revokeQosAssignment`**: a revoked
+assignment that recorded a `sink` receives a `status: UNAVAILABLE` /
+`statusInfo: DELETE_REQUESTED` CloudEvent, POSTed fire-and-forget over a raw
+`tokio` TCP stream (no HTTP-client dep), off the request path so it never delays
+the `204`. To make callbacks observable, the create `sink` now accepts `http://`
+as well as `https://` (delivering only to `http://` — no TLS client, so an
+`https://` sink is a documented no-op cut, aligning with QoD/Geofencing/Carrier
+Billing); a non-http(s) scheme → 400 `INVALID_SINK`. An `ACCESSTOKEN`
+`sinkCredential`'s bearer token is applied to the callback as
+`Authorization: Bearer …` (RFC 6750), derived at creation and held in a
+`assignmentId`-keyed in-memory side-store (`store::insert_credential`/
+`take_credential`, taken single-use at delivery) so the secret is never echoed;
+PLAIN/REFRESHTOKEN are a documented cut. `NETWORK_TERMINATED`, an
+`AVAILABLE`-on-provisioning event, and TLS (`https://`) delivery remain deferred.
+
 ## In progress (claimed this pass)
 
 _None._  <!-- agent: put the claimed item + run timestamp here, clear it when done -->
@@ -1276,7 +1294,20 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     (checked first, mirroring QoD's retrieve-by-device); else the in-memory store
     scanned by device echo (new `store::find_by_device`). One provisioning per
     device → a single `AssignmentInfo`.
-  - [ ] CloudEvents notifications on `sink` (status transitions)
+  - [~] CloudEvents notifications on `sink` (status transitions)
+    (`src/apis/qos_provisioning/notifications.rs`; event type
+    `org.camaraproject.qos-provisioning.v0.status-changed`, mirroring QoD):
+    - [x] `DELETE_REQUESTED` `status-changed` on `revokeQosAssignment` — a revoked
+      assignment that recorded a `sink` receives a `status: UNAVAILABLE` /
+      `statusInfo: DELETE_REQUESTED` CloudEvent, fire-and-forget over raw TCP (no
+      HTTP-client dep), still `204`. `sink` now accepts `http://` (for a loopback
+      receiver) as well as `https://`, delivering only to `http://` (no TLS
+      client — `https://` a documented no-op cut, mirroring QoD); non-http(s)
+      scheme → 400 `INVALID_SINK`. ACCESSTOKEN `sinkCredential` bearer applied
+      (single-use side-store `store::insert_credential`/`take_credential`),
+      PLAIN/REFRESHTOKEN a documented cut; the secret is never echoed.
+    - [ ] `NETWORK_TERMINATED` transition + an `AVAILABLE`-on-provisioning event
+    - [ ] TLS (`https://` sink) delivery (needs a rustls TLS client)
 - [ ] Other CAMARA APIs as capacity allows
 
 ## Cross-cutting (do alongside the item that needs it)
@@ -1303,6 +1334,32 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-05 — Phase 5: **QoS Provisioning v0.3** — CloudEvents notifications on
+  `sink` have begun: the **`DELETE_REQUESTED` `status-changed`** transition on
+  `revokeQosAssignment`. Verified the authoritative CAMARA spec via WebFetch
+  (qos-provisioning 0.3.0, r3.2): CloudEvent type
+  `org.camaraproject.qos-provisioning.v0.status-changed`, `data`
+  `{assignmentId, status(AVAILABLE|UNAVAILABLE), statusInfo?(NETWORK_TERMINATED|
+  DELETE_REQUESTED)}`, sink pattern `^https:\/\/.+$`. Added
+  `src/apis/qos_provisioning/notifications.rs` (event builder + `sink_authorization`
+  + raw-TCP `deliver`/`spawn_delivery`, mirroring QoD; no HTTP-client/uuid/rand
+  dep) and store helpers `new_event_id`/`insert_credential`/`take_credential`
+  (single-use bearer side-store). `revokeQosAssignment` now delivers the
+  UNAVAILABLE/DELETE_REQUESTED event to a recorded `sink` fire-and-forget (still
+  `204`); create stashes an ACCESSTOKEN `sinkCredential` bearer. Relaxed the
+  create `sink` to accept `http://` (for a loopback receiver) as well as
+  `https://` — delivering only to `http://` (no TLS client, `https://` a
+  documented no-op cut, aligning with QoD); non-http(s) scheme → 400
+  `INVALID_SINK`. Spec updated: `callbacks.statusChanged` on `createQosAssignment`
+  + new `StatusChangedEvent` schema, sink pattern `^https?:\/\/.+$`, statusInfo /
+  SinkCredential docs, revoke description + both ops' `x-camarasim-scenarios`.
+  Tests: notifications unit tests (event shape, sink-auth, http delivery + auth
+  header, non-http no-op), store credential/event-id tests, and two end-to-end
+  integration tests (revoke fires DELETE_REQUESTED to a loopback http sink; an
+  ACCESSTOKEN sinkCredential authenticates the callback and is never echoed);
+  adjusted the sink-validation tests for the new http-accepted behaviour. `cargo
+  test` green (1003 tests), `cargo build --release` green. No new dependency. —
+  binary: 2.2M
 - 2026-08-05 — Phase 5: **QoS Provisioning v0.3** — `POST /retrieve-qos-assignment`
   (`getQosAssignmentByDevice`, scope `qos-provisioning:qos-assignments:read-by-device`)
   now live. Verified the authoritative CAMARA spec via WebFetch (qos-provisioning

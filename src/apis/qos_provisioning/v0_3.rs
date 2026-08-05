@@ -12,11 +12,12 @@
 //! - `DELETE /qos-assignments/{assignmentId}` (operationId `revokeQosAssignment`,
 //!   scope `qos-provisioning:qos-assignments:delete`) — revokes a stored
 //!   assignment, evicting it from the store (`204 No Content`, single-use) or
-//!   `404 NOT_FOUND` for an unknown / already-revoked id. CAMARA also defines an
-//!   asynchronous `202 Accepted` form (`AssignmentInfo` with `status: AVAILABLE`,
-//!   `statusInfo: DELETE_REQUESTED`) driven by a notification callback; since
-//!   `sink` notifications are a later slice, CamaraSim serves only the synchronous
-//!   `204` here (mirroring QoD's `deleteSession`).
+//!   `404 NOT_FOUND` for an unknown / already-revoked id. If the revoked
+//!   assignment recorded a `sink`, a `status-changed` CloudEvent
+//!   (`status: UNAVAILABLE`, `statusInfo: DELETE_REQUESTED`) is delivered to it
+//!   fire-and-forget (see [`super::notifications`]); the response is still the
+//!   synchronous `204` (CAMARA's async `202 Accepted` form is a documented cut,
+//!   mirroring QoD's `deleteSession`).
 //! - `POST /retrieve-qos-assignment` (operationId `getQosAssignmentByDevice`,
 //!   scope `qos-provisioning:qos-assignments:read-by-device`) — returns the
 //!   assignment currently provisioned for a device (`200`) or `404 NOT_FOUND`
@@ -24,7 +25,10 @@
 //!   reserved error suffix → canonical CAMARA error, else the in-memory store
 //!   (mirroring QoD's `retrieveSessionsByDevice`).
 //!
-//! CloudEvents notifications on `sink` (status transitions) are a later slice.
+//! CloudEvents notifications on `sink`: the `DELETE_REQUESTED` status transition
+//! is delivered (see [`super::notifications`] and `revokeQosAssignment` below);
+//! other transitions (`NETWORK_TERMINATED`, and an `AVAILABLE`-on-provisioning
+//! event) remain a later slice.
 //!
 //! ## Identifier resolution (two-legged vs three-legged)
 //!
@@ -51,7 +55,11 @@
 //!   `expiresAt` — the assignment is open-ended.
 //! - **`qosProfile`** whose name contains `unavailable` →
 //!   `422 QOS_PROVISIONING.QOS_PROFILE_NOT_APPLICABLE`.
-//! - **`sink`** (optional) must be an `https://` URL → else `400 INVALID_SINK`.
+//! - **`sink`** (optional) must be an `http://` or `https://` callback URL → else
+//!   `400 INVALID_SINK`. CAMARA's schema requires `https://`; CamaraSim also
+//!   accepts `http://` so a loopback receiver can observe callbacks, and delivers
+//!   only to `http://` (no TLS client — `https://` is a documented no-op cut,
+//!   mirroring QoD).
 
 use axum::body::Bytes;
 use axum::extract::Path;
@@ -63,7 +71,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use super::store;
+use super::{notifications, store};
 use crate::auth::verify::Claims;
 use crate::errors::CamaraError;
 use crate::scenarios;
@@ -103,11 +111,12 @@ struct CreateAssignment {
     #[serde(rename = "qosProfile")]
     qos_profile: Option<String>,
     sink: Option<String>,
-    // Accepted for schema fidelity; never echoed (it carries a secret). Not
-    // applied this slice — notification delivery on `sink` is a later slice
-    // (documented cut, mirroring QoD's earliest slice).
+    // Accepted for schema fidelity and never echoed (it carries a secret). When a
+    // `sink` is supplied, an `ACCESSTOKEN` credential's bearer token is applied to
+    // the status-change callback as an `Authorization: Bearer` header (RFC 6750,
+    // via `notifications::sink_authorization`); PLAIN/REFRESHTOKEN are a documented
+    // cut. Held in memory only (single node) and taken single-use at delivery.
     #[serde(rename = "sinkCredential")]
-    #[allow(dead_code)]
     sink_credential: Option<Value>,
 }
 
@@ -172,15 +181,18 @@ async fn create_qos_assignment(claims: Claims, headers: HeaderMap, body: Bytes) 
         None => return invalid_argument("`qosProfile` is required.", &correlator),
     };
 
-    // An optional `sink` must be a well-formed `https://` URL (CAMARA requires
-    // https for the callback) → else 400 INVALID_SINK.
+    // An optional `sink` must be a well-formed `http://` or `https://` callback
+    // URL → else 400 INVALID_SINK. CAMARA's schema requires `https://`; CamaraSim
+    // also accepts `http://` so a loopback test receiver can observe callbacks,
+    // and delivers only to `http://` (no TLS client — an `https://` sink is a
+    // documented no-op cut, mirroring QoD / Geofencing / Carrier Billing).
     if let Some(sink) = &req.sink {
-        if !is_valid_https_sink(sink) {
+        if !is_valid_sink(sink) {
             return with_correlator(
                 CamaraError::new(
                     StatusCode::BAD_REQUEST,
                     "INVALID_SINK",
-                    "`sink` must be a valid `https://` callback URL.",
+                    "`sink` must be a valid `http://` or `https://` callback URL.",
                 )
                 .into_response(),
                 &correlator,
@@ -222,6 +234,21 @@ async fn create_qos_assignment(claims: Claims, headers: HeaderMap, body: Bytes) 
         req.sink,
         &resolved.id,
     );
+
+    // If the assignment records a `sink` and an ACCESSTOKEN `sinkCredential`, stash
+    // the derived bearer `Authorization` so a later status-change callback (e.g.
+    // `DELETE_REQUESTED` on revoke) can authenticate. Kept apart from the
+    // `AssignmentInfo` so the secret is never echoed (mirrors QoD).
+    if info.get("sink").is_some() {
+        if let Some(auth) = req
+            .sink_credential
+            .as_ref()
+            .and_then(notifications::sink_authorization)
+        {
+            store::insert_credential(assignment_id.clone(), auth);
+        }
+    }
+
     store::insert(assignment_id, info.clone());
 
     with_correlator((StatusCode::CREATED, Json(info)).into_response(), &correlator)
@@ -269,7 +296,28 @@ async fn revoke_qos_assignment(
     }
 
     match store::remove(&assignment_id) {
-        Some(_) => with_correlator(StatusCode::NO_CONTENT.into_response(), &correlator),
+        Some(info) => {
+            // If the revoked assignment recorded a `sink`, notify it that the
+            // assignment is now UNAVAILABLE with `statusInfo: DELETE_REQUESTED`.
+            // Fire-and-forget, off the request path (see `notifications`), so a
+            // slow or unreachable sink never delays this 204. The ACCESSTOKEN
+            // `sinkCredential` bearer (if any) is taken single-use.
+            if let Some(sink) = info.get("sink").and_then(Value::as_str) {
+                let event = notifications::status_changed_event(
+                    store::new_event_id(),
+                    rfc3339_utc(now_unix_secs()),
+                    &assignment_id,
+                    "UNAVAILABLE",
+                    Some("DELETE_REQUESTED"),
+                );
+                notifications::spawn_delivery(
+                    sink.to_string(),
+                    event,
+                    store::take_credential(&assignment_id),
+                );
+            }
+            with_correlator(StatusCode::NO_CONTENT.into_response(), &correlator)
+        }
         None => with_correlator(
             CamaraError::not_found("No assignment found for the provided assignmentId.")
                 .into_response(),
@@ -513,9 +561,16 @@ fn is_valid_qos_profile(s: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-'))
 }
 
-/// Whether `s` is a well-formed `https://` sink URL (CAMARA `^https:\/\/.+$`).
-fn is_valid_https_sink(s: &str) -> bool {
-    s.strip_prefix("https://").is_some_and(|rest| !rest.is_empty())
+/// Whether `s` is a well-formed callback sink URL — `http://…` or `https://…`
+/// with a non-empty authority. CAMARA's schema requires `https://`
+/// (`^https:\/\/.+$`); CamaraSim also accepts `http://` so a loopback receiver can
+/// observe callbacks, delivering only to `http://` (no TLS client — a documented
+/// cut, mirroring QoD). Any other scheme → `INVALID_SINK`.
+fn is_valid_sink(s: &str) -> bool {
+    let rest = s
+        .strip_prefix("https://")
+        .or_else(|| s.strip_prefix("http://"));
+    rest.is_some_and(|rest| !rest.is_empty())
 }
 
 /// Whether `s` matches the CAMARA `phoneNumber` pattern `^\+[1-9][0-9]{4,14}$`:
@@ -614,11 +669,12 @@ mod tests {
     }
 
     #[test]
-    fn https_sink_validation() {
-        assert!(is_valid_https_sink("https://example.com/callback"));
-        assert!(!is_valid_https_sink("http://example.com/callback"));
-        assert!(!is_valid_https_sink("https://")); // empty authority
-        assert!(!is_valid_https_sink("ftp://example.com"));
+    fn sink_validation_accepts_http_and_https_only() {
+        assert!(is_valid_sink("https://example.com/callback"));
+        assert!(is_valid_sink("http://example.com/callback")); // accepted for testability
+        assert!(!is_valid_sink("https://")); // empty authority
+        assert!(!is_valid_sink("http://")); // empty authority
+        assert!(!is_valid_sink("ftp://example.com")); // other scheme → INVALID_SINK
     }
 
     #[test]
@@ -846,17 +902,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn non_https_sink_is_400_invalid_sink() {
+    async fn non_http_scheme_sink_is_400_invalid_sink() {
         let token = mint_token(CREATE_SCOPE).await;
         let body = json!({
             "device": { "phoneNumber": "+123456789012" },
             "qosProfile": "QOS_E",
-            "sink": "http://insecure.example/callback",
+            "sink": "ftp://not-a-callback.example/x",
         })
         .to_string();
         let (status, _, err) = post_assignment(Some(&token), &body, None).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(err["code"], "INVALID_SINK");
+    }
+
+    #[tokio::test]
+    async fn http_sink_is_accepted_and_echoed() {
+        // CamaraSim accepts `http://` sinks (for a loopback receiver) as well as
+        // `https://`, delivering only to `http://` (no TLS client).
+        let token = mint_token(CREATE_SCOPE).await;
+        let body = json!({
+            "device": { "phoneNumber": "+123456789012" },
+            "qosProfile": "QOS_E",
+            "sink": "http://receiver.example/callback",
+        })
+        .to_string();
+        let (status, _, info) = post_assignment(Some(&token), &body, None).await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(info["sink"], "http://receiver.example/callback");
     }
 
     #[tokio::test]
@@ -993,6 +1065,106 @@ mod tests {
         let (status, _, _) =
             delete_assignment(None, "00000000-0000-4000-8000-000000000000", None).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    // --- CloudEvents notifications on `sink` (DELETE_REQUESTED) --------------
+
+    #[tokio::test]
+    async fn revoking_an_assignment_with_a_sink_fires_a_delete_requested_cloudevent() {
+        use tokio::io::AsyncReadExt;
+        use tokio::net::TcpListener;
+
+        // A loopback receiver stands in for the consumer's `sink`.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let sink = format!("http://{addr}/qosprov-notify");
+
+        // Create an assignment that records the sink…
+        let create = mint_token(CREATE_SCOPE).await;
+        let body = json!({
+            "device": { "phoneNumber": "+123456789012" },
+            "qosProfile": "QOS_E",
+            "sink": sink,
+        })
+        .to_string();
+        let (status, _, created) = post_assignment(Some(&create), &body, None).await;
+        assert_eq!(status, StatusCode::CREATED);
+        let assignment_id = created["assignmentId"].as_str().unwrap().to_string();
+
+        // …then revoke it: 204 to the caller, and a CloudEvent to the sink.
+        let del = mint_token(DELETE_SCOPE).await;
+        let (status, _, _) = delete_assignment(Some(&del), &assignment_id, None).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        // Receive the fire-and-forget notification the handler spawned.
+        let (mut sock, _) = listener.accept().await.unwrap();
+        let mut buf = Vec::new();
+        sock.read_to_end(&mut buf).await.unwrap();
+        let raw = String::from_utf8(buf).unwrap();
+        let (head, event_body) = raw.split_once("\r\n\r\n").expect("headers then body");
+        assert!(
+            head.starts_with("POST /qosprov-notify HTTP/1.1\r\n"),
+            "request line: {head}"
+        );
+        assert!(head.contains("Content-Type: application/cloudevents+json"));
+        // No sinkCredential → unauthenticated.
+        assert!(!head.contains("Authorization:"), "unauthenticated: {head}");
+
+        let event: Value = serde_json::from_str(event_body).expect("body is JSON");
+        assert_eq!(
+            event["type"],
+            "org.camaraproject.qos-provisioning.v0.status-changed"
+        );
+        assert_eq!(event["specversion"], "1.0");
+        assert_eq!(event["datacontenttype"], "application/json");
+        assert!(event["id"].is_string() && event["time"].is_string());
+        assert_eq!(event["data"]["assignmentId"], json!(assignment_id));
+        assert_eq!(event["data"]["status"], "UNAVAILABLE");
+        assert_eq!(event["data"]["statusInfo"], "DELETE_REQUESTED");
+    }
+
+    #[tokio::test]
+    async fn a_sink_credential_authenticates_the_callback_and_is_never_echoed() {
+        use tokio::io::AsyncReadExt;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let sink = format!("http://{addr}/qosprov-auth");
+
+        // Create with a sink AND an ACCESSTOKEN sinkCredential…
+        let create = mint_token(CREATE_SCOPE).await;
+        let body = json!({
+            "device": { "phoneNumber": "+123456789012" },
+            "qosProfile": "QOS_E",
+            "sink": sink,
+            "sinkCredential": {
+                "credentialType": "ACCESSTOKEN",
+                "accessToken": "sink-secret-123",
+                "accessTokenType": "bearer",
+            },
+        })
+        .to_string();
+        let (status, _, created) = post_assignment(Some(&create), &body, None).await;
+        assert_eq!(status, StatusCode::CREATED);
+        // The secret is never echoed in the AssignmentInfo.
+        assert!(created.get("sinkCredential").is_none());
+        let assignment_id = created["assignmentId"].as_str().unwrap().to_string();
+
+        // Revoke → the DELETE_REQUESTED callback carries the bearer.
+        let del = mint_token(DELETE_SCOPE).await;
+        let (status, _, _) = delete_assignment(Some(&del), &assignment_id, None).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        let (mut sock, _) = listener.accept().await.unwrap();
+        let mut buf = Vec::new();
+        sock.read_to_end(&mut buf).await.unwrap();
+        let raw = String::from_utf8(buf).unwrap();
+        let (head, _) = raw.split_once("\r\n\r\n").expect("headers then body");
+        assert!(
+            head.contains("Authorization: Bearer sink-secret-123\r\n"),
+            "authorization header present: {head}"
+        );
     }
 
     // --- getQosAssignmentByDevice (POST /retrieve-qos-assignment) -----------

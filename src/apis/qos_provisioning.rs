@@ -16,6 +16,7 @@
 //!   sub-1.0 base path like KYC Match v0.3 / Location Retrieval v0.4, DESIGN §9).
 //!   First slice: `POST /qos-assignments` + `GET /qos-assignments/{id}`.
 
+pub mod notifications;
 pub mod store;
 pub mod v0_3;
 

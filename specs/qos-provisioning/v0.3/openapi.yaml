@@ -12,8 +12,10 @@
 # This slice serves `POST /qos-assignments` (create),
 # `GET /qos-assignments/{assignmentId}` (read by id),
 # `DELETE /qos-assignments/{assignmentId}` (revoke), and
-# `POST /retrieve-qos-assignment` (retrieve by device). CloudEvents
-# notifications on `sink` (status transitions) are a later slice (documented cut).
+# `POST /retrieve-qos-assignment` (retrieve by device). CloudEvents notifications
+# on `sink`: the `DELETE_REQUESTED` status transition is delivered on revoke (see
+# the `createQosAssignment` `callbacks`); other transitions (`NETWORK_TERMINATED`,
+# an `AVAILABLE`-on-provisioning event) remain a later slice (documented cut).
 openapi: 3.0.3
 info:
   title: QoS Provisioning
@@ -64,10 +66,16 @@ info:
       has no `duration`, so there is no `expiresAt` — the assignment is open-ended.
     - **`qosProfile`** — a profile whose name contains `unavailable` →
       `422 QOS_PROVISIONING.QOS_PROFILE_NOT_APPLICABLE`; otherwise it is applied.
-    - **`sink`** — optional; when present it must be a well-formed `https://`
-      callback URL → else `400 INVALID_SINK`. Notification delivery on `sink` is
-      not modelled in this slice (documented cut); `sinkCredential` is accepted
-      but not applied.
+    - **`sink`** — optional; when present it must be a well-formed `http://` or
+      `https://` callback URL → else `400 INVALID_SINK`. CAMARA's schema requires
+      `https://`; CamaraSim also accepts `http://` so a loopback receiver can
+      observe callbacks, and delivers only to `http://` (no TLS client — an
+      `https://` sink is a documented no-op cut, mirroring QoD). On revoke a
+      recorded `sink` receives a `status-changed` CloudEvent
+      (`status: UNAVAILABLE`, `statusInfo: DELETE_REQUESTED`); an `ACCESSTOKEN`
+      `sinkCredential`'s bearer token is applied as `Authorization: Bearer …`
+      (RFC 6750). `sinkCredential` is a secret and never echoed;
+      `PLAIN`/`REFRESHTOKEN` are accepted but not applied (documented cut).
 
     The response echoes the device back in a single-property `DeviceResponse`
     (the identifier used), and echoes a supplied `sink`. `sinkCredential` (a
@@ -237,6 +245,8 @@ paths:
           reachable. Notification delivery on `sink` and the
           UNSUPPORTED_IDENTIFIER / IDENTIFIER_NOT_FOUND / SERVICE_NOT_APPLICABLE
           sub-cases beyond the shared reserved-suffix convention are not modelled.
+          When a `sink` is recorded, the `DELETE_REQUESTED` status-change
+          CloudEvent fires on revoke (see the `callbacks` and revoke scenarios).
         cases:
           - input: identifier ending in a reserved error suffix (e.g. …404)
             result: the canonical CAMARA error for that status
@@ -250,14 +260,41 @@ paths:
             result: "201 with the device echoed (`device.phoneNumber`)"
           - input: "`qosProfile` name containing `unavailable`"
             result: "422 QOS_PROVISIONING.QOS_PROFILE_NOT_APPLICABLE"
-          - input: "`sink` that is not a valid https URL"
+          - input: "`sink` that is not a valid http(s) URL"
             result: "400 INVALID_SINK"
+          - input: "`http://` `sink` supplied at create, then revoked"
+            result: >-
+              "204, and a status-changed CloudEvent
+              (status UNAVAILABLE, statusInfo DELETE_REQUESTED) delivered to the
+              sink; an ACCESSTOKEN sinkCredential is applied as a bearer token"
           - input: "`device` present but carrying no identifier"
             result: "400 INVALID_ARGUMENT"
           - input: "`device` submitted on a three-legged line token"
             result: "422 UNNECESSARY_IDENTIFIER"
           - input: no `device` and a non-line token subject
             result: "422 MISSING_IDENTIFIER"
+      callbacks:
+        statusChanged:
+          '{$request.body#/sink}':
+            post:
+              summary: QoS-assignment status change (CloudEvent)
+              description: |
+                Delivered by the API provider to the assignment's `sink` when its
+                status changes. CamaraSim delivers the `DELETE_REQUESTED`
+                transition on revoke (`status: UNAVAILABLE`); other transitions
+                (`NETWORK_TERMINATED`, an `AVAILABLE`-on-provisioning event) are a
+                later slice. Delivery is over `http://` only (no TLS client — an
+                `https://` sink is a documented no-op cut); an `ACCESSTOKEN`
+                `sinkCredential` is applied as an `Authorization: Bearer` header.
+              requestBody:
+                required: true
+                content:
+                  application/cloudevents+json:
+                    schema:
+                      $ref: "#/components/schemas/StatusChangedEvent"
+              responses:
+                "204":
+                  description: The notification was received (body ignored).
 
   /qos-assignments/{assignmentId}:
     get:
@@ -323,10 +360,15 @@ paths:
         assignment is revoked immediately), and an asynchronous `202 Accepted`
         that returns the `AssignmentInfo` with `status: AVAILABLE` and
         `statusInfo: DELETE_REQUESTED` when a notification callback drives the
-        revocation to completion (a subsequent `ASSIGNMENT_STATUS_CHANGED` event
-        reports `status: UNAVAILABLE`). CamaraSim serves only the synchronous
-        `204` form in this slice — `sink` notifications (and thus the `202`
-        path) are a later slice (documented cut, mirroring QoD's `deleteSession`).
+        revocation to completion (a subsequent `status-changed` event reports
+        `status: UNAVAILABLE`). CamaraSim serves only the synchronous `204` form
+        (the async `202` path is a documented cut, mirroring QoD's
+        `deleteSession`) — **but** if the revoked assignment recorded a `sink`, it
+        delivers the terminal `status-changed` CloudEvent (`status: UNAVAILABLE`,
+        `statusInfo: DELETE_REQUESTED`) to it, fire-and-forget, off the request
+        path (see the `createQosAssignment` `callbacks`). An `ACCESSTOKEN`
+        `sinkCredential` supplied at create authenticates that callback with a
+        bearer token (RFC 6750).
       security:
         - openId:
             - qos-provisioning:qos-assignments:delete
@@ -364,10 +406,18 @@ paths:
           Keyed only on the in-memory store (the `assignmentId` is opaque, so
           there is no reserved-identifier plane): an existing assignment is
           evicted and revoked (single-use), an unknown/already-revoked id
-          returns 404 NOT_FOUND. The `x-correlator` is echoed on the 204.
+          returns 404 NOT_FOUND. The `x-correlator` is echoed on the 204. If the
+          revoked assignment recorded an `http://` `sink`, a `status-changed`
+          CloudEvent (`status: UNAVAILABLE`, `statusInfo: DELETE_REQUESTED`) is
+          delivered to it fire-and-forget (an `https://` sink is not delivered —
+          no TLS client — a documented cut).
         cases:
-          - input: a known assignmentId
+          - input: a known assignmentId with no sink
             result: "204 No Content — the assignment is revoked and no longer reads back"
+          - input: a known assignmentId whose assignment recorded an http sink
+            result: >-
+              "204, and a DELETE_REQUESTED status-changed CloudEvent delivered to
+              the sink (ACCESSTOKEN sinkCredential applied as a bearer token)"
           - input: an unknown or already-revoked assignmentId
             result: "404 NOT_FOUND"
 
@@ -548,10 +598,13 @@ components:
           type: string
           format: uri
           description: >-
-            A `https://` callback URL for asynchronous notifications. Validated
-            for shape (must be `https://…`) but not delivered to in this slice
-            (documented cut).
-          pattern: '^https:\/\/.+$'
+            A callback URL for asynchronous CloudEvents notifications. CAMARA's
+            schema requires `https://`; CamaraSim also accepts `http://` so a
+            loopback receiver can observe callbacks, and delivers only to
+            `http://` (no TLS client — an `https://` sink is a documented no-op
+            cut, mirroring QoD). On revoke a recorded sink receives a
+            `status-changed` CloudEvent (`DELETE_REQUESTED`).
+          pattern: '^https?:\/\/.+$'
           example: "https://application-server.example.com/notifications"
         sinkCredential:
           $ref: "#/components/schemas/SinkCredential"
@@ -642,8 +695,11 @@ components:
     SinkCredential:
       type: object
       description: >-
-        A credential the callback would authenticate with. Accepted for schema
-        fidelity; not applied in this slice and never echoed.
+        A credential the callback authenticates with. An `ACCESSTOKEN` credential
+        (with a non-empty `accessToken`) is applied to the notification as an
+        `Authorization: Bearer <token>` header (RFC 6750); `PLAIN`/`REFRESHTOKEN`
+        are accepted for schema fidelity but not applied (documented cut). Held in
+        memory only and never echoed (it is a secret).
       required:
         - credentialType
       properties:
@@ -686,8 +742,10 @@ components:
         statusInfo:
           type: string
           description: >-
-            Extra detail for an `UNAVAILABLE` status. Not produced in this slice
-            (no notification-driven transitions yet).
+            Extra detail for an `UNAVAILABLE` status, carried in the
+            `status-changed` CloudEvent. CamaraSim produces `DELETE_REQUESTED`
+            (on revoke); `NETWORK_TERMINATED` is defined by CAMARA but not yet
+            produced (a later slice).
           enum: [NETWORK_TERMINATED, DELETE_REQUESTED]
         startedAt:
           type: string
@@ -699,5 +757,59 @@ components:
         sink:
           type: string
           format: uri
-          description: The `https://` callback URL supplied on creation, if any.
+          description: The callback URL supplied on creation, if any.
           example: "https://application-server.example.com/notifications"
+
+    StatusChangedEvent:
+      type: object
+      description: >-
+        The CloudEvents 1.0 envelope delivered to a `sink` on a QoS-assignment
+        status change (CamaraSim delivers the `DELETE_REQUESTED` transition on
+        revoke). `data` carries the `assignmentId`, the new `status`, and — for an
+        `UNAVAILABLE` transition — a `statusInfo` reason.
+      required:
+        - id
+        - source
+        - type
+        - specversion
+        - time
+        - data
+      properties:
+        id:
+          type: string
+          description: Unique CloudEvent id within `source` (UUID-shaped).
+          example: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+        source:
+          type: string
+          example: "//camarasimulator/qos-provisioning"
+        type:
+          type: string
+          enum: ["org.camaraproject.qos-provisioning.v0.status-changed"]
+        specversion:
+          type: string
+          enum: ["1.0"]
+        datacontenttype:
+          type: string
+          enum: ["application/json"]
+        time:
+          type: string
+          format: date-time
+          example: "2024-01-01T14:27:08Z"
+        data:
+          type: object
+          required:
+            - assignmentId
+            - status
+          properties:
+            assignmentId:
+              type: string
+              format: uuid
+              example: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+            status:
+              type: string
+              enum: [AVAILABLE, UNAVAILABLE]
+              example: UNAVAILABLE
+            statusInfo:
+              type: string
+              enum: [NETWORK_TERMINATED, DELETE_REQUESTED]
+              example: DELETE_REQUESTED
