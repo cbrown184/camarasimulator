@@ -1224,7 +1224,15 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `/{api}/v{n}/openapi.yaml`, plus `/auth/openapi.yaml` + `/shared/errors.yaml` so
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
-- [ ] Contract-test harness (validate responses against vendored spec)
+- [~] Contract-test harness (validate responses against vendored spec) — first
+  slice landed: a registry/wiring contract test (`src/main.rs`
+  `catalog_spec_urls_match_served_specs_and_resolve`) asserts the `/` catalog's
+  `spec_url` set exactly equals the served API-spec set (new
+  `apis::openapi::api_spec_urls`, single source of truth) and that every
+  catalogued `spec_url` resolves as `application/yaml` through the full app, so
+  catalog↔spec drift (a newly mounted API missing from the catalog, or a
+  `spec_url` that 404s) fails CI. Full response-vs-schema validation still TODO
+  (would need a YAML/JSON-Schema validator — a dependency trade-off, deferred).
 
 ---
 
@@ -1232,6 +1240,19 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-05 — Cross-cutting (contract-test harness, first slice): added a
+  registry/wiring contract test guarding catalog↔spec drift. New
+  `apis::openapi::api_spec_urls()` is the single source of truth for served API
+  spec URLs; `main.rs` test `catalog_spec_urls_match_served_specs_and_resolve`
+  asserts the `/` catalog's `spec_url` set equals it and that every catalogued
+  `spec_url` resolves as `application/yaml` through the full app. Refactored
+  `openapi.rs::serves_every_mounted_api_spec` to iterate that source of truth
+  instead of a duplicated 28-path list. Stateless/spatial API backlog is fully
+  implemented; remaining new APIs (e.g. QoD Provisioning, Scam Signal) either
+  need their canonical spec fetched (proxy returned 404s this run) or are
+  on-demand-only, so I did a safe, verifiable, test-only increment rather than
+  implement from memory. Test-only change → binary unchanged. `cargo test`: 956
+  passed (2 new/updated); `cargo build --release`: clean, no warnings. — binary: 2,163,760 bytes (2.1M)
 - 2026-08-05 — Phase 5 (other CAMARA APIs): **Population Density Data vwip** —
   new stateless, **area-keyed** aggregate API `POST
   /population-density-data/vwip/retrieve` (`retrievePopulationDensity`, scope

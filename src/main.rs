@@ -369,6 +369,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn catalog_spec_urls_match_served_specs_and_resolve() {
+        // The `/` catalog (this file) and the served-spec table (`apis::openapi`)
+        // are two independently hand-maintained lists that must agree
+        // (docs/DESIGN.md §9): every API CamaraSim serves a spec for is
+        // catalogued, and every catalogued `spec_url` actually resolves. Without
+        // this test the two silently drift — a new API can be mounted but left
+        // out of the catalog, or catalogued with a `spec_url` that 404s.
+        let response = app()
+            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        let apis = body["apis"].as_array().unwrap();
+
+        let mut catalog_urls: Vec<String> = apis
+            .iter()
+            .map(|a| a["spec_url"].as_str().expect("spec_url is a string").to_string())
+            .collect();
+        catalog_urls.sort();
+        // Each API is catalogued once.
+        let unique = catalog_urls.len();
+        catalog_urls.dedup();
+        assert_eq!(unique, catalog_urls.len(), "duplicate spec_url in catalog");
+
+        let mut served: Vec<String> = crate::apis::openapi::api_spec_urls()
+            .map(str::to_string)
+            .collect();
+        served.sort();
+
+        // Exactly the same set — nothing served-but-uncatalogued or
+        // catalogued-but-unserved.
+        assert_eq!(
+            catalog_urls, served,
+            "catalog spec_urls must match the served API specs"
+        );
+
+        // Every advertised spec_url resolves through the full app as YAML.
+        for url in &catalog_urls {
+            let resp = app()
+                .oneshot(Request::builder().uri(url.as_str()).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK, "catalog spec_url {url} must resolve");
+            assert_eq!(
+                resp.headers().get(axum::http::header::CONTENT_TYPE).unwrap(),
+                "application/yaml",
+                "catalog spec_url {url} served as YAML",
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn openapi_spec_is_reachable_through_the_app() {
         let response = app()
             .oneshot(

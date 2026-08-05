@@ -168,6 +168,23 @@ const SPECS: &[(&str, &str)] = &[
     ),
 ];
 
+/// The URL paths of every **API** OpenAPI spec served — every entry in [`SPECS`]
+/// except the shared `/auth` and `/shared` `$ref` fragments (which are serving
+/// infrastructure, not catalogued business APIs).
+///
+/// Exposed as the single source of truth so the `/` catalog can be checked
+/// against the specs actually served: the two hand-maintained lists must agree
+/// (docs/DESIGN.md §9 — every mounted API is catalogued and its `spec_url`
+/// resolves), and a test asserts the sets are equal. Test-support only — it has
+/// no role on the request path, so it is compiled only under `cfg(test)`.
+#[cfg(test)]
+pub fn api_spec_urls() -> impl Iterator<Item = &'static str> {
+    SPECS
+        .iter()
+        .map(|&(path, _)| path)
+        .filter(|path| !path.starts_with("/auth/") && !path.starts_with("/shared/"))
+}
+
 /// A `GET` route for every vendored spec, each returning its embedded YAML with
 /// `Content-Type: application/yaml`.
 pub fn routes() -> Router {
@@ -219,42 +236,20 @@ mod tests {
 
     #[tokio::test]
     async fn serves_every_mounted_api_spec() {
-        // Each mounted API's spec URL resolves and looks like an OpenAPI doc.
-        for path in [
-            "/number-verification/v1/openapi.yaml",
-            "/sim-swap/v2/openapi.yaml",
-            "/kyc-match/v0.3/openapi.yaml",
-            "/device-reachability-status/v1/openapi.yaml",
-            "/device-roaming-status/v1/openapi.yaml",
-            "/device-identifier/v0.3/openapi.yaml",
-            "/one-time-password-sms/v1/openapi.yaml",
-            "/quality-on-demand/v1/openapi.yaml",
-            "/location-verification/v3/openapi.yaml",
-            "/location-retrieval/v0.4/openapi.yaml",
-            "/geofencing-subscriptions/v0.4/openapi.yaml",
-            "/carrier-billing/v0.5/openapi.yaml",
-            "/call-forwarding-signal/v0.4/openapi.yaml",
-            "/number-recycling/v0.2/openapi.yaml",
-            "/kyc-age-verification/v0.1/openapi.yaml",
-            "/device-swap/v1/openapi.yaml",
-            "/kyc-fill-in/v0.3/openapi.yaml",
-            "/home-devices-qod/v0.4/openapi.yaml",
-            "/qos-profiles/v1/openapi.yaml",
-            "/kyc-tenure/v0.2/openapi.yaml",
-            "/blockchain-public-address/v0.3/openapi.yaml",
-            "/simple-edge-discovery/v2/openapi.yaml",
-            "/customer-insights/v0.2/openapi.yaml",
-            "/connected-network-type/v0.2/openapi.yaml",
-            "/connectivity-insights/v0.6/openapi.yaml",
-            "/region-device-count/v0.2/openapi.yaml",
-            "/device-visit-location/vwip/openapi.yaml",
-            "/population-density-data/vwip/openapi.yaml",
-        ] {
+        // Driven by [`api_spec_urls`] (the single source of truth) rather than a
+        // duplicated path list, so a newly served API can never be silently
+        // omitted from this check. Each API spec URL resolves and looks like an
+        // OpenAPI doc.
+        let mut count = 0;
+        for path in api_spec_urls() {
+            count += 1;
             let (status, content_type, body) = fetch(path).await;
             assert_eq!(status, StatusCode::OK, "spec {path} should be served");
             assert_eq!(content_type, YAML_CONTENT_TYPE, "spec {path} content-type");
             assert!(body.starts_with("#") || body.contains("openapi:"), "spec {path} is YAML");
         }
+        // Sanity: the source of truth is non-empty (guards a broken filter).
+        assert!(count >= 28, "expected the full API-spec catalog, got {count}");
     }
 
     #[tokio::test]
