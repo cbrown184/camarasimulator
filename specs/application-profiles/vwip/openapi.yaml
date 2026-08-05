@@ -6,10 +6,9 @@
 # with CamaraSim's parameter-driven functional cases (docs/DESIGN.md §7, §9).
 # Backed by `src/apis/application_profiles/vwip.rs`; spec and code must not drift.
 #
-# First slice: `POST /application-profiles` (createApplicationProfile) and
-# `GET /application-profiles/{applicationProfileId}` (readApplicationProfile).
-# `PATCH` (updateApplicationProfile) and `DELETE` (deleteApplicationProfile) are
-# separate later slices, out of scope for this contract.
+# Covers the full CRUD set: `POST /application-profiles` (createApplicationProfile),
+# `GET` (readApplicationProfile), `PATCH` (updateApplicationProfile), and `DELETE`
+# (deleteApplicationProfile) on `/application-profiles/{applicationProfileId}`.
 openapi: 3.0.3
 info:
   title: Application Profiles
@@ -23,8 +22,9 @@ info:
     given device right now.
 
     This is the CamaraSim reference double for CAMARA Application Profiles
-    (`wip`). It is a **stateful, resource-oriented** API: `POST` creates a profile
-    and `GET /{applicationProfileId}` reads it back.
+    (`wip`). It is a **stateful, resource-oriented** API: `POST` creates a
+    profile; `GET /{applicationProfileId}` reads it back; `PATCH` replaces its
+    threshold set in place (keeping the id); `DELETE` evicts it.
 
     ## No identifier / no device
 
@@ -227,6 +227,99 @@ paths:
             result: "404 NOT_FOUND"
           - input: "an applicationProfileId that is not a UUID"
             result: "400 INVALID_ARGUMENT"
+    patch:
+      operationId: updateApplicationProfile
+      summary: Update an application profile
+      description: |
+        Replaces a stored profile's **complete set** of quality-requirement
+        thresholds with the thresholds in the request body, keeping the same
+        `applicationProfileId`, and returns the updated `ApplicationProfile`
+        (`200`). This is a full-set replacement (not JSON Merge Patch): the body
+        is an `ApplicationProfileRequest` validated by the same rules as create
+        (the `anyOf` / `minProperties` structural rules and the numeric range
+        constraints drive `400 INVALID_ARGUMENT` / `400 OUT_OF_RANGE`), and the
+        body is validated before the store is consulted, so a malformed body
+        `400` wins over the unknown-id `404`. A well-formed but unknown id →
+        `404 NOT_FOUND`; a path value that violates the `uuid` shape →
+        `400 INVALID_ARGUMENT`.
+      security:
+        - openId:
+            - application-profiles:update
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+        - name: applicationProfileId
+          in: path
+          required: true
+          description: The id of the application profile to update.
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ApplicationProfileRequest"
+      responses:
+        "200":
+          description: The application profile was updated.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApplicationProfile"
+        "400":
+          description: |
+            400 — invalid request. `INVALID_ARGUMENT` for a malformed body, a
+            missing `anyOf` threshold, an empty threshold object
+            (`minProperties`), an unknown field, an unknown `unit` /
+            `gpuVendorType` enum, or an `applicationProfileId` that is not a
+            UUID; `OUT_OF_RANGE` for a numeric threshold outside its range.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApplicationProfilesError"
+              examples:
+                invalidArgument:
+                  summary: Missing anyOf threshold
+                  value:
+                    status: 400
+                    code: INVALID_ARGUMENT
+                    message: "At least one of `networkQualityThresholds` or `computeResources` is required."
+                outOfRange:
+                  summary: Rate value out of range
+                  value:
+                    status: 400
+                    code: OUT_OF_RANGE
+                    message: "`targetMinUpstreamRate.value` must be in 0..=1024."
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+      x-camarasim-scenarios:
+        description: >-
+          Full-set replacement selected from the request body (validated exactly
+          as create) and the opaque `applicationProfileId` path parameter against
+          the in-memory store (docs/DESIGN.md §7). No reserved-identifier plane —
+          the id is server-minted. The body is validated before the store is
+          consulted (a body `400` wins over the unknown-id `404`).
+        cases:
+          - input: "a stored applicationProfileId + a body with at least one valid threshold object"
+            result: "200 ApplicationProfile (thresholds replaced, applicationProfileId unchanged)"
+          - input: "a well-formed but unknown applicationProfileId + a valid body"
+            result: "404 NOT_FOUND"
+          - input: "an applicationProfileId that is not a UUID"
+            result: "400 INVALID_ARGUMENT"
+          - input: "a body carrying neither threshold object / an empty threshold object"
+            result: "400 INVALID_ARGUMENT (anyOf / minProperties)"
+          - input: "a Rate/Compute value outside 0..=1024, a Duration value < 1, or packetLossErrorRate outside 1..=10"
+            result: "400 OUT_OF_RANGE"
     delete:
       operationId: deleteApplicationProfile
       summary: Delete an application profile

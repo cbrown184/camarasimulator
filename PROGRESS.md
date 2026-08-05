@@ -1457,7 +1457,7 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     → 400 INVALID_ARGUMENT; `timeToLive` ∉ 1..=86400 → 400 OUT_OF_RANGE.
     Stateless (no read-back → no store). `x-correlator` echoed on every response
     incl. the `204`. **Completes Verified Caller vwip.**
-- [~] Application Profiles vwip (`/application-profiles/vwip`; CAMARA
+- [x] Application Profiles vwip (`/application-profiles/vwip`; CAMARA
   ApplicationProfiles, wip — no released version yet, mounted at its canonical
   `vwip` base path; stateful, resource-oriented; the *quality-requirements*
   registry the sibling Connectivity Insights API references by
@@ -1480,15 +1480,24 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     `gpuVendorType`/`gpuModelName` accepted with schema-level validation only
     (no numeric range in the spec) — documented cut. `x-correlator` echoed. No new
     dep (reuses `sha2`).
-  - [ ] `PATCH /application-profiles/{applicationProfileId}` (`updateApplicationProfile`,
-    `application-profiles:update`)
+  - [x] `PATCH /application-profiles/{applicationProfileId}` (`updateApplicationProfile`,
+    `application-profiles:update`) — full-set **replacement** of a stored
+    profile's thresholds (CAMARA op: "update the complete set … with the new set
+    of thresholds"), keeping the same `applicationProfileId` → `200`
+    `ApplicationProfile`. Body is an `ApplicationProfileRequest` validated by the
+    same shared `parse_and_validate` as create (`anyOf` / `minProperties` /
+    numeric ranges / strict parse → 400 INVALID_ARGUMENT / OUT_OF_RANGE), checked
+    **before** the store (a body 400 wins over the unknown-id 404). Path plane
+    mirrors read/delete: non-UUID → 400 INVALID_ARGUMENT, well-formed unknown →
+    404 NOT_FOUND. Atomic check-and-swap `store::replace`; `x-correlator` echoed.
+    No new dep. **Completes Application Profiles vwip.**
   - [x] `DELETE /application-profiles/{applicationProfileId}` (`deleteApplicationProfile`,
     `application-profiles:delete`) — evicts a stored profile from the in-memory
     store (`store::remove`): stored id → `204 No Content` (single-use); well-formed
     unknown/already-deleted id → `404 NOT_FOUND`; non-UUID path → `400
     INVALID_ARGUMENT` (mirrors `readApplicationProfile`). Store state the only
     control plane (opaque server-minted id → no reserved-identifier plane).
-    `x-correlator` echoed. (PATCH remains.)
+    `x-correlator` echoed.
 - [ ] Other CAMARA APIs as capacity allows
 
 ## Cross-cutting (do alongside the item that needs it)
@@ -1515,6 +1524,34 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-05 — Phase 5 (other CAMARA APIs): **Application Profiles vwip —
+  `PATCH /application-profiles/{applicationProfileId}`
+  (`updateApplicationProfile`, scope `application-profiles:update`)**, the update
+  leg that **completes Application Profiles vwip** (the only remaining `[ ]` leaf
+  besides the deferred QoD / QoS-Provisioning `https://` sink TLS delivery, which
+  still needs a heavyweight multi-MB rustls TLS client vs the "keep binary small"
+  guardrail). Verified against the authoritative CAMARA spec via WebFetch
+  (camaraproject/ApplicationProfiles `main`): `PATCH`, scope
+  `application-profiles:update`, body the threshold set, `200`/400/401/403/404/429;
+  the op is a **full-set replacement** ("update the complete set … with the new
+  set of thresholds"), not JSON Merge Patch. Body is an `ApplicationProfileRequest`
+  validated by the same rules as create — factored create's parse+validate into a
+  shared `parse_and_validate` (+ `render_profile`) so create and update cannot
+  drift — replacing the stored thresholds in place while keeping the
+  `applicationProfileId`; the body is validated before the store so a malformed
+  body 400 wins over the unknown-id 404. Path plane mirrors read/delete (non-UUID
+  → 400 INVALID_ARGUMENT, well-formed unknown → 404 NOT_FOUND). Atomic
+  check-and-swap `store::replace` (contains-then-insert under one lock, so a
+  concurrent delete can't resurrect an evicted profile). `x-correlator` echoed.
+  Spec: added the `patch` operation + `x-camarasim-scenarios` to the
+  `/application-profiles/{applicationProfileId}` path item, refreshed the header
+  and API description (`specs/application-profiles/vwip/openapi.yaml`). Tests: 10
+  new (1 store unit `replace_overwrites_existing_and_reports_absent_for_unknown`;
+  9 router: replace-in-place + read-back + id-unchanged + correlator, unknown-id
+  404, malformed-id 400, empty-body anyOf 400, out-of-range 400, bad-body-400-wins
+  -over-unknown-id-404, update-scope 403, missing-token 401). `cargo test` 1154
+  passed; `cargo build --release` OK. No new dependency. — binary: 2.4M
+  (2,437,312 bytes)
 - 2026-08-05 — Phase 5 (other CAMARA APIs): **Application Profiles vwip —
   `DELETE /application-profiles/{applicationProfileId}`
   (`deleteApplicationProfile`, scope `application-profiles:delete`)**, the delete

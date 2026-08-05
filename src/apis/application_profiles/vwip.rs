@@ -14,9 +14,14 @@
 //!   `deleteApplicationProfile`, scope `application-profiles:delete`) — evicts a
 //!   stored profile (`204 No Content`, single-use) or `404 NOT_FOUND` for an
 //!   unknown/already-deleted id.
+//! - `PATCH /application-profiles/{applicationProfileId}` (operationId
+//!   `updateApplicationProfile`, scope `application-profiles:update`) — replaces
+//!   a stored profile's threshold set **in place** with a new
+//!   `ApplicationProfileRequest`, keeping the same `applicationProfileId`, and
+//!   returns the updated `ApplicationProfile` (`200`) or `404 NOT_FOUND` for an
+//!   unknown id.
 //!
-//! `PATCH` (`updateApplicationProfile`) is the remaining follow-up sub-item
-//! (see PROGRESS.md).
+//! This completes Application Profiles vwip.
 //!
 //! ## No identifier / no `device`
 //!
@@ -56,6 +61,17 @@
 //! violating the `uuid` shape → `400 INVALID_ARGUMENT`; a stored id → `204 No
 //! Content` (single-use eviction); a well-formed but unknown or already-deleted
 //! id → `404 NOT_FOUND`.
+//!
+//! `updateApplicationProfile` is a **full-set replacement** (the CAMARA op
+//! description: "Update the complete set of … thresholds with the new set of
+//! thresholds"), so its body is an [`ApplicationProfileRequest`] validated by the
+//! very same rules as create (`anyOf` / `minProperties` / numeric ranges / strict
+//! parse). The stored profile's thresholds are replaced in place — the
+//! `applicationProfileId` never changes — and the updated `ApplicationProfile` is
+//! returned (`200`). The path param drives the store plane exactly like read /
+//! delete: a non-`uuid` value → `400 INVALID_ARGUMENT`; a well-formed but unknown
+//! id → `404 NOT_FOUND` (the body is validated first, so a `400` on a malformed
+//! body wins over the `404`).
 
 use axum::body::Bytes;
 use axum::extract::Path;
@@ -76,6 +92,8 @@ const CREATE_SCOPE: &str = "application-profiles:create";
 const READ_SCOPE: &str = "application-profiles:read";
 /// Scope required to delete a profile (CAMARA application-profiles).
 const DELETE_SCOPE: &str = "application-profiles:delete";
+/// Scope required to update a profile (CAMARA application-profiles).
+const UPDATE_SCOPE: &str = "application-profiles:update";
 
 /// Routes for Application Profiles vwip, mounted at their canonical URLs.
 pub fn routes() -> Router {
@@ -86,7 +104,9 @@ pub fn routes() -> Router {
         )
         .route(
             "/application-profiles/vwip/application-profiles/:application_profile_id",
-            axum::routing::get(read_application_profile).delete(delete_application_profile),
+            axum::routing::get(read_application_profile)
+                .patch(update_application_profile)
+                .delete(delete_application_profile),
         )
 }
 
@@ -262,49 +282,108 @@ async fn create_application_profile(claims: Claims, headers: HeaderMap, body: By
         return with_correlator(e.into_response(), &correlator);
     }
 
-    // Body is mandatory; parse strictly. Unknown fields, wrong types, and unknown
-    // enum variants (`unit` / `gpuVendorType`) all fail here → INVALID_ARGUMENT.
-    let req: ApplicationProfileRequest = match serde_json::from_slice(&body) {
+    // Parse + validate the body (anyOf / minProperties / numeric ranges); shared
+    // with `updateApplicationProfile`.
+    let req = match parse_and_validate(&body, &correlator) {
         Ok(req) => req,
-        Err(_) => {
-            return invalid_argument(
-                "Request body is not a valid ApplicationProfileRequest.",
-                &correlator,
-            )
-        }
+        Err(resp) => return resp,
     };
-
-    // `anyOf`: at least one of the two threshold objects must be present.
-    if req.network_quality_thresholds.is_none() && req.compute_resources.is_none() {
-        return invalid_argument(
-            "At least one of `networkQualityThresholds` or `computeResources` is required.",
-            &correlator,
-        );
-    }
-
-    // Validate the supplied threshold objects (minProperties + numeric ranges).
-    if let Some(nqt) = &req.network_quality_thresholds {
-        if let Err(resp) = validate_network_quality(nqt, &correlator) {
-            return resp;
-        }
-    }
-    if let Some(cr) = &req.compute_resources {
-        if let Err(resp) = validate_compute_resources(cr, &correlator) {
-            return resp;
-        }
-    }
 
     // Mint the id, render the ApplicationProfile (the validated request echoed
     // back with the id), remember it, and return 201.
     let profile_id = store::new_profile_id();
-    let mut profile = serde_json::to_value(&req).unwrap_or_else(|_| json!({}));
-    profile["applicationProfileId"] = json!(profile_id);
+    let profile = render_profile(&req, &profile_id);
     store::insert(profile_id, profile.clone());
 
     with_correlator(
         (StatusCode::CREATED, Json(profile)).into_response(),
         &correlator,
     )
+}
+
+/// `PATCH /application-profiles/vwip/application-profiles/{applicationProfileId}`.
+///
+/// A **full-set replacement**: the body is a fresh `ApplicationProfileRequest`
+/// (same validation as create) that replaces the stored profile's thresholds in
+/// place, keeping the same `applicationProfileId`. Returns the updated
+/// `ApplicationProfile` (`200`) or `404 NOT_FOUND` for an unknown id.
+async fn update_application_profile(
+    claims: Claims,
+    headers: HeaderMap,
+    Path(application_profile_id): Path<String>,
+    body: Bytes,
+) -> Response {
+    let correlator = headers.get("x-correlator").cloned();
+
+    if let Err(e) = claims.require_scope(UPDATE_SCOPE) {
+        return with_correlator(e.into_response(), &correlator);
+    }
+
+    // Path param is `format: uuid`; a malformed value is a 400 (mirrors read/delete).
+    if !is_uuid_shaped(&application_profile_id) {
+        return invalid_argument("`applicationProfileId` must be a UUID.", &correlator);
+    }
+
+    // Validate the replacement body first (a malformed body 400 wins over the
+    // unknown-id 404), then swap it into the store if the id exists.
+    let req = match parse_and_validate(&body, &correlator) {
+        Ok(req) => req,
+        Err(resp) => return resp,
+    };
+
+    let profile = render_profile(&req, &application_profile_id);
+    if store::replace(&application_profile_id, profile.clone()) {
+        with_correlator((StatusCode::OK, Json(profile)).into_response(), &correlator)
+    } else {
+        with_correlator(
+            CamaraError::not_found(
+                "No application profile found for the provided applicationProfileId.",
+            )
+            .into_response(),
+            &correlator,
+        )
+    }
+}
+
+/// Parse an `ApplicationProfileRequest` strictly and validate it (`anyOf`,
+/// `minProperties`, numeric ranges). Shared by create and update so the two
+/// operations cannot drift. Unknown fields, wrong types, and unknown enum
+/// variants (`unit` / `gpuVendorType`) all fail at parse → `INVALID_ARGUMENT`.
+fn parse_and_validate(
+    body: &Bytes,
+    correlator: &Option<HeaderValue>,
+) -> Result<ApplicationProfileRequest, Response> {
+    let req: ApplicationProfileRequest = serde_json::from_slice(body).map_err(|_| {
+        invalid_argument(
+            "Request body is not a valid ApplicationProfileRequest.",
+            correlator,
+        )
+    })?;
+
+    // `anyOf`: at least one of the two threshold objects must be present.
+    if req.network_quality_thresholds.is_none() && req.compute_resources.is_none() {
+        return Err(invalid_argument(
+            "At least one of `networkQualityThresholds` or `computeResources` is required.",
+            correlator,
+        ));
+    }
+
+    // Validate the supplied threshold objects (minProperties + numeric ranges).
+    if let Some(nqt) = &req.network_quality_thresholds {
+        validate_network_quality(nqt, correlator)?;
+    }
+    if let Some(cr) = &req.compute_resources {
+        validate_compute_resources(cr, correlator)?;
+    }
+    Ok(req)
+}
+
+/// Render a validated request as an `ApplicationProfile`: the thresholds echoed
+/// back carrying `applicationProfileId`.
+fn render_profile(req: &ApplicationProfileRequest, profile_id: &str) -> serde_json::Value {
+    let mut profile = serde_json::to_value(req).unwrap_or_else(|_| json!({}));
+    profile["applicationProfileId"] = json!(profile_id);
+    profile
 }
 
 /// `GET /application-profiles/vwip/application-profiles/{applicationProfileId}`.
@@ -597,6 +676,16 @@ mod tests {
         request("DELETE", &path, token, None, correlator).await
     }
 
+    async fn patch_profile(
+        token: Option<&str>,
+        id: &str,
+        body: &str,
+        correlator: Option<&str>,
+    ) -> (StatusCode, HeaderMap, Value) {
+        let path = format!("{PROFILES}/{id}");
+        request("PATCH", &path, token, Some(body), correlator).await
+    }
+
     /// Create a profile and return its minted `applicationProfileId`.
     async fn create_and_get_id() -> String {
         let token = mint_token(CREATE_SCOPE).await;
@@ -856,6 +945,107 @@ mod tests {
     async fn delete_missing_token_is_401() {
         let (status, _, _) =
             delete_profile(None, "00000000-0000-4000-8000-000000000000", None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    // --- updateApplicationProfile ------------------------------------------
+
+    #[tokio::test]
+    async fn patch_replaces_thresholds_in_place_and_keeps_the_id() {
+        let id = create_and_get_id().await; // created with computeResources.targetMinGPU
+        let upd = mint_token(UPDATE_SCOPE).await;
+        let body = json!({
+            "networkQualityThresholds": {
+                "targetMinDownstreamRate": { "value": 200, "unit": "Mbps" },
+                "packetLossErrorRate": 5,
+            }
+        })
+        .to_string();
+        let (status, headers, updated) = patch_profile(Some(&upd), &id, &body, Some("corr-p")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(headers.get("x-correlator").unwrap(), "corr-p");
+        // Same id, new thresholds, and the old set is fully gone (full replacement).
+        assert_eq!(updated["applicationProfileId"], id);
+        assert_eq!(
+            updated["networkQualityThresholds"]["targetMinDownstreamRate"]["value"],
+            200
+        );
+        assert!(updated.get("computeResources").is_none(), "old set replaced");
+
+        // A read now sees the replacement.
+        let read = mint_token(READ_SCOPE).await;
+        let (status, _, got) = get_profile(Some(&read), &id, None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(got, updated);
+    }
+
+    #[tokio::test]
+    async fn patch_unknown_id_is_404() {
+        let upd = mint_token(UPDATE_SCOPE).await;
+        let body = json!({ "computeResources": { "targetMinGPU": 2 } }).to_string();
+        let (status, _, err) =
+            patch_profile(Some(&upd), "00000000-0000-4000-8000-000000000000", &body, None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(err["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn patch_malformed_id_is_400() {
+        let upd = mint_token(UPDATE_SCOPE).await;
+        let body = json!({ "computeResources": { "targetMinGPU": 2 } }).to_string();
+        let (status, _, err) = patch_profile(Some(&upd), "not-a-uuid", &body, None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(err["code"], "INVALID_ARGUMENT");
+    }
+
+    #[tokio::test]
+    async fn patch_empty_body_fails_anyof_400() {
+        let id = create_and_get_id().await;
+        let upd = mint_token(UPDATE_SCOPE).await;
+        let (status, _, err) = patch_profile(Some(&upd), &id, "{}", None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(err["code"], "INVALID_ARGUMENT");
+    }
+
+    #[tokio::test]
+    async fn patch_out_of_range_threshold_is_400_out_of_range() {
+        let id = create_and_get_id().await;
+        let upd = mint_token(UPDATE_SCOPE).await;
+        let body = json!({
+            "networkQualityThresholds": { "targetMinUpstreamRate": { "value": 2048, "unit": "Mbps" } }
+        })
+        .to_string();
+        let (status, _, err) = patch_profile(Some(&upd), &id, &body, None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(err["code"], "OUT_OF_RANGE");
+    }
+
+    #[tokio::test]
+    async fn patch_bad_body_400_wins_over_unknown_id_404() {
+        // A malformed body on an unknown id is a 400 (body validated first).
+        let upd = mint_token(UPDATE_SCOPE).await;
+        let (status, _, err) =
+            patch_profile(Some(&upd), "00000000-0000-4000-8000-000000000000", "{}", None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(err["code"], "INVALID_ARGUMENT");
+    }
+
+    #[tokio::test]
+    async fn patch_requires_the_update_scope() {
+        // A read-only token may not update → 403 (and the profile is unchanged).
+        let id = create_and_get_id().await;
+        let read = mint_token(READ_SCOPE).await;
+        let body = json!({ "computeResources": { "targetMinGPU": 9 } }).to_string();
+        let (status, _, err) = patch_profile(Some(&read), &id, &body, None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(err["code"], "PERMISSION_DENIED");
+    }
+
+    #[tokio::test]
+    async fn patch_missing_token_is_401() {
+        let body = json!({ "computeResources": { "targetMinGPU": 1 } }).to_string();
+        let (status, _, _) =
+            patch_profile(None, "00000000-0000-4000-8000-000000000000", &body, None).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
     }
 }

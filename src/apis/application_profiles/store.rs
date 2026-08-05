@@ -59,6 +59,26 @@ pub fn get(id: &str) -> Option<Value> {
         .cloned()
 }
 
+/// Replace the profile stored under `id` with `profile`, returning `true` if a
+/// profile was already present (and was overwritten) or `false` if no such id
+/// exists (in which case nothing is stored).
+///
+/// `updateApplicationProfile` uses the distinction to answer `200` (the profile
+/// existed and its thresholds were replaced in place) vs `404 NOT_FOUND` (no such
+/// profile). The check-and-swap runs under the single store lock, so a concurrent
+/// `DELETE` cannot make the update resurrect an evicted profile.
+pub fn replace(id: &str, profile: Value) -> bool {
+    let mut guard = store()
+        .lock()
+        .expect("application-profiles store not poisoned");
+    if guard.contains_key(id) {
+        guard.insert(id.to_string(), profile);
+        true
+    } else {
+        false
+    }
+}
+
 /// Remove the profile stored under `id`, returning `true` if one was present.
 ///
 /// `deleteApplicationProfile` uses the distinction to answer `204 No Content`
@@ -138,6 +158,19 @@ mod tests {
         insert(id.clone(), profile.clone());
         assert_eq!(get(&id), Some(profile));
         assert!(get("no-such-profile").is_none());
+    }
+
+    #[test]
+    fn replace_overwrites_existing_and_reports_absent_for_unknown() {
+        let id = new_profile_id();
+        // Unknown id → replace stores nothing and reports absent.
+        assert!(!replace(&id, json!({ "applicationProfileId": id })));
+        assert!(get(&id).is_none(), "replace must not create an absent id");
+        // Stored id → replace overwrites in place and reports present.
+        insert(id.clone(), json!({ "applicationProfileId": id, "computeResources": { "targetMinGPU": 1 } }));
+        let updated = json!({ "applicationProfileId": id, "computeResources": { "targetMinGPU": 8 } });
+        assert!(replace(&id, updated.clone()), "replace of a stored id reports present");
+        assert_eq!(get(&id), Some(updated), "the stored value is the replacement");
     }
 
     #[test]
