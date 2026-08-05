@@ -143,6 +143,10 @@ const SPECS: &[(&str, &str)] = &[
         include_str!("../../specs/connected-network-type/v0.2/openapi.yaml"),
     ),
     (
+        "/device-data-volume/vwip/openapi.yaml",
+        include_str!("../../specs/device-data-volume/vwip/openapi.yaml"),
+    ),
+    (
         "/connectivity-insights/v0.6/openapi.yaml",
         include_str!("../../specs/connectivity-insights/v0.6/openapi.yaml"),
     ),

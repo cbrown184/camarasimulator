@@ -30,6 +30,7 @@
 //! - **Simple Edge Discovery v2** — `/simple-edge-discovery/v2/…`.
 //! - **Customer Insights v0.2** — `/customer-insights/v0.2/…`.
 //! - **Connected Network Type v0.2** — `/connected-network-type/v0.2/…`.
+//! - **Device Data Volume vwip** — `/device-data-volume/vwip/…`.
 //! - **Connectivity Insights v0.6** — `/connectivity-insights/v0.6/…`.
 //! - **Region Device Count v0.2** — `/region-device-count/v0.2/…`.
 //! - **Device Visit Location vwip** — `/device-visit-location/vwip/…`.
@@ -45,6 +46,7 @@ pub mod carrier_billing;
 pub mod connected_network_type;
 pub mod connectivity_insights;
 pub mod customer_insights;
+pub mod device_data_volume;
 pub mod device_identifier;
 pub mod device_swap;
 pub mod device_visit_location;
@@ -99,6 +101,7 @@ pub fn routes() -> Router {
         .merge(simple_edge_discovery::routes())
         .merge(customer_insights::routes())
         .merge(connected_network_type::routes())
+        .merge(device_data_volume::routes())
         .merge(connectivity_insights::routes())
         .merge(region_device_count::routes())
         .merge(device_visit_location::routes())

@@ -826,6 +826,27 @@ the non-terminal AVAILABLE event *peeks* it (new `store::peek_credential`, a
 non-destructive read) so a later terminal event (revoke / network-drop) still
 `take_credential`s it single-use. Only TLS (`https://`) delivery remains deferred.
 
+**Phase 5 (other CAMARA APIs) — Device Data Volume vwip** has begun, a new
+stateless, non-spatial, device-keyed data-usage query API mounted at its
+canonical work-in-progress base path `/device-data-volume/vwip` (CAMARA
+device-data-volume, `wip` — no released version yet, like Device Visit Location
+/ Population Density Data). `POST /retrieve` (scope `device-data-volume:read`,
+operationId `retrieveDataVolume`) answers a coarse, bucketed data-usage figure —
+`{ dataVolumeCategory: "<200MiB"|"<1GiB"|"<5GiB"|">=5GiB", lastStatusTime,
+device? }` — never a precise byte count. Device-object identifier resolution +
+the two-legged/three-legged rule (mirrors Connected Network Type): a submitted
+`device` on a three-legged **line** token (E.164 `sub`) → 422
+`UNNECESSARY_IDENTIFIER`; no `device` + a non-line subject → 422
+`MISSING_IDENTIFIER`; an empty `device` → 400 `INVALID_ARGUMENT`. Two control
+planes (DESIGN §7): the identifier's reserved error suffix → canonical CAMARA
+error; else its trailing three digits index a fixed lowest-first table
+`[<200MiB, <1GiB, <5GiB, >=5GiB]` (`% 4`; `…000`/no digits → `<200MiB`), so the
+reported bucket is a genuine second plane. `lastStatusTime` = now (RFC 3339 UTC;
+schema-nullable for "no known measurement" but the sim always reports fresh).
+`device` echoed only for a phoneNumber request. The companion `POST /check`
+(`checkDataVolume`, `{ thresholdExceeded }` for a `volumeToCheck`) is a later
+slice. `x-correlator` echoed on every response.
+
 ## In progress (claimed this pass)
 
 _None._  <!-- agent: put the claimed item + run timestamp here, clear it when done -->
@@ -1327,6 +1348,24 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
       (`store::peek_credential`) on the non-terminal AVAILABLE event so a later
       terminal event still authenticates, *taken* single-use on the terminal one.
     - [ ] TLS (`https://` sink) delivery (needs a rustls TLS client)
+- [~] Device Data Volume vwip (`/device-data-volume/vwip`; CAMARA
+  device-data-volume, wip — no released version yet, mounted at its canonical
+  `vwip` base path; stateless, non-spatial, device-keyed data-usage query):
+  - [x] `POST /retrieve` (`device-data-volume:read`, `retrieveDataVolume`) —
+    `{ dataVolumeCategory: "<200MiB"|"<1GiB"|"<5GiB"|">=5GiB", lastStatusTime,
+    device? }`, a coarse bucketed usage figure (never a byte count).
+    Device-object identifier resolution + the two-legged/three-legged rule
+    (mirrors Connected Network Type): `device` on a line token → 422
+    `UNNECESSARY_IDENTIFIER`; no `device` + non-line subject → 422
+    `MISSING_IDENTIFIER`; empty `device` → 400 `INVALID_ARGUMENT`. Two control
+    planes (DESIGN §7): identifier reserved-error suffix → canonical CAMARA
+    error; else trailing three digits index `[<200MiB,<1GiB,<5GiB,>=5GiB]`
+    (`% 4`; `…000`/no digits → `<200MiB` — category is a 2nd plane).
+    `lastStatusTime` = now (RFC 3339 UTC; schema-nullable but always fresh).
+    `device` echoed only for a phoneNumber request. No new dep.
+  - [ ] `POST /check` (`device-data-volume:read`, `checkDataVolume`) —
+    `{ thresholdExceeded }` for a caller-supplied `volumeToCheck`
+    (`{value:0..1024, unit:MiB|GiB}`). Later slice.
 - [ ] Other CAMARA APIs as capacity allows
 
 ## Cross-cutting (do alongside the item that needs it)
@@ -1353,6 +1392,32 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-05 — Phase 5 (other CAMARA APIs): **Device Data Volume vwip** — new
+  stateless, non-spatial, device-keyed data-usage query API. Verified the
+  authoritative CAMARA spec via WebFetch (device-data-volume, version `wip`: base
+  `/device-data-volume/vwip`, `POST /retrieve` = `retrieveDataVolume` scope
+  `device-data-volume:read`; request `RetrieveDataVolumeRequest {device?}`; 200 →
+  `RetrieveDataVolumeResponse {device?, lastStatusTime(nullable date-time,req),
+  dataVolumeCategory enum ["<200MiB","<1GiB","<5GiB",">=5GiB"](req)}`; errors
+  400/401/403/404/422/429). First slice = `POST /retrieve` (the companion
+  `POST /check` = `checkDataVolume` deferred to a later slice). New
+  `src/apis/device_data_volume/{,vwip}.rs` (mirrors Connected Network Type:
+  device-object identifier resolution + two-legged/three-legged rule — device on
+  a line token → 422 UNNECESSARY_IDENTIFIER, no device + non-line subject → 422
+  MISSING_IDENTIFIER, empty device → 400; self-contained RFC 3339 formatter, no
+  new dep), wired into apis/openapi/main catalog. Control planes (DESIGN §7):
+  reserved-error suffix → canonical error; else trailing three digits index
+  `[<200MiB,<1GiB,<5GiB,>=5GiB]` (`% 4`, `…000` → `<200MiB`), so the bucket is a
+  2nd plane; `lastStatusTime` always fresh (schema-nullable, never null). `device`
+  echoed only for a phoneNumber request. Vendored/annotated spec at
+  `specs/device-data-volume/vwip/openapi.yaml`, served + catalogued. 20 new tests
+  (6 unit + 14 integration through the real router: category-by-tail, required
+  fields + phone echo, non-phone omits echo, reserved-suffix errors, three-legged
+  subject + reserved subject, UNNECESSARY/MISSING_IDENTIFIER, empty/invalid/
+  unknown-field/malformed body 400s, scope-forbidden, missing-token, x-correlator
+  echo) + the catalog contract test extended. `cargo test` green (1028, was 1008),
+  `cargo build --release` clean (no warnings). No new dependency. — binary:
+  2,261,616 bytes (2.2M)
 - 2026-08-05 — Phase 5: **QoS Provisioning v0.3** — CloudEvents notifications:
   added the **`AVAILABLE`-on-provisioning** event and the **`NETWORK_TERMINATED`**
   transition, so only TLS (`https://`) delivery remains cut. `createQosAssignment`

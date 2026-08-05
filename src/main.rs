@@ -208,6 +208,12 @@ async fn catalog() -> Json<Value> {
                 "version": "v0.3",
                 "base_path": "/qos-provisioning/v0.3",
                 "spec_url": "/qos-provisioning/v0.3/openapi.yaml",
+            },
+            {
+                "name": "device-data-volume",
+                "version": "vwip",
+                "base_path": "/device-data-volume/vwip",
+                "spec_url": "/device-data-volume/vwip/openapi.yaml",
             }
         ],
         "authorization_servers": [{
@@ -360,6 +366,10 @@ mod tests {
             && a["version"] == "v0.2"
             && a["base_path"] == "/connected-network-type/v0.2"
             && a["spec_url"] == "/connected-network-type/v0.2/openapi.yaml"));
+        assert!(apis.iter().any(|a| a["name"] == "device-data-volume"
+            && a["version"] == "vwip"
+            && a["base_path"] == "/device-data-volume/vwip"
+            && a["spec_url"] == "/device-data-volume/vwip/openapi.yaml"));
         assert!(apis.iter().any(|a| a["name"] == "region-device-count"
             && a["version"] == "v0.2"
             && a["base_path"] == "/region-device-count/v0.2"
