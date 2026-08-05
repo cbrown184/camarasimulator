@@ -42,6 +42,7 @@
 //! - **Application Profiles vwip** — `/application-profiles/vwip/…`.
 //! - **Subscription Status vwip** — `/subscription-status/vwip/…`.
 //! - **Device Authenticity vwip** — `/device-authenticity/vwip/…`.
+//! - **Session Insights vwip** — `/session-insights/vwip/…`.
 //!
 //! Plus [`openapi`], which serves each mounted API's vendored OpenAPI spec at
 //! `/{api}/v{n}/openapi.yaml` (docs/DESIGN.md §9).
@@ -79,6 +80,7 @@ pub mod qos_profiles;
 pub mod qos_provisioning;
 pub mod quality_on_demand;
 pub mod region_device_count;
+pub mod session_insights;
 pub mod sim_swap;
 pub mod simple_edge_discovery;
 pub mod subscription_status;
@@ -125,5 +127,6 @@ pub fn routes() -> Router {
         .merge(application_profiles::routes())
         .merge(subscription_status::routes())
         .merge(device_authenticity::routes())
+        .merge(session_insights::routes())
         .merge(openapi::routes())
 }

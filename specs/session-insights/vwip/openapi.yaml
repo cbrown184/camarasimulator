@@ -1,0 +1,440 @@
+# CamaraSim — Session Insights, API version vwip (CAMARA SessionInsights, wip).
+#
+# Vendored from the CAMARA SessionInsights API (work-in-progress — no released
+# version yet, so mounted at its canonical `vwip` base path
+# `/session-insights/vwip`, like the other pre-1.0 wip APIs) and annotated with
+# CamaraSim's parameter-driven functional cases (docs/DESIGN.md §7, §9). Backed by
+# `src/apis/session_insights/vwip.rs`; spec and code must not drift.
+#
+# This slice serves the create/read pair — `POST /sessions` and
+# `GET /sessions/{sessionId}`. The lifecycle endpoints (`DELETE`,
+# `POST /retrieve-sessions`, `POST /sessions/{sessionId}/metrics`) and the
+# CloudEvents notifications on `sink` are deferred to later passes.
+openapi: 3.0.3
+info:
+  title: Session Insights
+  description: |
+    Session Insights lets an application register an interest in the network
+    quality of a specific **application session** — a device talking to a named
+    application server — so the operator can later report quality metrics and
+    notify the application when the experience degrades or the session ends.
+
+    This is the CamaraSim reference double for CAMARA SessionInsights (wip). It is
+    a **stateful, resource-oriented** API: `POST /sessions` creates a session
+    resource and mints an opaque `id`, and `GET /sessions/{sessionId}` reads it
+    back. `POST` requires the `session-insights:sessions:create` scope; `GET` the
+    `session-insights:sessions:read` scope.
+
+    ## Identifier
+
+    The session is keyed by the CAMARA `Device` — the submitted `device`
+    identifier (phoneNumber, else networkAccessIdentifier, else the IPv4
+    `publicAddress`, else ipv6Address), or, when no `device` is supplied, the
+    access-token subject (three-legged fallback). Neither present →
+    `422 MISSING_IDENTIFIER`.
+
+    ## Functional cases — the input is the control plane (docs/DESIGN.md §7)
+
+    - **Reserved error suffix (identifier).** If the resolved identifier's trailing
+      three digits name a reserved CAMARA status, `POST` answers with that canonical
+      CAMARA error (shared convention — see the referenced `errors.yaml`): `…400`,
+      `…401`, `…403`, `…404`, `…409`, `…422`, `…429`, `…500`, `…503`. In particular
+      `…409` drives the `createSession` `409 CONFLICT` (duplicate session) case and
+      `…422` the `422 SERVICE_NOT_APPLICABLE`.
+    - **Open-ended vs time-bounded (identifier digits).** Otherwise the created
+      session is `ACTIVE` with `startsAt = now`; its `expiresAt` is present
+      (`startsAt + 24 h`) unless the identifier's trailing three digits are `…000`
+      (or it has no digits), which marks an **open-ended** session (no `expiresAt`).
+
+    Example: `+123456789012` → `201 ACTIVE` with an `expiresAt`; `+123456789000`
+    → `201 ACTIVE` open-ended (no `expiresAt`); `+123456789409` → `409 CONFLICT`.
+
+    CamaraSim exposes the full shared reserved-error set here so every reserved
+    suffix is reachable.
+  version: "wip"
+  license:
+    name: Apache-2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0.html
+
+servers:
+  - url: "{apiRoot}/session-insights/vwip"
+    variables:
+      apiRoot:
+        default: http://localhost:8080
+        description: API root, e.g. the CamaraSim base URL.
+
+paths:
+  /sessions:
+    post:
+      operationId: createSession
+      summary: Create a session insights resource
+      description: |
+        Register interest in the network quality of an application session and
+        obtain an opaque `id`. `applicationProfileId`, `applicationServer` and
+        `sink` are required; `device` is required only for a two-legged token.
+
+        See the API description for the parameter-driven functional cases (the
+        resolved identifier's trailing three digits select an open-ended vs a
+        time-bounded session, or a reserved CAMARA error).
+      security:
+        - openId:
+            - session-insights:sessions:create
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SessionRequest"
+      responses:
+        "201":
+          description: Session created.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionInfo"
+              examples:
+                timeBounded:
+                  summary: Time-bounded ACTIVE session (non-…000 tail)
+                  value:
+                    id: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+                    applicationSessionId: "game-42"
+                    device:
+                      phoneNumber: "+123456789012"
+                    applicationServer:
+                      ipv4Address: "198.51.100.1"
+                    sink: "https://callback.example/notify"
+                    startsAt: "2026-08-05T10:41:38Z"
+                    expiresAt: "2026-08-06T10:41:38Z"
+                    status: ACTIVE
+                openEnded:
+                  summary: Open-ended ACTIVE session (…000 tail — no expiresAt)
+                  value:
+                    id: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+                    device:
+                      phoneNumber: "+123456789000"
+                    applicationServer:
+                      ipv4Address: "198.51.100.1"
+                    sink: "https://callback.example/notify"
+                    startsAt: "2026-08-05T10:41:38Z"
+                    status: ACTIVE
+        "400":
+          description: |
+            400 — invalid request. CamaraSim returns `INVALID_ARGUMENT` for a
+            malformed body; a missing `applicationProfileId`, `applicationServer`
+            (or one carrying no endpoint field), or `sink` (or a `sink` that is not
+            an http(s) URI); an `applicationSessionId` longer than 256 characters;
+            or a malformed `phoneNumber`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionInsightsError"
+              examples:
+                invalidArgument:
+                  summary: Missing required field
+                  value:
+                    status: 400
+                    code: INVALID_ARGUMENT
+                    message: "`sink` is required."
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "409":
+          $ref: "../../shared/errors.yaml#/components/responses/Conflict"
+        "422":
+          description: |
+            422 — unprocessable. CamaraSim returns `MISSING_IDENTIFIER` when neither
+            a `device` nor a usable token subject is present, or the reserved shared
+            `SERVICE_NOT_APPLICABLE` for an identifier ending in the `…422` suffix.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionInsightsError"
+              examples:
+                missingIdentifier:
+                  summary: No device and no token subject
+                  value:
+                    status: 422
+                    code: MISSING_IDENTIFIER
+                    message: "No `device` supplied and the access token identifies no device."
+                serviceNotApplicable:
+                  summary: Reserved `…422` suffix
+                  value:
+                    status: 422
+                    code: SERVICE_NOT_APPLICABLE
+                    message: The service is not available for the provided identifier.
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          Result selected from the resolved identifier — the submitted `device`
+          id, else the token subject (docs/DESIGN.md §7). Reserved error suffixes
+          come from the shared convention in errors.yaml.
+        cases:
+          - input: identifier ending in a reserved error suffix (e.g. …404, …409, …422)
+            result: the canonical CAMARA error for that status
+          - input: "identifier trailing digits …000 (or no digits)"
+            result: "201 ACTIVE, open-ended (no expiresAt)"
+          - input: "identifier with any other trailing digits (e.g. …012)"
+            result: "201 ACTIVE, time-bounded (expiresAt = startsAt + 24h)"
+          - input: no device and no token subject
+            result: "422 MISSING_IDENTIFIER"
+          - input: missing applicationProfileId / applicationServer / sink, or a malformed sink or phoneNumber
+            result: "400 INVALID_ARGUMENT"
+
+  /sessions/{sessionId}:
+    get:
+      operationId: getSession
+      summary: Retrieve a session insights resource by id
+      description: |
+        Return the stored session representation for `sessionId` (verbatim as it
+        was created in this slice), or `404 NOT_FOUND` for an unknown id.
+      security:
+        - openId:
+            - session-insights:sessions:read
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+        - name: sessionId
+          in: path
+          required: true
+          description: Operator-assigned session identifier.
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: The stored session.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionInfo"
+        "400":
+          $ref: "../../shared/errors.yaml#/components/responses/InvalidArgument"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+      x-camarasim-scenarios:
+        description: >-
+          Keyed only on the in-memory store (docs/DESIGN.md §7).
+        cases:
+          - input: a sessionId returned by a prior createSession
+            result: "200 with the stored SessionInfo"
+          - input: an unknown sessionId
+            result: "404 NOT_FOUND"
+
+components:
+  securitySchemes:
+    openId:
+      $ref: "../../auth/openapi.yaml#/components/securitySchemes/camaraOAuth"
+
+  parameters:
+    XCorrelator:
+      name: x-correlator
+      in: header
+      required: false
+      description: Correlation id for the request, echoed back on the response.
+      schema:
+        type: string
+
+  headers:
+    XCorrelator:
+      description: The `x-correlator` from the request, echoed if one was sent.
+      required: false
+      schema:
+        type: string
+
+  schemas:
+    Device:
+      type: object
+      minProperties: 1
+      description: >-
+        The device the session concerns. At least one identifier must be present;
+        CamaraSim keys its functional cases off the first present identifier in the
+        order phoneNumber, networkAccessIdentifier, ipv4Address.publicAddress,
+        ipv6Address.
+      properties:
+        phoneNumber:
+          type: string
+          pattern: '^\+[1-9][0-9]{4,14}$'
+          example: "+123456789012"
+        networkAccessIdentifier:
+          type: string
+          example: "123456789@domain.com"
+        ipv4Address:
+          type: object
+          properties:
+            publicAddress:
+              type: string
+              format: ipv4
+            privateAddress:
+              type: string
+              format: ipv4
+            publicPort:
+              type: integer
+              minimum: 0
+              maximum: 65535
+        ipv6Address:
+          type: string
+          format: ipv6
+
+    DeviceResponse:
+      type: object
+      description: >-
+        The single identifier CamaraSim resolved for the session, echoed back.
+      minProperties: 1
+      properties:
+        phoneNumber:
+          type: string
+          pattern: '^\+[1-9][0-9]{4,14}$'
+        networkAccessIdentifier:
+          type: string
+        ipv4Address:
+          type: object
+          properties:
+            publicAddress:
+              type: string
+        ipv6Address:
+          type: string
+
+    ApplicationServer:
+      type: object
+      description: >-
+        The application server endpoint the session concerns. At least one of
+        `domainName`, `ipv4Address`, `ipv6Address` must be present. Echoed verbatim
+        in the response.
+      properties:
+        domainName:
+          type: string
+          example: "app.example.com"
+        ipv4Address:
+          type: string
+          example: "198.51.100.1"
+        ipv6Address:
+          type: string
+        port:
+          type: integer
+          minimum: 0
+          maximum: 65535
+
+    SessionRequest:
+      type: object
+      description: Request body for creating a session insights resource.
+      required:
+        - applicationProfileId
+        - applicationServer
+        - sink
+      properties:
+        applicationProfileId:
+          type: string
+          format: uuid
+          description: Identifier of the application profile the session applies to.
+          example: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+        device:
+          $ref: "#/components/schemas/Device"
+        applicationServer:
+          $ref: "#/components/schemas/ApplicationServer"
+        applicationSessionId:
+          type: string
+          maxLength: 256
+          description: Application-level correlation id, echoed back when provided.
+          example: "game-42"
+        sink:
+          type: string
+          format: uri
+          description: https callback (webhook) for later notifications.
+          example: "https://callback.example/notify"
+        sinkCredential:
+          type: object
+          description: >-
+            Credential the operator must present on the sink callback. Accepted for
+            schema fidelity; not used in this slice (notification delivery deferred).
+
+    SessionInfo:
+      type: object
+      additionalProperties: false
+      description: A session insights resource.
+      required:
+        - id
+        - applicationServer
+        - sink
+        - startsAt
+        - status
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Operator-assigned session identifier.
+          example: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+        applicationSessionId:
+          type: string
+          maxLength: 256
+          description: Application-level correlation id, echoed from the request.
+        device:
+          $ref: "#/components/schemas/DeviceResponse"
+        applicationServer:
+          $ref: "#/components/schemas/ApplicationServer"
+        sink:
+          type: string
+          format: uri
+        startsAt:
+          type: string
+          format: date-time
+          description: When the session started (RFC 3339 with time zone).
+          example: "2026-08-05T10:41:38Z"
+        expiresAt:
+          type: string
+          format: date-time
+          description: >-
+            When the session expires (RFC 3339 with time zone). Absent for an
+            open-ended session (a `…000`/no-digit identifier tail).
+          example: "2026-08-06T10:41:38Z"
+        status:
+          type: string
+          description: Session lifecycle state. A freshly created session is ACTIVE.
+          enum:
+            - ACTIVE
+            - EXPIRED
+            - DELETED
+          example: ACTIVE
+
+    SessionInsightsError:
+      description: >-
+        The CAMARA error body for this API — the shared `CamaraError` shape with
+        the Session Insights `code` set (the API's own `MISSING_IDENTIFIER` plus
+        the shared reserved-error codes).
+      allOf:
+        - $ref: "../../shared/errors.yaml#/components/schemas/CamaraError"
+        - type: object
+          properties:
+            code:
+              type: string
+              enum:
+                - INVALID_ARGUMENT
+                - UNAUTHENTICATED
+                - PERMISSION_DENIED
+                - NOT_FOUND
+                - CONFLICT
+                - MISSING_IDENTIFIER
+                - SERVICE_NOT_APPLICABLE
+                - TOO_MANY_REQUESTS
+                - INTERNAL
+                - UNAVAILABLE

@@ -1551,6 +1551,23 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     carries a deterministic `reportedDate` of `now − d hours`. `lastChecked` = now
     (self-contained RFC 3339 formatter, no new dep). `x-correlator` echoed.
     **Completes Device Authenticity vwip.**
+- [~] Session Insights vwip (`/session-insights/vwip`; CAMARA SessionInsights,
+  wip — no released version yet, mounted at its canonical `vwip` base path;
+  **stateful, resource-oriented**, non-spatial application-session resource):
+  - [x] `POST /sessions` (`session-insights:sessions:create`, `createSession`)
+    + `GET /sessions/{sessionId}` (`session-insights:sessions:read`, `getSession`)
+    — the create/read pair. `POST` mints an opaque UUID-shaped `id`, stores the
+    rendered `SessionInfo`, returns 201; `GET` reads it back (200) or 404
+    NOT_FOUND. Identifier = submitted `device` id else token subject (two/three
+    -legged, 422 MISSING_IDENTIFIER when neither). Control planes (DESIGN §7):
+    identifier reserved-error suffix → canonical CAMARA error (`…409` → the
+    createSession 409 CONFLICT); else `status:ACTIVE`, `startsAt:now`, and
+    `expiresAt` present (now+24h) unless the tail is `…000`/no-digits (open-ended).
+  - [ ] `DELETE /sessions/{sessionId}` (`deleteSession`) + `POST /retrieve-sessions`
+    (`retrieveSessionsByDevice`) + `POST /sessions/{sessionId}/metrics`
+    (`sendSessionMetrics`) — deferred to later passes.
+  - [ ] CloudEvents notifications on `sink` (`quality-score` / `session-ended`) —
+    deferred (http sink; TLS deferred as elsewhere).
 - [ ] Other CAMARA APIs as capacity allows
 
 ## Cross-cutting (do alongside the item that needs it)
@@ -1577,6 +1594,43 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-05 — Phase 5 (other CAMARA APIs): **Session Insights vwip —
+  `POST /sessions` (`createSession`) + `GET /sessions/{sessionId}` (`getSession`)**,
+  CamaraSim's first slice of the CAMARA SessionInsights (wip) API — a **stateful,
+  resource-oriented**, non-spatial application-session resource. Verified the
+  authoritative CAMARA spec via WebFetch (camaraproject/SessionInsights `main`;
+  version `wip`; base `/session-insights/vwip`; `createSession` requestBody
+  `SessionRequest {applicationProfileId(uuid,req), device?, applicationServer(req),
+  applicationSessionId?≤256, sink(uri,req), sinkCredential?}`; response `SessionInfo
+  {id(uuid,req), applicationSessionId?, device?, applicationServer(req), sink(req),
+  startsAt(req), expiresAt?, status(ACTIVE|EXPIRED|DELETED,req)}`; getSession →
+  200/404). Chosen over the two remaining `[ ]` sink-TLS leaves (still deferred:
+  rustls is a heavyweight, multi-MB dep vs the small-binary guardrail) and the
+  other unimplemented CAMARA repos (all stateful/edge/complex — ConsentManagement,
+  QoSBooking, eSimRemoteManagement, EdgeApplicationManagement, IoTDeviceManagement);
+  SessionInsights is the least-spatial and mirrors the existing QoD create/read
+  template almost exactly. Scoped to the natural create/read pair; DELETE /
+  retrieve-sessions / metrics / CloudEvents notifications deferred to later passes
+  (recorded as sub-steps). New `src/apis/session_insights/{,.rs,store.rs,vwip.rs}`
+  (in-memory `Mutex<HashMap>` store, lock never held across await, UUID-shaped id
+  via `SHA-256(counter‖now)` — no uuid/rand dep, mirroring QoD). Model (DESIGN §7):
+  identifier = submitted `device` id else token subject (two/three-legged, 422
+  MISSING_IDENTIFIER when neither); reserved-error suffix → canonical CAMARA error
+  (`…409` → createSession 409 CONFLICT, `…422` → SERVICE_NOT_APPLICABLE); else
+  `status:ACTIVE`, `startsAt:now`, and `expiresAt` present (now+24h) unless the tail
+  is `…000`/no-digits (open-ended). Validation: missing applicationProfileId /
+  applicationServer(no endpoint) / sink(non-http(s)) → 400; applicationSessionId
+  >256 → 400; malformed phoneNumber → 400. Unknown top-level fields tolerated;
+  Device strict. Self-contained RFC 3339 formatter (no new dep). Spec: new
+  `specs/session-insights/vwip/openapi.yaml` (vendored + annotated with
+  `x-camarasim-scenarios`; full shared reserved-error set). Wired into
+  `apis::routes`, the `/` catalog + its contract test, and `openapi::SPECS`. Tests:
+  21 new (3 pure units — RFC 3339 formatter, e164, http-uri; 18 router: time-bounded
+  vs open-ended create echoing inputs, read-back verbatim, unknown → 404,
+  three-legged subject fallback, reserved-suffix 404/409/422/429, missing
+  profileId/server/sink + malformed sink/phone/body → 400, scope/auth on POST & GET,
+  x-correlator on success/error). `cargo test` 1215 passed; `cargo build --release`
+  OK. No new dependency. — binary: 2.5M (2,522,880 bytes)
 - 2026-08-05 — Phase 5 (other CAMARA APIs): **Device Authenticity vwip —
   `POST /check-status` (`checkImeiStatus`, scope
   `device-authenticity:check-status`)**, a new stateless, non-spatial,

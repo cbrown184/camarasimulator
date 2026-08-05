@@ -250,6 +250,12 @@ async fn catalog() -> Json<Value> {
                 "version": "vwip",
                 "base_path": "/device-authenticity/vwip",
                 "spec_url": "/device-authenticity/vwip/openapi.yaml",
+            },
+            {
+                "name": "session-insights",
+                "version": "vwip",
+                "base_path": "/session-insights/vwip",
+                "spec_url": "/session-insights/vwip/openapi.yaml",
             }
         ],
         "authorization_servers": [{
@@ -430,6 +436,10 @@ mod tests {
             && a["version"] == "vwip"
             && a["base_path"] == "/device-authenticity/vwip"
             && a["spec_url"] == "/device-authenticity/vwip/openapi.yaml"));
+        assert!(apis.iter().any(|a| a["name"] == "session-insights"
+            && a["version"] == "vwip"
+            && a["base_path"] == "/session-insights/vwip"
+            && a["spec_url"] == "/session-insights/vwip/openapi.yaml"));
         assert_eq!(
             body["authorization_servers"][0]["openid_configuration"],
             "/.well-known/openid-configuration"
