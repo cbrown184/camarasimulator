@@ -41,6 +41,7 @@
 //! - **Verified Caller vwip** — `/verified-caller/vwip/…`.
 //! - **Application Profiles vwip** — `/application-profiles/vwip/…`.
 //! - **Subscription Status vwip** — `/subscription-status/vwip/…`.
+//! - **Device Authenticity vwip** — `/device-authenticity/vwip/…`.
 //!
 //! Plus [`openapi`], which serves each mounted API's vendored OpenAPI spec at
 //! `/{api}/v{n}/openapi.yaml` (docs/DESIGN.md §9).
@@ -52,6 +53,7 @@ pub mod carrier_billing;
 pub mod connected_network_type;
 pub mod connectivity_insights;
 pub mod customer_insights;
+pub mod device_authenticity;
 pub mod device_data_volume;
 pub mod device_identifier;
 pub mod device_swap;
@@ -122,5 +124,6 @@ pub fn routes() -> Router {
         .merge(verified_caller::routes())
         .merge(application_profiles::routes())
         .merge(subscription_status::routes())
+        .merge(device_authenticity::routes())
         .merge(openapi::routes())
 }

@@ -244,6 +244,12 @@ async fn catalog() -> Json<Value> {
                 "version": "vwip",
                 "base_path": "/subscription-status/vwip",
                 "spec_url": "/subscription-status/vwip/openapi.yaml",
+            },
+            {
+                "name": "device-authenticity",
+                "version": "vwip",
+                "base_path": "/device-authenticity/vwip",
+                "spec_url": "/device-authenticity/vwip/openapi.yaml",
             }
         ],
         "authorization_servers": [{
@@ -420,6 +426,10 @@ mod tests {
             && a["version"] == "vwip"
             && a["base_path"] == "/verified-caller/vwip"
             && a["spec_url"] == "/verified-caller/vwip/openapi.yaml"));
+        assert!(apis.iter().any(|a| a["name"] == "device-authenticity"
+            && a["version"] == "vwip"
+            && a["base_path"] == "/device-authenticity/vwip"
+            && a["spec_url"] == "/device-authenticity/vwip/openapi.yaml"));
         assert_eq!(
             body["authorization_servers"][0]["openid_configuration"],
             "/.well-known/openid-configuration"

@@ -869,6 +869,20 @@ schema's `0..=1024`) and `d % 5` picks the `unit` from the lowest-first enum
 a genuine control plane. `device` echoed only for a phoneNumber request. No new
 dependency. `x-correlator` echoed on every response.
 
+**Device Authenticity vwip** is now live at `/device-authenticity/vwip/check-status`
+(`device-authenticity:check-status`, operationId `checkImeiStatus`) — a stateless,
+non-spatial, **IMEI-keyed** anti-fraud query. The caller submits an `imei` (15
+digits, required — no two/three-legged fallback, the device is named explicitly)
+and the operator answers its register status: `{ imei, operationalStatus,
+lastChecked, reportedDate? }`. Two control planes (DESIGN §7): the IMEI's
+reserved-error suffix → canonical CAMARA error (`…404` → NOT_FOUND over the API's
+own `IDENTIFIER_NOT_FOUND`, `…422` → SERVICE_NOT_APPLICABLE); else its trailing
+three digits `d` pick `operationalStatus` by `d % 9` over the nine-value enum in
+order (`…000` → `allowed` default, `…001` → `lost`, `…002` → `stolen`, …, `…008`
+→ `unknown`), and a non-`allowed` status carries a deterministic `reportedDate` of
+`now − d hours`. `lastChecked` is a fresh RFC 3339 UTC timestamp (self-contained
+formatter, no new dependency). `x-correlator` echoed on every response.
+
 ## In progress (claimed this pass)
 
 _None._  <!-- agent: put the claimed item + run timestamp here, clear it when done -->
@@ -1521,6 +1535,22 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     `dataService` active/suspended/throttled — so `…000`/no-digits is the
     all-active default and each field is independently controllable. No new dep.
     **Completes Subscription Status vwip.**
+- [x] Device Authenticity vwip (`/device-authenticity/vwip`; CAMARA
+  DeviceAuthenticity, wip — no released version yet, mounted at its canonical
+  `vwip` base path; stateless, non-spatial, **IMEI-keyed** anti-fraud query):
+  - [x] `POST /check-status` (`device-authenticity:check-status`,
+    `checkImeiStatus`) — `{ imei, operationalStatus, lastChecked, reportedDate? }`,
+    the register / operational status of a device by its IMEI. The IMEI is the
+    required identifier (no two-legged / three-legged fallback; missing or
+    non-15-digit → 400 INVALID_ARGUMENT). Two control planes (DESIGN §7):
+    identifier reserved-error suffix → canonical CAMARA error (`…404` → NOT_FOUND
+    over the API's own IDENTIFIER_NOT_FOUND, `…422` → SERVICE_NOT_APPLICABLE);
+    else the IMEI's trailing three digits `d` pick the `operationalStatus` by
+    `d % 9` over the nine-value enum in order (`…000` → `allowed` default, `…001`
+    → `lost`, `…002` → `stolen`, …, `…008` → `unknown`); a non-`allowed` status
+    carries a deterministic `reportedDate` of `now − d hours`. `lastChecked` = now
+    (self-contained RFC 3339 formatter, no new dep). `x-correlator` echoed.
+    **Completes Device Authenticity vwip.**
 - [ ] Other CAMARA APIs as capacity allows
 
 ## Cross-cutting (do alongside the item that needs it)
@@ -1547,6 +1577,37 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-05 — Phase 5 (other CAMARA APIs): **Device Authenticity vwip —
+  `POST /check-status` (`checkImeiStatus`, scope
+  `device-authenticity:check-status`)**, a new stateless, non-spatial,
+  **IMEI-keyed** anti-fraud query — the register / operational status of a device.
+  Chosen over the remaining `[ ]` leaves (QoD / QoS-Provisioning `https://` sink
+  TLS delivery — still deferred: a rustls TLS client is a heavyweight, multi-MB
+  dependency vs the "keep binary small" guardrail), as a higher-phase-priority
+  stateless API. Verified the authoritative CAMARA spec via WebFetch
+  (camaraproject/DeviceAuthenticity `main`; version `wip`; base
+  `/device-authenticity/vwip`; requestBody required, `RequestBody {imei required,
+  ^[0-9]{15}$}`; response `ImeiStatus {imei, operationalStatus(enum:
+  allowed|lost|stolen|blacklisted|blocked|fraud|non-payment|regulatory|unknown),
+  reportedDate?}` + `CommonResponseBody {lastChecked}`; errors
+  400/401/403/404(IDENTIFIER_NOT_FOUND)/422(SERVICE_NOT_APPLICABLE)/429). New
+  `src/apis/device_authenticity/{,.rs,vwip.rs}`. Model (DESIGN §7): the IMEI is the
+  required identifier (no two/three-legged fallback — device named explicitly);
+  reserved-error suffix → canonical CAMARA error (`…404`→NOT_FOUND, `…422`→
+  SERVICE_NOT_APPLICABLE); else trailing three digits `d` pick the status by
+  `d % 9` over the nine-value enum in order (`…000`→allowed default, `…001`→lost,
+  …, `…008`→unknown), a non-`allowed` status carrying `reportedDate` = now − d h.
+  Unknown request fields tolerated (CAMARA RequestBody omits
+  additionalProperties:false). Self-contained RFC 3339 formatter (no new dep,
+  mirroring Device Swap). Spec: new `specs/device-authenticity/vwip/openapi.yaml`
+  (vendored + annotated with `x-camarasim-scenarios`; full shared reserved-error
+  set). Wired into `apis::routes`, the `/` catalog, `openapi::SPECS`, and the
+  catalog contract test. Tests: 16 new (2 pure units — 15-digit IMEI validation,
+  RFC 3339 formatter; 14 router: allowed default w/o reportedDate, each status in
+  order, adverse reportedDate, mod-9 wrap, reserved-error suffixes, missing/
+  non-15-digit/malformed body → 400, unknown fields tolerated, scope/auth,
+  x-correlator on success/error). `cargo test` 1194 passed; `cargo build --release`
+  OK. No new dependency. — binary: 2.4M (2,486,648 bytes)
 - 2026-08-05 — Phase 5 (Carrier Billing v0.5): **`GET /payments`
   (`retrievePayments`) now applies its `page`/`perPage`/`order` query
   parameters** — closing the "accepted but not applied" documented cut. The
