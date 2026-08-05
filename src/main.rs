@@ -190,6 +190,12 @@ async fn catalog() -> Json<Value> {
                 "version": "v0.2",
                 "base_path": "/region-device-count/v0.2",
                 "spec_url": "/region-device-count/v0.2/openapi.yaml",
+            },
+            {
+                "name": "device-visit-location",
+                "version": "vwip",
+                "base_path": "/device-visit-location/vwip",
+                "spec_url": "/device-visit-location/vwip/openapi.yaml",
             }
         ],
         "authorization_servers": [{

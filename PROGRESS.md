@@ -745,6 +745,36 @@ RFC 3339 parser, no new dep), empty/bad `filter` → `INVALID_ARGUMENT`, and
 `sink`/CloudEvents delivery surface (and its 410 GONE) is a documented cut. No
 new dependency. `x-correlator` echoed on every response.
 
+**Phase 5 (other CAMARA APIs) — Device Visit Location vwip** is now live, a new
+stateless, device-keyed anti-fraud / identity-assurance API mounted at its
+canonical **`vwip`** base path `/device-visit-location/vwip` (CAMARA
+device-visit-location — the API has **no released version yet**, its upstream
+`main` spec is versioned `wip`, so — unlike the published sub-1.0 APIs like KYC
+Match v0.3 / Location Retrieval v0.4 — the canonical path segment is literally
+`vwip`; a numbered version will be added when CAMARA cuts a release). `POST
+/retrieve` (scope `device-visit-location:retrieve`, operationId
+`retrieveDeviceVisitLocation`) answers **where a device has been** over a
+caller-supplied time window — a coarse `geoCodeList` of `{ countryCode,
+codeType: "PostalCode", codeValue }` geographic codes, never precise
+coordinates. Device-object identifier resolution mirrors Connected Network Type
+/ Simple Edge Discovery (submitted `device` id — phoneNumber → NAI → IPv4
+publicAddress → ipv6Address — else token subject) with the two-legged /
+three-legged rule (a `device` on a line token → 422 `UNNECESSARY_IDENTIFIER`; no
+device + a non-line subject → 422 `MISSING_IDENTIFIER`; empty `device` → 400
+`INVALID_ARGUMENT`). **Two control planes** (DESIGN §7): (1) the identifier —
+reserved error suffix → canonical CAMARA error (checked first, so it dominates);
+else a `…000` / no-digit tail → 404 `DEVICE_VISIT_LOCATION.DATA_NOT_FOUND` (no
+recorded visit; "no data" is a 404 rather than an empty list because
+`geoCodeList` is `minItems: 1`); else the trailing three digits `d` yield
+`((d - 1) % 3) + 1` codes (1–3), the `i`-th on `COUNTRIES[(d + i) % 6]` over a
+fixed `[US, GB, DE, FR, ES, IT]` table with a deterministic 5-digit postal code,
+so both the number of places and the countries are a genuine second plane; and
+(2) the required RFC 3339 `startTime`/`endTime` window — malformed → 400
+`INVALID_ARGUMENT`, `endTime < startTime` → 400
+`DEVICE_VISIT_LOCATION.INVALID_END_DATE` (self-contained RFC 3339 parser, no new
+dep, mirroring Region Device Count). `x-correlator` echoed on every response. No
+new dependency.
+
 ## In progress (claimed this pass)
 
 _None._  <!-- agent: put the claimed item + run timestamp here, clear it when done -->
@@ -1139,6 +1169,26 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     sinkCredential → INVALID_CREDENTIAL/INVALID_TOKEN. Shoelace area, no new dep.
     Async `sink`/CloudEvents (+ 410 GONE) a documented cut. **Completes Region
     Device Count v0.2.**
+- [x] Device Visit Location vwip (`/device-visit-location/vwip`; CAMARA
+  device-visit-location, wip — no released version yet, so mounted at its
+  canonical `vwip` base path; stateless, device-keyed anti-fraud / identity):
+  - [x] `POST /retrieve` (`device-visit-location:retrieve`,
+    `retrieveDeviceVisitLocation`) — `{ geoCodeList: [{ countryCode, codeType:
+    "PostalCode", codeValue }] }`, the coarse places a device visited over a
+    required RFC 3339 `startTime`/`endTime` window (never coordinates).
+    Device-object identifier resolution + the two-legged/three-legged rule
+    (mirrors Connected Network Type): `device` on a line token → 422
+    `UNNECESSARY_IDENTIFIER`; no `device` + non-line subject → 422
+    `MISSING_IDENTIFIER`; empty `device` → 400 `INVALID_ARGUMENT`. Two control
+    planes (DESIGN §7): the identifier — reserved error suffix → canonical CAMARA
+    error (checked first); else `…000`/no-digits → 404
+    `DEVICE_VISIT_LOCATION.DATA_NOT_FOUND` (non-empty `geoCodeList`, so no-data is
+    a 404); else trailing digits `d` → `((d-1)%3)+1` codes, `i`-th on
+    `COUNTRIES[(d+i)%6]` of `[US,GB,DE,FR,ES,IT]`, deterministic postal codes —
+    and the `startTime`/`endTime` window (malformed → 400 `INVALID_ARGUMENT`;
+    `endTime < startTime` → 400 `DEVICE_VISIT_LOCATION.INVALID_END_DATE`;
+    self-contained RFC 3339 parser, no new dep). `x-correlator` echoed.
+    **Completes Device Visit Location vwip.**
 - [ ] Other CAMARA APIs as capacity allows
 
 ## Cross-cutting (do alongside the item that needs it)
@@ -1157,6 +1207,21 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-05 — Phase 5 (other CAMARA APIs): **Device Visit Location vwip** — new
+  stateless, device-keyed API `POST /device-visit-location/vwip/retrieve`
+  (`retrieveDeviceVisitLocation`, scope `device-visit-location:retrieve`).
+  Mounted at its canonical `vwip` path (the API has no released version yet).
+  Returns a `geoCodeList` of `{countryCode, codeType:"PostalCode", codeValue}`
+  places a device visited over a required RFC 3339 `startTime`/`endTime` window.
+  Two control planes (DESIGN §7): the identifier (device id → token subject,
+  two/three-legged rule; reserved suffix → canonical error checked first;
+  `…000`/no-digits → 404 `DEVICE_VISIT_LOCATION.DATA_NOT_FOUND`; else
+  `((d-1)%3)+1` codes over a fixed `[US,GB,DE,FR,ES,IT]` table w/ deterministic
+  postal codes) and the time window (malformed → 400 `INVALID_ARGUMENT`;
+  `endTime < startTime` → 400 `DEVICE_VISIT_LOCATION.INVALID_END_DATE`;
+  self-contained RFC 3339 parser). Vendored + annotated spec at
+  `specs/device-visit-location/vwip/openapi.yaml`, served + catalogued. No new
+  dependency. Added 23 tests; 929 tests green (was 906). — binary: 2.1M (2122808 B)
 - 2026-08-04 23:45Z — Phase 5 (other CAMARA APIs): **Region Device Count v0.2**
   — new stateless, **area-keyed** (not identifier-keyed) aggregate-count API,
   **completes the API in one pass** (single endpoint). The published stateless
