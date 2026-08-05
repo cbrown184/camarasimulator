@@ -1437,6 +1437,26 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     `edgeCloudRegion` values of the fixed 6-entry zone table, in table order
     (≤20 per the schema). `x-correlator` echoed. **Completes Optimal Edge
     Discovery vwip.**
+- [x] Verified Caller vwip (`/verified-caller/vwip`; CAMARA Verified Caller, wip
+  — no released version yet, mounted at its canonical `vwip` base path;
+  stateless, non-spatial, two-legged / business-facing anti-scam caller-trust
+  API):
+  - [x] `POST /pre-announce` (`verified-caller:create`, `createPreAnnouncement`)
+    — pre-announce an outbound call so the network can verify the calling party
+    to the called party (SMS or branded display) before it rings. Two-legged
+    only: both `callingParticipant` and `calledParticipant` are required in the
+    body (no line subject → no two-legged/three-legged dance). Control planes
+    (DESIGN §7): the `calledParticipant` is the identifier — a reserved error
+    suffix → canonical CAMARA error (`…404` = participant not found); else
+    `strategy` selects the response shape (`BRAND_DISPLAY` → `201
+    {preAnnouncementId, expiresAt}`, `SMS`/omitted default → `204 No Content`);
+    and `timeToLive` (default 120 s) sets `expiresAt` = now + ttl on the `201`
+    path. `preAnnouncementId` is a deterministic UUID-shaped SHA-256 token (no
+    uuid/rand dep). Validation: bad body / non-E.164 participant / unknown
+    `strategy` / over-length `registrationId`/`dynamicDisplayName`/`callReason`
+    → 400 INVALID_ARGUMENT; `timeToLive` ∉ 1..=86400 → 400 OUT_OF_RANGE.
+    Stateless (no read-back → no store). `x-correlator` echoed on every response
+    incl. the `204`. **Completes Verified Caller vwip.**
 - [ ] Other CAMARA APIs as capacity allows
 
 ## Cross-cutting (do alongside the item that needs it)
@@ -1463,6 +1483,37 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-05 — Phase 5 (other CAMARA APIs): **Verified Caller vwip
+  `POST /pre-announce` (`createPreAnnouncement`)**, a new stateless, non-spatial,
+  two-legged / business-facing anti-scam caller-trust API — the first Fall25 API
+  added. Verified the authoritative CAMARA spec via WebFetch (CAMARA
+  VerifiedCaller, `main`, version `wip`; base `/verified-caller/vwip`; scope
+  `verified-caller:create`; request `CreatePreAnnouncementRequest
+  {callingParticipant(req,PhoneNumber), calledParticipant(req,PhoneNumber),
+  strategy?(SMS|BRAND_DISPLAY,≤32), timeToLive?(1..86400),
+  registrationId?(uuid,≤256), dynamicDisplayName?(≤32), callReason?(≤32)}`;
+  responses `201 AnnouncementInfo {preAnnouncementId(uuid,≤256),
+  expiresAt(date-time)}` **or** `204`; errors 400/401/403/404/409/422/429).
+  Confirmed Scam Signal is NOT a public CAMARA API (private GSMA repo) and the
+  simple stateless phone-keyed space is otherwise exhausted, so picked this new
+  Fall25 API. New `src/apis/verified_caller/{,.rs,vwip.rs}`: two-legged only
+  (both participants required in the body → no two-legged/three-legged dance),
+  stateless (no read-back → no store). Model (DESIGN §7): `calledParticipant` is
+  the identifier — reserved suffix → canonical error (checked after validation);
+  else `strategy` selects the response (`BRAND_DISPLAY` → 201 with a handle, `SMS`
+  /omitted default → 204) and `timeToLive` (default 120 s) sets `expiresAt` = now
+  + ttl on the 201 path; `preAnnouncementId` a deterministic UUID-shaped SHA-256
+  token (reuses `sha2`, no new dep). Validation: bad body / non-E.164 participant
+  / unknown strategy / over-length text fields → 400 INVALID_ARGUMENT; timeToLive
+  ∉ 1..=86400 → 400 OUT_OF_RANGE. Spec: new
+  `specs/verified-caller/vwip/openapi.yaml` (vendored + annotated with
+  `x-camarasim-scenarios`; full shared reserved-error set). Wired into
+  `apis::routes`, the `/` catalog, `openapi::SPECS`, and the catalog contract
+  test. Tests: 20 new (4 pure units + 16 router tests: strategy 201/204 planes,
+  timeToLive→expiresAt, reserved-error on calledParticipant, calling-participant
+  is not the error plane, validation set, scope/auth, x-correlator on
+  201/204/error). `cargo test` 1119 passed; `cargo build --release` OK. No new
+  dependency. — binary: 2.3M (2,369,528 bytes)
 - 2026-08-05 — Phase 5 (other CAMARA APIs): **Optimal Edge Discovery vwip
   `GET /regions` (`getRegions`)**, completing the API. Verified the authoritative
   CAMARA spec via WebFetch (CAMARA OptimalEdgeDiscovery, `main`; scope

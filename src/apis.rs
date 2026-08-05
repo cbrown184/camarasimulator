@@ -38,6 +38,7 @@
 //! - **QoS Provisioning v0.3** — `/qos-provisioning/v0.3/…`.
 //! - **Media Streaming Rate vwip** — `/media-streaming-rate/vwip/…`.
 //! - **Optimal Edge Discovery vwip** — `/optimal-edge-discovery/vwip/…`.
+//! - **Verified Caller vwip** — `/verified-caller/vwip/…`.
 //!
 //! Plus [`openapi`], which serves each mounted API's vendored OpenAPI spec at
 //! `/{api}/v{n}/openapi.yaml` (docs/DESIGN.md §9).
@@ -75,6 +76,7 @@ pub mod quality_on_demand;
 pub mod region_device_count;
 pub mod sim_swap;
 pub mod simple_edge_discovery;
+pub mod verified_caller;
 
 use axum::Router;
 
@@ -113,5 +115,6 @@ pub fn routes() -> Router {
         .merge(qos_provisioning::routes())
         .merge(media_streaming_rate::routes())
         .merge(optimal_edge_discovery::routes())
+        .merge(verified_caller::routes())
         .merge(openapi::routes())
 }
