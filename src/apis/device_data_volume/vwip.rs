@@ -1,9 +1,16 @@
 //! Device Data Volume **vwip** (CAMARA Device Data Volume, work-in-progress).
 //!
-//! One endpoint so far:
+//! Two endpoints:
 //! - `POST /device-data-volume/vwip/retrieve` — which coarse data-volume category
 //!   (`<200MiB`/`<1GiB`/`<5GiB`/`>=5GiB`) has the device consumed?
 //!   (operationId `retrieveDataVolume`).
+//! - `POST /device-data-volume/vwip/check` — does the device's **remaining** data
+//!   volume exceed a caller-supplied threshold? (operationId `checkDataVolume`).
+//!
+//! Both endpoints share the identifier-resolution rules, the reserved-error
+//! convention, and the `device-data-volume:read` scope. `retrieve` reports the
+//! device's *consumed* bucket; `check` answers a boolean against its *remaining*
+//! volume (see [`check`] and [`remaining_data_volume_mib`]).
 //!
 //! ## What it does
 //!
@@ -77,6 +84,10 @@ use crate::scenarios;
 /// Volume).
 const RETRIEVE_SCOPE: &str = "device-data-volume:read";
 
+/// The OAuth2 scope the `POST /check` endpoint requires — the same read scope as
+/// `retrieve` (CAMARA Device Data Volume declares one scope for the API).
+const CHECK_SCOPE: &str = "device-data-volume:read";
+
 /// The data-volume categories (CAMARA `dataVolumeCategory` enum), lowest-first.
 /// The identifier's trailing three digits pick one (`digits % CATEGORIES.len()`),
 /// so the reported bucket is deterministic from the device — a genuine second
@@ -86,7 +97,9 @@ const CATEGORIES: [&str; 4] = ["<200MiB", "<1GiB", "<5GiB", ">=5GiB"];
 
 /// Routes for Device Data Volume vwip, mounted at their canonical URLs.
 pub fn routes() -> Router {
-    Router::new().route("/device-data-volume/vwip/retrieve", post(retrieve))
+    Router::new()
+        .route("/device-data-volume/vwip/retrieve", post(retrieve))
+        .route("/device-data-volume/vwip/check", post(check))
 }
 
 /// `POST /retrieve` request body (CAMARA `RetrieveDataVolumeRequest`). `device`
@@ -186,6 +199,121 @@ fn data_volume_category(identifier: &str) -> &'static str {
     let idx =
         scenarios::trailing_three_digits(identifier).unwrap_or(0) as usize % CATEGORIES.len();
     CATEGORIES[idx]
+}
+
+/// `POST /check` request body (CAMARA `CheckDataVolumeRequest`). `device` is
+/// optional (omit it under a three-legged token); `volumeToCheck` is **required**.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CheckRequest {
+    device: Option<Device>,
+    #[serde(rename = "volumeToCheck")]
+    volume_to_check: VolumeToCheck,
+}
+
+/// The threshold to compare the device's remaining volume against (CAMARA
+/// `volumeToCheck`). `value` is an int32 in `0..=1024`; `unit` is `MiB`/`GiB`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct VolumeToCheck {
+    value: i64,
+    unit: VolumeUnit,
+}
+
+/// The CAMARA `VolumeUnitEnum`: `MiB` (2^20 bytes) or `GiB` (2^30 bytes). An
+/// unknown unit fails deserialization → `400 INVALID_ARGUMENT`.
+#[derive(Debug, Clone, Copy, Deserialize)]
+enum VolumeUnit {
+    MiB,
+    GiB,
+}
+
+/// The `value`/`unit` range CamaraSim accepts for `volumeToCheck.value`
+/// (CAMARA schema `minimum: 0`, `maximum: 1024`).
+const VOLUME_VALUE_MAX: i64 = 1024;
+
+/// `POST /device-data-volume/vwip/check`.
+///
+/// Answers `{ "thresholdExceeded": bool, "lastStatusTime": …, "device"?: … }` —
+/// whether the device's **remaining** data volume exceeds the caller-supplied
+/// `volumeToCheck`. `volumeToCheck` is required (an empty/malformed body or an
+/// out-of-range `value` is rejected before the identifier is resolved), then the
+/// same identifier resolution and reserved-error convention as `retrieve` apply.
+async fn check(claims: Claims, headers: HeaderMap, body: Bytes) -> Response {
+    // Optional correlation header, echoed on every response (CAMARA Commonalities).
+    let correlator = headers.get("x-correlator").cloned();
+
+    // Endpoint authorisation: the token must carry this API's scope.
+    if let Err(e) = claims.require_scope(CHECK_SCOPE) {
+        return with_correlator(e.into_response(), &correlator);
+    }
+
+    // `volumeToCheck` is required, so the body must be present and well-formed.
+    let req: CheckRequest = match serde_json::from_slice(&body) {
+        Ok(req) => req,
+        Err(_) => {
+            return invalid_argument(
+                "Request body is not a valid CheckDataVolumeRequest (`volumeToCheck` is required).",
+                &correlator,
+            )
+        }
+    };
+
+    // Validate the threshold's range first (mirrors KYC Age Verification's
+    // `ageThreshold` plane): a `value` outside `0..=1024` → 400 OUT_OF_RANGE.
+    if !(0..=VOLUME_VALUE_MAX).contains(&req.volume_to_check.value) {
+        return out_of_range(
+            "`volumeToCheck.value` must be in the range 0..=1024.",
+            &correlator,
+        );
+    }
+
+    // Resolve the device identifier, honouring the two-legged / three-legged rule.
+    let resolved = match resolve_identifier(req.device, &claims, &correlator) {
+        Ok(id) => id,
+        Err(resp) => return resp,
+    };
+
+    // The identifier is the first control plane (docs/DESIGN.md §7), checked first.
+    if let Some(err) = scenarios::reserved_error(&resolved.identifier) {
+        return with_correlator(err.into_response(), &correlator);
+    }
+
+    // Second control plane: the device's remaining volume vs the threshold.
+    let remaining_mib = remaining_data_volume_mib(&resolved.identifier);
+    let threshold_mib = to_mib(req.volume_to_check.value, req.volume_to_check.unit);
+    let threshold_exceeded = remaining_mib > threshold_mib;
+
+    let mut out = json!({
+        "thresholdExceeded": threshold_exceeded,
+        "lastStatusTime": rfc3339_utc(now_unix_secs()),
+    });
+    // The CAMARA DeviceResponse carries only `phoneNumber` (echo phone-keyed only).
+    if let Some(phone) = resolved.phone_number {
+        out["device"] = json!({ "phoneNumber": phone });
+    }
+
+    with_correlator((StatusCode::OK, Json(out)).into_response(), &correlator)
+}
+
+/// The device's **remaining** data volume, in MiB, deterministic from
+/// `identifier` (docs/DESIGN.md §7). The trailing three digits `d` (`0..=999`;
+/// no digits → 0) scale to `d * 10` MiB (`0..=9990` MiB ≈ 9.75 GiB), so the same
+/// device always reports the same remaining volume. This is a distinct quantity
+/// from `retrieve`'s *consumed* bucket. `…000` / a no-digit identifier → `0` MiB
+/// remaining, so it never exceeds a positive threshold.
+fn remaining_data_volume_mib(identifier: &str) -> i64 {
+    scenarios::trailing_three_digits(identifier).unwrap_or(0) as i64 * 10
+}
+
+/// Normalise a `volumeToCheck` `(value, unit)` to MiB (`GiB` → `value * 1024`),
+/// so the threshold can be compared against [`remaining_data_volume_mib`]. Cannot
+/// overflow: `value <= 1024`, so the largest product is `1024 * 1024` MiB.
+fn to_mib(value: i64, unit: VolumeUnit) -> i64 {
+    match unit {
+        VolumeUnit::MiB => value,
+        VolumeUnit::GiB => value * 1024,
+    }
 }
 
 /// A resolved device identifier plus, when it is a phone number, that number
@@ -303,6 +431,15 @@ fn unprocessable(code: &str, message: &str, correlator: &Option<HeaderValue>) ->
 /// A 400 `INVALID_ARGUMENT` CAMARA error, with the correlator echoed.
 fn invalid_argument(message: &str, correlator: &Option<HeaderValue>) -> Response {
     with_correlator(CamaraError::invalid_argument(message).into_response(), correlator)
+}
+
+/// A 400 `OUT_OF_RANGE` CAMARA error, with the correlator echoed (used for a
+/// `volumeToCheck.value` outside its `0..=1024` schema range).
+fn out_of_range(message: &str, correlator: &Option<HeaderValue>) -> Response {
+    with_correlator(
+        CamaraError::new(StatusCode::BAD_REQUEST, "OUT_OF_RANGE", message).into_response(),
+        correlator,
+    )
 }
 
 /// Echo the request's `x-correlator` onto a response, if one was supplied.
@@ -676,6 +813,304 @@ mod tests {
         assert_eq!(
             headers.get("x-correlator").and_then(|v| v.to_str().ok()),
             Some("corr-err")
+        );
+    }
+
+    // ======================================================================
+    // POST /check (checkDataVolume)
+    // ======================================================================
+
+    // --- Pure scenario units ----------------------------------------------
+
+    #[test]
+    fn remaining_volume_scales_with_the_trailing_digits() {
+        // …000 / no digits → 0 MiB remaining (never exceeds a positive threshold).
+        assert_eq!(remaining_data_volume_mib("+123456789000"), 0);
+        assert_eq!(remaining_data_volume_mib("ddv-client"), 0);
+        // d * 10 MiB.
+        assert_eq!(remaining_data_volume_mib("+123456789050"), 500);
+        assert_eq!(remaining_data_volume_mib("+123456789500"), 5000);
+        assert_eq!(remaining_data_volume_mib("+123456789999"), 9990);
+    }
+
+    #[test]
+    fn to_mib_normalises_the_unit() {
+        assert_eq!(to_mib(500, VolumeUnit::MiB), 500);
+        assert_eq!(to_mib(1, VolumeUnit::GiB), 1024);
+        assert_eq!(to_mib(1024, VolumeUnit::GiB), 1024 * 1024);
+        assert_eq!(to_mib(0, VolumeUnit::MiB), 0);
+    }
+
+    // --- Integration through the real router -------------------------------
+
+    /// POST to `/check` with an optional Bearer token and optional correlator.
+    async fn post_check(
+        token: Option<&str>,
+        body: &str,
+        correlator: Option<&str>,
+    ) -> (StatusCode, HeaderMap, Value) {
+        let mut builder = Request::builder()
+            .method("POST")
+            .uri("/device-data-volume/vwip/check")
+            .header("host", HOST)
+            .header("content-type", "application/json");
+        if let Some(t) = token {
+            builder = builder.header("authorization", format!("Bearer {t}"));
+        }
+        if let Some(c) = correlator {
+            builder = builder.header("x-correlator", c);
+        }
+        let response = app()
+            .oneshot(builder.body(Body::from(body.to_string())).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let headers = response.headers().clone();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, headers, json)
+    }
+
+    /// Mint a scoped (two-legged, non-line subject) token and call `/check`.
+    async fn check_ok(body: &str) -> (StatusCode, HeaderMap, Value) {
+        let token = mint_token(CHECK_SCOPE).await;
+        post_check(Some(&token), body, None).await
+    }
+
+    #[tokio::test]
+    async fn threshold_is_a_second_control_plane_for_a_fixed_device() {
+        // …450 → 4500 MiB remaining (450 is not a reserved error suffix). The same
+        // device flips true↔false as the threshold moves — a genuine second
+        // control plane (docs/DESIGN.md §7).
+        let (status, _, body) = check_ok(
+            r#"{"device":{"phoneNumber":"+123456789450"},"volumeToCheck":{"value":4,"unit":"GiB"}}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        // 4500 MiB > 4096 MiB → exceeds.
+        assert_eq!(body["thresholdExceeded"], true);
+        assert!(body["lastStatusTime"].as_str().unwrap().ends_with('Z'));
+        assert_eq!(body["device"]["phoneNumber"], "+123456789450");
+
+        let (_, _, body) = check_ok(
+            r#"{"device":{"phoneNumber":"+123456789450"},"volumeToCheck":{"value":5,"unit":"GiB"}}"#,
+        )
+        .await;
+        // 4500 MiB > 5120 MiB → does not exceed.
+        assert_eq!(body["thresholdExceeded"], false);
+    }
+
+    #[tokio::test]
+    async fn device_is_a_control_plane_for_a_fixed_threshold() {
+        // Threshold 1 GiB (1024 MiB). Remaining scales with the device tail.
+        let (_, _, body) = check_ok(
+            r#"{"device":{"phoneNumber":"+123456789050"},"volumeToCheck":{"value":1,"unit":"GiB"}}"#,
+        )
+        .await;
+        // …050 → 500 MiB remaining < 1024 → false.
+        assert_eq!(body["thresholdExceeded"], false);
+
+        let (_, _, body) = check_ok(
+            r#"{"device":{"phoneNumber":"+123456789200"},"volumeToCheck":{"value":1,"unit":"GiB"}}"#,
+        )
+        .await;
+        // …200 → 2000 MiB remaining > 1024 → true.
+        assert_eq!(body["thresholdExceeded"], true);
+    }
+
+    #[tokio::test]
+    async fn zero_remaining_never_exceeds() {
+        // …000 → 0 MiB remaining → no positive threshold is exceeded.
+        let (status, _, body) = check_ok(
+            r#"{"device":{"phoneNumber":"+123456789000"},"volumeToCheck":{"value":1,"unit":"MiB"}}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["thresholdExceeded"], false);
+    }
+
+    #[tokio::test]
+    async fn mib_unit_is_honoured() {
+        // …050 → 500 MiB remaining; threshold 300 MiB → 500 > 300 → true.
+        let (_, _, body) = check_ok(
+            r#"{"device":{"phoneNumber":"+123456789050"},"volumeToCheck":{"value":300,"unit":"MiB"}}"#,
+        )
+        .await;
+        assert_eq!(body["thresholdExceeded"], true);
+        // Threshold 700 MiB → 500 > 700 → false.
+        let (_, _, body) = check_ok(
+            r#"{"device":{"phoneNumber":"+123456789050"},"volumeToCheck":{"value":700,"unit":"MiB"}}"#,
+        )
+        .await;
+        assert_eq!(body["thresholdExceeded"], false);
+    }
+
+    #[tokio::test]
+    async fn check_non_phone_identifier_omits_the_device_echo() {
+        let (status, _, body) = check_ok(
+            r#"{"device":{"ipv4Address":{"publicAddress":"203.0.113.200"}},"volumeToCheck":{"value":1,"unit":"GiB"}}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        // …200 → 2000 MiB > 1024 → true; no device echo (DeviceResponse = phone).
+        assert_eq!(body["thresholdExceeded"], true);
+        assert!(body.get("device").is_none());
+    }
+
+    #[tokio::test]
+    async fn check_reserved_suffix_selects_a_canonical_camara_error() {
+        // Reserved identifier suffix wins over the threshold plane.
+        let (status, _, body) = check_ok(
+            r#"{"device":{"phoneNumber":"+123456789404"},"volumeToCheck":{"value":1,"unit":"MiB"}}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["code"], "NOT_FOUND");
+
+        let (status, _, body) = check_ok(
+            r#"{"device":{"phoneNumber":"+123456789429"},"volumeToCheck":{"value":1,"unit":"MiB"}}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(body["code"], "TOO_MANY_REQUESTS");
+    }
+
+    #[tokio::test]
+    async fn check_three_legged_keys_off_the_subject() {
+        // No device; subject is an E.164 line …200 → 2000 MiB remaining.
+        let token = mint_token_with_client(CHECK_SCOPE, "+123456789200").await;
+        let (status, _, body) =
+            post_check(Some(&token), r#"{"volumeToCheck":{"value":1,"unit":"GiB"}}"#, None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["thresholdExceeded"], true);
+        assert_eq!(body["device"]["phoneNumber"], "+123456789200");
+    }
+
+    #[tokio::test]
+    async fn check_resubmitting_the_device_on_a_line_token_is_unnecessary() {
+        let token = mint_token_with_client(CHECK_SCOPE, "+123456789012").await;
+        let (status, _, body) = post_check(
+            Some(&token),
+            r#"{"device":{"phoneNumber":"+123456789012"},"volumeToCheck":{"value":1,"unit":"MiB"}}"#,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["code"], "UNNECESSARY_IDENTIFIER");
+    }
+
+    #[tokio::test]
+    async fn check_no_device_and_non_line_subject_is_missing_identifier() {
+        let (status, _, body) = check_ok(r#"{"volumeToCheck":{"value":1,"unit":"MiB"}}"#).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["code"], "MISSING_IDENTIFIER");
+    }
+
+    // --- Validation --------------------------------------------------------
+
+    #[tokio::test]
+    async fn check_value_out_of_range_is_rejected() {
+        // > 1024.
+        let (status, _, body) = check_ok(
+            r#"{"device":{"phoneNumber":"+123456789050"},"volumeToCheck":{"value":1025,"unit":"MiB"}}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "OUT_OF_RANGE");
+
+        // < 0.
+        let (status, _, body) = check_ok(
+            r#"{"device":{"phoneNumber":"+123456789050"},"volumeToCheck":{"value":-1,"unit":"MiB"}}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "OUT_OF_RANGE");
+    }
+
+    #[tokio::test]
+    async fn check_range_is_validated_before_the_identifier() {
+        // A bad `value` is rejected even with no resolvable identifier (a
+        // two-legged token, no device) — range is checked first.
+        let (status, _, body) = check_ok(r#"{"volumeToCheck":{"value":9999,"unit":"MiB"}}"#).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "OUT_OF_RANGE");
+    }
+
+    #[tokio::test]
+    async fn check_missing_volume_to_check_is_rejected() {
+        // `volumeToCheck` is required.
+        let (status, _, body) =
+            check_ok(r#"{"device":{"phoneNumber":"+123456789050"}}"#).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "INVALID_ARGUMENT");
+
+        // Empty body → also rejected (unlike /retrieve, /check requires a body).
+        let token = mint_token(CHECK_SCOPE).await;
+        let (status, _, body) = post_check(Some(&token), "", None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "INVALID_ARGUMENT");
+    }
+
+    #[tokio::test]
+    async fn check_unknown_unit_is_rejected() {
+        let (status, _, body) = check_ok(
+            r#"{"device":{"phoneNumber":"+123456789050"},"volumeToCheck":{"value":1,"unit":"TiB"}}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "INVALID_ARGUMENT");
+    }
+
+    #[tokio::test]
+    async fn check_empty_device_object_is_rejected() {
+        let (status, _, body) =
+            check_ok(r#"{"device":{},"volumeToCheck":{"value":1,"unit":"MiB"}}"#).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "INVALID_ARGUMENT");
+    }
+
+    // --- Auth --------------------------------------------------------------
+
+    #[tokio::test]
+    async fn check_token_without_the_scope_is_forbidden() {
+        let token = mint_token("some:other-scope").await;
+        let (status, _, body) = post_check(
+            Some(&token),
+            r#"{"device":{"phoneNumber":"+123456789050"},"volumeToCheck":{"value":1,"unit":"MiB"}}"#,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["code"], "PERMISSION_DENIED");
+    }
+
+    #[tokio::test]
+    async fn check_missing_token_is_unauthenticated() {
+        let (status, _, body) = post_check(
+            None,
+            r#"{"device":{"phoneNumber":"+123456789050"},"volumeToCheck":{"value":1,"unit":"MiB"}}"#,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["code"], "UNAUTHENTICATED");
+    }
+
+    #[tokio::test]
+    async fn check_x_correlator_is_echoed() {
+        let token = mint_token(CHECK_SCOPE).await;
+        let (status, headers, _) = post_check(
+            Some(&token),
+            r#"{"device":{"phoneNumber":"+123456789050"},"volumeToCheck":{"value":1,"unit":"MiB"}}"#,
+            Some("corr-chk"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-chk")
         );
     }
 }

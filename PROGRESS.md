@@ -1348,7 +1348,7 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
       (`store::peek_credential`) on the non-terminal AVAILABLE event so a later
       terminal event still authenticates, *taken* single-use on the terminal one.
     - [ ] TLS (`https://` sink) delivery (needs a rustls TLS client)
-- [~] Device Data Volume vwip (`/device-data-volume/vwip`; CAMARA
+- [x] Device Data Volume vwip (`/device-data-volume/vwip`; CAMARA
   device-data-volume, wip — no released version yet, mounted at its canonical
   `vwip` base path; stateless, non-spatial, device-keyed data-usage query):
   - [x] `POST /retrieve` (`device-data-volume:read`, `retrieveDataVolume`) —
@@ -1363,9 +1363,18 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     (`% 4`; `…000`/no digits → `<200MiB` — category is a 2nd plane).
     `lastStatusTime` = now (RFC 3339 UTC; schema-nullable but always fresh).
     `device` echoed only for a phoneNumber request. No new dep.
-  - [ ] `POST /check` (`device-data-volume:read`, `checkDataVolume`) —
+  - [x] `POST /check` (`device-data-volume:read`, `checkDataVolume`) —
     `{ thresholdExceeded }` for a caller-supplied `volumeToCheck`
-    (`{value:0..1024, unit:MiB|GiB}`). Later slice.
+    (`{value:0..1024, unit:MiB|GiB}`). Same identifier resolution + two-legged/
+    three-legged rule and reserved-error convention as `retrieve`. Two control
+    planes (DESIGN §7): identifier reserved-error suffix (checked first, after the
+    `value` range); else the identifier's trailing three digits `d` fix the
+    device's **remaining** volume at `d*10` MiB (`…000`/no digits → 0 MiB) and
+    `thresholdExceeded = remaining_MiB > volumeToCheck` (GiB → value*1024), so
+    `volumeToCheck` is a genuine second plane. `volumeToCheck` required (missing/
+    unknown `unit` → 400 INVALID_ARGUMENT; `value` ∉ 0..=1024 → 400 OUT_OF_RANGE).
+    `device` echoed only for a phoneNumber request. No new dep.
+    **Completes Device Data Volume vwip.**
 - [ ] Other CAMARA APIs as capacity allows
 
 ## Cross-cutting (do alongside the item that needs it)
@@ -1392,6 +1401,28 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-05 — Phase 5: **Device Data Volume vwip `POST /check`
+  (`checkDataVolume`)** — the companion to `retrieve`, **completing Device Data
+  Volume vwip**. Verified the authoritative CAMARA spec via WebFetch
+  (`CheckDataVolumeRequest {device?, volumeToCheck{value int32 0..1024, unit
+  MiB|GiB}(req)}`; 200 → `CheckDataVolumeResponse {device?, lastStatusTime
+  (nullable), thresholdExceeded(req)}`; scope `device-data-volume:read`; errors
+  400/401/403/404/422/429; `thresholdExceeded` = remaining volume exceeds
+  threshold). Added `check` handler to `src/apis/device_data_volume/vwip.rs`
+  reusing retrieve's identifier resolution / two-legged-three-legged rule /
+  reserved-error convention. Model: identifier trailing three digits `d` fix the
+  device's **remaining** volume at `d*10` MiB (`…000`/no digits → 0 MiB),
+  `volumeToCheck` normalised to MiB (GiB→value*1024), `thresholdExceeded =
+  remaining > threshold` — so `volumeToCheck` is a genuine second control plane
+  (the same device flips true↔false as the threshold moves). `volumeToCheck`
+  required (missing/unknown `unit` → 400 INVALID_ARGUMENT; `value` ∉ 0..=1024 →
+  400 OUT_OF_RANGE, checked before identifier resolution). Spec: added `/check`
+  path + `CheckDataVolumeRequest`/`VolumeToCheck`/`VolumeUnitEnum`/
+  `CheckDataVolumeResponse` schemas + `x-camarasim-scenarios`. Tests: 16 new
+  (threshold as 2nd plane both ways, unit normalisation, zero-remaining, reserved
+  suffix wins, three-legged, 422 identifier rules, range/missing/unknown-unit/
+  empty-device validation, auth, x-correlator). `cargo test` 1047 green;
+  `cargo build --release` green. No new dependency. — binary: 2.2M (2,280,448 B)
 - 2026-08-05 — Phase 5 (other CAMARA APIs): **Device Data Volume vwip** — new
   stateless, non-spatial, device-keyed data-usage query API. Verified the
   authoritative CAMARA spec via WebFetch (device-data-volume, version `wip`: base
