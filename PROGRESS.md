@@ -1568,9 +1568,17 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     store → `204 No Content` (single-use); an unknown/already-deleted id → `404
     NOT_FOUND` (new `store::remove`). Keyed only on store state; no `session-ended`
     CloudEvent emitted (notifications still deferred). `x-correlator` echoed.
-  - [ ] `POST /retrieve-sessions` (`retrieveSessionsByDevice`) +
-    `POST /sessions/{sessionId}/metrics` (`sendSessionMetrics`) — deferred to
-    later passes.
+  - [x] `POST /retrieve-sessions` (`retrieveSessionsByDevice`,
+    `session-insights:sessions:read`) — lists a device's sessions as an array of
+    `SessionInfo` (`200`; empty array when none — never 404s). Device = submitted
+    `device` id, else token subject (two/three-legged, 422 MISSING_IDENTIFIER when
+    neither). Two control planes (DESIGN §7): identifier reserved-error suffix →
+    canonical CAMARA error (checked first, mirroring QoD's retrieve-by-device);
+    else the in-memory store scanned by device echo (new `store::find_by_device`).
+    A resolved identifier with no `device` echo (non-E.164 subject, no submitted
+    device) matches nothing → `200 []`.
+  - [ ] `POST /sessions/{sessionId}/metrics` (`sendSessionMetrics`) — deferred to
+    a later pass.
   - [ ] CloudEvents notifications on `sink` (`quality-score` / `session-ended`) —
     deferred (http sink; TLS deferred as elsewhere).
 - [ ] Other CAMARA APIs as capacity allows
@@ -1599,6 +1607,19 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-05 — Phase 5: **Session Insights vwip — `POST /retrieve-sessions`
+  (`retrieveSessionsByDevice`, scope `session-insights:sessions:read`)**. Lists a
+  device's sessions as an array of `SessionInfo` (`200`; `[]` when none — never
+  404s). New `store::find_by_device` (device-echo scan, lock never across await,
+  mirrors QoD's store). Device = submitted `device` id, else token subject
+  (two/three-legged; 422 MISSING_IDENTIFIER when neither); identifier
+  reserved-error suffix → canonical CAMARA error (checked first); a non-E.164
+  subject echo matches nothing → `200 []`. Spec: added the `/retrieve-sessions`
+  path + `retrieveSessionsByDevice` op (200 array / error set /
+  `x-camarasim-scenarios`) and a `RetrieveSessionsInput` schema; header comment
+  updated. Tests: 9 new (store find-by-device + 8 integration — device isolation,
+  empty array, reserved suffix, subject fallback, bad body, scope/auth,
+  correlator). `cargo test` 1231 pass; release builds. — binary: 2.5M (2 537 168 bytes)
 - 2026-08-05 — Phase 5: **Session Insights vwip — `DELETE /sessions/{sessionId}`
   (`deleteSession`, scope `session-insights:sessions:delete`)**. Mirrors the QoD
   delete: new `store::remove` (single-use eviction, returns the `SessionInfo` or

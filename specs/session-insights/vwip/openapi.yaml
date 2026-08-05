@@ -7,10 +7,10 @@
 # `src/apis/session_insights/vwip.rs`; spec and code must not drift.
 #
 # This slice serves the create/read/delete trio — `POST /sessions`,
-# `GET /sessions/{sessionId}` and `DELETE /sessions/{sessionId}`. The remaining
-# lifecycle endpoints (`POST /retrieve-sessions`,
-# `POST /sessions/{sessionId}/metrics`) and the CloudEvents notifications on
-# `sink` are deferred to later passes.
+# `GET /sessions/{sessionId}` and `DELETE /sessions/{sessionId}` — plus
+# list-by-device (`POST /retrieve-sessions`, `retrieveSessionsByDevice`). The
+# remaining lifecycle endpoint (`POST /sessions/{sessionId}/metrics`) and the
+# CloudEvents notifications on `sink` are deferred to later passes.
 openapi: 3.0.3
 info:
   title: Session Insights
@@ -286,6 +286,101 @@ paths:
           - input: an unknown or already-deleted sessionId
             result: "404 NOT_FOUND"
 
+  /retrieve-sessions:
+    post:
+      operationId: retrieveSessionsByDevice
+      summary: List a device's session insights resources
+      description: |
+        List the session-insights resources for a device as an array of
+        `SessionInfo` (`200`; an empty array when the device has none — CAMARA
+        never `404`s on an empty result). The device is the submitted `device`
+        identifier, else the access-token subject (three-legged fallback; neither
+        present → `422 MISSING_IDENTIFIER`). This is a read, so it requires the
+        `session-insights:sessions:read` scope (as `getSession` does).
+
+        On the happy path the stored sessions are matched by their echoed
+        `device`; a resolved identifier with no `device` echo (a non-E.164 token
+        subject and no submitted device) matches nothing → `200 []`.
+      security:
+        - openId:
+            - session-insights:sessions:read
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RetrieveSessionsInput"
+      responses:
+        "200":
+          description: The device's sessions (possibly empty).
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/SessionInfo"
+              examples:
+                withSessions:
+                  summary: One active session for the device
+                  value:
+                    - id: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+                      device:
+                        phoneNumber: "+123456789012"
+                      applicationServer:
+                        ipv4Address: "198.51.100.1"
+                      sink: "https://callback.example/notify"
+                      startsAt: "2026-08-05T10:41:38Z"
+                      expiresAt: "2026-08-06T10:41:38Z"
+                      status: ACTIVE
+                empty:
+                  summary: Device has no sessions
+                  value: []
+        "400":
+          $ref: "../../shared/errors.yaml#/components/responses/InvalidArgument"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "422":
+          description: |
+            422 — unprocessable. CamaraSim returns `MISSING_IDENTIFIER` when neither
+            a `device` nor a usable token subject is present, or the reserved shared
+            `SERVICE_NOT_APPLICABLE` for an identifier ending in the `…422` suffix.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionInsightsError"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          Result selected from the resolved identifier — the submitted `device`
+          id, else the token subject (docs/DESIGN.md §7) — then the in-memory
+          store, matched by each session's echoed `device`. Reserved error
+          suffixes come from the shared convention in errors.yaml.
+        cases:
+          - input: identifier ending in a reserved error suffix (e.g. …404, …429)
+            result: the canonical CAMARA error for that status
+          - input: an identifier with one or more stored sessions
+            result: "200 with the array of matching SessionInfo"
+          - input: an identifier with no stored sessions (or a non-E.164 subject echo)
+            result: "200 [] (never 404)"
+          - input: no device and no token subject
+            result: "422 MISSING_IDENTIFIER"
+          - input: a non-empty body that is not a valid RetrieveSessionsInput
+            result: "400 INVALID_ARGUMENT"
+
 components:
   securitySchemes:
     openId:
@@ -412,6 +507,15 @@ components:
           description: >-
             Credential the operator must present on the sink callback. Accepted for
             schema fidelity; not used in this slice (notification delivery deferred).
+
+    RetrieveSessionsInput:
+      type: object
+      description: >-
+        Request body for `retrieveSessionsByDevice`. The `device` is optional —
+        omit it on a three-legged token to select the token subject.
+      properties:
+        device:
+          $ref: "#/components/schemas/Device"
 
     SessionInfo:
       type: object

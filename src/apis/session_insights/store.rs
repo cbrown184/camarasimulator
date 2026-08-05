@@ -64,6 +64,21 @@ pub fn remove(id: &str) -> Option<Value> {
         .remove(id)
 }
 
+/// Return a snapshot of every stored `SessionInfo` whose echoed `device` equals
+/// `device`. `retrieveSessionsByDevice` uses this to list a device's sessions.
+/// The lock is held only for the scan + clone (never across an `.await`), and the
+/// returned `Vec` is an independent copy (mirrors
+/// [`crate::apis::quality_on_demand::store::find_by_device`]).
+pub fn find_by_device(device: &Value) -> Vec<Value> {
+    store()
+        .lock()
+        .expect("session-insights store not poisoned")
+        .values()
+        .filter(|info| info.get("device") == Some(device))
+        .cloned()
+        .collect()
+}
+
 /// Mint a fresh, opaque, UUID-v4-shaped session `id`.
 ///
 /// The 16 bytes come from `SHA-256(counter ‖ now)` — the monotonic counter alone
@@ -125,6 +140,24 @@ mod tests {
         insert(id.clone(), info.clone());
         assert_eq!(get(&id), Some(info));
         assert!(get("no-such-session").is_none());
+    }
+
+    #[test]
+    fn find_by_device_matches_only_sessions_with_that_device_echo() {
+        let phone_a = json!({ "phoneNumber": "+15550009001" });
+        let phone_b = json!({ "phoneNumber": "+15550009002" });
+        let id1 = new_session_id();
+        let id2 = new_session_id();
+        let id3 = new_session_id();
+        insert(id1.clone(), json!({ "id": id1, "device": phone_a, "status": "ACTIVE" }));
+        insert(id2.clone(), json!({ "id": id2, "device": phone_a, "status": "ACTIVE" }));
+        insert(id3.clone(), json!({ "id": id3, "device": phone_b, "status": "ACTIVE" }));
+
+        let found = find_by_device(&phone_a);
+        assert_eq!(found.len(), 2, "both device-A sessions match");
+        assert!(found.iter().all(|s| s["device"] == phone_a));
+        // An unrelated device matches nothing.
+        assert!(find_by_device(&json!({ "phoneNumber": "+15550009099" })).is_empty());
     }
 
     #[test]

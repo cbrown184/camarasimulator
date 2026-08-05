@@ -1,14 +1,16 @@
 //! Session Insights **vwip** (CAMARA SessionInsights, work-in-progress).
 //!
-//! Three endpoints in this slice — the create/read/delete trio of the session
-//! resource:
+//! Four endpoints in this slice — the create/read/delete trio of the session
+//! resource plus list-by-device:
 //! - `POST   /session-insights/vwip/sessions` — create a session (`createSession`).
 //! - `GET    /session-insights/vwip/sessions/{sessionId}` — read it (`getSession`).
 //! - `DELETE /session-insights/vwip/sessions/{sessionId}` — delete it
 //!   (`deleteSession`).
+//! - `POST   /session-insights/vwip/retrieve-sessions` — list a device's sessions
+//!   (`retrieveSessionsByDevice`).
 //!
-//! (`POST /retrieve-sessions`, `POST /sessions/{id}/metrics`, and the CloudEvents
-//! notifications on `sink` are deferred to later passes.)
+//! (`POST /sessions/{id}/metrics` and the CloudEvents notifications on `sink` are
+//! deferred to later passes.)
 //!
 //! ## What it does
 //!
@@ -100,6 +102,10 @@ pub fn routes() -> Router {
         .route(
             "/session-insights/vwip/sessions/:session_id",
             get(get_session).delete(delete_session),
+        )
+        .route(
+            "/session-insights/vwip/retrieve-sessions",
+            post(retrieve_sessions),
         )
 }
 
@@ -283,6 +289,73 @@ async fn delete_session(
             &correlator,
         ),
     }
+}
+
+/// `POST /retrieve-sessions` request body (CAMARA `RetrieveSessionsInput`). The
+/// `device` is optional — omit it on a three-legged token to select the token
+/// subject. Unknown fields are tolerated (the request body does not set
+/// `additionalProperties: false`).
+#[derive(Debug, Deserialize)]
+struct RetrieveSessionsInput {
+    device: Option<Device>,
+}
+
+/// `POST /session-insights/vwip/retrieve-sessions`.
+///
+/// Lists a device's session-insights resources as an array of `SessionInfo`
+/// (`200`; an empty array when the device has none — CAMARA never 404s on an
+/// empty result). The device is the submitted `device` identifier, else the token
+/// subject (three-legged fallback; neither present → `422 MISSING_IDENTIFIER`).
+/// Requires the `session-insights:sessions:read` scope (a read, like
+/// `getSession`). Two control planes (docs/DESIGN.md §7): the identifier — a
+/// reserved error suffix selects a canonical CAMARA error (so `…404` → `404
+/// NOT_FOUND` for an unknown device) — and, on the happy path, the in-memory
+/// store, matched by each session's echoed `device`. A resolved identifier with no
+/// `device` echo (a non-E.164 token subject and no submitted device) matches
+/// nothing → `200 []`.
+async fn retrieve_sessions(claims: Claims, headers: HeaderMap, body: Bytes) -> Response {
+    let correlator = headers.get("x-correlator").cloned();
+
+    if let Err(e) = claims.require_scope(READ_SCOPE) {
+        return with_correlator(e.into_response(), &correlator);
+    }
+
+    // `device` is optional, so an empty body is accepted as `{}` (three-legged:
+    // the device comes from the token subject). A non-empty body must be valid.
+    let req: RetrieveSessionsInput = if body.is_empty() {
+        RetrieveSessionsInput { device: None }
+    } else {
+        match serde_json::from_slice(&body) {
+            Ok(req) => req,
+            Err(_) => {
+                return invalid_argument(
+                    "Request body is not a valid RetrieveSessionsInput.",
+                    &correlator,
+                )
+            }
+        }
+    };
+
+    // Resolve the identifier (submitted device, else token subject).
+    let resolved = match resolve_identifier(req.device, &claims, &correlator) {
+        Ok(r) => r,
+        Err(resp) => return resp,
+    };
+
+    // Reserved error suffix on the identifier selects a canonical CAMARA error
+    // (…404 → 404 NOT_FOUND, the device-identifier-not-found case).
+    if let Some(err) = scenarios::reserved_error(&resolved.id) {
+        return with_correlator(err.into_response(), &correlator);
+    }
+
+    // Match stored sessions by their echoed `device`. A resolved identifier with
+    // no device echo (a non-E.164 subject, no submitted device) matches nothing.
+    let sessions = match resolved.echo {
+        Some(echo) => store::find_by_device(&echo),
+        None => Vec::new(),
+    };
+
+    with_correlator((StatusCode::OK, Json(sessions)).into_response(), &correlator)
 }
 
 /// The resolved device identifier: the string CamaraSim keys its functional cases
@@ -596,6 +669,34 @@ mod tests {
         collect(response).await
     }
 
+    async fn retrieve_sessions_req(
+        token: Option<&str>,
+        body: &str,
+        correlator: Option<&str>,
+    ) -> (StatusCode, HeaderMap, Value) {
+        let mut builder = Request::builder()
+            .method("POST")
+            .uri("/session-insights/vwip/retrieve-sessions")
+            .header("host", HOST)
+            .header("content-type", "application/json");
+        if let Some(t) = token {
+            builder = builder.header("authorization", format!("Bearer {t}"));
+        }
+        if let Some(c) = correlator {
+            builder = builder.header("x-correlator", c);
+        }
+        let response = app()
+            .oneshot(builder.body(Body::from(body.to_string())).unwrap())
+            .await
+            .unwrap();
+        collect(response).await
+    }
+
+    /// A retrieve-sessions body naming `phone` as the device.
+    fn retrieve_body(phone: &str) -> String {
+        format!(r#"{{"device":{{"phoneNumber":"{phone}"}}}}"#)
+    }
+
     async fn collect(response: Response) -> (StatusCode, HeaderMap, Value) {
         let status = response.status();
         let headers = response.headers().clone();
@@ -771,6 +872,106 @@ mod tests {
         assert_eq!(
             headers.get("x-correlator").and_then(|v| v.to_str().ok()),
             Some("corr-del-404")
+        );
+    }
+
+    // --- Retrieve sessions by device ---------------------------------------
+
+    #[tokio::test]
+    async fn retrieve_sessions_returns_only_the_requested_devices_sessions() {
+        // Two distinct devices; create one session for each.
+        let dev_a = "+15550170101";
+        let dev_b = "+15550170202";
+        let create = mint_token(CREATE_SCOPE).await;
+        let (status, _, made_a) = post_session(Some(&create), &body_for(dev_a), None).await;
+        assert_eq!(status, StatusCode::CREATED);
+        let (status, _, _made_b) = post_session(Some(&create), &body_for(dev_b), None).await;
+        assert_eq!(status, StatusCode::CREATED);
+
+        // Retrieving device A's sessions returns only A's.
+        let read = mint_token(READ_SCOPE).await;
+        let (status, _, list) = retrieve_sessions_req(Some(&read), &retrieve_body(dev_a), None).await;
+        assert_eq!(status, StatusCode::OK);
+        let arr = list.as_array().expect("array");
+        assert!(!arr.is_empty(), "device A has at least one session");
+        assert!(
+            arr.iter().all(|s| s["device"]["phoneNumber"] == dev_a),
+            "only device A's sessions are listed"
+        );
+        // The created session is present.
+        let created_id = made_a["id"].as_str().unwrap();
+        assert!(arr.iter().any(|s| s["id"] == created_id));
+    }
+
+    #[tokio::test]
+    async fn retrieve_sessions_for_a_device_with_none_is_empty_array() {
+        // A device with no created sessions → 200 [] (never 404).
+        let read = mint_token(READ_SCOPE).await;
+        let (status, _, list) =
+            retrieve_sessions_req(Some(&read), &retrieve_body("+15550179988"), None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(list, json!([]));
+    }
+
+    #[tokio::test]
+    async fn retrieve_sessions_reserved_suffix_selects_a_camara_error() {
+        let read = mint_token(READ_SCOPE).await;
+        let (status, _, body) =
+            retrieve_sessions_req(Some(&read), &retrieve_body("+15550170404"), None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["code"], "NOT_FOUND");
+
+        let (status, _, body) =
+            retrieve_sessions_req(Some(&read), &retrieve_body("+15550170429"), None).await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(body["code"], "TOO_MANY_REQUESTS");
+    }
+
+    #[tokio::test]
+    async fn retrieve_sessions_with_a_non_e164_subject_and_no_device_is_empty() {
+        // An empty body → device from the token subject; a client_credentials
+        // subject (`si-client`) is not E.164, so it has no device echo → 200 [].
+        let read = mint_token(READ_SCOPE).await;
+        let (status, _, list) = retrieve_sessions_req(Some(&read), "", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(list, json!([]));
+    }
+
+    #[tokio::test]
+    async fn retrieve_sessions_rejects_a_bad_body() {
+        let read = mint_token(READ_SCOPE).await;
+        let (status, _, body) = retrieve_sessions_req(Some(&read), "not json", None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "INVALID_ARGUMENT");
+    }
+
+    #[tokio::test]
+    async fn retrieve_sessions_requires_the_read_scope() {
+        let other = mint_token("some:other-scope").await;
+        let (status, _, body) =
+            retrieve_sessions_req(Some(&other), &retrieve_body("+15550170101"), None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["code"], "PERMISSION_DENIED");
+    }
+
+    #[tokio::test]
+    async fn retrieve_sessions_without_a_token_is_unauthenticated() {
+        let (status, _, body) =
+            retrieve_sessions_req(None, &retrieve_body("+15550170101"), None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["code"], "UNAUTHENTICATED");
+    }
+
+    #[tokio::test]
+    async fn x_correlator_is_echoed_on_retrieve_sessions() {
+        let read = mint_token(READ_SCOPE).await;
+        let (status, headers, _) =
+            retrieve_sessions_req(Some(&read), &retrieve_body("+15550179988"), Some("corr-ret"))
+                .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-ret")
         );
     }
 
