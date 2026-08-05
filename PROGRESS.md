@@ -1415,6 +1415,22 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     picks the `unit` from `[bps,kbps,Mbps,Gbps,Tbps]`, so both axes climb from the
     `…000` floor (`0 bps`) — a genuine plane. `device` echoed only for a
     phoneNumber request. No new dep. **Completes Media Streaming Rate vwip.**
+- [~] Optimal Edge Discovery vwip (`/optimal-edge-discovery/vwip`; CAMARA
+  optimal-edge-discovery, wip — no released version yet, mounted at its canonical
+  `vwip` base path; stateless, device-keyed edge/MEC discovery — the *ranked*
+  successor to Simple Edge Discovery):
+  - [x] `POST /retrieve-optimal-edge-cloud-zones` (`discoverOptimalEdge`, scope
+    `optimal-edge-discovery:edge-zones:read`) — returns a ranked list (1–20) of
+    `EdgeCloudZone`s optimal for the device, never coordinates. Device-object
+    identifier resolution + the two-legged/three-legged rule (mirrors Simple Edge
+    Discovery: device on a line token → 422 UNNECESSARY_IDENTIFIER; no device +
+    non-line subject → 422 MISSING_IDENTIFIER; empty device → 400). Control planes
+    (DESIGN §7): required `applicationProfileId` (UUID, else 400 INVALID_ARGUMENT);
+    identifier reserved-error suffix → canonical CAMARA error; the identifier's
+    trailing three digits pick the optimal zone (start index `% 6`) and the count
+    (`(d % 3) + 1`, 1–3 zones); and the optional `edgeCloudRegion` filters the
+    candidate zones (unknown region → 404 NOT_FOUND) — a genuine second plane.
+  - [ ] `GET /regions` (`getRegions`) — deferred to a later slice.
 - [ ] Other CAMARA APIs as capacity allows
 
 ## Cross-cutting (do alongside the item that needs it)
@@ -1440,6 +1456,41 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 ## Scan journal
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
+
+- 2026-08-05 — Phase 5 (other CAMARA APIs): **Optimal Edge Discovery vwip
+  `POST /retrieve-optimal-edge-cloud-zones` (`discoverOptimalEdge`)** — a new
+  stateless, device-keyed edge/MEC discovery API, the *ranked* successor to Simple
+  Edge Discovery. Verified the authoritative CAMARA spec via WebFetch (CAMARA
+  OptimalEdgeDiscovery, `main`, version `wip`; base `/optimal-edge-discovery/vwip`;
+  scope `optimal-edge-discovery:edge-zones:read`; request `OptimalEdgeDiscoveryInfo
+  {applicationProfileId(req,uuid,≤36), device?, edgeCloudRegion?(^[A-Za-z0-9-]+$,
+  ≤64)}`; 200 → `EdgeDiscoveryResponse {edgeCloudZones[1..20](req), applicationProfileId?,
+  device?}` where `EdgeCloudZone {edgeCloudZoneId(uuid,req), edgeCloudZoneName(req),
+  edgeCloudProvider(req), edgeCloudRegion?, edgeCloudZoneStatus? enum active|inactive|
+  unknown default unknown}`; errors 400/401/403/404/422/429; two-legged/three-legged
+  identifier rule). New `src/apis/optimal_edge_discovery/{,.rs,vwip.rs}` mirroring
+  Simple Edge Discovery's device-object identifier resolution / two-legged-three-legged
+  rule (422 UNNECESSARY/MISSING_IDENTIFIER) / reserved-error convention and its
+  SHA-256 UUID-shaped zone id (no new dep). Model (DESIGN §7): required
+  `applicationProfileId` UUID-validated (else 400); reserved suffix on the identifier
+  → canonical error (checked first); else trailing three digits `d` pick the optimal
+  zone (start `d % 6`) and list length `(d % 3) + 1` (1–3 zones) over a fixed 6-entry
+  `(name, provider, region)` table, top zone `active`/rest `inactive`; optional
+  `edgeCloudRegion` filters candidates (malformed → 400, well-formed-but-unknown →
+  404); device echoed only for a phoneNumber request; `applicationProfileId` echoed.
+  Wired into `apis.rs` routes, `openapi.rs` SPECS, and the `/` catalog (+ catalog
+  test assertion). Spec: vendored+annotated `specs/optimal-edge-discovery/vwip/
+  openapi.yaml` (path, request/response schemas, `EdgeCloudZoneStatus` enum, full
+  shared error set, `x-camarasim-scenarios`). Tests: 27 new (7 unit: ranking start/
+  count/wrap, length ≤ schema max, region filter + unknown→None, zone-id determinism,
+  uuid+region validation, e164, device precedence; 20 integration: required fields +
+  applicationProfileId & phone echo, ranking by tail, region narrows, unknown region
+  404, non-phone omits echo, reserved suffix wins, three-legged subject + reserved
+  subject, UNNECESSARY/MISSING_IDENTIFIER, missing/malformed applicationProfileId,
+  malformed region, empty/bad-phone/unknown-field/malformed-json 400s, scope-forbidden,
+  missing-token, x-correlator). `cargo test` 1094 green (was 1067); `cargo build
+  --release` green. No new dependency. `GET /regions` (`getRegions`) deferred to a
+  later slice. — binary: 2.3M (2,337,056 B; +33,560 B)
 
 - 2026-08-05 — Phase 5 (other CAMARA APIs): **Media Streaming Rate vwip
   `POST /retrieve-maximum-downstream-media-rate`

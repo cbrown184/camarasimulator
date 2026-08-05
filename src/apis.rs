@@ -37,6 +37,7 @@
 //! - **Population Density Data vwip** — `/population-density-data/vwip/…`.
 //! - **QoS Provisioning v0.3** — `/qos-provisioning/v0.3/…`.
 //! - **Media Streaming Rate vwip** — `/media-streaming-rate/vwip/…`.
+//! - **Optimal Edge Discovery vwip** — `/optimal-edge-discovery/vwip/…`.
 //!
 //! Plus [`openapi`], which serves each mounted API's vendored OpenAPI spec at
 //! `/{api}/v{n}/openapi.yaml` (docs/DESIGN.md §9).
@@ -66,6 +67,7 @@ pub mod number_recycling;
 pub mod number_verification;
 pub mod one_time_password_sms;
 pub mod openapi;
+pub mod optimal_edge_discovery;
 pub mod population_density_data;
 pub mod qos_profiles;
 pub mod qos_provisioning;
@@ -110,5 +112,6 @@ pub fn routes() -> Router {
         .merge(population_density_data::routes())
         .merge(qos_provisioning::routes())
         .merge(media_streaming_rate::routes())
+        .merge(optimal_edge_discovery::routes())
         .merge(openapi::routes())
 }
