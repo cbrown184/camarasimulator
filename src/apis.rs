@@ -33,6 +33,7 @@
 //! - **Connectivity Insights v0.6** — `/connectivity-insights/v0.6/…`.
 //! - **Region Device Count v0.2** — `/region-device-count/v0.2/…`.
 //! - **Device Visit Location vwip** — `/device-visit-location/vwip/…`.
+//! - **Population Density Data vwip** — `/population-density-data/vwip/…`.
 //!
 //! Plus [`openapi`], which serves each mounted API's vendored OpenAPI spec at
 //! `/{api}/v{n}/openapi.yaml` (docs/DESIGN.md §9).
@@ -60,6 +61,7 @@ pub mod number_recycling;
 pub mod number_verification;
 pub mod one_time_password_sms;
 pub mod openapi;
+pub mod population_density_data;
 pub mod qos_profiles;
 pub mod quality_on_demand;
 pub mod region_device_count;
@@ -98,5 +100,6 @@ pub fn routes() -> Router {
         .merge(connectivity_insights::routes())
         .merge(region_device_count::routes())
         .merge(device_visit_location::routes())
+        .merge(population_density_data::routes())
         .merge(openapi::routes())
 }

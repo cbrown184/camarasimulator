@@ -155,6 +155,10 @@ const SPECS: &[(&str, &str)] = &[
         include_str!("../../specs/device-visit-location/vwip/openapi.yaml"),
     ),
     (
+        "/population-density-data/vwip/openapi.yaml",
+        include_str!("../../specs/population-density-data/vwip/openapi.yaml"),
+    ),
+    (
         "/auth/openapi.yaml",
         include_str!("../../specs/auth/openapi.yaml"),
     ),
@@ -244,6 +248,7 @@ mod tests {
             "/connectivity-insights/v0.6/openapi.yaml",
             "/region-device-count/v0.2/openapi.yaml",
             "/device-visit-location/vwip/openapi.yaml",
+            "/population-density-data/vwip/openapi.yaml",
         ] {
             let (status, content_type, body) = fetch(path).await;
             assert_eq!(status, StatusCode::OK, "spec {path} should be served");

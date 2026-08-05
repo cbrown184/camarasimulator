@@ -1189,6 +1189,31 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     `endTime < startTime` → 400 `DEVICE_VISIT_LOCATION.INVALID_END_DATE`;
     self-contained RFC 3339 parser, no new dep). `x-correlator` echoed.
     **Completes Device Visit Location vwip.**
+- [x] Population Density Data vwip (`/population-density-data/vwip`; CAMARA
+  population-density-data, wip — no released version yet, mounted at its canonical
+  `vwip` base path; stateless, **area-keyed** aggregate density estimate):
+  - [x] `POST /retrieve` (`population-density-data:read`,
+    `retrievePopulationDensity`) — per grid cell, an estimated people-per-km²
+    figure with a min/max band (or `NO_DATA`/`LOW_DENSITY`), plus an overall
+    area-support `status`. No device identifier — the **geometry is the control
+    plane** (mirrors Region Device Count). CamaraSim implements the **synchronous
+    `GEOHASHLIST`** path (one cell per input geohash, a single time slice over the
+    window). Control planes (DESIGN §7): the **first geohash**'s reserved error
+    suffix → canonical CAMARA error (geohashes contain digits, so the shared
+    convention applies unchanged; checked before the window); **each geohash**'s
+    stable hash fixes its cell (`h%7==0`→NO_DATA, `==1`→LOW_DENSITY, else
+    DENSITY_ESTIMATION `pplDensity=(h%20000)+1` ±10%), and the cell mix fixes
+    `status` (all NO_DATA→`AREA_NOT_SUPPORTED`, some→`PART_OF_AREA_NOT_SUPPORTED`,
+    else `SUPPORTED_AREA`). Capability/structural planes: `POLYGON` areaType → 422
+    `…UNSUPPORTED_AREA_TYPE`; a geohash longer than 9 chars → 422
+    `…UNSUPPORTED_PRECISION`; > 100 geohashes → 422 `…UNSUPPORTED_SYNC_RESPONSE`;
+    unknown areaType / bad geohash / empty or >1000 list / `precision` with a
+    GEOHASHLIST → 400 `INVALID_ARGUMENT`. Time window: malformed → 400
+    `INVALID_ARGUMENT`; `endTime<startTime` → 400 `…INVALID_END_TIME`; > 7 days →
+    400 `…MAX_TIME_PERIOD_EXCEEDED` (self-contained RFC 3339 parser). Documented
+    cuts: `POLYGON`, async `sink`/CloudEvents (202 flow), hourly time-slicing, and
+    the ±3-month absolute start-time checks. `x-correlator` echoed. No new dep.
+    **Completes Population Density Data vwip.**
 - [ ] Other CAMARA APIs as capacity allows
 
 ## Cross-cutting (do alongside the item that needs it)
@@ -1207,6 +1232,25 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-05 — Phase 5 (other CAMARA APIs): **Population Density Data vwip** —
+  new stateless, **area-keyed** aggregate API `POST
+  /population-density-data/vwip/retrieve` (`retrievePopulationDensity`, scope
+  `population-density-data:read`). Mounted at its canonical `vwip` path (no
+  released version yet). Verified the authoritative CAMARA spec (info.version
+  `wip`) via WebFetch. Implements the **synchronous GEOHASHLIST** path: one
+  `CellPopulationDensityData` per input geohash in a single time slice, plus an
+  overall `status`. Control planes (DESIGN §7): the first geohash's reserved
+  error suffix → canonical CAMARA error (geohashes carry digits, shared
+  convention unchanged); each geohash's FNV-1a hash fixes its cell
+  (NO_DATA/LOW_DENSITY/DENSITY_ESTIMATION with a ±10% band); the cell mix fixes
+  `status` (SUPPORTED/PART/AREA_NOT_SUPPORTED). API-specific 422s wired to real
+  cases: POLYGON→UNSUPPORTED_AREA_TYPE, >9-char geohash→UNSUPPORTED_PRECISION,
+  >100 geohashes→UNSUPPORTED_SYNC_RESPONSE; window checks →
+  INVALID_END_TIME/MAX_TIME_PERIOD_EXCEEDED (self-contained RFC 3339 parser).
+  Documented cuts: POLYGON, async sink/CloudEvents, hourly slicing, ±3-month
+  start-time checks. Vendored + annotated spec at
+  `specs/population-density-data/vwip/openapi.yaml`, served + catalogued. No new
+  dependency. Added 26 tests; 955 tests green (was 929). — binary: 2.1M (2163760 B)
 - 2026-08-05 — Phase 5 (other CAMARA APIs): **Device Visit Location vwip** — new
   stateless, device-keyed API `POST /device-visit-location/vwip/retrieve`
   (`retrieveDeviceVisitLocation`, scope `device-visit-location:retrieve`).
