@@ -10,10 +10,10 @@
 # (mirroring the KYC Match v0.3 / Location Retrieval v0.4 decisions — DESIGN §9).
 #
 # This slice serves `POST /qos-assignments` (create),
-# `GET /qos-assignments/{assignmentId}` (read by id), and
-# `DELETE /qos-assignments/{assignmentId}` (revoke). The
-# `POST /retrieve-qos-assignment` (retrieve by device) and CloudEvents
-# notifications on `sink` are later slices (documented cut).
+# `GET /qos-assignments/{assignmentId}` (read by id),
+# `DELETE /qos-assignments/{assignmentId}` (revoke), and
+# `POST /retrieve-qos-assignment` (retrieve by device). CloudEvents
+# notifications on `sink` (status transitions) are a later slice (documented cut).
 openapi: 3.0.3
 info:
   title: QoS Provisioning
@@ -371,6 +371,147 @@ paths:
           - input: an unknown or already-revoked assignmentId
             result: "404 NOT_FOUND"
 
+  /retrieve-qos-assignment:
+    post:
+      operationId: getQosAssignmentByDevice
+      summary: Get the QoS assignment provisioned for a device
+      description: |
+        Returns the `AssignmentInfo` currently provisioned for a device, if any.
+        CAMARA uses `POST` (not `GET`) because the `device` may carry PII.
+
+        The device is resolved by the same two-legged / three-legged rule as
+        `createQosAssignment` (see the API description): a `device` in the body
+        for a two-legged token, or the token subject for a three-legged token
+        (in which case `device` must be omitted, else `422
+        UNNECESSARY_IDENTIFIER`; a missing device with a non-line subject →
+        `422 MISSING_IDENTIFIER`).
+
+        Two control planes (docs/DESIGN.md §7): the resolved identifier's reserved
+        error suffix → the canonical CAMARA error (the shared convention exposes
+        the error set from the input alone); otherwise the in-memory store — the
+        device's stored assignment (`200`) or `404 NOT_FOUND` when it has none.
+      security:
+        - openId:
+            - qos-provisioning:qos-assignments:read-by-device
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RetrieveAssignmentByDevice"
+      responses:
+        "200":
+          description: The QoS assignment provisioned for the device.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AssignmentInfo"
+              examples:
+                available:
+                  summary: The device's AVAILABLE assignment
+                  value:
+                    assignmentId: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+                    qosProfile: QOS_E
+                    status: AVAILABLE
+                    startedAt: "2024-01-01T14:27:08Z"
+                    device:
+                      phoneNumber: "+123456789012"
+        "400":
+          $ref: "../../shared/errors.yaml#/components/responses/InvalidArgument"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          description: |
+            404 — not found. CamaraSim returns `NOT_FOUND` when the device has no
+            provisioned assignment (and for the reserved `…404` suffix).
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "../../shared/errors.yaml#/components/schemas/CamaraError"
+              examples:
+                notFound:
+                  summary: No assignment for the device
+                  value:
+                    status: 404
+                    code: NOT_FOUND
+                    message: No assignment found for the provided device.
+        "409":
+          description: |
+            409 — conflict. The reserved `…409` suffix exposes the canonical
+            CAMARA conflict via the shared reserved-suffix convention.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "../../shared/errors.yaml#/components/schemas/CamaraError"
+        "422":
+          description: |
+            422 — unprocessable. `MISSING_IDENTIFIER` when the device cannot be
+            identified (no `device` and a non-line subject); `UNNECESSARY_IDENTIFIER`
+            when a `device` is submitted on a three-legged device token; or the
+            reserved shared `SERVICE_NOT_APPLICABLE` for the `…422` suffix.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "../../shared/errors.yaml#/components/schemas/CamaraError"
+              examples:
+                missingIdentifier:
+                  summary: The device cannot be identified
+                  value:
+                    status: 422
+                    code: MISSING_IDENTIFIER
+                    message: The device cannot be identified.
+                unnecessaryIdentifier:
+                  summary: The device is already identified by the token
+                  value:
+                    status: 422
+                    code: UNNECESSARY_IDENTIFIER
+                    message: The device is already identified by the access token.
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          The device is resolved (the submitted `device` identifier, else the
+          access token subject) under the two-legged / three-legged rule. Two
+          control planes (docs/DESIGN.md §7): the resolved identifier's reserved
+          error suffix → the canonical CAMARA error (checked first, mirroring
+          QoD's retrieveSessionsByDevice); otherwise the in-memory store keyed by
+          the device echo — a match returns its stored `AssignmentInfo`, no match
+          returns 404 NOT_FOUND. CamaraSim models at most one provisioning per
+          device, so a single `AssignmentInfo` is returned.
+        cases:
+          - input: identifier ending in a reserved error suffix (e.g. …409)
+            result: the canonical CAMARA error for that status
+          - input: a device with a stored assignment
+            result: "200 — the device's AssignmentInfo"
+          - input: a device with no stored assignment
+            result: "404 NOT_FOUND"
+          - input: "`device` submitted on a three-legged line token"
+            result: "422 UNNECESSARY_IDENTIFIER"
+          - input: no `device` and a non-line token subject
+            result: "422 MISSING_IDENTIFIER"
+          - input: "`device` present but carrying no identifier"
+            result: "400 INVALID_ARGUMENT"
+
 components:
   securitySchemes:
     openId:
@@ -414,6 +555,16 @@ components:
           example: "https://application-server.example.com/notifications"
         sinkCredential:
           $ref: "#/components/schemas/SinkCredential"
+
+    RetrieveAssignmentByDevice:
+      type: object
+      description: >-
+        Request to retrieve the QoS assignment provisioned for a device. `device`
+        is required for a two-legged token and must be omitted for a three-legged
+        token (which identifies the device by its subject).
+      properties:
+        device:
+          $ref: "#/components/schemas/Device"
 
     Device:
       type: object

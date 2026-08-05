@@ -1,7 +1,7 @@
 //! QoS Provisioning **v0.3** (CAMARA qos-provisioning 0.3.0, release r3.2),
 //! mounted at `/qos-provisioning/v0.3`.
 //!
-//! This slice implements the create + read-by-id + revoke trio:
+//! This slice implements the create + read-by-id + revoke + retrieve-by-device set:
 //! - `POST /qos-assignments` (operationId `createQosAssignment`, scope
 //!   `qos-provisioning:qos-assignments:create`) — provisions a QoS profile for a
 //!   device, mints an opaque `assignmentId` ([`super::store`]), remembers the
@@ -17,9 +17,14 @@
 //!   `statusInfo: DELETE_REQUESTED`) driven by a notification callback; since
 //!   `sink` notifications are a later slice, CamaraSim serves only the synchronous
 //!   `204` here (mirroring QoD's `deleteSession`).
+//! - `POST /retrieve-qos-assignment` (operationId `getQosAssignmentByDevice`,
+//!   scope `qos-provisioning:qos-assignments:read-by-device`) — returns the
+//!   assignment currently provisioned for a device (`200`) or `404 NOT_FOUND`
+//!   when the device has none. Two control planes: the resolved identifier's
+//!   reserved error suffix → canonical CAMARA error, else the in-memory store
+//!   (mirroring QoD's `retrieveSessionsByDevice`).
 //!
-//! The `POST /retrieve-qos-assignment` (`getQosAssignmentByDevice`) operation and
-//! CloudEvents notifications on `sink` are later slices.
+//! CloudEvents notifications on `sink` (status transitions) are a later slice.
 //!
 //! ## Identifier resolution (two-legged vs three-legged)
 //!
@@ -69,6 +74,8 @@ const CREATE_SCOPE: &str = "qos-provisioning:qos-assignments:create";
 const READ_SCOPE: &str = "qos-provisioning:qos-assignments:read";
 /// Scope required to revoke an assignment (CAMARA qos-provisioning 0.3.0).
 const DELETE_SCOPE: &str = "qos-provisioning:qos-assignments:delete";
+/// Scope required to retrieve an assignment by device (CAMARA qos-provisioning 0.3.0).
+const READ_BY_DEVICE_SCOPE: &str = "qos-provisioning:qos-assignments:read-by-device";
 
 /// Routes for QoS Provisioning v0.3, mounted at their canonical URLs.
 pub fn routes() -> Router {
@@ -80,6 +87,10 @@ pub fn routes() -> Router {
         .route(
             "/qos-provisioning/v0.3/qos-assignments/:assignment_id",
             get(get_qos_assignment_by_id).delete(revoke_qos_assignment),
+        )
+        .route(
+            "/qos-provisioning/v0.3/retrieve-qos-assignment",
+            post(retrieve_qos_assignment_by_device),
         )
 }
 
@@ -262,6 +273,76 @@ async fn revoke_qos_assignment(
         None => with_correlator(
             CamaraError::not_found("No assignment found for the provided assignmentId.")
                 .into_response(),
+            &correlator,
+        ),
+    }
+}
+
+/// `RetrieveAssignmentByDevice` request body (CAMARA 0.3.0): an optional
+/// `device`, required only for a two-legged token (in three-legged auth the
+/// device is identified by the token subject, so the body may be `{}` / empty).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RetrieveByDevice {
+    device: Option<Device>,
+}
+
+/// `POST /qos-provisioning/v0.3/retrieve-qos-assignment`.
+///
+/// Returns the QoS assignment currently provisioned for a device, if any (CAMARA
+/// uses `POST` rather than `GET` because the `device` may carry PII). The device
+/// is resolved by the same two-legged / three-legged rule as `createQosAssignment`
+/// (a `RetrieveAssignmentByDevice` carrying an optional `device`, else the token
+/// subject). Two control planes (docs/DESIGN.md §7): the resolved identifier's
+/// reserved error suffix → the canonical CAMARA error (mirroring QoD's
+/// `retrieveSessionsByDevice`); otherwise the in-memory store — the device's
+/// stored `AssignmentInfo` (`200`) or `404 NOT_FOUND` when the device has none.
+async fn retrieve_qos_assignment_by_device(
+    claims: Claims,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let correlator = headers.get("x-correlator").cloned();
+
+    if let Err(e) = claims.require_scope(READ_BY_DEVICE_SCOPE) {
+        return with_correlator(e.into_response(), &correlator);
+    }
+
+    // Every field is optional, so an empty body is a valid `{}` (three-legged
+    // auth need not send one). Parse strictly when a body is present.
+    let req: RetrieveByDevice = if body.is_empty() {
+        RetrieveByDevice { device: None }
+    } else {
+        match serde_json::from_slice(&body) {
+            Ok(req) => req,
+            Err(_) => {
+                return invalid_argument(
+                    "Request body is not a valid RetrieveAssignmentByDevice.",
+                    &correlator,
+                )
+            }
+        }
+    };
+
+    // Resolve the identifier, enforcing the two-legged / three-legged rule.
+    let resolved = match resolve_identifier(req.device, &claims, &correlator) {
+        Ok(r) => r,
+        Err(resp) => return resp,
+    };
+
+    // Reserved error suffix on the identifier selects a canonical CAMARA error
+    // (mirroring QoD's retrieve-by-device — the shared convention exposes the
+    // error set from the input alone).
+    if let Some(err) = scenarios::reserved_error(&resolved.id) {
+        return with_correlator(err.into_response(), &correlator);
+    }
+
+    // The store is the remaining control plane: the device's stored assignment,
+    // else 404 when the device has none.
+    match resolved.echo.and_then(|echo| store::find_by_device(&echo)) {
+        Some(info) => with_correlator((StatusCode::OK, Json(info)).into_response(), &correlator),
+        None => with_correlator(
+            CamaraError::not_found("No assignment found for the provided device.").into_response(),
             &correlator,
         ),
     }
@@ -519,6 +600,7 @@ mod tests {
 
     const HOST: &str = "qosprov.local:8080";
     const ASSIGNMENTS: &str = "/qos-provisioning/v0.3/qos-assignments";
+    const RETRIEVE: &str = "/qos-provisioning/v0.3/retrieve-qos-assignment";
 
     // --- Pure units --------------------------------------------------------
 
@@ -657,6 +739,14 @@ mod tests {
     ) -> (StatusCode, HeaderMap, Value) {
         let path = format!("{ASSIGNMENTS}/{id}");
         request("DELETE", &path, token, None, correlator).await
+    }
+
+    async fn retrieve_by_device(
+        token: Option<&str>,
+        body: &str,
+        correlator: Option<&str>,
+    ) -> (StatusCode, HeaderMap, Value) {
+        request("POST", RETRIEVE, token, Some(body), correlator).await
     }
 
     /// A well-formed CreateAssignment body for a two-legged `device`/`profile`.
@@ -902,6 +992,103 @@ mod tests {
     async fn revoke_without_a_token_is_401() {
         let (status, _, _) =
             delete_assignment(None, "00000000-0000-4000-8000-000000000000", None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    // --- getQosAssignmentByDevice (POST /retrieve-qos-assignment) -----------
+    //
+    // Each test uses a device number unique to itself so the process-global
+    // store — shared across the whole test binary — returns exactly the
+    // assignment that test created (find_by_device returns the single match).
+
+    #[tokio::test]
+    async fn create_then_retrieve_by_device_returns_the_assignment() {
+        let create = mint_token(CREATE_SCOPE).await;
+        let (status, _, created) =
+            post_assignment(Some(&create), &create_body("+123456789521", "QOS_E"), None).await;
+        assert_eq!(status, StatusCode::CREATED);
+
+        let read = mint_token(READ_BY_DEVICE_SCOPE).await;
+        let body = json!({ "device": { "phoneNumber": "+123456789521" } }).to_string();
+        let (status, headers, got) = retrieve_by_device(Some(&read), &body, Some("corr-r")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(got, created);
+        // The correlator is echoed on the 200.
+        assert_eq!(headers.get("x-correlator").unwrap(), "corr-r");
+    }
+
+    #[tokio::test]
+    async fn retrieve_by_device_with_no_assignment_is_404() {
+        // A number never provisioned → the device has no assignment.
+        let read = mint_token(READ_BY_DEVICE_SCOPE).await;
+        let body = json!({ "device": { "phoneNumber": "+123456789522" } }).to_string();
+        let (status, _, err) = retrieve_by_device(Some(&read), &body, None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(err["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn retrieve_by_device_reserved_suffix_selects_the_canonical_error() {
+        // The reserved-error plane is checked before the store (mirrors QoD):
+        // `…409` → 409 CONFLICT, `…404` → 404 NOT_FOUND.
+        let read = mint_token(READ_BY_DEVICE_SCOPE).await;
+        let body = json!({ "device": { "phoneNumber": "+123456789409" } }).to_string();
+        let (status, _, err) = retrieve_by_device(Some(&read), &body, None).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(err["code"], "CONFLICT");
+
+        let body = json!({ "device": { "phoneNumber": "+123456789404" } }).to_string();
+        let (status, _, _) = retrieve_by_device(Some(&read), &body, None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn retrieve_by_device_three_legged_keys_off_the_subject() {
+        // Create via a line token: the subject identifies the device.
+        let create = mint_token_with_client(CREATE_SCOPE, "+123456789531").await;
+        let body = json!({ "qosProfile": "QOS_E" }).to_string();
+        let (status, _, created) = post_assignment(Some(&create), &body, None).await;
+        assert_eq!(status, StatusCode::CREATED);
+
+        // Retrieve with the same line token and no device body (empty body is `{}`).
+        let read = mint_token_with_client(READ_BY_DEVICE_SCOPE, "+123456789531").await;
+        let (status, _, got) = retrieve_by_device(Some(&read), "", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(got, created);
+    }
+
+    #[tokio::test]
+    async fn retrieve_by_device_on_a_line_token_is_422_unnecessary_identifier() {
+        let read = mint_token_with_client(READ_BY_DEVICE_SCOPE, "+123456789012").await;
+        let body = json!({ "device": { "phoneNumber": "+123456789034" } }).to_string();
+        let (status, _, err) = retrieve_by_device(Some(&read), &body, None).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(err["code"], "UNNECESSARY_IDENTIFIER");
+    }
+
+    #[tokio::test]
+    async fn retrieve_by_device_no_device_and_non_line_subject_is_422_missing_identifier() {
+        // Subject "qosprov-client" is not a line and no device is supplied.
+        let read = mint_token(READ_BY_DEVICE_SCOPE).await;
+        let (status, _, err) = retrieve_by_device(Some(&read), "", None).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(err["code"], "MISSING_IDENTIFIER");
+    }
+
+    #[tokio::test]
+    async fn retrieve_by_device_requires_the_read_by_device_scope() {
+        // The plain read (by-id) scope does not grant retrieve-by-device → 403.
+        let token = mint_token(READ_SCOPE).await;
+        let body = json!({ "device": { "phoneNumber": "+123456789521" } }).to_string();
+        let (status, _, err) = retrieve_by_device(Some(&token), &body, None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(err["code"], "PERMISSION_DENIED");
+    }
+
+    #[tokio::test]
+    async fn retrieve_by_device_without_a_token_is_401() {
+        let body = json!({ "device": { "phoneNumber": "+123456789521" } }).to_string();
+        let (status, _, _) = retrieve_by_device(None, &body, None).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
     }
 }

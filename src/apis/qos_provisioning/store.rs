@@ -66,6 +66,22 @@ pub fn remove(id: &str) -> Option<Value> {
         .remove(id)
 }
 
+/// Return the first stored `AssignmentInfo` whose echoed `device` equals
+/// `device`, or `None` if the device has no assignment. `getQosAssignmentByDevice`
+/// uses the distinction to answer `200` (the device's assignment) vs `404` (the
+/// device has none). QoS Provisioning models at most one provisioning per device,
+/// so a single match is returned — unlike QoD's `find_by_device`, which lists a
+/// device's sessions as an array. The lock is held only for the scan + clone
+/// (never across an `.await`), and the returned value is an independent copy.
+pub fn find_by_device(device: &Value) -> Option<Value> {
+    store()
+        .lock()
+        .expect("qos-provisioning store not poisoned")
+        .values()
+        .find(|info| info.get("device") == Some(device))
+        .cloned()
+}
+
 /// Mint a fresh, opaque, UUID-shaped `assignmentId`. See [`mint_uuid`] for the shape.
 pub fn new_assignment_id() -> String {
     mint_uuid()
@@ -132,6 +148,21 @@ mod tests {
         insert(id.clone(), info.clone());
         assert_eq!(get(&id), Some(info));
         assert!(get("no-such-assignment").is_none());
+    }
+
+    #[test]
+    fn find_by_device_matches_only_the_assignment_with_that_device_echo() {
+        let device = json!({ "phoneNumber": "+199990000001" });
+        // Nothing stored for this device yet.
+        assert!(find_by_device(&device).is_none());
+
+        let id = new_assignment_id();
+        let info = json!({ "assignmentId": id, "status": "AVAILABLE", "device": device });
+        insert(id, info.clone());
+
+        assert_eq!(find_by_device(&device), Some(info));
+        // A different device echo matches nothing.
+        assert!(find_by_device(&json!({ "phoneNumber": "+199990000099" })).is_none());
     }
 
     #[test]

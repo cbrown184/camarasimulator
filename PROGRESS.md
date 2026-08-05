@@ -1267,7 +1267,15 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     state (opaque `assignmentId`, no reserved-identifier plane). CAMARA's async
     `202 Accepted`/`DELETE_REQUESTED` form is deferred with `sink` notifications —
     synchronous `204` only (mirrors QoD's `deleteSession`). `x-correlator` echoed.
-  - [ ] `POST /retrieve-qos-assignment` (`getQosAssignmentByDevice`)
+  - [x] `POST /retrieve-qos-assignment` (`getQosAssignmentByDevice`,
+    `qos-provisioning:qos-assignments:read-by-device`) — returns the device's
+    provisioned `AssignmentInfo` (`200`) or `404 NOT_FOUND` when it has none.
+    Same two-legged/three-legged identifier rule as create (422
+    `UNNECESSARY_IDENTIFIER`/`MISSING_IDENTIFIER`). Two control planes (DESIGN
+    §7): resolved identifier reserved-error suffix → canonical CAMARA error
+    (checked first, mirroring QoD's retrieve-by-device); else the in-memory store
+    scanned by device echo (new `store::find_by_device`). One provisioning per
+    device → a single `AssignmentInfo`.
   - [ ] CloudEvents notifications on `sink` (status transitions)
 - [ ] Other CAMARA APIs as capacity allows
 
@@ -1294,6 +1302,25 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 ## Scan journal
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
+
+- 2026-08-05 — Phase 5: **QoS Provisioning v0.3** — `POST /retrieve-qos-assignment`
+  (`getQosAssignmentByDevice`, scope `qos-provisioning:qos-assignments:read-by-device`)
+  now live. Verified the authoritative CAMARA spec via WebFetch (qos-provisioning
+  0.3.0, r3.2): POST-not-GET (device may carry PII), body `RetrieveAssignmentByDevice
+  {device?}`, 2-legged → device required / 3-legged → device omitted, 200 →
+  `AssignmentInfo`, error set 400/401/403/404/422/429. Implemented: same
+  two-legged/three-legged identifier resolution as create (reuses
+  `resolve_identifier`; 422 UNNECESSARY/MISSING_IDENTIFIER); two control planes —
+  resolved identifier reserved-error suffix → canonical error (checked first,
+  mirroring QoD's retrieveSessionsByDevice), else new `store::find_by_device`
+  scans the store by echoed `device` → the device's `AssignmentInfo` (200) or 404
+  NOT_FOUND. One provisioning per device → a single record (Option, not QoD's
+  array). Empty body accepted as `{}` (3-legged). `x-correlator` echoed. Spec
+  updated (`/retrieve-qos-assignment` path + `RetrieveAssignmentByDevice` schema +
+  `x-camarasim-scenarios`; header comment refreshed). No new dependency (reuses the
+  existing store `Mutex<HashMap>`). 9 new handler tests + 1 store `find_by_device`
+  test; `cargo test` 991 passed (was 982); `cargo build --release` clean, no
+  warnings. — binary: 2,220,760 bytes (2.2M)
 
 - 2026-08-05 — Phase 5: **QoS Provisioning v0.3** — `DELETE /qos-assignments/
   {assignmentId}` (`revokeQosAssignment`, scope
