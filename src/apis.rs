@@ -39,10 +39,12 @@
 //! - **Media Streaming Rate vwip** — `/media-streaming-rate/vwip/…`.
 //! - **Optimal Edge Discovery vwip** — `/optimal-edge-discovery/vwip/…`.
 //! - **Verified Caller vwip** — `/verified-caller/vwip/…`.
+//! - **Application Profiles vwip** — `/application-profiles/vwip/…`.
 //!
 //! Plus [`openapi`], which serves each mounted API's vendored OpenAPI spec at
 //! `/{api}/v{n}/openapi.yaml` (docs/DESIGN.md §9).
 
+pub mod application_profiles;
 pub mod blockchain_public_address;
 pub mod call_forwarding_signal;
 pub mod carrier_billing;
@@ -116,5 +118,6 @@ pub fn routes() -> Router {
         .merge(media_streaming_rate::routes())
         .merge(optimal_edge_discovery::routes())
         .merge(verified_caller::routes())
+        .merge(application_profiles::routes())
         .merge(openapi::routes())
 }

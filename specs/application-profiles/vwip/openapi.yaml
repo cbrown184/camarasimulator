@@ -1,0 +1,393 @@
+# CamaraSim — Application Profiles, API version vwip (CAMARA ApplicationProfiles, wip).
+#
+# Vendored from the CAMARA Application Profiles API (work-in-progress — no
+# released version yet, so mounted at its canonical `vwip` base path, like
+# Verified Caller / Media Streaming Rate / Optimal Edge Discovery) and annotated
+# with CamaraSim's parameter-driven functional cases (docs/DESIGN.md §7, §9).
+# Backed by `src/apis/application_profiles/vwip.rs`; spec and code must not drift.
+#
+# First slice: `POST /application-profiles` (createApplicationProfile) and
+# `GET /application-profiles/{applicationProfileId}` (readApplicationProfile).
+# `PATCH` (updateApplicationProfile) and `DELETE` (deleteApplicationProfile) are
+# separate later slices, out of scope for this contract.
+openapi: 3.0.3
+info:
+  title: Application Profiles
+  description: |
+    Lets an application register a named set of *quality requirements* — network
+    quality thresholds (latency, throughput, packet loss, jitter) and/or compute
+    resource thresholds (CPU, GPU, memory, storage) — and receive back an opaque
+    `applicationProfileId`. That id is then referenced by the sibling
+    **Connectivity Insights** API (its `applicationProfileId` request field),
+    which answers whether the network can meet a profile's requirements for a
+    given device right now.
+
+    This is the CamaraSim reference double for CAMARA Application Profiles
+    (`wip`). It is a **stateful, resource-oriented** API: `POST` creates a profile
+    and `GET /{applicationProfileId}` reads it back.
+
+    ## No identifier / no device
+
+    An application profile is a free-standing catalog resource — it is not tied
+    to a device, a subscriber line, or a token subject. There is therefore **no**
+    reserved-identifier control plane and no two-legged / three-legged rule; the
+    opaque `applicationProfileId` is minted by the server, and for read the store
+    state is the only control plane.
+
+    ## Functional cases — the request body is the control plane (docs/DESIGN.md §7)
+
+    `createApplicationProfile` is driven entirely by the request body:
+
+    - **`anyOf`.** The body must carry at least one of `networkQualityThresholds`
+      or `computeResources` → else `400 INVALID_ARGUMENT`.
+    - **`minProperties: 1`.** A supplied `networkQualityThresholds` /
+      `computeResources` object must carry at least one property → else
+      `400 INVALID_ARGUMENT`.
+    - **Range constraints → `400 OUT_OF_RANGE`.** A `Duration` (`packetDelayBudget`,
+      `jitter`) `value` must be `>= 1`; a `Rate` (`targetMinDownstreamRate`,
+      `targetMinUpstreamRate`) `value` must be `0..=1024`; `packetLossErrorRate`
+      must be `1..=10`; a `Compute` (`targetMin*Memory` / `*Storage`) `value` must
+      be `0..=1024`.
+    - **Enum / type violations** (unknown `unit`, unknown `gpuVendorType`, wrong
+      JSON type, unknown field) are rejected at parse → `400 INVALID_ARGUMENT`.
+
+    A created profile echoes the validated thresholds back with its minted
+    `applicationProfileId`. `readApplicationProfile` returns a stored profile
+    (`200`); a well-formed but unknown id → `404 NOT_FOUND`; an id that violates
+    the `uuid` shape → `400 INVALID_ARGUMENT`.
+
+    The `targetMinCPU` / `targetMinGPU` / `gpuVendorType` / `gpuModelName` compute
+    fields are accepted with schema-level (type/enum) validation only — the CAMARA
+    spec places no numeric range on them — a documented trim (docs/AGENT.md).
+
+    CamaraSim exposes the full shared reserved-error response set on the spec so
+    the shared `CamaraError` `$ref`s resolve; canonical Application Profiles
+    declares a subset (400/401/403/404/429).
+  version: "wip"
+  license:
+    name: Apache-2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0.html
+
+servers:
+  - url: "{apiRoot}/application-profiles/vwip"
+    variables:
+      apiRoot:
+        default: http://localhost:8080
+        description: API root, e.g. the CamaraSim base URL.
+
+paths:
+  /application-profiles:
+    post:
+      operationId: createApplicationProfile
+      summary: Create an application profile
+      description: |
+        Registers an application's quality requirements and returns the created
+        `ApplicationProfile`, including a server-minted `applicationProfileId`.
+        The request body is the control plane (see the API description): the
+        `anyOf` / `minProperties` structural rules and the numeric range
+        constraints drive `400 INVALID_ARGUMENT` / `400 OUT_OF_RANGE`.
+      security:
+        - openId:
+            - application-profiles:create
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ApplicationProfileRequest"
+      responses:
+        "201":
+          description: The application profile was created.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApplicationProfile"
+              examples:
+                created:
+                  summary: A network-quality profile
+                  value:
+                    applicationProfileId: 3fa85f64-5717-4562-b3fc-2c963f66afa6
+                    networkQualityThresholds:
+                      packetDelayBudget:
+                        value: 10
+                        unit: Milliseconds
+                      packetLossErrorRate: 3
+        "400":
+          description: |
+            400 — invalid request. CamaraSim returns `INVALID_ARGUMENT` for a
+            malformed body, a missing `anyOf` threshold, an empty threshold
+            object (`minProperties`), an unknown field, or an unknown `unit` /
+            `gpuVendorType` enum; and `OUT_OF_RANGE` for a numeric threshold
+            outside its allowed range.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApplicationProfilesError"
+              examples:
+                invalidArgument:
+                  summary: Missing anyOf threshold
+                  value:
+                    status: 400
+                    code: INVALID_ARGUMENT
+                    message: "At least one of `networkQualityThresholds` or `computeResources` is required."
+                outOfRange:
+                  summary: Rate value out of range
+                  value:
+                    status: 400
+                    code: OUT_OF_RANGE
+                    message: "`targetMinDownstreamRate.value` must be in 0..=1024."
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+      x-camarasim-scenarios:
+        description: >-
+          Result selected from the request body (docs/DESIGN.md §7). There is no
+          identifier, so no reserved-error plane on create; the structural
+          (`anyOf` / `minProperties`) and numeric-range rules drive the error set.
+        cases:
+          - input: "body with at least one valid threshold object"
+            result: "201 ApplicationProfile (thresholds echoed + minted applicationProfileId)"
+          - input: "body carrying neither networkQualityThresholds nor computeResources"
+            result: "400 INVALID_ARGUMENT (anyOf)"
+          - input: "an empty networkQualityThresholds / computeResources object"
+            result: "400 INVALID_ARGUMENT (minProperties)"
+          - input: "a Rate/Compute value outside 0..=1024, a Duration value < 1, or packetLossErrorRate outside 1..=10"
+            result: "400 OUT_OF_RANGE"
+          - input: "unknown unit / gpuVendorType enum, unknown field, or wrong JSON type"
+            result: "400 INVALID_ARGUMENT (rejected at parse)"
+
+  /application-profiles/{applicationProfileId}:
+    get:
+      operationId: readApplicationProfile
+      summary: Read an application profile
+      description: |
+        Reads back a previously created application profile by its
+        `applicationProfileId`. The store state is the control plane: a stored id
+        → `200`; a well-formed but unknown id → `404 NOT_FOUND`; an id that
+        violates the `uuid` shape → `400 INVALID_ARGUMENT`.
+      security:
+        - openId:
+            - application-profiles:read
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+        - name: applicationProfileId
+          in: path
+          required: true
+          description: The id of the application profile to read.
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: The application profile.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApplicationProfile"
+        "400":
+          description: 400 — `applicationProfileId` is not a valid UUID.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApplicationProfilesError"
+              examples:
+                invalidArgument:
+                  value:
+                    status: 400
+                    code: INVALID_ARGUMENT
+                    message: "`applicationProfileId` must be a UUID."
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+      x-camarasim-scenarios:
+        description: >-
+          Result selected from the opaque `applicationProfileId` path parameter
+          against the in-memory store (docs/DESIGN.md §7). No reserved-identifier
+          plane — the id is server-minted.
+        cases:
+          - input: "a stored applicationProfileId"
+            result: "200 ApplicationProfile"
+          - input: "a well-formed but unknown applicationProfileId"
+            result: "404 NOT_FOUND"
+          - input: "an applicationProfileId that is not a UUID"
+            result: "400 INVALID_ARGUMENT"
+
+components:
+  securitySchemes:
+    openId:
+      $ref: "../../auth/openapi.yaml#/components/securitySchemes/camaraOAuth"
+
+  parameters:
+    XCorrelator:
+      name: x-correlator
+      in: header
+      required: false
+      description: Correlation id for the request, echoed back on the response.
+      schema:
+        type: string
+
+  headers:
+    XCorrelator:
+      description: The `x-correlator` from the request, echoed if one was sent.
+      required: false
+      schema:
+        type: string
+
+  schemas:
+    TimeUnitEnum:
+      type: string
+      enum: [Days, Hours, Minutes, Seconds, Milliseconds, Microseconds, Nanoseconds]
+
+    RateUnitEnum:
+      type: string
+      enum: [Bps, Kbps, Mbps, Gbps, Tbps]
+
+    ComputeUnitEnum:
+      type: string
+      enum: [Kb, Mb, Gb, Tb]
+
+    Duration:
+      type: object
+      description: A duration — a value paired with a time unit.
+      properties:
+        value:
+          type: integer
+          format: int32
+          minimum: 1
+        unit:
+          $ref: "#/components/schemas/TimeUnitEnum"
+
+    Rate:
+      type: object
+      description: A data rate — a value paired with a rate unit.
+      properties:
+        value:
+          type: integer
+          format: int32
+          minimum: 0
+          maximum: 1024
+        unit:
+          $ref: "#/components/schemas/RateUnitEnum"
+
+    Compute:
+      type: object
+      description: A compute quantity — a value paired with a compute unit.
+      properties:
+        value:
+          type: integer
+          format: int32
+          minimum: 0
+          maximum: 1024
+        unit:
+          $ref: "#/components/schemas/ComputeUnitEnum"
+
+    NetworkQualityThresholds:
+      type: object
+      description: Network-quality requirements (at least one property).
+      minProperties: 1
+      properties:
+        packetDelayBudget:
+          $ref: "#/components/schemas/Duration"
+        targetMinDownstreamRate:
+          $ref: "#/components/schemas/Rate"
+        targetMinUpstreamRate:
+          $ref: "#/components/schemas/Rate"
+        packetLossErrorRate:
+          type: integer
+          format: int32
+          minimum: 1
+          maximum: 10
+        jitter:
+          $ref: "#/components/schemas/Duration"
+
+    ComputeResourcesThresholds:
+      type: object
+      description: Compute-resource requirements (at least one property).
+      minProperties: 1
+      properties:
+        targetMinCPU:
+          type: number
+          description: Minimum vCPUs (fractional allowed).
+        targetMinGPU:
+          type: integer
+        gpuVendorType:
+          type: string
+          enum: [Nvidia, AMD]
+        gpuModelName:
+          type: string
+        targetMinMemory:
+          $ref: "#/components/schemas/Compute"
+        targetMinGPUMemory:
+          $ref: "#/components/schemas/Compute"
+        targetMinEphemeralStorage:
+          $ref: "#/components/schemas/Compute"
+        targetMinPersistentStorage:
+          $ref: "#/components/schemas/Compute"
+
+    ApplicationProfileRequest:
+      type: object
+      description: |
+        Request to create an application profile. At least one of the two
+        threshold objects must be present (`anyOf`).
+      anyOf:
+        - required: [networkQualityThresholds]
+        - required: [computeResources]
+      properties:
+        networkQualityThresholds:
+          $ref: "#/components/schemas/NetworkQualityThresholds"
+        computeResources:
+          $ref: "#/components/schemas/ComputeResourcesThresholds"
+
+    ApplicationProfile:
+      type: object
+      description: |
+        A created application profile: the requested thresholds plus the
+        server-minted `applicationProfileId`.
+      required:
+        - applicationProfileId
+      anyOf:
+        - required: [networkQualityThresholds]
+        - required: [computeResources]
+      properties:
+        applicationProfileId:
+          type: string
+          format: uuid
+          description: Opaque, UUID-shaped id of the application profile.
+        networkQualityThresholds:
+          $ref: "#/components/schemas/NetworkQualityThresholds"
+        computeResources:
+          $ref: "#/components/schemas/ComputeResourcesThresholds"
+
+    ApplicationProfilesError:
+      description: >-
+        The CAMARA error body for this API — the shared `CamaraError` shape with
+        the Application Profiles `code` set (adds `OUT_OF_RANGE`).
+      allOf:
+        - $ref: "../../shared/errors.yaml#/components/schemas/CamaraError"
+        - type: object
+          properties:
+            code:
+              type: string
+              enum:
+                - INVALID_ARGUMENT
+                - OUT_OF_RANGE
+                - UNAUTHENTICATED
+                - PERMISSION_DENIED
+                - NOT_FOUND
+                - TOO_MANY_REQUESTS

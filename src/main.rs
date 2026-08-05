@@ -232,6 +232,12 @@ async fn catalog() -> Json<Value> {
                 "version": "vwip",
                 "base_path": "/verified-caller/vwip",
                 "spec_url": "/verified-caller/vwip/openapi.yaml",
+            },
+            {
+                "name": "application-profiles",
+                "version": "vwip",
+                "base_path": "/application-profiles/vwip",
+                "spec_url": "/application-profiles/vwip/openapi.yaml",
             }
         ],
         "authorization_servers": [{

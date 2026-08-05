@@ -1457,6 +1457,33 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     → 400 INVALID_ARGUMENT; `timeToLive` ∉ 1..=86400 → 400 OUT_OF_RANGE.
     Stateless (no read-back → no store). `x-correlator` echoed on every response
     incl. the `204`. **Completes Verified Caller vwip.**
+- [~] Application Profiles vwip (`/application-profiles/vwip`; CAMARA
+  ApplicationProfiles, wip — no released version yet, mounted at its canonical
+  `vwip` base path; stateful, resource-oriented; the *quality-requirements*
+  registry the sibling Connectivity Insights API references by
+  `applicationProfileId`):
+  - [x] `POST /application-profiles` (`createApplicationProfile`, scope
+    `application-profiles:create`) + `GET /application-profiles/{applicationProfileId}`
+    (`readApplicationProfile`, scope `application-profiles:read`). In-memory
+    profile store (`src/apis/application_profiles/store.rs`; `Mutex<HashMap>`,
+    opaque UUID id, no uuid/rand dep, mirroring QoS Provisioning). No identifier /
+    no `device` — the id is server-minted, so no reserved-identifier plane and no
+    two/three-legged rule. Create is driven entirely by the request body (DESIGN
+    §7): `anyOf` (≥1 of `networkQualityThresholds`/`computeResources`, else 400
+    INVALID_ARGUMENT); each supplied object's `minProperties: 1` (else 400
+    INVALID_ARGUMENT); numeric ranges → 400 OUT_OF_RANGE (Duration value ≥ 1;
+    Rate/Compute value 0..=1024; packetLossErrorRate 1..=10); unknown unit/
+    gpuVendorType enum / unknown field / wrong type → 400 INVALID_ARGUMENT at
+    parse. Created profile echoes the validated thresholds + minted
+    `applicationProfileId`; read → 200 (store hit) / 404 NOT_FOUND (well-formed
+    unknown) / 400 INVALID_ARGUMENT (non-UUID path). `targetMinCPU`/`targetMinGPU`/
+    `gpuVendorType`/`gpuModelName` accepted with schema-level validation only
+    (no numeric range in the spec) — documented cut. `x-correlator` echoed. No new
+    dep (reuses `sha2`).
+  - [ ] `PATCH /application-profiles/{applicationProfileId}` (`updateApplicationProfile`,
+    `application-profiles:update`)
+  - [ ] `DELETE /application-profiles/{applicationProfileId}` (`deleteApplicationProfile`,
+    `application-profiles:delete`)
 - [ ] Other CAMARA APIs as capacity allows
 
 ## Cross-cutting (do alongside the item that needs it)
@@ -1483,6 +1510,38 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-05 — Phase 5 (other CAMARA APIs): **Application Profiles vwip —
+  `POST /application-profiles` (`createApplicationProfile`) +
+  `GET /application-profiles/{applicationProfileId}` (`readApplicationProfile`)**,
+  a new stateful, resource-oriented API — the quality-requirements registry the
+  already-implemented Connectivity Insights API references by
+  `applicationProfileId` (closing that noted cut's counterpart). Chosen over the
+  remaining `[ ]` leaf items (QoD / QoS-Provisioning `https://` sink TLS delivery),
+  which need a rustls TLS client — a heavyweight, multi-MB dependency that
+  conflicts with the "keep the binary small / justify every dep" guardrail and has
+  been deliberately deferred as a documented cut; a new stateless-ish API is also
+  the higher phase-priority pick. Verified the authoritative CAMARA spec via
+  WebFetch (camaraproject/ApplicationProfiles, `main`; version `wip`; base
+  `/application-profiles/vwip`; scopes `application-profiles:{create,read,update,
+  delete}`; request `ApplicationProfileRequest {anyOf networkQualityThresholds |
+  computeResources}`; response `ApplicationProfile {applicationProfileId(uuid) +
+  thresholds}`; errors 400/401/403/404/429). Scoped this pass to create + read-by-id
+  (PATCH/DELETE are follow-up sub-items). New
+  `src/apis/application_profiles/{,.rs,store.rs,vwip.rs}`: in-memory store (opaque
+  UUID id, `Mutex<HashMap>`, no uuid/rand dep, mirroring QoS Provisioning); no
+  identifier/`device`, so store state (read) and the request body (create) are the
+  control planes (DESIGN §7). Create validation: `anyOf` + per-object
+  `minProperties: 1` → 400 INVALID_ARGUMENT; numeric ranges (Duration ≥ 1, Rate/
+  Compute 0..=1024, packetLossErrorRate 1..=10) → 400 OUT_OF_RANGE; unknown enum/
+  field/type → 400 INVALID_ARGUMENT at parse. Read: 200 / 404 (unknown) / 400
+  (non-UUID path). Spec: new `specs/application-profiles/vwip/openapi.yaml`
+  (vendored + annotated with `x-camarasim-scenarios`; shared error `$ref`s). Wired
+  into `apis::routes`, the `/` catalog, `openapi::SPECS`, and the catalog contract
+  test. Tests: 19 new (2 store units + `is_uuid_shaped` unit + 16 router tests:
+  create NQ/compute happy paths, create→read round-trip, 404/400 read cases, anyOf/
+  minProperties/OUT_OF_RANGE/enum/unknown-field 400s, scope/auth). `cargo test`
+  1138 passed; `cargo build --release` OK. No new dependency. — binary: 2.4M
+  (2,423,504 bytes)
 - 2026-08-05 — Phase 5 (other CAMARA APIs): **Verified Caller vwip
   `POST /pre-announce` (`createPreAnnouncement`)**, a new stateless, non-spatial,
   two-legged / business-facing anti-scam caller-trust API — the first Fall25 API
