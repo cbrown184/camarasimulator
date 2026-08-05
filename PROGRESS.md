@@ -1498,6 +1498,23 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     INVALID_ARGUMENT` (mirrors `readApplicationProfile`). Store state the only
     control plane (opaque server-minted id → no reserved-identifier plane).
     `x-correlator` echoed.
+- [x] Subscription Status vwip (`/subscription-status/vwip`; CAMARA
+  SubscriptionStatus, wip — no released version yet, mounted at its canonical
+  `vwip` base path; stateless, non-spatial, phone-number-keyed line-status query):
+  - [x] `POST /retrieve-subscription-status` (`subscription-status:retrieve-subscription-status`,
+    `retrieveSubscriptionStatus`) — the live service status of a line
+    (`{ voiceSmsIn: active|suspended, voiceSmsOut: active|suspended,
+    dataService: active|suspended|throttled }`). Same two-legged (submitted
+    `phoneNumber`) / three-legged (E.164 `sub`) identifier rule as Number
+    Recycling with 422 `UNNECESSARY_IDENTIFIER` / `MISSING_IDENTIFIER`; empty
+    body accepted (three-legged). Two control planes (DESIGN §7): identifier
+    reserved-error suffix → canonical CAMARA error (`…404` → NOT_FOUND, `…422`
+    → SERVICE_NOT_APPLICABLE — the API's own service-level 422); else the
+    identifier's trailing three digits `d` are a status bitfield — bit 0 →
+    `voiceSmsIn` suspended, bit 1 → `voiceSmsOut` suspended, `(d>>2)%3` →
+    `dataService` active/suspended/throttled — so `…000`/no-digits is the
+    all-active default and each field is independently controllable. No new dep.
+    **Completes Subscription Status vwip.**
 - [ ] Other CAMARA APIs as capacity allows
 
 ## Cross-cutting (do alongside the item that needs it)
@@ -1524,6 +1541,38 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-05 — Phase 5 (other CAMARA APIs): **Subscription Status vwip —
+  `POST /retrieve-subscription-status` (`retrieveSubscriptionStatus`, scope
+  `subscription-status:retrieve-subscription-status`)**, a new stateless,
+  non-spatial, phone-number-keyed line-status query — the live service status of
+  a mobile line. Chosen over the remaining `[ ]` leaves (QoD / QoS-Provisioning
+  `https://` sink TLS delivery — still deferred: a rustls TLS client is a
+  heavyweight, multi-MB dependency vs the "keep binary small" guardrail), and as
+  a higher-phase-priority stateless API. Verified the authoritative CAMARA spec
+  via WebFetch (camaraproject/SubscriptionStatus `main`; version `wip`; base
+  `/subscription-status/vwip`; requestBody required, `SubscriptionStatusRequest
+  {phoneNumber?}` additionalProperties:false; `SubscriptionStatusResponse
+  {voiceSmsIn(active|suspended), voiceSmsOut(active|suspended),
+  dataService(active|suspended|throttled)}` all required; declared errors
+  200/400/401/403/404(IDENTIFIER_NOT_FOUND)/422(SERVICE_NOT_APPLICABLE,
+  MISSING_IDENTIFIER, UNNECESSARY_IDENTIFIER)). New
+  `src/apis/subscription_status/{,.rs,vwip.rs}`, mirroring Number Recycling's
+  two-legged/three-legged identifier rule (422 UNNECESSARY/MISSING; empty body
+  accepted for three-legged). Model (DESIGN §7): reserved-error suffix →
+  canonical CAMARA error (`…404`→NOT_FOUND, `…422`→SERVICE_NOT_APPLICABLE,
+  matching the API's own service-level 422 code); else the identifier's trailing
+  three digits `d` are a status bitfield (bit0→voiceSmsIn suspended,
+  bit1→voiceSmsOut suspended, `(d>>2)%3`→dataService active/suspended/throttled),
+  so `…000` is the all-active default and every field is independently
+  controllable. Spec: new `specs/subscription-status/vwip/openapi.yaml` (vendored
+  + annotated with `x-camarasim-scenarios`; full shared reserved-error set,
+  `IDENTIFIER_NOT_FOUND` in the error enum for completeness). Wired into
+  `apis::routes`, the `/` catalog, `openapi::SPECS`, and the catalog contract
+  test. Tests: 16 new (1 E.164 unit + 15 router: all-active default, per-field
+  independence, dataService's three states, reserved-error suffixes, three-legged
+  subject + empty body, UNNECESSARY/MISSING identifier, validation set, scope/
+  auth, x-correlator on success/error). `cargo test` 1170 passed; `cargo build
+  --release` OK. No new dependency. — binary: 2.4M (2,458,096 bytes)
 - 2026-08-05 — Phase 5 (other CAMARA APIs): **Application Profiles vwip —
   `PATCH /application-profiles/{applicationProfileId}`
   (`updateApplicationProfile`, scope `application-profiles:update`)**, the update

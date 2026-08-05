@@ -40,6 +40,7 @@
 //! - **Optimal Edge Discovery vwip** — `/optimal-edge-discovery/vwip/…`.
 //! - **Verified Caller vwip** — `/verified-caller/vwip/…`.
 //! - **Application Profiles vwip** — `/application-profiles/vwip/…`.
+//! - **Subscription Status vwip** — `/subscription-status/vwip/…`.
 //!
 //! Plus [`openapi`], which serves each mounted API's vendored OpenAPI spec at
 //! `/{api}/v{n}/openapi.yaml` (docs/DESIGN.md §9).
@@ -78,6 +79,7 @@ pub mod quality_on_demand;
 pub mod region_device_count;
 pub mod sim_swap;
 pub mod simple_edge_discovery;
+pub mod subscription_status;
 pub mod verified_caller;
 
 use axum::Router;
@@ -119,5 +121,6 @@ pub fn routes() -> Router {
         .merge(optimal_edge_discovery::routes())
         .merge(verified_caller::routes())
         .merge(application_profiles::routes())
+        .merge(subscription_status::routes())
         .merge(openapi::routes())
 }
