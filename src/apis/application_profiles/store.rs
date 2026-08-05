@@ -59,6 +59,19 @@ pub fn get(id: &str) -> Option<Value> {
         .cloned()
 }
 
+/// Remove the profile stored under `id`, returning `true` if one was present.
+///
+/// `deleteApplicationProfile` uses the distinction to answer `204 No Content`
+/// (a profile existed and was evicted — single-use) vs `404 NOT_FOUND` (no such
+/// profile, including an already-deleted id).
+pub fn remove(id: &str) -> bool {
+    store()
+        .lock()
+        .expect("application-profiles store not poisoned")
+        .remove(id)
+        .is_some()
+}
+
 /// Mint a fresh, opaque, UUID-shaped `applicationProfileId`. See [`mint_uuid`].
 pub fn new_profile_id() -> String {
     mint_uuid()
@@ -125,5 +138,16 @@ mod tests {
         insert(id.clone(), profile.clone());
         assert_eq!(get(&id), Some(profile));
         assert!(get("no-such-profile").is_none());
+    }
+
+    #[test]
+    fn remove_evicts_once_then_reports_absent() {
+        let id = new_profile_id();
+        insert(id.clone(), json!({ "applicationProfileId": id }));
+        assert!(get(&id).is_some(), "stored");
+        assert!(remove(&id), "first remove finds the profile");
+        assert!(get(&id).is_none(), "gone after remove");
+        assert!(!remove(&id), "second remove finds nothing (single-use)");
+        assert!(!remove("no-such-profile"), "unknown id removes nothing");
     }
 }

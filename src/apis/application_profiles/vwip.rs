@@ -10,9 +10,13 @@
 //! - `GET /application-profiles/{applicationProfileId}` (operationId
 //!   `readApplicationProfile`, scope `application-profiles:read`) — reads a stored
 //!   profile back (`200`) or `404 NOT_FOUND` for an unknown id.
+//! - `DELETE /application-profiles/{applicationProfileId}` (operationId
+//!   `deleteApplicationProfile`, scope `application-profiles:delete`) — evicts a
+//!   stored profile (`204 No Content`, single-use) or `404 NOT_FOUND` for an
+//!   unknown/already-deleted id.
 //!
-//! `PATCH` (`updateApplicationProfile`) and `DELETE` (`deleteApplicationProfile`)
-//! are follow-up sub-items (see PROGRESS.md).
+//! `PATCH` (`updateApplicationProfile`) is the remaining follow-up sub-item
+//! (see PROGRESS.md).
 //!
 //! ## No identifier / no `device`
 //!
@@ -47,6 +51,11 @@
 //! `readApplicationProfile` is driven by the `applicationProfileId` path param: a
 //! value violating the `uuid` shape → `400 INVALID_ARGUMENT`; a well-formed but
 //! unknown id → `404 NOT_FOUND`; a stored id → `200`.
+//!
+//! `deleteApplicationProfile` is keyed the same way against the store: a value
+//! violating the `uuid` shape → `400 INVALID_ARGUMENT`; a stored id → `204 No
+//! Content` (single-use eviction); a well-formed but unknown or already-deleted
+//! id → `404 NOT_FOUND`.
 
 use axum::body::Bytes;
 use axum::extract::Path;
@@ -65,6 +74,8 @@ use crate::errors::CamaraError;
 const CREATE_SCOPE: &str = "application-profiles:create";
 /// Scope required to read a profile (CAMARA application-profiles).
 const READ_SCOPE: &str = "application-profiles:read";
+/// Scope required to delete a profile (CAMARA application-profiles).
+const DELETE_SCOPE: &str = "application-profiles:delete";
 
 /// Routes for Application Profiles vwip, mounted at their canonical URLs.
 pub fn routes() -> Router {
@@ -75,7 +86,7 @@ pub fn routes() -> Router {
         )
         .route(
             "/application-profiles/vwip/application-profiles/:application_profile_id",
-            axum::routing::get(read_application_profile),
+            axum::routing::get(read_application_profile).delete(delete_application_profile),
         )
 }
 
@@ -329,6 +340,39 @@ async fn read_application_profile(
     }
 }
 
+/// `DELETE /application-profiles/vwip/application-profiles/{applicationProfileId}`.
+async fn delete_application_profile(
+    claims: Claims,
+    headers: HeaderMap,
+    Path(application_profile_id): Path<String>,
+) -> Response {
+    let correlator = headers.get("x-correlator").cloned();
+
+    if let Err(e) = claims.require_scope(DELETE_SCOPE) {
+        return with_correlator(e.into_response(), &correlator);
+    }
+
+    // The path parameter is `format: uuid`; a malformed value is a 400 (mirrors
+    // `readApplicationProfile`).
+    if !is_uuid_shaped(&application_profile_id) {
+        return invalid_argument("`applicationProfileId` must be a UUID.", &correlator);
+    }
+
+    // The store state is the only control plane: present → 204 (single-use
+    // eviction), absent → 404.
+    if store::remove(&application_profile_id) {
+        with_correlator(StatusCode::NO_CONTENT.into_response(), &correlator)
+    } else {
+        with_correlator(
+            CamaraError::not_found(
+                "No application profile found for the provided applicationProfileId.",
+            )
+            .into_response(),
+            &correlator,
+        )
+    }
+}
+
 /// Validate `NetworkQualityThresholds`: `minProperties: 1`, then per-field ranges.
 fn validate_network_quality(
     nqt: &NetworkQualityThresholds,
@@ -544,6 +588,24 @@ mod tests {
         request("GET", &path, token, None, correlator).await
     }
 
+    async fn delete_profile(
+        token: Option<&str>,
+        id: &str,
+        correlator: Option<&str>,
+    ) -> (StatusCode, HeaderMap, Value) {
+        let path = format!("{PROFILES}/{id}");
+        request("DELETE", &path, token, None, correlator).await
+    }
+
+    /// Create a profile and return its minted `applicationProfileId`.
+    async fn create_and_get_id() -> String {
+        let token = mint_token(CREATE_SCOPE).await;
+        let body = json!({ "computeResources": { "targetMinGPU": 1 } }).to_string();
+        let (status, _, created) = post_profile(Some(&token), &body, None).await;
+        assert_eq!(status, StatusCode::CREATED);
+        created["applicationProfileId"].as_str().unwrap().to_string()
+    }
+
     #[tokio::test]
     async fn create_network_quality_profile_echoes_and_mints_uuid() {
         let token = mint_token(CREATE_SCOPE).await;
@@ -729,6 +791,71 @@ mod tests {
     async fn missing_token_is_401() {
         let body = json!({ "computeResources": { "targetMinGPU": 1 } }).to_string();
         let (status, _, _) = post_profile(None, &body, None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    // --- deleteApplicationProfile ------------------------------------------
+
+    #[tokio::test]
+    async fn delete_evicts_the_profile_204_then_read_is_404() {
+        let id = create_and_get_id().await;
+        let del = mint_token(DELETE_SCOPE).await;
+        let (status, headers, _) = delete_profile(Some(&del), &id, Some("corr-del")).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(headers.get("x-correlator").unwrap(), "corr-del");
+
+        // A read after the delete now 404s.
+        let read = mint_token(READ_SCOPE).await;
+        let (status, _, body) = get_profile(Some(&read), &id, None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn delete_is_single_use_second_delete_is_404() {
+        let id = create_and_get_id().await;
+        let del = mint_token(DELETE_SCOPE).await;
+        let (status, _, _) = delete_profile(Some(&del), &id, None).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let (status, _, body) = delete_profile(Some(&del), &id, None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn delete_unknown_profile_is_404() {
+        let del = mint_token(DELETE_SCOPE).await;
+        let (status, _, body) =
+            delete_profile(Some(&del), "00000000-0000-4000-8000-000000000000", None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn delete_malformed_id_is_400() {
+        let del = mint_token(DELETE_SCOPE).await;
+        let (status, _, body) = delete_profile(Some(&del), "not-a-uuid", None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "INVALID_ARGUMENT");
+    }
+
+    #[tokio::test]
+    async fn delete_requires_the_delete_scope() {
+        // A read-only token may not delete → 403 (and the profile survives).
+        let id = create_and_get_id().await;
+        let read = mint_token(READ_SCOPE).await;
+        let (status, _, err) = delete_profile(Some(&read), &id, None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(err["code"], "PERMISSION_DENIED");
+        // Still readable — the forbidden delete did not evict it.
+        let (status, _, _) = get_profile(Some(&read), &id, None).await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn delete_missing_token_is_401() {
+        let (status, _, _) =
+            delete_profile(None, "00000000-0000-4000-8000-000000000000", None).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
     }
 }

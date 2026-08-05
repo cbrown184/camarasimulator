@@ -1482,8 +1482,13 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     dep (reuses `sha2`).
   - [ ] `PATCH /application-profiles/{applicationProfileId}` (`updateApplicationProfile`,
     `application-profiles:update`)
-  - [ ] `DELETE /application-profiles/{applicationProfileId}` (`deleteApplicationProfile`,
-    `application-profiles:delete`)
+  - [x] `DELETE /application-profiles/{applicationProfileId}` (`deleteApplicationProfile`,
+    `application-profiles:delete`) — evicts a stored profile from the in-memory
+    store (`store::remove`): stored id → `204 No Content` (single-use); well-formed
+    unknown/already-deleted id → `404 NOT_FOUND`; non-UUID path → `400
+    INVALID_ARGUMENT` (mirrors `readApplicationProfile`). Store state the only
+    control plane (opaque server-minted id → no reserved-identifier plane).
+    `x-correlator` echoed. (PATCH remains.)
 - [ ] Other CAMARA APIs as capacity allows
 
 ## Cross-cutting (do alongside the item that needs it)
@@ -1510,6 +1515,28 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-05 — Phase 5 (other CAMARA APIs): **Application Profiles vwip —
+  `DELETE /application-profiles/{applicationProfileId}`
+  (`deleteApplicationProfile`, scope `application-profiles:delete`)**, the delete
+  leg of the profile CRUD lifecycle. Chosen over the remaining `[ ]` leaf items
+  (QoD / QoS-Provisioning `https://` sink TLS delivery — still deferred: a rustls
+  TLS client is a heavyweight, multi-MB dependency vs the "keep binary small /
+  justify every dep" guardrail) and over the sibling PATCH sub-item, as the
+  smallest, lowest-risk single endpoint that lands green with no new dep. Keyed
+  only on store state (opaque server-minted id → no reserved-identifier plane,
+  mirroring QoS Provisioning's `revokeQosAssignment` / Blockchain's delete):
+  stored id → `204 No Content` (single-use eviction via new `store::remove`);
+  well-formed unknown/already-deleted id → `404 NOT_FOUND`; non-UUID path → `400
+  INVALID_ARGUMENT` (mirrors `readApplicationProfile`); `x-correlator` echoed.
+  Spec: added the `delete` operation + `x-camarasim-scenarios` to the existing
+  `/application-profiles/{applicationProfileId}` path item in
+  `specs/application-profiles/vwip/openapi.yaml` (204/400/401/403/404/429). Tests:
+  7 new (1 store unit `remove_evicts_once_then_reports_absent`; 6 router tests:
+  delete→read 404 round-trip + correlator echo, single-use second-delete 404,
+  unknown-id 404, malformed-id 400, delete-scope 403 (profile survives), missing
+  token 401). `cargo test` 1145 passed; `cargo build --release` OK. No new
+  dependency. PATCH (`updateApplicationProfile`) remains the last
+  Application Profiles sub-item. — binary: 2.4M (2,429,288 bytes)
 - 2026-08-05 — Phase 5 (other CAMARA APIs): **Application Profiles vwip —
   `POST /application-profiles` (`createApplicationProfile`) +
   `GET /application-profiles/{applicationProfileId}` (`readApplicationProfile`)**,

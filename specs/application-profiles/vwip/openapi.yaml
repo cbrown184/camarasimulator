@@ -227,6 +227,67 @@ paths:
             result: "404 NOT_FOUND"
           - input: "an applicationProfileId that is not a UUID"
             result: "400 INVALID_ARGUMENT"
+    delete:
+      operationId: deleteApplicationProfile
+      summary: Delete an application profile
+      description: |
+        Deletes a previously created application profile by its
+        `applicationProfileId`. The store state is the control plane: a stored id
+        → `204 No Content` (single-use eviction); a well-formed but unknown or
+        already-deleted id → `404 NOT_FOUND`; an id that violates the `uuid` shape
+        → `400 INVALID_ARGUMENT`.
+      security:
+        - openId:
+            - application-profiles:delete
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+        - name: applicationProfileId
+          in: path
+          required: true
+          description: The id of the application profile to delete.
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "204":
+          description: The application profile was deleted.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+        "400":
+          description: 400 — `applicationProfileId` is not a valid UUID.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApplicationProfilesError"
+              examples:
+                invalidArgument:
+                  value:
+                    status: 400
+                    code: INVALID_ARGUMENT
+                    message: "`applicationProfileId` must be a UUID."
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+      x-camarasim-scenarios:
+        description: >-
+          Result selected from the opaque `applicationProfileId` path parameter
+          against the in-memory store (docs/DESIGN.md §7). No reserved-identifier
+          plane — the id is server-minted. Delete is single-use: the first delete
+          of a stored id evicts it (`204`), any later delete of the same id
+          `404`s.
+        cases:
+          - input: "a stored applicationProfileId"
+            result: "204 No Content (evicted)"
+          - input: "a well-formed but unknown or already-deleted applicationProfileId"
+            result: "404 NOT_FOUND"
+          - input: "an applicationProfileId that is not a UUID"
+            result: "400 INVALID_ARGUMENT"
 
 components:
   securitySchemes:
