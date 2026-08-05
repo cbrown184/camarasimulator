@@ -1,0 +1,494 @@
+# CamaraSim — QoS Provisioning, API version v0.3 (CAMARA 0.3.0).
+#
+# Vendored from the CAMARA QoS Provisioning API (qos-provisioning 0.3.0, part of
+# the QualityOnDemand repository, meta-release r3.2 — the latest published
+# version) and annotated with CamaraSim's parameter-driven functional cases
+# (docs/DESIGN.md §7, §9). Backed by `src/apis/qos_provisioning/v0_3.rs`; spec
+# and code must not drift.
+#
+# Mounted under its real published name/version at `/qos-provisioning/v0.3`
+# (mirroring the KYC Match v0.3 / Location Retrieval v0.4 decisions — DESIGN §9).
+#
+# This slice serves `POST /qos-assignments` (create) and
+# `GET /qos-assignments/{assignmentId}` (read by id). The
+# `DELETE /qos-assignments/{assignmentId}` (revoke), `POST /retrieve-qos-assignment`
+# (retrieve by device), and CloudEvents notifications on `sink` are later slices
+# (documented cut).
+openapi: 3.0.3
+info:
+  title: QoS Provisioning
+  description: |
+    Provisions a QoS profile for a device **indefinitely** — until it is
+    explicitly revoked — as opposed to the bounded QoS sessions of Quality on
+    Demand. QoS Provisioning is the *provisioning* counterpart of QoD: both live
+    in the CAMARA QualityOnDemand repository, but where QoD mints time-boxed
+    `sessions`, QoS Provisioning mints open-ended `qos-assignments`.
+
+    This is the CamaraSim reference double for CAMARA QoS Provisioning 0.3.0. The
+    device can be identified either by the `device` object in the request body
+    (two-legged / CIBA) or by the identity a three-legged access token
+    authenticated (in which case `device` is omitted).
+
+    ## Identifier resolution (two-legged vs three-legged)
+
+    The `device` object is only meaningful in two-legged auth. In a three-legged
+    token the device is already identified by the token subject:
+
+    - `device` carries an identifier **and** the token subject is itself an
+      E.164 line (a device-authenticated three-legged token) →
+      `422 UNNECESSARY_IDENTIFIER`.
+    - `device` carries an identifier, subject not a line → that identifier is
+      used (two-legged). Precedence: `phoneNumber` → `networkAccessIdentifier` →
+      the IPv4 `publicAddress` → `ipv6Address`.
+    - `device` absent, subject is an E.164 line → the subject is the identifier
+      (three-legged).
+    - `device` absent **and** the subject is not a line → the device cannot be
+      identified → `422 MISSING_IDENTIFIER`.
+    - `device` present but carrying **no** identifier (`minProperties: 1`
+      violated) → `400 INVALID_ARGUMENT`.
+
+    ## Functional cases — the input is the control plane (docs/DESIGN.md §7)
+
+    Once the identifier is resolved, the outcome is deterministic from it:
+
+    - **Reserved error suffix** — if the identifier's trailing three digits name
+      a reserved CAMARA status, the endpoint answers with that canonical CAMARA
+      error instead of a result (shared convention — see the referenced
+      `errors.yaml`): `…400`, `…401`, `…403`, `…404`, `…409`, `…422`, `…429`,
+      `…500`, `…503`. In particular `…409` → `409 CONFLICT`, modelling the
+      canonical "an assignment already exists for the same device" case.
+    - **Grant status** — otherwise the identifier's trailing three digits fix the
+      status: `…000` (or an identifier with no trailing digits) →
+      `status: REQUESTED` with no `startedAt` yet; any other tail →
+      `status: AVAILABLE` with `startedAt` = the current instant. QoS Provisioning
+      has no `duration`, so there is no `expiresAt` — the assignment is open-ended.
+    - **`qosProfile`** — a profile whose name contains `unavailable` →
+      `422 QOS_PROVISIONING.QOS_PROFILE_NOT_APPLICABLE`; otherwise it is applied.
+    - **`sink`** — optional; when present it must be a well-formed `https://`
+      callback URL → else `400 INVALID_SINK`. Notification delivery on `sink` is
+      not modelled in this slice (documented cut); `sinkCredential` is accepted
+      but not applied.
+
+    The response echoes the device back in a single-property `DeviceResponse`
+    (the identifier used), and echoes a supplied `sink`. `sinkCredential` (a
+    secret) is never echoed.
+
+    Examples: `+123456789012` → `AVAILABLE`; `+123456789000` → `REQUESTED`;
+    `+123456789409` → `409 CONFLICT`; `+123456789404` → `404 NOT_FOUND`.
+  version: "0.3.0"
+  license:
+    name: Apache-2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0.html
+
+servers:
+  - url: "{apiRoot}/qos-provisioning/v0.3"
+    variables:
+      apiRoot:
+        default: http://localhost:8080
+        description: API root, e.g. the CamaraSim base URL.
+
+paths:
+  /qos-assignments:
+    post:
+      operationId: createQosAssignment
+      summary: Provision a QoS profile for a device
+      description: |
+        Provisions the requested `qosProfile` for the identified device and
+        returns the created `AssignmentInfo` with a minted `assignmentId`.
+
+        See the API description for the identifier-resolution rules and the
+        parameter-driven functional cases.
+      security:
+        - openId:
+            - qos-provisioning:qos-assignments:create
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateAssignment"
+      responses:
+        "201":
+          description: The QoS assignment was created.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AssignmentInfo"
+              examples:
+                available:
+                  summary: An AVAILABLE assignment (device echoed)
+                  value:
+                    assignmentId: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+                    qosProfile: QOS_E
+                    status: AVAILABLE
+                    startedAt: "2024-01-01T14:27:08Z"
+                    device:
+                      phoneNumber: "+123456789012"
+                requested:
+                  summary: A REQUESTED assignment (no startedAt yet)
+                  value:
+                    assignmentId: "3fa85f64-5717-4562-b3fc-2c963f66afa7"
+                    qosProfile: QOS_E
+                    status: REQUESTED
+                    device:
+                      phoneNumber: "+123456789000"
+        "400":
+          description: |
+            400 — bad request. CamaraSim returns `INVALID_ARGUMENT` for a
+            malformed/missing `qosProfile` or a `device` carrying no identifier,
+            and `INVALID_SINK` for a `sink` that is not a valid `https://` URL.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "../../shared/errors.yaml#/components/schemas/CamaraError"
+              examples:
+                invalidArgument:
+                  summary: Missing or malformed argument
+                  value:
+                    status: 400
+                    code: INVALID_ARGUMENT
+                    message: "`qosProfile` is required."
+                invalidSink:
+                  summary: Sink is not a valid https URL
+                  value:
+                    status: 400
+                    code: INVALID_SINK
+                    message: "`sink` must be a valid `https://` callback URL."
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "409":
+          description: |
+            409 — conflict. The reserved `…409` suffix models the canonical case
+            where a QoS assignment already exists for the same device.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "../../shared/errors.yaml#/components/schemas/CamaraError"
+              examples:
+                conflict:
+                  summary: An assignment already exists for the device
+                  value:
+                    status: 409
+                    code: CONFLICT
+                    message: There is a conflict with the current state of the resource.
+        "422":
+          description: |
+            422 — unprocessable. CamaraSim returns `MISSING_IDENTIFIER` when the
+            device cannot be identified (no `device` and a non-line subject),
+            `UNNECESSARY_IDENTIFIER` when a `device` is submitted on a
+            three-legged device token, `QOS_PROVISIONING.QOS_PROFILE_NOT_APPLICABLE`
+            for a profile whose name marks it unavailable, or the reserved shared
+            `SERVICE_NOT_APPLICABLE` for the `…422` suffix.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "../../shared/errors.yaml#/components/schemas/CamaraError"
+              examples:
+                missingIdentifier:
+                  summary: The device cannot be identified
+                  value:
+                    status: 422
+                    code: MISSING_IDENTIFIER
+                    message: The device cannot be identified.
+                unnecessaryIdentifier:
+                  summary: The device is already identified by the token
+                  value:
+                    status: 422
+                    code: UNNECESSARY_IDENTIFIER
+                    message: The device is already identified by the access token.
+                qosProfileNotApplicable:
+                  summary: The requested QoS profile is not applicable
+                  value:
+                    status: 422
+                    code: QOS_PROVISIONING.QOS_PROFILE_NOT_APPLICABLE
+                    message: The requested QoS profile is not applicable for this device.
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          The assignment status is selected from the identifier (the first
+          present device identifier, else the access token subject) whose trailing
+          three digits drive the case (docs/DESIGN.md §7). Reserved error suffixes
+          come from the shared convention in errors.yaml. Canonical QoS
+          Provisioning 0.3.0 declares 400/401/403/404/409/422/429; CamaraSim
+          additionally exposes the shared 500/503 so every reserved suffix is
+          reachable. Notification delivery on `sink` and the
+          UNSUPPORTED_IDENTIFIER / IDENTIFIER_NOT_FOUND / SERVICE_NOT_APPLICABLE
+          sub-cases beyond the shared reserved-suffix convention are not modelled.
+        cases:
+          - input: identifier ending in a reserved error suffix (e.g. …404)
+            result: the canonical CAMARA error for that status
+          - input: "identifier ending in …409"
+            result: "409 CONFLICT — an assignment already exists for the device"
+          - input: "identifier ending in …000 (or no trailing digits)"
+            result: "201 — status REQUESTED, no startedAt"
+          - input: "any other identifier"
+            result: "201 — status AVAILABLE, startedAt = now, no expiresAt"
+          - input: phoneNumber-keyed request
+            result: "201 with the device echoed (`device.phoneNumber`)"
+          - input: "`qosProfile` name containing `unavailable`"
+            result: "422 QOS_PROVISIONING.QOS_PROFILE_NOT_APPLICABLE"
+          - input: "`sink` that is not a valid https URL"
+            result: "400 INVALID_SINK"
+          - input: "`device` present but carrying no identifier"
+            result: "400 INVALID_ARGUMENT"
+          - input: "`device` submitted on a three-legged line token"
+            result: "422 UNNECESSARY_IDENTIFIER"
+          - input: no `device` and a non-line token subject
+            result: "422 MISSING_IDENTIFIER"
+
+  /qos-assignments/{assignmentId}:
+    get:
+      operationId: getQosAssignmentById
+      summary: Get a QoS assignment by id
+      description: |
+        Reads back the `AssignmentInfo` previously created under `assignmentId`,
+        or `404 NOT_FOUND` if no such assignment exists.
+      security:
+        - openId:
+            - qos-provisioning:qos-assignments:read
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+        - name: assignmentId
+          in: path
+          required: true
+          description: The id of the QoS assignment (as minted by create).
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: The QoS assignment.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AssignmentInfo"
+        "400":
+          $ref: "../../shared/errors.yaml#/components/responses/InvalidArgument"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          Keyed only on the in-memory store (the `assignmentId` is opaque, so
+          there is no reserved-identifier plane): a known id returns its stored
+          `AssignmentInfo`, an unknown/never-created id returns 404 NOT_FOUND.
+        cases:
+          - input: a known assignmentId
+            result: "200 — the stored AssignmentInfo"
+          - input: an unknown assignmentId
+            result: "404 NOT_FOUND"
+
+components:
+  securitySchemes:
+    openId:
+      $ref: "../../auth/openapi.yaml#/components/securitySchemes/camaraOAuth"
+
+  parameters:
+    XCorrelator:
+      name: x-correlator
+      in: header
+      required: false
+      description: Correlation id for the request, echoed back on the response.
+      schema:
+        type: string
+
+  headers:
+    XCorrelator:
+      description: The `x-correlator` from the request, echoed if one was sent.
+      required: false
+      schema:
+        type: string
+
+  schemas:
+    CreateAssignment:
+      type: object
+      description: Request to provision a QoS profile for a device.
+      required:
+        - qosProfile
+      properties:
+        device:
+          $ref: "#/components/schemas/Device"
+        qosProfile:
+          $ref: "#/components/schemas/QosProfileName"
+        sink:
+          type: string
+          format: uri
+          description: >-
+            A `https://` callback URL for asynchronous notifications. Validated
+            for shape (must be `https://…`) but not delivered to in this slice
+            (documented cut).
+          pattern: '^https:\/\/.+$'
+          example: "https://application-server.example.com/notifications"
+        sinkCredential:
+          $ref: "#/components/schemas/SinkCredential"
+
+    Device:
+      type: object
+      description: >-
+        Identifies the device. At least one identifier must be present. Optional
+        at the request level: omit `device` to use the device identified by a
+        three-legged access token. CamaraSim keys its functional cases off the
+        first present identifier, in the order phoneNumber →
+        networkAccessIdentifier → ipv4Address.publicAddress → ipv6Address.
+      minProperties: 1
+      properties:
+        phoneNumber:
+          type: string
+          description: A phone number in E.164 format (starting with `+`).
+          pattern: '^\+[1-9][0-9]{4,14}$'
+          example: "+123456789012"
+        networkAccessIdentifier:
+          type: string
+          description: A network access identifier assigned by the operator.
+          example: "user012@example.com"
+        ipv4Address:
+          $ref: "#/components/schemas/DeviceIpv4Addr"
+        ipv6Address:
+          type: string
+          description: The device's IPv6 address.
+          example: "2001:db8::11"
+
+    DeviceIpv4Addr:
+      type: object
+      description: >-
+        The device's IPv4 address information. CamaraSim reads `publicAddress` as
+        the identifier; `privateAddress`/`publicPort` are accepted for fidelity.
+      properties:
+        publicAddress:
+          type: string
+          example: "203.0.113.12"
+        privateAddress:
+          type: string
+          example: "192.0.2.25"
+        publicPort:
+          type: integer
+          format: int32
+          minimum: 0
+          maximum: 65535
+          example: 59765
+
+    DeviceResponse:
+      type: object
+      description: >-
+        The device echoed back on the response — the single identifier used to
+        resolve the request (`maxProperties: 1`).
+      maxProperties: 1
+      properties:
+        phoneNumber:
+          type: string
+          pattern: '^\+[1-9][0-9]{4,14}$'
+          example: "+123456789012"
+        networkAccessIdentifier:
+          type: string
+          example: "user012@example.com"
+        ipv4Address:
+          $ref: "#/components/schemas/DeviceIpv4Addr"
+        ipv6Address:
+          type: string
+          example: "2001:db8::11"
+
+    QosProfileName:
+      type: string
+      description: The name of a QoS profile to provision.
+      pattern: '^[a-zA-Z0-9_.-]+$'
+      minLength: 3
+      maxLength: 256
+      example: QOS_E
+
+    SinkCredential:
+      type: object
+      description: >-
+        A credential the callback would authenticate with. Accepted for schema
+        fidelity; not applied in this slice and never echoed.
+      required:
+        - credentialType
+      properties:
+        credentialType:
+          type: string
+          enum: [PLAIN, ACCESSTOKEN, REFRESHTOKEN]
+        accessToken:
+          type: string
+        accessTokenExpiresUtc:
+          type: string
+          format: date-time
+        accessTokenType:
+          type: string
+          enum: [bearer]
+
+    AssignmentInfo:
+      type: object
+      description: The provisioned QoS assignment.
+      required:
+        - assignmentId
+        - qosProfile
+        - status
+      properties:
+        assignmentId:
+          type: string
+          format: uuid
+          description: The unique id of the QoS assignment.
+          example: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+        qosProfile:
+          $ref: "#/components/schemas/QosProfileName"
+        device:
+          $ref: "#/components/schemas/DeviceResponse"
+        status:
+          type: string
+          description: >-
+            The provisioning status. `REQUESTED` — accepted, not yet applied;
+            `AVAILABLE` — applied and active; `UNAVAILABLE` — no longer active.
+          enum: [REQUESTED, AVAILABLE, UNAVAILABLE]
+          example: AVAILABLE
+        statusInfo:
+          type: string
+          description: >-
+            Extra detail for an `UNAVAILABLE` status. Not produced in this slice
+            (no notification-driven transitions yet).
+          enum: [NETWORK_TERMINATED, DELETE_REQUESTED]
+        startedAt:
+          type: string
+          format: date-time
+          description: >-
+            When the assignment became `AVAILABLE` (RFC 3339, UTC). Absent while
+            `REQUESTED`. There is no `expiresAt` — provisioning is open-ended.
+          example: "2024-01-01T14:27:08Z"
+        sink:
+          type: string
+          format: uri
+          description: The `https://` callback URL supplied on creation, if any.
+          example: "https://application-server.example.com/notifications"

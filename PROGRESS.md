@@ -775,6 +775,29 @@ so both the number of places and the countries are a genuine second plane; and
 dep, mirroring Region Device Count). `x-correlator` echoed on every response. No
 new dependency.
 
+**QoS Provisioning v0.3** has begun (`/qos-provisioning/v0.3`; CAMARA
+qos-provisioning 0.3.0, release r3.2 — part of the QualityOnDemand repo). It is
+the **provisioning** (open-ended) counterpart of Quality on Demand's bounded
+sessions: a stateful, resource-oriented API that mints indefinite QoS
+`qos-assignments`. `POST /qos-assignments` (`createQosAssignment`, scope
+`qos-provisioning:qos-assignments:create`) provisions a `qosProfile` for a
+device, mints an opaque UUID-shaped `assignmentId` (new in-memory store
+`src/apis/qos_provisioning/store.rs`, mirroring QoD's store), persists the
+rendered `AssignmentInfo`, and returns 201. `GET /qos-assignments/{assignmentId}`
+(`getQosAssignmentById`, scope `…:read`) reads it back (200) or 404 `NOT_FOUND`.
+Device-object identifier resolution + the two-legged/three-legged rule (device on
+a line token → 422 `UNNECESSARY_IDENTIFIER`; no device + non-line subject → 422
+`MISSING_IDENTIFIER`). Control planes (DESIGN §7): the identifier's reserved-error
+suffix → canonical CAMARA error (`…409` → 409 `CONFLICT`, the "existing
+provisioning for the same device" case); else its trailing three digits fix the
+grant — `…000`/no-digits → `status:REQUESTED` (no `startedAt`), any other tail →
+`status:AVAILABLE` (`startedAt`=now; no `expiresAt` — provisioning is open-ended);
+a `qosProfile` name containing `unavailable` → 422
+`QOS_PROVISIONING.QOS_PROFILE_NOT_APPLICABLE`; an optional `sink` must be a valid
+`https://` URL → else 400 `INVALID_SINK`. `sinkCredential` is accepted but not
+applied; `DELETE`/retrieve-by-device/notifications are deferred. `x-correlator`
+echoed on every response.
+
 ## In progress (claimed this pass)
 
 _None._  <!-- agent: put the claimed item + run timestamp here, clear it when done -->
@@ -1214,6 +1237,32 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     cuts: `POLYGON`, async `sink`/CloudEvents (202 flow), hourly time-slicing, and
     the ±3-month absolute start-time checks. `x-correlator` echoed. No new dep.
     **Completes Population Density Data vwip.**
+- [~] QoS Provisioning v0.3 (`/qos-provisioning/v0.3`; CAMARA qos-provisioning
+  0.3.0, release r3.2 — part of the QualityOnDemand repo; the *provisioning*
+  (open-ended) counterpart of Quality on Demand's bounded sessions; stateful,
+  resource-oriented, in-memory assignment store):
+  - [x] `POST /qos-assignments` (`qos-provisioning:qos-assignments:create`,
+    `createQosAssignment`) — provisions a `qosProfile` for a device, mints an
+    opaque UUID-shaped `assignmentId` (`src/apis/qos_provisioning/store.rs`;
+    `Mutex<HashMap>`, no uuid/rand dep, mirroring QoD's store), persists the
+    rendered `AssignmentInfo`, `201`. Device-object identifier resolution + the
+    two-legged/three-legged rule (device on a line token → 422
+    `UNNECESSARY_IDENTIFIER`; no device + non-line subject → 422
+    `MISSING_IDENTIFIER`; empty `device` → 400 INVALID_ARGUMENT). Control planes
+    (DESIGN §7): identifier reserved-error suffix → canonical CAMARA error
+    (`…409` → 409 CONFLICT "existing provisioning"); else `…000`/no-digits →
+    `status:REQUESTED` (no `startedAt`), any other tail → `status:AVAILABLE`
+    (`startedAt`=now; no `expiresAt` — provisioning is open-ended); `qosProfile`
+    name containing `unavailable` → 422
+    `QOS_PROVISIONING.QOS_PROFILE_NOT_APPLICABLE`; optional `sink` must be a
+    valid `https://` URL → else 400 `INVALID_SINK`. `sinkCredential`
+    accepted-not-applied; notifications a later slice. `x-correlator` echoed.
+  - [x] `GET /qos-assignments/{assignmentId}` (`qos-provisioning:qos-assignments:read`,
+    `getQosAssignmentById`) — reads a stored assignment back (`200`) or `404
+    NOT_FOUND`. Opaque `assignmentId` → store state the only control plane.
+  - [ ] `DELETE /qos-assignments/{assignmentId}` (`revokeQosAssignment`)
+  - [ ] `POST /retrieve-qos-assignment` (`getQosAssignmentByDevice`)
+  - [ ] CloudEvents notifications on `sink` (status transitions)
 - [ ] Other CAMARA APIs as capacity allows
 
 ## Cross-cutting (do alongside the item that needs it)
@@ -1240,6 +1289,34 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-05 — Phase 5 (other CAMARA APIs): **QoS Provisioning v0.3** — new
+  stateful, resource-oriented API, the *provisioning* (open-ended) counterpart of
+  Quality on Demand. Verified the authoritative CAMARA spec via WebFetch
+  (qos-provisioning 0.3.0 lives in the QualityOnDemand repo, meta-release r3.2:
+  base `/qos-provisioning/v0.3`, `POST /qos-assignments` = `createQosAssignment`
+  scope `qos-provisioning:qos-assignments:create`, `GET /qos-assignments/{id}` =
+  `getQosAssignmentById` scope `…:read`; request `CreateAssignment {device?,
+  qosProfile(req), sink?, sinkCredential?}`; 201 → `AssignmentInfo {assignmentId,
+  qosProfile, device?, status(REQUESTED/AVAILABLE/UNAVAILABLE), statusInfo?,
+  startedAt?, sink?}`; errors 400 [INVALID_ARGUMENT/OUT_OF_RANGE/INVALID_CREDENTIAL/
+  INVALID_TOKEN/INVALID_SINK]/401/403/404/409 CONFLICT/422 [MISSING/UNSUPPORTED/
+  UNNECESSARY_IDENTIFIER/SERVICE_NOT_APPLICABLE/QOS_PROVISIONING.QOS_PROFILE_NOT_
+  APPLICABLE]/429). First slice = the create + read-by-id pair (mirroring QoD's
+  first slice). New `src/apis/qos_provisioning/{,store,v0_3}.rs` + wired into
+  apis/openapi/main catalog; vendored/annotated spec at
+  `specs/qos-provisioning/v0.3/openapi.yaml`, served + catalogued. In-memory
+  assignment store (`Mutex<HashMap>`, UUID-shaped id via SHA-256, no uuid/rand
+  dep, mirroring QoD's store). Device-object identifier resolution + two-legged/
+  three-legged rule (device on line token → 422 UNNECESSARY_IDENTIFIER; no device
+  + non-line subject → 422 MISSING_IDENTIFIER; empty device → 400). Control planes
+  (DESIGN §7): reserved suffix → canonical error (`…409` → 409 CONFLICT "existing
+  provisioning"); else `…000`/no-digits → REQUESTED (no startedAt), else AVAILABLE
+  (startedAt=now, no expiresAt — open-ended); qosProfile name `unavailable` → 422
+  QOS_PROFILE_NOT_APPLICABLE; non-https `sink` → 400 INVALID_SINK. sinkCredential
+  accepted-not-applied; DELETE/retrieve-by-device/notifications deferred. No new
+  dependency (serde/serde_json/axum/sha2 + self-contained RFC 3339 formatter). 20
+  new tests; `cargo test` 976 passed (was 956); `cargo build --release` clean, no
+  warnings. — binary: 2,203,016 bytes (2.2M)
 - 2026-08-05 — Cross-cutting (contract-test harness, first slice): added a
   registry/wiring contract test guarding catalog↔spec drift. New
   `apis::openapi::api_spec_urls()` is the single source of truth for served API

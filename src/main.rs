@@ -202,6 +202,12 @@ async fn catalog() -> Json<Value> {
                 "version": "vwip",
                 "base_path": "/population-density-data/vwip",
                 "spec_url": "/population-density-data/vwip/openapi.yaml",
+            },
+            {
+                "name": "qos-provisioning",
+                "version": "v0.3",
+                "base_path": "/qos-provisioning/v0.3",
+                "spec_url": "/qos-provisioning/v0.3/openapi.yaml",
             }
         ],
         "authorization_servers": [{
