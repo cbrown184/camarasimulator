@@ -122,6 +122,19 @@ pub fn take_credential(id: &str) -> Option<String> {
         .remove(id)
 }
 
+/// Read (clone, non-destructive) the stored `Authorization` header value for `id`,
+/// leaving it in place. Used for a **non-terminal** callback — the
+/// `AVAILABLE`-on-provisioning event — so the credential survives for the eventual
+/// terminal event (revoke / network-termination), which [`take_credential`]s it
+/// single-use. `None` when the assignment carried no ACCESSTOKEN `sinkCredential`.
+pub fn peek_credential(id: &str) -> Option<String> {
+    credentials()
+        .lock()
+        .expect("qos-provisioning credential store not poisoned")
+        .get(id)
+        .cloned()
+}
+
 /// Mint a fresh, opaque, UUID-v4-shaped identifier.
 ///
 /// The 16 bytes come from `SHA-256(counter ‖ now)` — the monotonic counter alone
@@ -216,6 +229,19 @@ mod tests {
         // First take returns it; a second finds nothing (dropped from memory).
         assert_eq!(take_credential(&id), Some("Bearer sekret".to_string()));
         assert!(take_credential(&id).is_none(), "single-use → gone");
+    }
+
+    #[test]
+    fn peek_credential_is_non_destructive_and_take_still_consumes() {
+        let id = new_assignment_id();
+        assert!(peek_credential(&id).is_none(), "not stored yet → None");
+        insert_credential(id.clone(), "Bearer keep".to_string());
+        // Peek clones without removing — a second peek still sees it…
+        assert_eq!(peek_credential(&id), Some("Bearer keep".to_string()));
+        assert_eq!(peek_credential(&id), Some("Bearer keep".to_string()));
+        // …and a subsequent take still consumes it single-use.
+        assert_eq!(take_credential(&id), Some("Bearer keep".to_string()));
+        assert!(peek_credential(&id).is_none(), "gone after take");
     }
 
     #[test]

@@ -813,8 +813,18 @@ Billing); a non-http(s) scheme → 400 `INVALID_SINK`. An `ACCESSTOKEN`
 `Authorization: Bearer …` (RFC 6750), derived at creation and held in a
 `assignmentId`-keyed in-memory side-store (`store::insert_credential`/
 `take_credential`, taken single-use at delivery) so the secret is never echoed;
-PLAIN/REFRESHTOKEN are a documented cut. `NETWORK_TERMINATED`, an
-`AVAILABLE`-on-provisioning event, and TLS (`https://`) delivery remain deferred.
+PLAIN/REFRESHTOKEN are a documented cut. The **`AVAILABLE`-on-provisioning** event
+and the **`NETWORK_TERMINATED`** transition are now in place too: creating an
+`AVAILABLE`, sink-bearing assignment delivers a `status: AVAILABLE` `status-changed`
+CloudEvent (no `statusInfo`) fire-and-forget; a `…001` identifier tail instead
+schedules `v0_3::spawn_network_termination` (a short 1 s grace, mirroring QoD's
+`NETWORK_TERMINATION_TAIL`) that evicts the assignment and delivers a
+`status: UNAVAILABLE` / `statusInfo: NETWORK_TERMINATED` event (exactly-once vs a
+concurrent revoke); a `REQUESTED` assignment is not yet active, so it notifies
+nothing. The ACCESSTOKEN `sinkCredential` bearer is applied to every callback —
+the non-terminal AVAILABLE event *peeks* it (new `store::peek_credential`, a
+non-destructive read) so a later terminal event (revoke / network-drop) still
+`take_credential`s it single-use. Only TLS (`https://`) delivery remains deferred.
 
 ## In progress (claimed this pass)
 
@@ -1306,7 +1316,16 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
       scheme → 400 `INVALID_SINK`. ACCESSTOKEN `sinkCredential` bearer applied
       (single-use side-store `store::insert_credential`/`take_credential`),
       PLAIN/REFRESHTOKEN a documented cut; the secret is never echoed.
-    - [ ] `NETWORK_TERMINATED` transition + an `AVAILABLE`-on-provisioning event
+    - [x] `NETWORK_TERMINATED` transition + an `AVAILABLE`-on-provisioning event
+      — creating an `AVAILABLE`, sink-bearing assignment delivers a
+      `status: AVAILABLE` `status-changed` CloudEvent (no `statusInfo`,
+      fire-and-forget); a `…001` `AVAILABLE` assignment instead schedules an early
+      network drop (`v0_3::spawn_network_termination`, 1 s grace) → evict +
+      `status: UNAVAILABLE`/`statusInfo: NETWORK_TERMINATED` (exactly-once vs a
+      concurrent revoke). A `REQUESTED` assignment fires nothing. The ACCESSTOKEN
+      `sinkCredential` bearer is applied to every callback — *peeked*
+      (`store::peek_credential`) on the non-terminal AVAILABLE event so a later
+      terminal event still authenticates, *taken* single-use on the terminal one.
     - [ ] TLS (`https://` sink) delivery (needs a rustls TLS client)
 - [ ] Other CAMARA APIs as capacity allows
 
@@ -1334,6 +1353,28 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-05 — Phase 5: **QoS Provisioning v0.3** — CloudEvents notifications:
+  added the **`AVAILABLE`-on-provisioning** event and the **`NETWORK_TERMINATED`**
+  transition, so only TLS (`https://`) delivery remains cut. `createQosAssignment`
+  now delivers, fire-and-forget, a `status: AVAILABLE` `status-changed` CloudEvent
+  (no `statusInfo`) for an `AVAILABLE`, sink-bearing assignment; a `…001` tail
+  instead schedules `v0_3::spawn_network_termination` (1 s grace, mirroring QoD's
+  `NETWORK_TERMINATION_TAIL`) → evict + `status: UNAVAILABLE`/`statusInfo:
+  NETWORK_TERMINATED`, exactly-once vs a concurrent revoke; a `REQUESTED`
+  assignment notifies nothing. The ACCESSTOKEN `sinkCredential` bearer is applied
+  to every callback: new `store::peek_credential` reads it non-destructively for
+  the non-terminal AVAILABLE event so a later terminal event (revoke /
+  network-drop) still `take_credential`s it single-use. Store insert now happens
+  before the timer is spawned so the eviction always sees the assignment. Spec
+  updated: header note, create `sink` description + `x-camarasim-scenarios` cases
+  (AVAILABLE / …001 NETWORK_TERMINATED / REQUESTED-no-event), `callbacks` +
+  `StatusChangedEvent`/`statusInfo` docs. Tests: 4 new integration tests (AVAILABLE
+  event shape + unauthenticated; `…001` → NETWORK_TERMINATED + eviction (GET 404);
+  AVAILABLE event authenticated AND a later revoke still authenticated (proves
+  peek); REQUESTED fires no event via an accept-timeout) + a `peek_credential`
+  store test; isolated the two existing DELETE_REQUESTED tests to a `…000`
+  identifier. `cargo test` green (1008 tests), `cargo build --release` green. No
+  new dependency. — binary: 2.2M (2,238,648 bytes)
 - 2026-08-05 — Phase 5: **QoS Provisioning v0.3** — CloudEvents notifications on
   `sink` have begun: the **`DELETE_REQUESTED` `status-changed`** transition on
   `revokeQosAssignment`. Verified the authoritative CAMARA spec via WebFetch

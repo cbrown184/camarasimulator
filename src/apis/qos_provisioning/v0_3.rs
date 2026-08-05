@@ -25,10 +25,23 @@
 //!   reserved error suffix → canonical CAMARA error, else the in-memory store
 //!   (mirroring QoD's `retrieveSessionsByDevice`).
 //!
-//! CloudEvents notifications on `sink`: the `DELETE_REQUESTED` status transition
-//! is delivered (see [`super::notifications`] and `revokeQosAssignment` below);
-//! other transitions (`NETWORK_TERMINATED`, and an `AVAILABLE`-on-provisioning
-//! event) remain a later slice.
+//! CloudEvents notifications on `sink` (see [`super::notifications`]):
+//! - **`AVAILABLE`-on-provisioning** — creating an `AVAILABLE`, sink-bearing
+//!   assignment delivers a `status-changed` CloudEvent (`status: AVAILABLE`, no
+//!   `statusInfo`) once, fire-and-forget, signalling the provisioning is active.
+//! - **`NETWORK_TERMINATED`** — a `…001` identifier tail on an `AVAILABLE`,
+//!   sink-bearing assignment schedules an early network drop
+//!   ([`spawn_network_termination`]): a short fire-and-forget timer evicts it and
+//!   delivers `status: UNAVAILABLE`, `statusInfo: NETWORK_TERMINATED` (in place of
+//!   the `AVAILABLE` event).
+//! - **`DELETE_REQUESTED`** — revoking a sink-bearing assignment delivers
+//!   `status: UNAVAILABLE`, `statusInfo: DELETE_REQUESTED` (see
+//!   `revokeQosAssignment` below).
+//!
+//! An `AVAILABLE` assignment holds its ACCESSTOKEN `sinkCredential` bearer across
+//! callbacks (the AVAILABLE event *peeks* it; the terminal revoke / network-drop
+//! event *takes* it single-use). Only TLS (`https://` sink) delivery remains a
+//! documented cut.
 //!
 //! ## Identifier resolution (two-legged vs three-legged)
 //!
@@ -69,7 +82,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use super::{notifications, store};
 use crate::auth::verify::Claims;
@@ -84,6 +97,18 @@ const READ_SCOPE: &str = "qos-provisioning:qos-assignments:read";
 const DELETE_SCOPE: &str = "qos-provisioning:qos-assignments:delete";
 /// Scope required to retrieve an assignment by device (CAMARA qos-provisioning 0.3.0).
 const READ_BY_DEVICE_SCOPE: &str = "qos-provisioning:qos-assignments:read-by-device";
+
+/// The trailing-three-digits tail (`…001`) selecting the `NETWORK_TERMINATED`
+/// transition: an `AVAILABLE`, sink-bearing assignment whose identifier ends
+/// `…001` is dropped *early* by the (simulated) network shortly after
+/// provisioning, rather than delivering the ordinary `AVAILABLE` event (mirrors
+/// QoD's `NETWORK_TERMINATION_TAIL`).
+const NETWORK_TERMINATION_TAIL: u16 = 1;
+
+/// How long a `…001` `AVAILABLE` assignment survives before the (simulated)
+/// network drops it — a short, fixed grace, independent of the (open-ended)
+/// provisioning (mirrors QoD's `NETWORK_TERMINATION_GRACE_SECS`).
+const NETWORK_TERMINATION_GRACE_SECS: u64 = 1;
 
 /// Routes for QoS Provisioning v0.3, mounted at their canonical URLs.
 pub fn routes() -> Router {
@@ -249,9 +274,71 @@ async fn create_qos_assignment(claims: Claims, headers: HeaderMap, body: Bytes) 
         }
     }
 
-    store::insert(assignment_id, info.clone());
+    // Remember the assignment *before* scheduling any notification, so a spawned
+    // network-termination timer always sees the stored assignment to evict.
+    store::insert(assignment_id.clone(), info.clone());
+
+    // Notify a recorded `sink` of the provisioning's status. A REQUESTED
+    // assignment is not yet active, so it emits nothing (it would fire an
+    // AVAILABLE event only once it transitioned — which CamaraSim does not model).
+    // An AVAILABLE, sink-bearing assignment either:
+    //   - `…001` (`NETWORK_TERMINATION_TAIL`): the (simulated) network drops it
+    //     early — a short fire-and-forget timer evicts it and delivers the terminal
+    //     `UNAVAILABLE`/`NETWORK_TERMINATED` event (`spawn_network_termination`); or
+    //   - any other tail: the provisioning is active — deliver a single
+    //     `AVAILABLE` `status-changed` CloudEvent (no `statusInfo`), fire-and-forget
+    //     off the request path. The ACCESSTOKEN `sinkCredential` bearer is applied
+    //     but *peeked* (not consumed), so a later `DELETE_REQUESTED` on revoke can
+    //     still authenticate.
+    if info["status"] == "AVAILABLE" {
+        if let Some(sink) = info.get("sink").and_then(Value::as_str) {
+            if scenarios::trailing_three_digits(&resolved.id) == Some(NETWORK_TERMINATION_TAIL) {
+                spawn_network_termination(assignment_id.clone(), sink.to_string());
+            } else {
+                let event = notifications::status_changed_event(
+                    store::new_event_id(),
+                    rfc3339_utc(now_unix_secs()),
+                    &assignment_id,
+                    "AVAILABLE",
+                    None,
+                );
+                notifications::spawn_delivery(
+                    sink.to_string(),
+                    event,
+                    store::peek_credential(&assignment_id),
+                );
+            }
+        }
+    }
 
     with_correlator((StatusCode::CREATED, Json(info)).into_response(), &correlator)
+}
+
+/// Schedule the `NETWORK_TERMINATED` status transition for a `…001` assignment.
+///
+/// Spawns a fire-and-forget async timer (never on the request path, DESIGN §11)
+/// that waits [`NETWORK_TERMINATION_GRACE_SECS`] — a short, fixed grace — then, if
+/// the assignment still exists, evicts it and delivers a `status-changed`
+/// CloudEvent (`status: UNAVAILABLE`, `statusInfo: NETWORK_TERMINATED`) to `sink`,
+/// modelling the network dropping a freshly-provisioned assignment early. A
+/// `revokeQosAssignment` that removed the assignment first makes this a no-op (the
+/// concurrent revoke already fired `DELETE_REQUESTED`; `store::remove` is then
+/// `None`, so exactly one terminal event fires). The ACCESSTOKEN `sinkCredential`
+/// bearer (if any) is taken single-use. Mirrors QoD's `spawn_network_termination`.
+fn spawn_network_termination(assignment_id: String, sink: String) {
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(NETWORK_TERMINATION_GRACE_SECS)).await;
+        if store::remove(&assignment_id).is_some() {
+            let event = notifications::status_changed_event(
+                store::new_event_id(),
+                rfc3339_utc(now_unix_secs()),
+                &assignment_id,
+                "UNAVAILABLE",
+                Some("NETWORK_TERMINATED"),
+            );
+            notifications::spawn_delivery(sink, event, store::take_credential(&assignment_id));
+        }
+    });
 }
 
 /// `GET /qos-provisioning/v0.3/qos-assignments/{assignmentId}`.
@@ -1079,16 +1166,20 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let sink = format!("http://{addr}/qosprov-notify");
 
-        // Create an assignment that records the sink…
+        // Create an assignment that records the sink. A REQUESTED (`…000`)
+        // identifier is used so no AVAILABLE-on-provisioning event fires first —
+        // this test isolates the DELETE_REQUESTED transition (the AVAILABLE event
+        // and the revoke of an AVAILABLE assignment are covered separately below).
         let create = mint_token(CREATE_SCOPE).await;
         let body = json!({
-            "device": { "phoneNumber": "+123456789012" },
+            "device": { "phoneNumber": "+123456789000" },
             "qosProfile": "QOS_E",
             "sink": sink,
         })
         .to_string();
         let (status, _, created) = post_assignment(Some(&create), &body, None).await;
         assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(created["status"], "REQUESTED");
         let assignment_id = created["assignmentId"].as_str().unwrap().to_string();
 
         // …then revoke it: 204 to the caller, and a CloudEvent to the sink.
@@ -1132,10 +1223,12 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let sink = format!("http://{addr}/qosprov-auth");
 
-        // Create with a sink AND an ACCESSTOKEN sinkCredential…
+        // Create with a sink AND an ACCESSTOKEN sinkCredential. A REQUESTED
+        // (`…000`) identifier isolates the DELETE_REQUESTED callback (no AVAILABLE
+        // event fires first).
         let create = mint_token(CREATE_SCOPE).await;
         let body = json!({
-            "device": { "phoneNumber": "+123456789012" },
+            "device": { "phoneNumber": "+123456789000" },
             "qosProfile": "QOS_E",
             "sink": sink,
             "sinkCredential": {
@@ -1164,6 +1257,175 @@ mod tests {
         assert!(
             head.contains("Authorization: Bearer sink-secret-123\r\n"),
             "authorization header present: {head}"
+        );
+    }
+
+    // --- CloudEvents notifications on `sink` (AVAILABLE / NETWORK_TERMINATED) -
+
+    /// Accept one fire-and-forget notification connection and parse the CloudEvent,
+    /// returning the raw request head and the parsed JSON body.
+    async fn read_one_event(listener: &tokio::net::TcpListener) -> (String, Value) {
+        use tokio::io::AsyncReadExt;
+        let (mut sock, _) = listener.accept().await.unwrap();
+        let mut buf = Vec::new();
+        sock.read_to_end(&mut buf).await.unwrap();
+        let raw = String::from_utf8(buf).unwrap();
+        let (head, body) = raw.split_once("\r\n\r\n").expect("headers then body");
+        (
+            head.to_string(),
+            serde_json::from_str(body).expect("body is JSON"),
+        )
+    }
+
+    #[tokio::test]
+    async fn creating_an_available_assignment_with_a_sink_fires_an_available_cloudevent() {
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let sink = format!("http://{addr}/qosprov-available");
+
+        // …612 → AVAILABLE (not …001, not a reserved suffix).
+        let create = mint_token(CREATE_SCOPE).await;
+        let body = json!({
+            "device": { "phoneNumber": "+123456789612" },
+            "qosProfile": "QOS_E",
+            "sink": sink,
+        })
+        .to_string();
+        let (status, _, created) = post_assignment(Some(&create), &body, None).await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(created["status"], "AVAILABLE");
+        let assignment_id = created["assignmentId"].as_str().unwrap().to_string();
+
+        // The provisioning-active notification arrives on the sink, fire-and-forget.
+        let (head, event) = read_one_event(&listener).await;
+        assert!(
+            head.starts_with("POST /qosprov-available HTTP/1.1\r\n"),
+            "request line: {head}"
+        );
+        assert!(head.contains("Content-Type: application/cloudevents+json"));
+        assert!(!head.contains("Authorization:"), "unauthenticated: {head}");
+        assert_eq!(
+            event["type"],
+            "org.camaraproject.qos-provisioning.v0.status-changed"
+        );
+        assert_eq!(event["data"]["assignmentId"], json!(assignment_id));
+        assert_eq!(event["data"]["status"], "AVAILABLE");
+        assert!(
+            event["data"].get("statusInfo").is_none(),
+            "an AVAILABLE transition carries no statusInfo"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_001_assignment_with_a_sink_fires_network_terminated_early() {
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let sink = format!("http://{addr}/qosprov-netterm");
+
+        // …001 → the NETWORK_TERMINATED tail: created AVAILABLE, then dropped early.
+        let create = mint_token(CREATE_SCOPE).await;
+        let body = json!({
+            "device": { "phoneNumber": "+123456789001" },
+            "qosProfile": "QOS_E",
+            "sink": sink,
+        })
+        .to_string();
+        let (status, _, created) = post_assignment(Some(&create), &body, None).await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(created["status"], "AVAILABLE");
+        let assignment_id = created["assignmentId"].as_str().unwrap().to_string();
+
+        // The one and only event delivered is the terminal NETWORK_TERMINATED (no
+        // AVAILABLE event fires for the …001 tail).
+        let (_head, event) = read_one_event(&listener).await;
+        assert_eq!(event["data"]["assignmentId"], json!(assignment_id));
+        assert_eq!(event["data"]["status"], "UNAVAILABLE");
+        assert_eq!(event["data"]["statusInfo"], "NETWORK_TERMINATED");
+
+        // The termination evicted the assignment — a later GET is 404.
+        let read = mint_token(READ_SCOPE).await;
+        let (status, _, _) = get_assignment(Some(&read), &assignment_id, None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn the_available_event_is_authenticated_and_a_later_revoke_is_too() {
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let sink = format!("http://{addr}/qosprov-avail-auth");
+
+        // …613 → AVAILABLE, with an ACCESSTOKEN sinkCredential.
+        let create = mint_token(CREATE_SCOPE).await;
+        let body = json!({
+            "device": { "phoneNumber": "+123456789613" },
+            "qosProfile": "QOS_E",
+            "sink": sink,
+            "sinkCredential": {
+                "credentialType": "ACCESSTOKEN",
+                "accessToken": "avail-secret-9",
+                "accessTokenType": "bearer",
+            },
+        })
+        .to_string();
+        let (status, _, created) = post_assignment(Some(&create), &body, None).await;
+        assert_eq!(status, StatusCode::CREATED);
+        let assignment_id = created["assignmentId"].as_str().unwrap().to_string();
+
+        // The AVAILABLE creation event carries the bearer…
+        let (head1, ev1) = read_one_event(&listener).await;
+        assert_eq!(ev1["data"]["status"], "AVAILABLE");
+        assert!(
+            head1.contains("Authorization: Bearer avail-secret-9\r\n"),
+            "auth on the AVAILABLE event: {head1}"
+        );
+
+        // …and because it only *peeked* the credential, a later revoke's
+        // DELETE_REQUESTED callback is still authenticated (single-use take there).
+        let del = mint_token(DELETE_SCOPE).await;
+        let (status, _, _) = delete_assignment(Some(&del), &assignment_id, None).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        let (head2, ev2) = read_one_event(&listener).await;
+        assert_eq!(ev2["data"]["status"], "UNAVAILABLE");
+        assert_eq!(ev2["data"]["statusInfo"], "DELETE_REQUESTED");
+        assert!(
+            head2.contains("Authorization: Bearer avail-secret-9\r\n"),
+            "auth on the DELETE_REQUESTED event: {head2}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_requested_assignment_fires_no_event() {
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let sink = format!("http://{addr}/qosprov-requested");
+
+        // …000 → REQUESTED: not yet active, so no AVAILABLE event is delivered.
+        let create = mint_token(CREATE_SCOPE).await;
+        let body = json!({
+            "device": { "phoneNumber": "+123456780000" },
+            "qosProfile": "QOS_E",
+            "sink": sink,
+        })
+        .to_string();
+        let (status, _, created) = post_assignment(Some(&create), &body, None).await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(created["status"], "REQUESTED");
+
+        // Nothing ever connects to the sink within a generous window.
+        let accepted =
+            tokio::time::timeout(Duration::from_millis(500), listener.accept()).await;
+        assert!(
+            accepted.is_err(),
+            "a REQUESTED assignment must not notify the sink"
         );
     }
 
