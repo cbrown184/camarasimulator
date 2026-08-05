@@ -6,10 +6,11 @@
 # CamaraSim's parameter-driven functional cases (docs/DESIGN.md §7, §9). Backed by
 # `src/apis/session_insights/vwip.rs`; spec and code must not drift.
 #
-# This slice serves the create/read pair — `POST /sessions` and
-# `GET /sessions/{sessionId}`. The lifecycle endpoints (`DELETE`,
-# `POST /retrieve-sessions`, `POST /sessions/{sessionId}/metrics`) and the
-# CloudEvents notifications on `sink` are deferred to later passes.
+# This slice serves the create/read/delete trio — `POST /sessions`,
+# `GET /sessions/{sessionId}` and `DELETE /sessions/{sessionId}`. The remaining
+# lifecycle endpoints (`POST /retrieve-sessions`,
+# `POST /sessions/{sessionId}/metrics`) and the CloudEvents notifications on
+# `sink` are deferred to later passes.
 openapi: 3.0.3
 info:
   title: Session Insights
@@ -239,6 +240,50 @@ paths:
           - input: a sessionId returned by a prior createSession
             result: "200 with the stored SessionInfo"
           - input: an unknown sessionId
+            result: "404 NOT_FOUND"
+    delete:
+      operationId: deleteSession
+      summary: Delete a session insights resource by id
+      description: |
+        Delete the session resource identified by `sessionId`. Keyed only on the
+        in-memory store: a session that exists is evicted (single-use) → `204 No
+        Content`; an unknown or already-deleted id → `404 NOT_FOUND`. No
+        `session-ended` CloudEvent is emitted (notifications are deferred).
+      security:
+        - openId:
+            - session-insights:sessions:delete
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+        - name: sessionId
+          in: path
+          required: true
+          description: Operator-assigned session identifier.
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "204":
+          description: The session was deleted. No response body.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+        "400":
+          $ref: "../../shared/errors.yaml#/components/responses/InvalidArgument"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+      x-camarasim-scenarios:
+        description: >-
+          Keyed only on the in-memory store (docs/DESIGN.md §7).
+        cases:
+          - input: a sessionId returned by a prior createSession (not yet deleted)
+            result: "204 No Content; the session is evicted (single-use)"
+          - input: an unknown or already-deleted sessionId
             result: "404 NOT_FOUND"
 
 components:

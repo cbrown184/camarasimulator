@@ -1,11 +1,14 @@
 //! Session Insights **vwip** (CAMARA SessionInsights, work-in-progress).
 //!
-//! Two endpoints in this slice — the create/read pair of the session resource:
-//! - `POST /session-insights/vwip/sessions` — create a session (`createSession`).
-//! - `GET  /session-insights/vwip/sessions/{sessionId}` — read it (`getSession`).
+//! Three endpoints in this slice — the create/read/delete trio of the session
+//! resource:
+//! - `POST   /session-insights/vwip/sessions` — create a session (`createSession`).
+//! - `GET    /session-insights/vwip/sessions/{sessionId}` — read it (`getSession`).
+//! - `DELETE /session-insights/vwip/sessions/{sessionId}` — delete it
+//!   (`deleteSession`).
 //!
-//! (`DELETE`, `POST /retrieve-sessions`, `POST /sessions/{id}/metrics`, and the
-//! CloudEvents notifications on `sink` are deferred to later passes.)
+//! (`POST /retrieve-sessions`, `POST /sessions/{id}/metrics`, and the CloudEvents
+//! notifications on `sink` are deferred to later passes.)
 //!
 //! ## What it does
 //!
@@ -83,6 +86,8 @@ use super::store;
 const CREATE_SCOPE: &str = "session-insights:sessions:create";
 /// Scope required to read a session (CAMARA SessionInsights).
 const READ_SCOPE: &str = "session-insights:sessions:read";
+/// Scope required to delete a session (CAMARA SessionInsights).
+const DELETE_SCOPE: &str = "session-insights:sessions:delete";
 
 /// A created session's lifetime when it is time-bounded (24 hours), added to
 /// `startsAt` to compute `expiresAt`.
@@ -94,7 +99,7 @@ pub fn routes() -> Router {
         .route("/session-insights/vwip/sessions", post(create_session))
         .route(
             "/session-insights/vwip/sessions/:session_id",
-            get(get_session),
+            get(get_session).delete(delete_session),
         )
 }
 
@@ -249,6 +254,30 @@ async fn get_session(claims: Claims, headers: HeaderMap, Path(session_id): Path<
     }
     match store::get(&session_id) {
         Some(info) => with_correlator((StatusCode::OK, Json(info)).into_response(), &correlator),
+        None => with_correlator(
+            CamaraError::not_found("No session found for the provided sessionId.").into_response(),
+            &correlator,
+        ),
+    }
+}
+
+/// `DELETE /session-insights/vwip/sessions/{sessionId}`.
+///
+/// Deletes the session resource. Keyed only on the stored state (docs/DESIGN.md
+/// §7): a session that exists is evicted → `204 No Content` (single-use); an
+/// unknown (or already-deleted) id → `404 NOT_FOUND`. No CloudEvent is emitted
+/// (`session-ended` notifications on `sink` are deferred to a later pass).
+async fn delete_session(
+    claims: Claims,
+    headers: HeaderMap,
+    Path(session_id): Path<String>,
+) -> Response {
+    let correlator = headers.get("x-correlator").cloned();
+    if let Err(e) = claims.require_scope(DELETE_SCOPE) {
+        return with_correlator(e.into_response(), &correlator);
+    }
+    match store::remove(&session_id) {
+        Some(_) => with_correlator(StatusCode::NO_CONTENT.into_response(), &correlator),
         None => with_correlator(
             CamaraError::not_found("No session found for the provided sessionId.").into_response(),
             &correlator,
@@ -545,6 +574,28 @@ mod tests {
         collect(response).await
     }
 
+    async fn delete_session_req(
+        token: Option<&str>,
+        id: &str,
+        correlator: Option<&str>,
+    ) -> (StatusCode, HeaderMap, Value) {
+        let mut builder = Request::builder()
+            .method("DELETE")
+            .uri(format!("{SESSIONS}/{id}"))
+            .header("host", HOST);
+        if let Some(t) = token {
+            builder = builder.header("authorization", format!("Bearer {t}"));
+        }
+        if let Some(c) = correlator {
+            builder = builder.header("x-correlator", c);
+        }
+        let response = app()
+            .oneshot(builder.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        collect(response).await
+    }
+
     async fn collect(response: Response) -> (StatusCode, HeaderMap, Value) {
         let status = response.status();
         let headers = response.headers().clone();
@@ -635,6 +686,92 @@ mod tests {
         assert_eq!(body["status"], "ACTIVE");
         assert!(body.get("expiresAt").is_none());
         assert!(body.get("device").is_none());
+    }
+
+    // --- Delete -------------------------------------------------------------
+
+    #[tokio::test]
+    async fn create_then_delete_returns_204_and_the_session_is_gone() {
+        let token = mint_token(CREATE_SCOPE).await;
+        let (status, _, created) =
+            post_session(Some(&token), &body_for("+123456789012"), None).await;
+        assert_eq!(status, StatusCode::CREATED);
+        let id = created["id"].as_str().unwrap().to_string();
+
+        // Delete it → 204 No Content, with an empty body.
+        let del = mint_token(DELETE_SCOPE).await;
+        let (status, _, body) = delete_session_req(Some(&del), &id, None).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(body, Value::Null, "204 carries no body");
+
+        // …and it can no longer be read back.
+        let read = mint_token(READ_SCOPE).await;
+        let (status, _, _) = get_session_req(Some(&read), &id, None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn delete_is_single_use_second_delete_is_not_found() {
+        let token = mint_token(CREATE_SCOPE).await;
+        let (_, _, created) = post_session(Some(&token), &body_for("+123456789012"), None).await;
+        let id = created["id"].as_str().unwrap().to_string();
+
+        let del = mint_token(DELETE_SCOPE).await;
+        let (status, _, _) = delete_session_req(Some(&del), &id, None).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        // A second delete of the same id finds nothing.
+        let (status, _, body) = delete_session_req(Some(&del), &id, None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn delete_unknown_session_is_not_found() {
+        let del = mint_token(DELETE_SCOPE).await;
+        let (status, _, body) =
+            delete_session_req(Some(&del), "11111111-1111-4111-8111-111111111111", None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn delete_without_the_scope_is_forbidden() {
+        // A read token must not satisfy the delete scope.
+        let read = mint_token(READ_SCOPE).await;
+        let (status, _, body) = delete_session_req(Some(&read), "any-id", None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["code"], "PERMISSION_DENIED");
+    }
+
+    #[tokio::test]
+    async fn delete_without_a_token_is_unauthenticated() {
+        let (status, _, body) =
+            delete_session_req(None, "11111111-1111-4111-8111-111111111111", None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["code"], "UNAUTHENTICATED");
+    }
+
+    #[tokio::test]
+    async fn x_correlator_is_echoed_on_delete_204_and_404() {
+        // Echoed on the 204 (created-then-deleted)…
+        let token = mint_token(CREATE_SCOPE).await;
+        let (_, _, created) = post_session(Some(&token), &body_for("+123456789012"), None).await;
+        let id = created["id"].as_str().unwrap().to_string();
+        let del = mint_token(DELETE_SCOPE).await;
+        let (status, headers, _) = delete_session_req(Some(&del), &id, Some("corr-del")).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-del")
+        );
+        // …and on the 404 (unknown id).
+        let (status, headers, _) =
+            delete_session_req(Some(&del), "no-such-id", Some("corr-del-404")).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-del-404")
+        );
     }
 
     // --- Reserved-error convention -----------------------------------------

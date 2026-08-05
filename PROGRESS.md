@@ -1563,9 +1563,14 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     identifier reserved-error suffix → canonical CAMARA error (`…409` → the
     createSession 409 CONFLICT); else `status:ACTIVE`, `startsAt:now`, and
     `expiresAt` present (now+24h) unless the tail is `…000`/no-digits (open-ended).
-  - [ ] `DELETE /sessions/{sessionId}` (`deleteSession`) + `POST /retrieve-sessions`
-    (`retrieveSessionsByDevice`) + `POST /sessions/{sessionId}/metrics`
-    (`sendSessionMetrics`) — deferred to later passes.
+  - [x] `DELETE /sessions/{sessionId}` (`deleteSession`,
+    `session-insights:sessions:delete`) — evicts the session from the in-memory
+    store → `204 No Content` (single-use); an unknown/already-deleted id → `404
+    NOT_FOUND` (new `store::remove`). Keyed only on store state; no `session-ended`
+    CloudEvent emitted (notifications still deferred). `x-correlator` echoed.
+  - [ ] `POST /retrieve-sessions` (`retrieveSessionsByDevice`) +
+    `POST /sessions/{sessionId}/metrics` (`sendSessionMetrics`) — deferred to
+    later passes.
   - [ ] CloudEvents notifications on `sink` (`quality-score` / `session-ended`) —
     deferred (http sink; TLS deferred as elsewhere).
 - [ ] Other CAMARA APIs as capacity allows
@@ -1594,6 +1599,16 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-05 — Phase 5: **Session Insights vwip — `DELETE /sessions/{sessionId}`
+  (`deleteSession`, scope `session-insights:sessions:delete`)**. Mirrors the QoD
+  delete: new `store::remove` (single-use eviction, returns the `SessionInfo` or
+  `None`); handler → `204 No Content` on a hit, `404 NOT_FOUND` on unknown/already
+  -deleted, `x-correlator` echoed on both. No `session-ended` CloudEvent (sink
+  notifications still deferred). Spec: added the `delete` operation + `204` and
+  `x-camarasim-scenarios` under `/sessions/{sessionId}`; updated header comment.
+  Tests: 7 new (store round-trip + 6 integration — 204+gone, single-use, unknown
+  404, forbidden scope, unauthenticated, correlator on 204/404). `cargo test`
+  1222 pass; release builds. — binary: 2.5M (2 527 800 bytes)
 - 2026-08-05 — Phase 5 (other CAMARA APIs): **Session Insights vwip —
   `POST /sessions` (`createSession`) + `GET /sessions/{sessionId}` (`getSession`)**,
   CamaraSim's first slice of the CAMARA SessionInsights (wip) API — a **stateful,
