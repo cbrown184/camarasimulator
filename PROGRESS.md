@@ -847,6 +847,28 @@ schema-nullable for "no known measurement" but the sim always reports fresh).
 (`checkDataVolume`, `{ thresholdExceeded }` for a `volumeToCheck`) is a later
 slice. `x-correlator` echoed on every response.
 
+**Phase 5 (other CAMARA APIs) — Media Streaming Rate vwip** is now live, a new
+stateless, non-spatial, device-keyed network-quality query mounted at its
+canonical `vwip` base path (CAMARA Device Media Streaming Rate, work-in-progress
+— no released version yet, mirroring Device Data Volume / Device Visit Location).
+`POST /retrieve-maximum-downstream-media-rate` (scope
+`media-streaming-rate:retrieve-maximum-downstream-media-rate`, operationId
+`retrieveMaximumDownstreamMediaRate`) answers the maximum **downstream** media
+bit rate the network can currently sustain for a device —
+`{ maxDownstreamMediaBitRateSupported: 0..1024, unit: bps|kbps|Mbps|Gbps|Tbps,
+device? }`, a magnitude an application can use to size its streaming, never raw
+per-flow telemetry. Device-object identifier resolution + the two-legged/
+three-legged rule (mirrors Device Data Volume): a submitted `device` on a
+three-legged **line** token (E.164 `sub`) → 422 `UNNECESSARY_IDENTIFIER`; no
+`device` + a non-line subject → 422 `MISSING_IDENTIFIER`; an empty `device` → 400
+`INVALID_ARGUMENT`. Two control planes (DESIGN §7): the identifier's reserved
+error suffix → canonical CAMARA error (checked first); else its trailing three
+digits `d` (`0..=999`; `…000`/no digits → 0) are the magnitude (always within the
+schema's `0..=1024`) and `d % 5` picks the `unit` from the lowest-first enum
+`[bps,kbps,Mbps,Gbps,Tbps]`, so both axes climb from the `…000` floor (`0 bps`) —
+a genuine control plane. `device` echoed only for a phoneNumber request. No new
+dependency. `x-correlator` echoed on every response.
+
 ## In progress (claimed this pass)
 
 _None._  <!-- agent: put the claimed item + run timestamp here, clear it when done -->
@@ -1375,6 +1397,24 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     unknown `unit` → 400 INVALID_ARGUMENT; `value` ∉ 0..=1024 → 400 OUT_OF_RANGE).
     `device` echoed only for a phoneNumber request. No new dep.
     **Completes Device Data Volume vwip.**
+- [x] Media Streaming Rate vwip (`/media-streaming-rate/vwip`; CAMARA Device
+  Media Streaming Rate, wip — no released version yet, mounted at its canonical
+  `vwip` base path; stateless, non-spatial, device-keyed network-quality query):
+  - [x] `POST /retrieve-maximum-downstream-media-rate`
+    (`media-streaming-rate:retrieve-maximum-downstream-media-rate`,
+    `retrieveMaximumDownstreamMediaRate`) —
+    `{ maxDownstreamMediaBitRateSupported: 0..1024, unit:
+    bps|kbps|Mbps|Gbps|Tbps, device? }`, the max downstream media bit rate the
+    network can sustain (never raw telemetry). Device-object identifier
+    resolution + the two-legged/three-legged rule (mirrors Device Data Volume):
+    `device` on a line token → 422 `UNNECESSARY_IDENTIFIER`; no `device` +
+    non-line subject → 422 `MISSING_IDENTIFIER`; empty `device` → 400
+    `INVALID_ARGUMENT`. Two control planes (DESIGN §7): identifier reserved-error
+    suffix → canonical CAMARA error (checked first); else the trailing three
+    digits `d` (`0..=999`; `…000`/no digits → 0) are the magnitude and `d % 5`
+    picks the `unit` from `[bps,kbps,Mbps,Gbps,Tbps]`, so both axes climb from the
+    `…000` floor (`0 bps`) — a genuine plane. `device` echoed only for a
+    phoneNumber request. No new dep. **Completes Media Streaming Rate vwip.**
 - [ ] Other CAMARA APIs as capacity allows
 
 ## Cross-cutting (do alongside the item that needs it)
@@ -1401,6 +1441,32 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-05 — Phase 5 (other CAMARA APIs): **Media Streaming Rate vwip
+  `POST /retrieve-maximum-downstream-media-rate`
+  (`retrieveMaximumDownstreamMediaRate`)** — a new stateless, non-spatial,
+  device-keyed network-quality query, **completing Media Streaming Rate vwip**.
+  Verified the authoritative CAMARA spec via WebFetch (CAMARA
+  DeviceMediaStreamingRate, `main`, version `wip`;
+  `MediaStreamingRateRequest {device?}`; 200 →
+  `MediaStreamingRateResponse {device?, maxDownstreamMediaBitRateSupported int32
+  0..1024 (req), unit enum bps|kbps|Mbps|Gbps|Tbps (req)}`; scope
+  `media-streaming-rate:retrieve-maximum-downstream-media-rate`; errors
+  400/401/403/404/422/429/503; two-legged/three-legged identifier rule). New
+  `src/apis/media_streaming_rate/{,.rs,vwip.rs}` reusing Device Data Volume's
+  device-object identifier resolution / two-legged-three-legged rule (422
+  UNNECESSARY/MISSING_IDENTIFIER) / reserved-error convention. Model: identifier
+  trailing three digits `d` (0..=999; `…000`/no digits → 0) → magnitude `d`
+  (always ≤ 1024) and `unit = [bps,kbps,Mbps,Gbps,Tbps][d % 5]`, both lowest-first
+  from the `…000` floor (`0 bps`); reserved suffix checked first; device echoed
+  only for a phoneNumber request. Wired into `apis.rs` routes, `openapi.rs` SPECS,
+  and the `/` catalog (+ catalog test assertion). Spec: vendored+annotated
+  `specs/media-streaming-rate/vwip/openapi.yaml` (path, request/response schemas,
+  `BitRateUnitEnum`, full shared error set, `x-camarasim-scenarios`). Tests: 20
+  new (rate+unit derivation & unit cycling, magnitude in range, enum validity,
+  reserved suffix wins, non-phone omits echo, three-legged subject keying,
+  422 identifier rules, empty/bad-phone/unknown-field/malformed validation, auth,
+  x-correlator). `cargo test` 1067 green; `cargo build --release` green. No new
+  dependency. — binary: 2.2M (2,303,496 B)
 - 2026-08-05 — Phase 5: **Device Data Volume vwip `POST /check`
   (`checkDataVolume`)** — the companion to `retrieve`, **completing Device Data
   Volume vwip**. Verified the authoritative CAMARA spec via WebFetch

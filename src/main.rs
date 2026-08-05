@@ -214,6 +214,12 @@ async fn catalog() -> Json<Value> {
                 "version": "vwip",
                 "base_path": "/device-data-volume/vwip",
                 "spec_url": "/device-data-volume/vwip/openapi.yaml",
+            },
+            {
+                "name": "media-streaming-rate",
+                "version": "vwip",
+                "base_path": "/media-streaming-rate/vwip",
+                "spec_url": "/media-streaming-rate/vwip/openapi.yaml",
             }
         ],
         "authorization_servers": [{
@@ -378,6 +384,10 @@ mod tests {
             && a["version"] == "vwip"
             && a["base_path"] == "/population-density-data/vwip"
             && a["spec_url"] == "/population-density-data/vwip/openapi.yaml"));
+        assert!(apis.iter().any(|a| a["name"] == "media-streaming-rate"
+            && a["version"] == "vwip"
+            && a["base_path"] == "/media-streaming-rate/vwip"
+            && a["spec_url"] == "/media-streaming-rate/vwip/openapi.yaml"));
         assert_eq!(
             body["authorization_servers"][0]["openid_configuration"],
             "/.well-known/openid-configuration"

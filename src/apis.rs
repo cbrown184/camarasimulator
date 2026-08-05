@@ -36,6 +36,7 @@
 //! - **Device Visit Location vwip** — `/device-visit-location/vwip/…`.
 //! - **Population Density Data vwip** — `/population-density-data/vwip/…`.
 //! - **QoS Provisioning v0.3** — `/qos-provisioning/v0.3/…`.
+//! - **Media Streaming Rate vwip** — `/media-streaming-rate/vwip/…`.
 //!
 //! Plus [`openapi`], which serves each mounted API's vendored OpenAPI spec at
 //! `/{api}/v{n}/openapi.yaml` (docs/DESIGN.md §9).
@@ -60,6 +61,7 @@ pub mod kyc_match;
 pub mod kyc_tenure;
 pub mod location_retrieval;
 pub mod location_verification;
+pub mod media_streaming_rate;
 pub mod number_recycling;
 pub mod number_verification;
 pub mod one_time_password_sms;
@@ -107,5 +109,6 @@ pub fn routes() -> Router {
         .merge(device_visit_location::routes())
         .merge(population_density_data::routes())
         .merge(qos_provisioning::routes())
+        .merge(media_streaming_rate::routes())
         .merge(openapi::routes())
 }
