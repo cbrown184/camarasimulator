@@ -8,9 +8,10 @@
 #
 # This slice serves the create/read/delete trio — `POST /sessions`,
 # `GET /sessions/{sessionId}` and `DELETE /sessions/{sessionId}` — plus
-# list-by-device (`POST /retrieve-sessions`, `retrieveSessionsByDevice`). The
-# remaining lifecycle endpoint (`POST /sessions/{sessionId}/metrics`) and the
-# CloudEvents notifications on `sink` are deferred to later passes.
+# list-by-device (`POST /retrieve-sessions`, `retrieveSessionsByDevice`) and
+# application-observed metrics submission (`POST /sessions/{sessionId}/metrics`,
+# `sendSessionMetrics`). The CloudEvents notifications on `sink` are deferred to
+# later passes.
 openapi: 3.0.3
 info:
   title: Session Insights
@@ -381,6 +382,101 @@ paths:
           - input: a non-empty body that is not a valid RetrieveSessionsInput
             result: "400 INVALID_ARGUMENT"
 
+  /sessions/{sessionId}/metrics:
+    post:
+      operationId: sendSessionMetrics
+      summary: Submit application-observed metrics for a session
+      description: |
+        Report the network quality the application actually observed for the
+        session (a `MetricsPayload`). CAMARA acknowledges receipt with `204 No
+        Content`; the resulting quality score is delivered later via a notification
+        on the session's `sink`, **not** in this response. CamaraSim therefore
+        validates the payload, confirms the session exists, and answers `204`
+        without persisting the metrics (notification delivery is deferred).
+
+        Keyed only on the in-memory store (docs/DESIGN.md §7): a known `sessionId`
+        with a valid payload → `204`; an unknown or already-deleted id → `404
+        NOT_FOUND`; a malformed or out-of-range `MetricsPayload` → `400`
+        (`INVALID_ARGUMENT` for a structural problem or a bad `unit`, `OUT_OF_RANGE`
+        for a numeric field outside its allowed range).
+
+        The spec's `410 Gone` (metrics for an expired session) is a documented
+        CamaraSim cut: no retained expired state exists in this slice — a deleted
+        session is evicted (→ `404`) and the expiry transition arrives with the
+        deferred `sink` notifications.
+      security:
+        - openId:
+            - session-insights:sessions:write
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+        - name: sessionId
+          in: path
+          required: true
+          description: Operator-assigned session identifier.
+          schema:
+            type: string
+            format: uuid
+            maxLength: 36
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MetricsPayload"
+      responses:
+        "204":
+          description: Metrics accepted. No response body.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+        "400":
+          description: |
+            400 — invalid `MetricsPayload`. CamaraSim returns `INVALID_ARGUMENT`
+            for a malformed body, a missing required figure
+            (`packetDelay`/`jitter`/`packetLossErrorRate`), or an invalid `unit`;
+            and `OUT_OF_RANGE` for a `value` or `packetLossErrorRate` outside its
+            allowed range.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionInsightsError"
+              examples:
+                invalidArgument:
+                  summary: Missing required figure
+                  value:
+                    status: 400
+                    code: INVALID_ARGUMENT
+                    message: "`packetLossErrorRate` is required."
+                outOfRange:
+                  summary: Value outside its allowed range
+                  value:
+                    status: 400
+                    code: OUT_OF_RANGE
+                    message: "`packetLossErrorRate` must be between 1 and 10."
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+      x-camarasim-scenarios:
+        description: >-
+          Keyed only on the in-memory store (docs/DESIGN.md §7); the payload is
+          validated first. CAMARA acknowledges with `204` — the quality score
+          arrives later via a `sink` notification (deferred), never in this
+          response. `410 Gone` is a documented cut (no retained expired state).
+        cases:
+          - input: a sessionId from a prior createSession + a valid MetricsPayload
+            result: "204 No Content (metrics acknowledged)"
+          - input: an unknown or already-deleted sessionId
+            result: "404 NOT_FOUND"
+          - input: a missing required figure, malformed body, or invalid unit
+            result: "400 INVALID_ARGUMENT"
+          - input: "a value/packetLossErrorRate outside its range (e.g. packetLossErrorRate 11)"
+            result: "400 OUT_OF_RANGE"
+
 components:
   securitySchemes:
     openId:
@@ -517,6 +613,90 @@ components:
         device:
           $ref: "#/components/schemas/Device"
 
+    MetricsPayload:
+      type: object
+      description: >-
+        Application-observed session metrics submitted via `sendSessionMetrics`.
+        `packetDelay`, `jitter` and `packetLossErrorRate` are required; the two
+        throughput figures are optional. Unknown fields are tolerated.
+      required:
+        - packetDelay
+        - jitter
+        - packetLossErrorRate
+      properties:
+        packetDelay:
+          description: Application-observed one-way packet delay.
+          allOf:
+            - $ref: "#/components/schemas/Duration"
+        jitter:
+          description: Application-observed packet delay variation.
+          allOf:
+            - $ref: "#/components/schemas/Duration"
+        packetLossErrorRate:
+          type: integer
+          format: int32
+          minimum: 1
+          maximum: 10
+          description: >-
+            Application-observed packet loss rate as an exponent of 10 (a value of
+            3 means up to 10⁻³, i.e. 0.1%, of packets were lost).
+        upstreamRate:
+          description: Application-observed upstream bitrate.
+          allOf:
+            - $ref: "#/components/schemas/Rate"
+        downstreamRate:
+          description: Application-observed downstream bitrate.
+          allOf:
+            - $ref: "#/components/schemas/Rate"
+
+    Duration:
+      type: object
+      description: Specification of a duration. CamaraSim range-validates `value`.
+      properties:
+        value:
+          type: integer
+          format: int32
+          minimum: 1
+          maximum: 500
+          example: 12
+        unit:
+          $ref: "#/components/schemas/TimeUnitEnum"
+
+    Rate:
+      type: object
+      description: Specification of a rate. CamaraSim range-validates `value`.
+      properties:
+        value:
+          type: integer
+          format: int32
+          minimum: 0
+          maximum: 1024
+          example: 10
+        unit:
+          $ref: "#/components/schemas/RateUnitEnum"
+
+    TimeUnitEnum:
+      type: string
+      description: Units of time.
+      enum:
+        - Days
+        - Hours
+        - Minutes
+        - Seconds
+        - Milliseconds
+        - Microseconds
+        - Nanoseconds
+
+    RateUnitEnum:
+      type: string
+      description: Units of rate.
+      enum:
+        - Bps
+        - Kbps
+        - Mbps
+        - Gbps
+        - Tbps
+
     SessionInfo:
       type: object
       additionalProperties: false
@@ -578,6 +758,7 @@ components:
               type: string
               enum:
                 - INVALID_ARGUMENT
+                - OUT_OF_RANGE
                 - UNAUTHENTICATED
                 - PERMISSION_DENIED
                 - NOT_FOUND

@@ -1577,8 +1577,18 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     else the in-memory store scanned by device echo (new `store::find_by_device`).
     A resolved identifier with no `device` echo (non-E.164 subject, no submitted
     device) matches nothing → `200 []`.
-  - [ ] `POST /sessions/{sessionId}/metrics` (`sendSessionMetrics`) — deferred to
-    a later pass.
+  - [x] `POST /sessions/{sessionId}/metrics` (`sendSessionMetrics`,
+    `session-insights:sessions:write`) — submit the application-observed
+    `MetricsPayload` (`packetDelay`/`jitter` Durations, `packetLossErrorRate`
+    exponent, optional `upstreamRate`/`downstreamRate`). CAMARA acknowledges with
+    `204` (the quality score arrives later via a `sink` notification, deferred), so
+    the sim validates + confirms the session exists + `204`, without persisting the
+    metrics. Keyed only on store state (opaque `sessionId`, like delete): known id
+    + valid payload → `204`; unknown/deleted id → `404 NOT_FOUND`; malformed/
+    missing-figure/bad-`unit` → `400 INVALID_ARGUMENT`, value out of range → `400
+    OUT_OF_RANGE`. Spec's `410 Gone` (expired session) a documented cut (no
+    retained expired state — a deleted session evicts → 404; expiry arrives with
+    the deferred notifications). No new dep.
   - [ ] CloudEvents notifications on `sink` (`quality-score` / `session-ended`) —
     deferred (http sink; TLS deferred as elsewhere).
 - [ ] Other CAMARA APIs as capacity allows
@@ -1607,6 +1617,29 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-05 — Phase 5: **Session Insights vwip — `POST /sessions/{sessionId}/metrics`
+  (`sendSessionMetrics`, scope `session-insights:sessions:write`)**. Submit the
+  application-observed `MetricsPayload` (`packetDelay`/`jitter` Durations,
+  `packetLossErrorRate` 1–10 exponent, optional `upstreamRate`/`downstreamRate`
+  Rates). CAMARA returns `204` to acknowledge receipt — the quality score is
+  delivered later via a `sink` notification (deferred) — so the sim validates the
+  payload, confirms the session exists, and answers `204` without persisting the
+  metrics. Keyed only on store state (opaque `sessionId`, mirroring delete): known
+  id + valid payload → `204`; unknown/deleted id → `404 NOT_FOUND`; malformed body
+  / missing required figure / bad `unit` → `400 INVALID_ARGUMENT`; a value or
+  `packetLossErrorRate` outside its range → `400 OUT_OF_RANGE` (new `out_of_range`
+  helper). Payload validated before the store lookup. `410 Gone` (metrics for an
+  expired session) a documented cut — no retained expired state in this slice.
+  Spec: added the `/sessions/{sessionId}/metrics` path + `sendSessionMetrics` op
+  (204 / inline 400 with INVALID_ARGUMENT+OUT_OF_RANGE examples / shared error set
+  / `x-camarasim-scenarios`) and the `MetricsPayload`/`Duration`/`Rate`/
+  `TimeUnitEnum`/`RateUnitEnum` schemas; added `OUT_OF_RANGE` to the error enum;
+  header comment updated. Verified against the authoritative CAMARA SessionInsights
+  spec (camaraproject/SessionInsights `main`, version `wip`) via WebFetch. Tests:
+  12 new (204 happy path, required-only accepted, unknown→404, deleted→404,
+  missing-figure→400, out-of-range value/loss/rate→OUT_OF_RANGE, bad unit→400,
+  malformed body→400, body-before-lookup, wrong-scope→403, no-token→401, correlator
+  on 204/404). `cargo test` 1243 pass; release builds. No new dep. — binary: 2.5M (2 557 312 bytes)
 - 2026-08-05 — Phase 5: **Session Insights vwip — `POST /retrieve-sessions`
   (`retrieveSessionsByDevice`, scope `session-insights:sessions:read`)**. Lists a
   device's sessions as an array of `SessionInfo` (`200`; `[]` when none — never

@@ -1,16 +1,34 @@
 //! Session Insights **vwip** (CAMARA SessionInsights, work-in-progress).
 //!
-//! Four endpoints in this slice — the create/read/delete trio of the session
-//! resource plus list-by-device:
+//! Five endpoints in this slice — the create/read/delete trio of the session
+//! resource, list-by-device, and application-observed metrics submission:
 //! - `POST   /session-insights/vwip/sessions` — create a session (`createSession`).
 //! - `GET    /session-insights/vwip/sessions/{sessionId}` — read it (`getSession`).
 //! - `DELETE /session-insights/vwip/sessions/{sessionId}` — delete it
 //!   (`deleteSession`).
 //! - `POST   /session-insights/vwip/retrieve-sessions` — list a device's sessions
 //!   (`retrieveSessionsByDevice`).
+//! - `POST   /session-insights/vwip/sessions/{sessionId}/metrics` — submit the
+//!   application-observed session metrics (`sendSessionMetrics`).
 //!
-//! (`POST /sessions/{id}/metrics` and the CloudEvents notifications on `sink` are
-//! deferred to later passes.)
+//! ## `sendSessionMetrics`
+//!
+//! `POST /sessions/{sessionId}/metrics` lets the application report the network
+//! quality it actually observed (a `MetricsPayload` — `packetDelay`, `jitter`,
+//! `packetLossErrorRate`, and the optional `upstreamRate`/`downstreamRate`).
+//! CAMARA acknowledges receipt with `204 No Content`; the resulting quality score
+//! is delivered later via a notification on the session's `sink`, **not** in this
+//! response — so CamaraSim validates the payload, confirms the session exists, and
+//! answers `204` (it does not persist the metrics — notifications are deferred).
+//! Requires the `session-insights:sessions:write` scope. Keyed only on the
+//! in-memory store (docs/DESIGN.md §7): an unknown `sessionId` → `404 NOT_FOUND`;
+//! a malformed/out-of-range `MetricsPayload` → `400`
+//! (`INVALID_ARGUMENT`/`OUT_OF_RANGE`). The spec's `410 Gone` (metrics for an
+//! expired session) is a documented cut — no retained expired state exists in this
+//! slice (a deleted session is evicted → `404`; expiry transitions arrive with the
+//! deferred notifications).
+//!
+//! (The CloudEvents notifications on `sink` are deferred to later passes.)
 //!
 //! ## What it does
 //!
@@ -90,6 +108,8 @@ const CREATE_SCOPE: &str = "session-insights:sessions:create";
 const READ_SCOPE: &str = "session-insights:sessions:read";
 /// Scope required to delete a session (CAMARA SessionInsights).
 const DELETE_SCOPE: &str = "session-insights:sessions:delete";
+/// Scope required to submit session metrics (CAMARA SessionInsights).
+const WRITE_SCOPE: &str = "session-insights:sessions:write";
 
 /// A created session's lifetime when it is time-bounded (24 hours), added to
 /// `startsAt` to compute `expiresAt`.
@@ -106,6 +126,10 @@ pub fn routes() -> Router {
         .route(
             "/session-insights/vwip/retrieve-sessions",
             post(retrieve_sessions),
+        )
+        .route(
+            "/session-insights/vwip/sessions/:session_id/metrics",
+            post(send_session_metrics),
         )
 }
 
@@ -358,6 +382,188 @@ async fn retrieve_sessions(claims: Claims, headers: HeaderMap, body: Bytes) -> R
     with_correlator((StatusCode::OK, Json(sessions)).into_response(), &correlator)
 }
 
+/// `POST /sessions/{sessionId}/metrics` request body (CAMARA `MetricsPayload`).
+/// The three network-quality figures are required; the two throughput figures are
+/// optional. Unknown fields are tolerated (the CAMARA schema does not set
+/// `additionalProperties: false`).
+#[derive(Debug, Deserialize)]
+struct MetricsPayload {
+    #[serde(rename = "packetDelay")]
+    packet_delay: Option<Duration>,
+    jitter: Option<Duration>,
+    #[serde(rename = "packetLossErrorRate")]
+    packet_loss_error_rate: Option<i64>,
+    #[serde(rename = "upstreamRate")]
+    upstream_rate: Option<Rate>,
+    #[serde(rename = "downstreamRate")]
+    downstream_rate: Option<Rate>,
+}
+
+/// The CAMARA `Duration` object (`packetDelay` / `jitter`): a `value` (1..=500) in
+/// a `unit` from [`TIME_UNITS`]. Both are optional in the schema; when present they
+/// are range/enum-validated below.
+#[derive(Debug, Deserialize)]
+struct Duration {
+    value: Option<i64>,
+    unit: Option<String>,
+}
+
+/// The CAMARA `Rate` object (`upstreamRate` / `downstreamRate`): a `value`
+/// (0..=1024) in a `unit` from [`RATE_UNITS`].
+#[derive(Debug, Deserialize)]
+struct Rate {
+    value: Option<i64>,
+    unit: Option<String>,
+}
+
+/// Valid `TimeUnitEnum` values (CAMARA `Duration.unit`).
+const TIME_UNITS: [&str; 7] = [
+    "Days",
+    "Hours",
+    "Minutes",
+    "Seconds",
+    "Milliseconds",
+    "Microseconds",
+    "Nanoseconds",
+];
+
+/// Valid `RateUnitEnum` values (CAMARA `Rate.unit`).
+const RATE_UNITS: [&str; 5] = ["Bps", "Kbps", "Mbps", "Gbps", "Tbps"];
+
+/// `POST /session-insights/vwip/sessions/{sessionId}/metrics`.
+///
+/// Submit the application-observed metrics for a session. CAMARA acknowledges
+/// receipt with `204 No Content` — the resulting quality score is delivered later
+/// via a notification on the session's `sink`, not in this response — so CamaraSim
+/// validates the payload, confirms the session exists, and answers `204` without
+/// persisting the metrics (notification delivery is deferred). Keyed only on the
+/// in-memory store (docs/DESIGN.md §7): a known `sessionId` + a valid payload →
+/// `204`; an unknown/deleted id → `404 NOT_FOUND`; a malformed or out-of-range
+/// `MetricsPayload` → `400` (`INVALID_ARGUMENT` / `OUT_OF_RANGE`).
+async fn send_session_metrics(
+    claims: Claims,
+    headers: HeaderMap,
+    Path(session_id): Path<String>,
+    body: Bytes,
+) -> Response {
+    let correlator = headers.get("x-correlator").cloned();
+
+    if let Err(e) = claims.require_scope(WRITE_SCOPE) {
+        return with_correlator(e.into_response(), &correlator);
+    }
+
+    // Body is mandatory (three required figures); parse then validate.
+    let payload: MetricsPayload = match serde_json::from_slice(&body) {
+        Ok(p) => p,
+        Err(_) => {
+            return invalid_argument("Request body is not a valid MetricsPayload.", &correlator)
+        }
+    };
+    if let Err(resp) = validate_metrics(&payload, &correlator) {
+        return resp;
+    }
+
+    // Keyed only on the store state: the session must exist to accept metrics.
+    match store::get(&session_id) {
+        Some(_) => with_correlator(StatusCode::NO_CONTENT.into_response(), &correlator),
+        None => with_correlator(
+            CamaraError::not_found("No session found for the provided sessionId.").into_response(),
+            &correlator,
+        ),
+    }
+}
+
+/// Validate a `MetricsPayload`: the three required figures must be present, and
+/// every supplied `value`/`unit` must respect the CAMARA range/enum. A structural
+/// problem (missing field, bad `unit`) → `400 INVALID_ARGUMENT`; a numeric field
+/// outside its allowed range → `400 OUT_OF_RANGE`.
+fn validate_metrics(
+    payload: &MetricsPayload,
+    correlator: &Option<HeaderValue>,
+) -> Result<(), Response> {
+    // Required figures.
+    let packet_delay = payload
+        .packet_delay
+        .as_ref()
+        .ok_or_else(|| invalid_argument("`packetDelay` is required.", correlator))?;
+    let jitter = payload
+        .jitter
+        .as_ref()
+        .ok_or_else(|| invalid_argument("`jitter` is required.", correlator))?;
+    let loss = payload
+        .packet_loss_error_rate
+        .ok_or_else(|| invalid_argument("`packetLossErrorRate` is required.", correlator))?;
+
+    // packetLossErrorRate is an exponent of 10 in 1..=10.
+    if !(1..=10).contains(&loss) {
+        return Err(out_of_range(
+            "`packetLossErrorRate` must be between 1 and 10.",
+            correlator,
+        ));
+    }
+
+    // The two required Durations, then the two optional Rates.
+    validate_duration(packet_delay, "packetDelay", correlator)?;
+    validate_duration(jitter, "jitter", correlator)?;
+    if let Some(up) = &payload.upstream_rate {
+        validate_rate(up, "upstreamRate", correlator)?;
+    }
+    if let Some(down) = &payload.downstream_rate {
+        validate_rate(down, "downstreamRate", correlator)?;
+    }
+    Ok(())
+}
+
+/// Validate a CAMARA `Duration`: `value` (when present) in 1..=500 → else
+/// `OUT_OF_RANGE`; `unit` (when present) a valid [`TIME_UNITS`] → else
+/// `INVALID_ARGUMENT`.
+fn validate_duration(
+    d: &Duration,
+    field: &str,
+    correlator: &Option<HeaderValue>,
+) -> Result<(), Response> {
+    if let Some(v) = d.value {
+        if !(1..=500).contains(&v) {
+            return Err(out_of_range(
+                &format!("`{field}.value` must be between 1 and 500."),
+                correlator,
+            ));
+        }
+    }
+    if let Some(unit) = &d.unit {
+        if !TIME_UNITS.contains(&unit.as_str()) {
+            return Err(invalid_argument(
+                &format!("`{field}.unit` must be a valid TimeUnitEnum value."),
+                correlator,
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Validate a CAMARA `Rate`: `value` (when present) in 0..=1024 → else
+/// `OUT_OF_RANGE`; `unit` (when present) a valid [`RATE_UNITS`] → else
+/// `INVALID_ARGUMENT`.
+fn validate_rate(r: &Rate, field: &str, correlator: &Option<HeaderValue>) -> Result<(), Response> {
+    if let Some(v) = r.value {
+        if !(0..=1024).contains(&v) {
+            return Err(out_of_range(
+                &format!("`{field}.value` must be between 0 and 1024."),
+                correlator,
+            ));
+        }
+    }
+    if let Some(unit) = &r.unit {
+        if !RATE_UNITS.contains(&unit.as_str()) {
+            return Err(invalid_argument(
+                &format!("`{field}.unit` must be a valid RateUnitEnum value."),
+                correlator,
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// The resolved device identifier: the string CamaraSim keys its functional cases
 /// off, plus the single-property `device` object to echo in the response (`None`
 /// when the identifier came from a token subject that is not a phone number).
@@ -489,6 +695,15 @@ fn is_valid_e164(s: &str) -> bool {
 fn invalid_argument(message: &str, correlator: &Option<HeaderValue>) -> Response {
     with_correlator(
         CamaraError::invalid_argument(message).into_response(),
+        correlator,
+    )
+}
+
+/// A 400 `OUT_OF_RANGE` CAMARA error, with the correlator echoed. Used for a
+/// `MetricsPayload` numeric field that is present but outside its allowed range.
+fn out_of_range(message: &str, correlator: &Option<HeaderValue>) -> Response {
+    with_correlator(
+        CamaraError::new(StatusCode::BAD_REQUEST, "OUT_OF_RANGE", message).into_response(),
         correlator,
     )
 }
@@ -695,6 +910,45 @@ mod tests {
     /// A retrieve-sessions body naming `phone` as the device.
     fn retrieve_body(phone: &str) -> String {
         format!(r#"{{"device":{{"phoneNumber":"{phone}"}}}}"#)
+    }
+
+    async fn post_metrics(
+        token: Option<&str>,
+        session_id: &str,
+        body: &str,
+        correlator: Option<&str>,
+    ) -> (StatusCode, HeaderMap, Value) {
+        let mut builder = Request::builder()
+            .method("POST")
+            .uri(format!("{SESSIONS}/{session_id}/metrics"))
+            .header("host", HOST)
+            .header("content-type", "application/json");
+        if let Some(t) = token {
+            builder = builder.header("authorization", format!("Bearer {t}"));
+        }
+        if let Some(c) = correlator {
+            builder = builder.header("x-correlator", c);
+        }
+        let response = app()
+            .oneshot(builder.body(Body::from(body.to_string())).unwrap())
+            .await
+            .unwrap();
+        collect(response).await
+    }
+
+    /// A well-formed `MetricsPayload` body.
+    const VALID_METRICS: &str = r#"{"packetDelay":{"value":12,"unit":"Milliseconds"},
+             "jitter":{"value":3,"unit":"Milliseconds"},
+             "packetLossErrorRate":3,
+             "upstreamRate":{"value":10,"unit":"Mbps"},
+             "downstreamRate":{"value":50,"unit":"Mbps"}}"#;
+
+    /// Create a session (as `+123456789012`) and return its `id`, for the metrics
+    /// tests that need a live session to submit against.
+    async fn create_session_id() -> String {
+        let (status, _, created) = create_ok("+123456789012").await;
+        assert_eq!(status, StatusCode::CREATED);
+        created["id"].as_str().unwrap().to_string()
     }
 
     async fn collect(response: Response) -> (StatusCode, HeaderMap, Value) {
@@ -972,6 +1226,167 @@ mod tests {
         assert_eq!(
             headers.get("x-correlator").and_then(|v| v.to_str().ok()),
             Some("corr-ret")
+        );
+    }
+
+    // --- Send session metrics ----------------------------------------------
+
+    #[tokio::test]
+    async fn metrics_for_a_live_session_returns_204_no_content() {
+        let id = create_session_id().await;
+        let write = mint_token(WRITE_SCOPE).await;
+        let (status, _, body) = post_metrics(Some(&write), &id, VALID_METRICS, None).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(body, Value::Null, "204 carries no body");
+    }
+
+    #[tokio::test]
+    async fn metrics_with_only_the_required_figures_is_accepted() {
+        // upstreamRate / downstreamRate are optional.
+        let id = create_session_id().await;
+        let write = mint_token(WRITE_SCOPE).await;
+        let body = r#"{"packetDelay":{"value":1,"unit":"Seconds"},
+                       "jitter":{"value":500},
+                       "packetLossErrorRate":1}"#;
+        let (status, _, _) = post_metrics(Some(&write), &id, body, None).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn metrics_for_an_unknown_session_is_not_found() {
+        let write = mint_token(WRITE_SCOPE).await;
+        let (status, _, body) = post_metrics(
+            Some(&write),
+            "11111111-1111-4111-8111-111111111111",
+            VALID_METRICS,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn metrics_for_a_deleted_session_is_not_found() {
+        // A deleted session is evicted → its metrics endpoint 404s (no retained
+        // expired state; the spec's 410 Gone is a documented cut).
+        let create = mint_token(CREATE_SCOPE).await;
+        let (_, _, created) = post_session(Some(&create), &body_for("+123456789012"), None).await;
+        let id = created["id"].as_str().unwrap().to_string();
+        let del = mint_token(DELETE_SCOPE).await;
+        let (status, _, _) = delete_session_req(Some(&del), &id, None).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        let write = mint_token(WRITE_SCOPE).await;
+        let (status, _, body) = post_metrics(Some(&write), &id, VALID_METRICS, None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn metrics_missing_a_required_figure_is_invalid_argument() {
+        let id = create_session_id().await;
+        let write = mint_token(WRITE_SCOPE).await;
+        // No packetLossErrorRate.
+        let body = r#"{"packetDelay":{"value":12,"unit":"Milliseconds"},
+                       "jitter":{"value":3,"unit":"Milliseconds"}}"#;
+        let (status, _, body) = post_metrics(Some(&write), &id, body, None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "INVALID_ARGUMENT");
+    }
+
+    #[tokio::test]
+    async fn metrics_with_an_out_of_range_value_is_out_of_range() {
+        let id = create_session_id().await;
+        let write = mint_token(WRITE_SCOPE).await;
+        // packetLossErrorRate 11 (> 10).
+        let loss = r#"{"packetDelay":{"value":12},"jitter":{"value":3},
+                       "packetLossErrorRate":11}"#;
+        let (status, _, b) = post_metrics(Some(&write), &id, loss, None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(b["code"], "OUT_OF_RANGE");
+        // packetDelay.value 501 (> 500).
+        let delay = r#"{"packetDelay":{"value":501},"jitter":{"value":3},
+                        "packetLossErrorRate":3}"#;
+        let (status, _, b) = post_metrics(Some(&write), &id, delay, None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(b["code"], "OUT_OF_RANGE");
+        // downstreamRate.value 2000 (> 1024).
+        let rate = r#"{"packetDelay":{"value":12},"jitter":{"value":3},
+                       "packetLossErrorRate":3,"downstreamRate":{"value":2000,"unit":"Mbps"}}"#;
+        let (status, _, b) = post_metrics(Some(&write), &id, rate, None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(b["code"], "OUT_OF_RANGE");
+    }
+
+    #[tokio::test]
+    async fn metrics_with_a_bad_unit_is_invalid_argument() {
+        let id = create_session_id().await;
+        let write = mint_token(WRITE_SCOPE).await;
+        let body = r#"{"packetDelay":{"value":12,"unit":"Fortnights"},
+                       "jitter":{"value":3},"packetLossErrorRate":3}"#;
+        let (status, _, body) = post_metrics(Some(&write), &id, body, None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "INVALID_ARGUMENT");
+    }
+
+    #[tokio::test]
+    async fn metrics_with_a_malformed_body_is_invalid_argument() {
+        let id = create_session_id().await;
+        let write = mint_token(WRITE_SCOPE).await;
+        let (status, _, body) = post_metrics(Some(&write), &id, "not json", None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "INVALID_ARGUMENT");
+    }
+
+    #[tokio::test]
+    async fn metrics_bad_body_is_reported_before_session_lookup() {
+        // An invalid payload against an unknown session → 400 (validated first),
+        // not 404.
+        let write = mint_token(WRITE_SCOPE).await;
+        let (status, _, body) =
+            post_metrics(Some(&write), "no-such-session", "not json", None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "INVALID_ARGUMENT");
+    }
+
+    #[tokio::test]
+    async fn metrics_without_the_write_scope_is_forbidden() {
+        // A read token must not satisfy the write scope.
+        let id = create_session_id().await;
+        let read = mint_token(READ_SCOPE).await;
+        let (status, _, body) = post_metrics(Some(&read), &id, VALID_METRICS, None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["code"], "PERMISSION_DENIED");
+    }
+
+    #[tokio::test]
+    async fn metrics_without_a_token_is_unauthenticated() {
+        let (status, _, body) =
+            post_metrics(None, "any-session-id", VALID_METRICS, None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["code"], "UNAUTHENTICATED");
+    }
+
+    #[tokio::test]
+    async fn x_correlator_is_echoed_on_metrics_204_and_404() {
+        let id = create_session_id().await;
+        let write = mint_token(WRITE_SCOPE).await;
+        // Echoed on the 204.
+        let (status, headers, _) =
+            post_metrics(Some(&write), &id, VALID_METRICS, Some("corr-m")).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-m")
+        );
+        // …and on the 404 (unknown id).
+        let (status, headers, _) =
+            post_metrics(Some(&write), "no-such-id", VALID_METRICS, Some("corr-m-404")).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-m-404")
         );
     }
 
