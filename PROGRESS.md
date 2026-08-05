@@ -1260,7 +1260,13 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   - [x] `GET /qos-assignments/{assignmentId}` (`qos-provisioning:qos-assignments:read`,
     `getQosAssignmentById`) — reads a stored assignment back (`200`) or `404
     NOT_FOUND`. Opaque `assignmentId` → store state the only control plane.
-  - [ ] `DELETE /qos-assignments/{assignmentId}` (`revokeQosAssignment`)
+  - [x] `DELETE /qos-assignments/{assignmentId}` (`revokeQosAssignment`,
+    `qos-provisioning:qos-assignments:delete`) — revokes a stored assignment,
+    evicting it from the store (new `store::remove`): present → `204 No Content`
+    (single-use), unknown/already-revoked → `404 NOT_FOUND`. Keyed only on store
+    state (opaque `assignmentId`, no reserved-identifier plane). CAMARA's async
+    `202 Accepted`/`DELETE_REQUESTED` form is deferred with `sink` notifications —
+    synchronous `204` only (mirrors QoD's `deleteSession`). `x-correlator` echoed.
   - [ ] `POST /retrieve-qos-assignment` (`getQosAssignmentByDevice`)
   - [ ] CloudEvents notifications on `sink` (status transitions)
 - [ ] Other CAMARA APIs as capacity allows
@@ -1288,6 +1294,23 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 ## Scan journal
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
+
+- 2026-08-05 — Phase 5: **QoS Provisioning v0.3** — `DELETE /qos-assignments/
+  {assignmentId}` (`revokeQosAssignment`, scope
+  `qos-provisioning:qos-assignments:delete`) now live. Verified the authoritative
+  CAMARA spec via WebFetch (qos-provisioning 0.3.0, r3.2): revoke has a
+  synchronous `204 No Content` form and an async `202 Accepted` + `AssignmentInfo`
+  (`status:AVAILABLE`, `statusInfo:DELETE_REQUESTED`) form driven by a `sink`
+  callback; error set 400/401/403/404/429. Implemented the synchronous `204` path
+  (the async/202 form is deferred with `sink` notifications — a documented cut,
+  mirroring QoD's `deleteSession`): new `store::remove` evicts the assignment,
+  present → 204 (single-use), unknown/already-revoked → 404 NOT_FOUND; opaque
+  `assignmentId` → store state the only control plane. `x-correlator` echoed on the
+  204. Spec updated (`specs/qos-provisioning/v0.3/openapi.yaml`: `delete` op added
+  under `/qos-assignments/{assignmentId}` with the 204 + async-cut note and
+  `x-camarasim-scenarios`; header comment refreshed). No new dependency. 6 new
+  tests (5 handler + 1 store `remove`); `cargo test` 982 passed (was 976);
+  `cargo build --release` clean, no warnings. — binary: 2,208,656 bytes (2.2M)
 
 - 2026-08-05 — Phase 5 (other CAMARA APIs): **QoS Provisioning v0.3** — new
   stateful, resource-oriented API, the *provisioning* (open-ended) counterpart of

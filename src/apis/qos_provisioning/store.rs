@@ -55,6 +55,17 @@ pub fn get(id: &str) -> Option<Value> {
         .cloned()
 }
 
+/// Remove the assignment stored under `id`, returning its `AssignmentInfo` if one
+/// was present, or `None` if no such assignment existed. `revokeQosAssignment`
+/// uses the distinction to answer `204` (an assignment was revoked) vs `404`
+/// (unknown / already-revoked id). Mirrors [`crate::apis::quality_on_demand::store::remove`].
+pub fn remove(id: &str) -> Option<Value> {
+    store()
+        .lock()
+        .expect("qos-provisioning store not poisoned")
+        .remove(id)
+}
+
 /// Mint a fresh, opaque, UUID-shaped `assignmentId`. See [`mint_uuid`] for the shape.
 pub fn new_assignment_id() -> String {
     mint_uuid()
@@ -121,5 +132,17 @@ mod tests {
         insert(id.clone(), info.clone());
         assert_eq!(get(&id), Some(info));
         assert!(get("no-such-assignment").is_none());
+    }
+
+    #[test]
+    fn remove_evicts_once_and_reports_presence() {
+        let id = new_assignment_id();
+        assert!(remove(&id).is_none(), "not stored yet → nothing to remove");
+        let info = json!({ "assignmentId": id, "status": "AVAILABLE" });
+        insert(id.clone(), info.clone());
+        // First remove returns the stored value (single-use); a second is a no-op.
+        assert_eq!(remove(&id), Some(info));
+        assert!(remove(&id).is_none(), "already removed → None");
+        assert!(get(&id).is_none(), "gone from the store after remove");
     }
 }

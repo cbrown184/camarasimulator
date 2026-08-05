@@ -1,7 +1,7 @@
 //! QoS Provisioning **v0.3** (CAMARA qos-provisioning 0.3.0, release r3.2),
 //! mounted at `/qos-provisioning/v0.3`.
 //!
-//! This slice implements the create + read-by-id pair:
+//! This slice implements the create + read-by-id + revoke trio:
 //! - `POST /qos-assignments` (operationId `createQosAssignment`, scope
 //!   `qos-provisioning:qos-assignments:create`) — provisions a QoS profile for a
 //!   device, mints an opaque `assignmentId` ([`super::store`]), remembers the
@@ -9,10 +9,17 @@
 //! - `GET /qos-assignments/{assignmentId}` (operationId `getQosAssignmentById`,
 //!   scope `qos-provisioning:qos-assignments:read`) — reads a stored assignment
 //!   back (`200`) or `404 NOT_FOUND` for an unknown id.
+//! - `DELETE /qos-assignments/{assignmentId}` (operationId `revokeQosAssignment`,
+//!   scope `qos-provisioning:qos-assignments:delete`) — revokes a stored
+//!   assignment, evicting it from the store (`204 No Content`, single-use) or
+//!   `404 NOT_FOUND` for an unknown / already-revoked id. CAMARA also defines an
+//!   asynchronous `202 Accepted` form (`AssignmentInfo` with `status: AVAILABLE`,
+//!   `statusInfo: DELETE_REQUESTED`) driven by a notification callback; since
+//!   `sink` notifications are a later slice, CamaraSim serves only the synchronous
+//!   `204` here (mirroring QoD's `deleteSession`).
 //!
-//! The `DELETE /qos-assignments/{assignmentId}` (`revokeQosAssignment`) and
-//! `POST /retrieve-qos-assignment` (`getQosAssignmentByDevice`) operations, plus
-//! CloudEvents notifications on `sink`, are later slices.
+//! The `POST /retrieve-qos-assignment` (`getQosAssignmentByDevice`) operation and
+//! CloudEvents notifications on `sink` are later slices.
 //!
 //! ## Identifier resolution (two-legged vs three-legged)
 //!
@@ -60,6 +67,8 @@ use crate::scenarios;
 const CREATE_SCOPE: &str = "qos-provisioning:qos-assignments:create";
 /// Scope required to read an assignment (CAMARA qos-provisioning 0.3.0).
 const READ_SCOPE: &str = "qos-provisioning:qos-assignments:read";
+/// Scope required to revoke an assignment (CAMARA qos-provisioning 0.3.0).
+const DELETE_SCOPE: &str = "qos-provisioning:qos-assignments:delete";
 
 /// Routes for QoS Provisioning v0.3, mounted at their canonical URLs.
 pub fn routes() -> Router {
@@ -70,7 +79,7 @@ pub fn routes() -> Router {
         )
         .route(
             "/qos-provisioning/v0.3/qos-assignments/:assignment_id",
-            get(get_qos_assignment_by_id),
+            get(get_qos_assignment_by_id).delete(revoke_qos_assignment),
         )
 }
 
@@ -221,6 +230,35 @@ async fn get_qos_assignment_by_id(
 
     match store::get(&assignment_id) {
         Some(info) => with_correlator((StatusCode::OK, Json(info)).into_response(), &correlator),
+        None => with_correlator(
+            CamaraError::not_found("No assignment found for the provided assignmentId.")
+                .into_response(),
+            &correlator,
+        ),
+    }
+}
+
+/// `DELETE /qos-provisioning/v0.3/qos-assignments/{assignmentId}`.
+///
+/// Revokes a stored assignment. Keyed only on the store state (the `assignmentId`
+/// is opaque, so there is no reserved-identifier control plane): an existing
+/// assignment is evicted → `204 No Content` (single-use); an unknown or
+/// already-revoked id → `404 NOT_FOUND`. The asynchronous `202 Accepted` +
+/// `DELETE_REQUESTED` notification form is deferred with `sink` notifications
+/// (mirrors QoD's synchronous `deleteSession`).
+async fn revoke_qos_assignment(
+    claims: Claims,
+    headers: HeaderMap,
+    Path(assignment_id): Path<String>,
+) -> Response {
+    let correlator = headers.get("x-correlator").cloned();
+
+    if let Err(e) = claims.require_scope(DELETE_SCOPE) {
+        return with_correlator(e.into_response(), &correlator);
+    }
+
+    match store::remove(&assignment_id) {
+        Some(_) => with_correlator(StatusCode::NO_CONTENT.into_response(), &correlator),
         None => with_correlator(
             CamaraError::not_found("No assignment found for the provided assignmentId.")
                 .into_response(),
@@ -612,6 +650,15 @@ mod tests {
         request("GET", &path, token, None, correlator).await
     }
 
+    async fn delete_assignment(
+        token: Option<&str>,
+        id: &str,
+        correlator: Option<&str>,
+    ) -> (StatusCode, HeaderMap, Value) {
+        let path = format!("{ASSIGNMENTS}/{id}");
+        request("DELETE", &path, token, None, correlator).await
+    }
+
     /// A well-formed CreateAssignment body for a two-legged `device`/`profile`.
     fn create_body(phone: &str, profile: &str) -> String {
         json!({
@@ -789,6 +836,72 @@ mod tests {
     async fn missing_token_is_401() {
         let (status, _, _) =
             post_assignment(None, &create_body("+123456789012", "QOS_E"), None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    // --- revokeQosAssignment (DELETE) --------------------------------------
+
+    #[tokio::test]
+    async fn revoke_evicts_the_assignment_204_then_get_is_404() {
+        // Create an assignment, then revoke it: 204, and it is gone afterwards.
+        let create = mint_token(CREATE_SCOPE).await;
+        let (status, _, created) =
+            post_assignment(Some(&create), &create_body("+123456789012", "QOS_E"), None).await;
+        assert_eq!(status, StatusCode::CREATED);
+        let id = created["assignmentId"].as_str().unwrap().to_string();
+
+        let del = mint_token(DELETE_SCOPE).await;
+        let (status, headers, _) = delete_assignment(Some(&del), &id, Some("corr-del")).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        // The correlator is echoed even on the empty 204.
+        assert_eq!(headers.get("x-correlator").unwrap(), "corr-del");
+
+        // The assignment no longer reads back.
+        let read = mint_token(READ_SCOPE).await;
+        let (status, _, body) = get_assignment(Some(&read), &id, None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn revoke_is_single_use_second_delete_is_404() {
+        let create = mint_token(CREATE_SCOPE).await;
+        let (_, _, created) =
+            post_assignment(Some(&create), &create_body("+123456789012", "QOS_E"), None).await;
+        let id = created["assignmentId"].as_str().unwrap().to_string();
+
+        let del = mint_token(DELETE_SCOPE).await;
+        let (status, _, _) = delete_assignment(Some(&del), &id, None).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        // A second revoke of the same id finds nothing → 404.
+        let (status, _, body) = delete_assignment(Some(&del), &id, None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn revoke_unknown_assignment_is_404() {
+        let del = mint_token(DELETE_SCOPE).await;
+        let (status, _, body) =
+            delete_assignment(Some(&del), "00000000-0000-4000-8000-000000000000", None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn revoke_requires_the_delete_scope() {
+        // A token with only the read scope may not revoke → 403.
+        let read = mint_token(READ_SCOPE).await;
+        let (status, _, err) =
+            delete_assignment(Some(&read), "00000000-0000-4000-8000-000000000000", None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(err["code"], "PERMISSION_DENIED");
+    }
+
+    #[tokio::test]
+    async fn revoke_without_a_token_is_401() {
+        let (status, _, _) =
+            delete_assignment(None, "00000000-0000-4000-8000-000000000000", None).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
     }
 }

@@ -9,11 +9,11 @@
 # Mounted under its real published name/version at `/qos-provisioning/v0.3`
 # (mirroring the KYC Match v0.3 / Location Retrieval v0.4 decisions — DESIGN §9).
 #
-# This slice serves `POST /qos-assignments` (create) and
-# `GET /qos-assignments/{assignmentId}` (read by id). The
-# `DELETE /qos-assignments/{assignmentId}` (revoke), `POST /retrieve-qos-assignment`
-# (retrieve by device), and CloudEvents notifications on `sink` are later slices
-# (documented cut).
+# This slice serves `POST /qos-assignments` (create),
+# `GET /qos-assignments/{assignmentId}` (read by id), and
+# `DELETE /qos-assignments/{assignmentId}` (revoke). The
+# `POST /retrieve-qos-assignment` (retrieve by device) and CloudEvents
+# notifications on `sink` are later slices (documented cut).
 openapi: 3.0.3
 info:
   title: QoS Provisioning
@@ -311,6 +311,64 @@ paths:
           - input: a known assignmentId
             result: "200 — the stored AssignmentInfo"
           - input: an unknown assignmentId
+            result: "404 NOT_FOUND"
+    delete:
+      operationId: revokeQosAssignment
+      summary: Revoke a QoS assignment
+      description: |
+        Revokes the QoS assignment identified by `assignmentId`, releasing the
+        provisioned profile.
+
+        CAMARA defines two success forms: a synchronous `204 No Content` (the
+        assignment is revoked immediately), and an asynchronous `202 Accepted`
+        that returns the `AssignmentInfo` with `status: AVAILABLE` and
+        `statusInfo: DELETE_REQUESTED` when a notification callback drives the
+        revocation to completion (a subsequent `ASSIGNMENT_STATUS_CHANGED` event
+        reports `status: UNAVAILABLE`). CamaraSim serves only the synchronous
+        `204` form in this slice — `sink` notifications (and thus the `202`
+        path) are a later slice (documented cut, mirroring QoD's `deleteSession`).
+      security:
+        - openId:
+            - qos-provisioning:qos-assignments:delete
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+        - name: assignmentId
+          in: path
+          required: true
+          description: The id of the QoS assignment (as minted by create).
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "204":
+          description: The QoS assignment was revoked. No response body.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+        "400":
+          $ref: "../../shared/errors.yaml#/components/responses/InvalidArgument"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          Keyed only on the in-memory store (the `assignmentId` is opaque, so
+          there is no reserved-identifier plane): an existing assignment is
+          evicted and revoked (single-use), an unknown/already-revoked id
+          returns 404 NOT_FOUND. The `x-correlator` is echoed on the 204.
+        cases:
+          - input: a known assignmentId
+            result: "204 No Content — the assignment is revoked and no longer reads back"
+          - input: an unknown or already-revoked assignmentId
             result: "404 NOT_FOUND"
 
 components:
