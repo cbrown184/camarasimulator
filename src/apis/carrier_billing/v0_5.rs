@@ -75,10 +75,14 @@
 //!   `cancelPayment` releases one → `cancelled`. The 409 `ALREADY_EXISTS`
 //!   duplicate-session case on `preparePayment` (a `clientCorrelator` already in
 //!   flight) is not modelled.
-//! - `retrievePayments` returns the full list unpaginated and unfiltered: its
-//!   `page`/`perPage`, `paymentCreationDate.gte`/`.lte`, `paymentStatus`,
-//!   `merchantIdentifier`, and `order` query parameters are accepted but not
-//!   applied (a later slice), and payments are not scoped per client.
+//! - `retrievePayments` applies the three list controls the CAMARA 0.5.0 spec
+//!   defines — `page`/`perPage` pagination and `order` (sort by
+//!   `paymentCreationDate`, `asc`/`desc`) — validating each (non-integer
+//!   `page`/`perPage` → 400 `INVALID_ARGUMENT`, `< 1` → 400 `OUT_OF_RANGE`,
+//!   unknown `order` → 400 `INVALID_ARGUMENT`). Payments are still not scoped
+//!   per client (every stored payment is a pagination candidate); the spec
+//!   defines no `paymentCreationDate`/`paymentStatus`/`merchantIdentifier`
+//!   filters, so none are modelled.
 //! - `sink` / `sinkCredential` are accepted for schema fidelity but not acted on
 //!   (Carrier Billing charging notifications are a later slice). Because they are
 //!   never applied, the persisted payment carries no `sink` — the CAMARA
@@ -86,7 +90,7 @@
 //!   simply omits it.
 
 use axum::body::Bytes;
-use axum::extract::Path;
+use axum::extract::{Path, RawQuery};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -927,14 +931,25 @@ async fn retrieve_payment(claims: Claims, headers: HeaderMap, Path(payment_id): 
 /// carrying `carrier-billing:payments:read` (the same read scope as
 /// `retrievePayment`).
 ///
-/// **Documented cut (this slice):** the real operation's query parameters —
-/// `page`/`perPage` pagination, `paymentCreationDate.gte`/`.lte` and
-/// `paymentStatus`/`merchantIdentifier` filtering, and `order` — are accepted
-/// (unknown query parameters are ignored) but **not applied**: the full list is
-/// returned unpaginated and unfiltered. CamaraSim also does not scope payments
-/// per client (a documented simplification, mirroring the Geofencing
-/// Subscriptions list). Pagination/filtering is a later slice.
-async fn retrieve_payments(claims: Claims, headers: HeaderMap) -> Response {
+/// The `page`/`perPage`/`order` query parameters (the three the CAMARA 0.5.0
+/// spec defines for this operation) are now **applied** (DESIGN §7): the stored
+/// payments are sorted by `paymentCreationDate` in `order` (`asc`/`desc`,
+/// default `desc`) and the `page`-th window of `perPage` items is returned.
+/// Invalid parameters are rejected — a non-integer `page`/`perPage` → 400
+/// `INVALID_ARGUMENT`, a value below the schema minimum (`< 1`) → 400
+/// `OUT_OF_RANGE`, an `order` outside `{asc, desc}` → 400 `INVALID_ARGUMENT`.
+/// Unknown query parameters are ignored.
+///
+/// **Documented simplification:** CamaraSim does not scope payments per client
+/// (mirroring the Geofencing Subscriptions list) — every stored payment is a
+/// pagination candidate. No `paymentCreationDate.gte`/`.lte` /
+/// `paymentStatus` / `merchantIdentifier` filters exist in the 0.5.0 spec, so
+/// none are modelled.
+async fn retrieve_payments(
+    claims: Claims,
+    headers: HeaderMap,
+    RawQuery(query): RawQuery,
+) -> Response {
     // Optional correlation header, echoed on every response (CAMARA Commonalities).
     let correlator = headers.get("x-correlator").cloned();
 
@@ -943,8 +958,139 @@ async fn retrieve_payments(claims: Claims, headers: HeaderMap) -> Response {
         return with_correlator(e.into_response(), &correlator);
     }
 
-    let payments = store::all();
+    let params = match parse_list_params(query.as_deref(), &correlator) {
+        Ok(p) => p,
+        Err(response) => return response,
+    };
+
+    let payments = apply_list_params(store::all(), &params);
     with_correlator((StatusCode::OK, Json(payments)).into_response(), &correlator)
+}
+
+/// The validated `page`/`perPage`/`order` list controls for `retrievePayments`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ListParams {
+    /// 1-based page index (schema `minimum: 1`, default `1`).
+    page: i64,
+    /// Page size (schema `minimum: 1`, default `10`).
+    per_page: i64,
+    /// Sort order by `paymentCreationDate` (default `desc`).
+    order: Order,
+}
+
+/// Sort direction for the payment list, keyed on `paymentCreationDate`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Order {
+    Asc,
+    Desc,
+}
+
+/// Parse and validate the `retrievePayments` query string into [`ListParams`],
+/// or return the CAMARA error `Response` for a malformed parameter. Unknown
+/// query parameters are ignored (serde skips fields it does not know); an
+/// absent parameter falls back to its schema default.
+fn parse_list_params(
+    query: Option<&str>,
+    correlator: &Option<HeaderValue>,
+) -> Result<ListParams, Response> {
+    #[derive(serde::Deserialize, Default)]
+    struct Raw {
+        page: Option<String>,
+        #[serde(rename = "perPage")]
+        per_page: Option<String>,
+        order: Option<String>,
+    }
+
+    let raw: Raw = serde_urlencoded::from_str(query.unwrap_or("")).map_err(|_| {
+        invalid_argument(
+            "the query string is not valid application/x-www-form-urlencoded",
+            correlator,
+        )
+    })?;
+
+    let page = parse_positive_int(raw.page.as_deref(), "page", 1, correlator)?;
+    let per_page = parse_positive_int(raw.per_page.as_deref(), "perPage", 10, correlator)?;
+    let order = match raw.order.as_deref() {
+        None | Some("desc") => Order::Desc,
+        Some("asc") => Order::Asc,
+        Some(_) => {
+            return Err(invalid_argument(
+                "`order` must be one of: asc, desc.",
+                correlator,
+            ))
+        }
+    };
+
+    Ok(ListParams {
+        page,
+        per_page,
+        order,
+    })
+}
+
+/// Parse an optional integer query parameter with a schema `minimum: 1`: absent
+/// → `default`; a non-integer → 400 `INVALID_ARGUMENT`; a value `< 1` → 400
+/// `OUT_OF_RANGE`.
+fn parse_positive_int(
+    value: Option<&str>,
+    name: &str,
+    default: i64,
+    correlator: &Option<HeaderValue>,
+) -> Result<i64, Response> {
+    match value {
+        None => Ok(default),
+        Some(raw) => {
+            let parsed: i64 = raw.parse().map_err(|_| {
+                invalid_argument(&format!("`{name}` must be an integer."), correlator)
+            })?;
+            if parsed < 1 {
+                Err(out_of_range(
+                    &format!("`{name}` must be greater than or equal to 1."),
+                    correlator,
+                ))
+            } else {
+                Ok(parsed)
+            }
+        }
+    }
+}
+
+/// Apply the validated [`ListParams`] to a snapshot of stored payments: sort by
+/// `paymentCreationDate` (with `paymentId` as a stable tiebreaker so equal
+/// timestamps order deterministically), reverse for `desc`, then return the
+/// `page`-th window of `per_page` items (an empty slice once `page` runs past
+/// the end). Pure over its input, so it is unit-tested directly, independent of
+/// the process-global store.
+fn apply_list_params(mut payments: Vec<Value>, params: &ListParams) -> Vec<Value> {
+    payments.sort_by(|a, b| sort_key(a).cmp(&sort_key(b)));
+    if params.order == Order::Desc {
+        payments.reverse();
+    }
+
+    let len = payments.len() as i64;
+    // `page` and `per_page` are both `>= 1`; `saturating_mul` guards against an
+    // absurd `page * per_page` overflowing `i64`.
+    let start = (params.page - 1).saturating_mul(params.per_page).min(len);
+    let end = start.saturating_add(params.per_page).min(len);
+    payments[start as usize..end as usize].to_vec()
+}
+
+/// The ordering key for a payment in the list: its `paymentCreationDate` (a
+/// fixed-width RFC 3339 `…Z` instant, so a lexicographic compare is chronological)
+/// paired with its `paymentId` as a deterministic tiebreaker.
+fn sort_key(payment: &Value) -> (&str, &str) {
+    (
+        payment["paymentCreationDate"].as_str().unwrap_or(""),
+        payment["paymentId"].as_str().unwrap_or(""),
+    )
+}
+
+/// A 400 `OUT_OF_RANGE` CAMARA error, with the correlator echoed.
+fn out_of_range(message: &str, correlator: &Option<HeaderValue>) -> Response {
+    with_correlator(
+        CamaraError::new(StatusCode::BAD_REQUEST, "OUT_OF_RANGE", message).into_response(),
+        correlator,
+    )
 }
 
 /// Resolve the mobile account to charge: the submitted `phoneNumber` (validated
@@ -1278,6 +1424,26 @@ mod tests {
         (status, headers, json)
     }
 
+    /// GET `/payments?{query}` (list) with a Bearer token, for exercising the
+    /// `page`/`perPage`/`order` query parameters end-to-end through the app.
+    async fn list_payments_query(token: &str, query: &str) -> (StatusCode, Value) {
+        let builder = Request::builder()
+            .method("GET")
+            .uri(format!("/carrier-billing/v0.5/payments?{query}"))
+            .header("host", HOST)
+            .header("authorization", format!("Bearer {token}"));
+        let response = app()
+            .oneshot(builder.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, json)
+    }
+
     /// A minimal valid CreatePayment body for the given phone number and amount.
     fn payment_body(phone: &str, amount: f64) -> String {
         format!(
@@ -1510,7 +1676,9 @@ mod tests {
         let id = created["paymentId"].as_str().unwrap().to_string();
 
         let read = mint_token(READ_SCOPE).await;
-        let (status, _, list) = list_payments(Some(&read), None).await;
+        // Ask for a single large page so the newly created payment is in range
+        // regardless of how many payments other parallel tests have added.
+        let (status, list) = list_payments_query(&read, "perPage=1000000").await;
         assert_eq!(status, StatusCode::OK);
         let items = list.as_array().expect("response is a JSON array");
         assert!(
@@ -1549,6 +1717,182 @@ mod tests {
             headers.get("x-correlator").and_then(|v| v.to_str().ok()),
             Some("corr-list")
         );
+    }
+
+    // --- retrievePayments: page / perPage / order query parameters ----------
+
+    /// Build a payment `Value` with just the fields `apply_list_params` reads.
+    fn payment_val(id: &str, created: &str) -> Value {
+        json!({ "paymentId": id, "paymentCreationDate": created, "paymentStatus": "succeeded" })
+    }
+
+    #[test]
+    fn apply_list_params_orders_desc_by_creation_date_by_default() {
+        let items = vec![
+            payment_val("a", "2024-01-01T00:00:00Z"),
+            payment_val("c", "2024-03-01T00:00:00Z"),
+            payment_val("b", "2024-02-01T00:00:00Z"),
+        ];
+        let out = apply_list_params(
+            items,
+            &ListParams {
+                page: 1,
+                per_page: 10,
+                order: Order::Desc,
+            },
+        );
+        let ids: Vec<&str> = out.iter().map(|p| p["paymentId"].as_str().unwrap()).collect();
+        assert_eq!(ids, ["c", "b", "a"], "newest first");
+    }
+
+    #[test]
+    fn apply_list_params_orders_asc() {
+        let items = vec![
+            payment_val("c", "2024-03-01T00:00:00Z"),
+            payment_val("a", "2024-01-01T00:00:00Z"),
+            payment_val("b", "2024-02-01T00:00:00Z"),
+        ];
+        let out = apply_list_params(
+            items,
+            &ListParams {
+                page: 1,
+                per_page: 10,
+                order: Order::Asc,
+            },
+        );
+        let ids: Vec<&str> = out.iter().map(|p| p["paymentId"].as_str().unwrap()).collect();
+        assert_eq!(ids, ["a", "b", "c"], "oldest first");
+    }
+
+    #[test]
+    fn apply_list_params_breaks_equal_timestamps_by_payment_id() {
+        // Same instant → deterministic order by paymentId (asc) / reverse (desc),
+        // so pagination over the process-global store is never flaky.
+        let ts = "2024-01-01T00:00:00Z";
+        let items = vec![payment_val("b", ts), payment_val("a", ts), payment_val("c", ts)];
+        let asc = apply_list_params(
+            items.clone(),
+            &ListParams {
+                page: 1,
+                per_page: 10,
+                order: Order::Asc,
+            },
+        );
+        let asc_ids: Vec<&str> = asc.iter().map(|p| p["paymentId"].as_str().unwrap()).collect();
+        assert_eq!(asc_ids, ["a", "b", "c"]);
+        let desc = apply_list_params(
+            items,
+            &ListParams {
+                page: 1,
+                per_page: 10,
+                order: Order::Desc,
+            },
+        );
+        let desc_ids: Vec<&str> = desc.iter().map(|p| p["paymentId"].as_str().unwrap()).collect();
+        assert_eq!(desc_ids, ["c", "b", "a"]);
+    }
+
+    #[test]
+    fn apply_list_params_paginates() {
+        let items: Vec<Value> = (0..5)
+            .map(|i| payment_val(&format!("p{i}"), &format!("2024-01-0{}T00:00:00Z", i + 1)))
+            .collect();
+        // asc, perPage 2 → [p0,p1], [p2,p3], [p4], then empty.
+        let base = |page| ListParams {
+            page,
+            per_page: 2,
+            order: Order::Asc,
+        };
+        let ids = |out: Vec<Value>| -> Vec<String> {
+            out.iter()
+                .map(|p| p["paymentId"].as_str().unwrap().to_string())
+                .collect()
+        };
+        assert_eq!(ids(apply_list_params(items.clone(), &base(1))), ["p0", "p1"]);
+        assert_eq!(ids(apply_list_params(items.clone(), &base(2))), ["p2", "p3"]);
+        assert_eq!(ids(apply_list_params(items.clone(), &base(3))), ["p4"]);
+        assert!(apply_list_params(items, &base(4)).is_empty(), "past the end → []");
+    }
+
+    #[test]
+    fn apply_list_params_survives_absurd_page() {
+        // A page far past the end (guarding the saturating_mul) → empty, not panic.
+        let items = vec![payment_val("a", "2024-01-01T00:00:00Z")];
+        let out = apply_list_params(
+            items,
+            &ListParams {
+                page: i64::MAX,
+                per_page: i64::MAX,
+                order: Order::Asc,
+            },
+        );
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn parse_list_params_defaults_and_valid_values() {
+        assert_eq!(
+            parse_list_params(None, &None).unwrap(),
+            ListParams {
+                page: 1,
+                per_page: 10,
+                order: Order::Desc,
+            }
+        );
+        assert_eq!(
+            parse_list_params(Some("page=2&perPage=5&order=asc"), &None).unwrap(),
+            ListParams {
+                page: 2,
+                per_page: 5,
+                order: Order::Asc,
+            }
+        );
+        // Unknown query parameters are ignored.
+        assert_eq!(
+            parse_list_params(Some("page=3&unknown=x"), &None).unwrap().page,
+            3
+        );
+    }
+
+    #[tokio::test]
+    async fn list_non_integer_page_is_invalid_argument() {
+        let read = mint_token(READ_SCOPE).await;
+        let (status, body) = list_payments_query(&read, "page=abc").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "INVALID_ARGUMENT");
+    }
+
+    #[tokio::test]
+    async fn list_page_below_minimum_is_out_of_range() {
+        let read = mint_token(READ_SCOPE).await;
+        let (status, body) = list_payments_query(&read, "page=0").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "OUT_OF_RANGE");
+
+        let (status, body) = list_payments_query(&read, "perPage=0").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "OUT_OF_RANGE");
+    }
+
+    #[tokio::test]
+    async fn list_unknown_order_is_invalid_argument() {
+        let read = mint_token(READ_SCOPE).await;
+        let (status, body) = list_payments_query(&read, "order=sideways").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "INVALID_ARGUMENT");
+    }
+
+    #[tokio::test]
+    async fn list_perpage_bounds_result_size_through_the_app() {
+        // Create two payments, then ask for a single-item page: the applied
+        // perPage must cap the array at one even though the shared store holds
+        // more (other tests' payments included).
+        let _ = create_ok_token(&payment_body("+123456789012", 1.0)).await;
+        let _ = create_ok_token(&payment_body("+123456789013", 1.0)).await;
+        let read = mint_token(READ_SCOPE).await;
+        let (status, body) = list_payments_query(&read, "page=1&perPage=1").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body.as_array().map(|a| a.len()), Some(1), "perPage=1 caps the page");
     }
 
     #[tokio::test]

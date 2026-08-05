@@ -958,10 +958,16 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     charged payment so it can be read back (`200`) or `404 NOT_FOUND` for an
     unknown id. Opaque `paymentId` → store state is the only control plane.
   - [x] `GET /payments` (list, `retrievePayments`) —
-    `carrier-billing:payments:read`. Store `all()` scan → a `PaymentArray` of
-    every stored payment (`200`, empty array when none; store state the only
-    control plane). Query-param pagination/filtering (`page`/`perPage`/`order`/
-    date+status filters) accepted but not applied — documented cut, later slice.
+    `carrier-billing:payments:read`. Store `all()` scan → a `PaymentArray`
+    (`200`, empty array when none). Now a second control plane: the spec's
+    `page`/`perPage`/`order` query params are **applied** — payments sorted by
+    `paymentCreationDate` (`paymentId` tiebreaker) in `order` (asc/desc, default
+    desc), then the `page`-th window of `perPage` (defaults 1/10). Validation:
+    non-integer `page`/`perPage` → 400 INVALID_ARGUMENT, `<1` → 400 OUT_OF_RANGE,
+    unknown `order` → 400 INVALID_ARGUMENT; unknown query params ignored. No new
+    dep (`RawQuery` + `serde_urlencoded`). Per-client scoping and
+    `paymentCreationDate`/`paymentStatus`/`merchantIdentifier` filters (not in
+    the 0.5.0 spec) remain out of scope.
   - [x] two-step flow: reserve → validate → confirm / cancel
     - [x] `POST /payments/prepare` (`preparePayment`,
       `carrier-billing:payments:create`) — reserve step; happy path →
@@ -1541,6 +1547,27 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-05 — Phase 5 (Carrier Billing v0.5): **`GET /payments`
+  (`retrievePayments`) now applies its `page`/`perPage`/`order` query
+  parameters** — closing the "accepted but not applied" documented cut. The
+  stored payments are sorted by `paymentCreationDate` (`paymentId` breaks ties
+  for deterministic order over the process-global store) in `order` (asc/desc,
+  default desc), then the `page`-th window of `perPage` (defaults 1/10) is
+  returned; non-integer `page`/`perPage` → 400 INVALID_ARGUMENT, `<1` → 400
+  OUT_OF_RANGE, unknown `order` → 400 INVALID_ARGUMENT; unknown query params
+  ignored. Chosen over the two remaining `[ ]` leaves (QoD / QoS-Provisioning
+  `https://` sink TLS delivery — still deferred: a rustls TLS client is a
+  heavyweight, multi-MB dependency vs the "keep binary small" guardrail, and is
+  hard to test without a TLS-server harness) as a small, safe, no-new-dep slice
+  fully covered by the already-vendored spec. Sort/paginate logic is a pure
+  helper (`apply_list_params`), unit-tested independent of the shared store;
+  param parsing/validation reuses `RawQuery` + `serde_urlencoded` (both already
+  deps). Spec: rewrote the `retrievePayments` description, the three parameter
+  descriptions, and the `x-camarasim-scenarios` cases to the applied behaviour.
+  Tests: 6 pure `apply_list_params`/`parse_list_params` cases + 4 through-the-app
+  cases (400 INVALID_ARGUMENT / OUT_OF_RANGE, perPage bounds the page); updated
+  the one pre-existing containment test to a large `perPage`. 1180 tests green,
+  no new deps. — binary: 2.4M (2468040 B)
 - 2026-08-05 — Phase 5 (other CAMARA APIs): **Subscription Status vwip —
   `POST /retrieve-subscription-status` (`retrieveSubscriptionStatus`, scope
   `subscription-status:retrieve-subscription-status`)**, a new stateless,

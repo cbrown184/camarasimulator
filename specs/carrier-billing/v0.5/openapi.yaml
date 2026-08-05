@@ -73,14 +73,18 @@ info:
 
     ## List — `GET /payments` (`retrievePayments`)
 
-    Lists created payments as a `PaymentArray` — a JSON array of every payment
+    Lists created payments as a `PaymentArray` — a JSON array of the payments
     held in the in-memory store (`200`, an empty array when none exist; CAMARA
     lists never `404` on an empty result). Like `retrievePayment` it requires the
-    `carrier-billing:payments:read` scope, and the store state is its only
-    control plane. The real operation's `page`/`perPage` pagination and
-    `paymentCreationDate.gte`/`.lte` / `paymentStatus` / `merchantIdentifier` /
-    `order` query parameters are accepted but not applied in this slice (a later
-    slice); payments are not scoped per client.
+    `carrier-billing:payments:read` scope. The three list controls this spec
+    defines are **applied**: `order` (sort by `paymentCreationDate`, `asc`/`desc`,
+    default `desc`) and `page`/`perPage` pagination (defaults `1`/`10`), so the
+    query parameters are a genuine control plane over the stored payments (a
+    non-integer `page`/`perPage` → `400 INVALID_ARGUMENT`; a value below the
+    schema minimum → `400 OUT_OF_RANGE`; an unknown `order` → `400
+    INVALID_ARGUMENT`). Payments are not scoped per client (every stored payment
+    is a pagination candidate); no `paymentCreationDate`/`paymentStatus`/
+    `merchantIdentifier` filters are defined.
 
     ## Reserve — `POST /payments/prepare` (`preparePayment`)
 
@@ -163,10 +167,10 @@ info:
       in flight) is not modelled. `confirmPayment`'s / `cancelPayment`'s optional
       `phoneNumber` body field is accepted but not applied (the reservation is
       addressed by its `paymentId`).
-    - `retrievePayments` returns the full list unpaginated and unfiltered — its
-      `page`/`perPage`, `paymentCreationDate.gte`/`.lte`, `paymentStatus`,
-      `merchantIdentifier`, and `order` query parameters are accepted but not
-      applied — and payments are not scoped per client.
+    - `retrievePayments` applies its `page`/`perPage`/`order` query parameters
+      (sort by `paymentCreationDate`, then paginate) but is not scoped per
+      client; no `paymentCreationDate`/`paymentStatus`/`merchantIdentifier`
+      filters are defined by this spec.
     - **Charging notifications.** A successful one-step `createPayment` charge
       now delivers a `payment-completed` CloudEvent to the request's `sink` (see
       the operation's `callbacks`), fire-and-forget over raw TCP to an `http://`
@@ -369,13 +373,15 @@ paths:
       operationId: retrievePayments
       summary: List created payments
       description: |
-        Lists created payments as a `PaymentArray`. Returns every payment held in
+        Lists created payments as a `PaymentArray`. Returns the payments held in
         the in-memory store (`200`, an empty array when none exist).
 
-        In this slice the query parameters below are accepted but **not applied**:
-        the full list is returned unpaginated and unfiltered, and payments are not
-        scoped per client (a documented simplification). Pagination/filtering is a
-        later slice.
+        The `page`/`perPage`/`order` query parameters below are **applied**: the
+        stored payments are sorted by `paymentCreationDate` in `order`
+        (`paymentId` breaks ties deterministically) and the `page`-th window of
+        `perPage` items is returned. Payments are not scoped per client (a
+        documented simplification) — every stored payment is a pagination
+        candidate. Invalid parameters are rejected with `400` (see below).
       security:
         - openId:
             - carrier-billing:payments:read
@@ -385,8 +391,8 @@ paths:
           in: query
           required: false
           description: >-
-            1-based page index. Accepted but not applied in this slice (the full
-            list is always returned).
+            1-based page index. Applied. A non-integer value → `400
+            INVALID_ARGUMENT`; a value below the minimum → `400 OUT_OF_RANGE`.
           schema:
             type: integer
             minimum: 1
@@ -395,8 +401,8 @@ paths:
           in: query
           required: false
           description: >-
-            Page size. Accepted but not applied in this slice (the full list is
-            always returned).
+            Page size. Applied. A non-integer value → `400 INVALID_ARGUMENT`; a
+            value below the minimum → `400 OUT_OF_RANGE`.
           schema:
             type: integer
             minimum: 1
@@ -405,8 +411,8 @@ paths:
           in: query
           required: false
           description: >-
-            Sort order by `paymentCreationDate`. Accepted but not applied in this
-            slice.
+            Sort order by `paymentCreationDate`. Applied. A value outside the
+            enum → `400 INVALID_ARGUMENT`.
           schema:
             type: string
             enum: [asc, desc]
@@ -450,15 +456,26 @@ paths:
           $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
       x-camarasim-scenarios:
         description: >-
-          Keyed only on the in-memory payment store (docs/DESIGN.md §7): every
-          payment created by `createPayment` appears in the returned array, in
-          unspecified order; an empty store yields `200 []`. Query-parameter
-          pagination/filtering is accepted but not applied in this slice.
+          Two control planes (docs/DESIGN.md §7): the in-memory payment store
+          (every payment created by `createPayment`/`preparePayment` is a
+          candidate; an empty store yields `200 []`) and the `page`/`perPage`/
+          `order` query parameters, which sort the candidates by
+          `paymentCreationDate` (ties broken by `paymentId`) and page over them.
         cases:
-          - input: any read-scoped token, with payments in the store
-            result: "200 with a `PaymentArray` containing every stored payment"
+          - input: no query parameters (defaults page=1, perPage=10, order=desc)
+            result: "200 with up to 10 payments, newest `paymentCreationDate` first"
+          - input: "`order=asc`"
+            result: "200 with the payments oldest `paymentCreationDate` first"
+          - input: "`page=2&perPage=5`"
+            result: "200 with the 6th–10th payment of the sorted list (empty once page runs past the end)"
           - input: any read-scoped token, with no payments in the store
             result: "200 []"
+          - input: "`page=abc` or `perPage=x` (non-integer)"
+            result: "400 INVALID_ARGUMENT"
+          - input: "`page=0` or `perPage=0` (below the minimum of 1)"
+            result: "400 OUT_OF_RANGE"
+          - input: "`order=sideways` (outside the enum)"
+            result: "400 INVALID_ARGUMENT"
 
   /payments/prepare:
     post:
