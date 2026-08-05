@@ -1415,7 +1415,7 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     picks the `unit` from `[bps,kbps,Mbps,Gbps,Tbps]`, so both axes climb from the
     `…000` floor (`0 bps`) — a genuine plane. `device` echoed only for a
     phoneNumber request. No new dep. **Completes Media Streaming Rate vwip.**
-- [~] Optimal Edge Discovery vwip (`/optimal-edge-discovery/vwip`; CAMARA
+- [x] Optimal Edge Discovery vwip (`/optimal-edge-discovery/vwip`; CAMARA
   optimal-edge-discovery, wip — no released version yet, mounted at its canonical
   `vwip` base path; stateless, device-keyed edge/MEC discovery — the *ranked*
   successor to Simple Edge Discovery):
@@ -1430,7 +1430,13 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     trailing three digits pick the optimal zone (start index `% 6`) and the count
     (`(d % 3) + 1`, 1–3 zones); and the optional `edgeCloudRegion` filters the
     candidate zones (unknown region → 404 NOT_FOUND) — a genuine second plane.
-  - [ ] `GET /regions` (`getRegions`) — deferred to a later slice.
+  - [x] `GET /regions` (`getRegions`, scope `optimal-edge-discovery:regions:read`)
+    — the read-only helper listing the edge cloud **regions** where zones are
+    available. No request body / identifier, so no parameter-driven functional
+    cases (only the auth error set): any authorised call returns the **distinct**
+    `edgeCloudRegion` values of the fixed 6-entry zone table, in table order
+    (≤20 per the schema). `x-correlator` echoed. **Completes Optimal Edge
+    Discovery vwip.**
 - [ ] Other CAMARA APIs as capacity allows
 
 ## Cross-cutting (do alongside the item that needs it)
@@ -1457,6 +1463,22 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-05 — Phase 5 (other CAMARA APIs): **Optimal Edge Discovery vwip
+  `GET /regions` (`getRegions`)**, completing the API. Verified the authoritative
+  CAMARA spec via WebFetch (CAMARA OptimalEdgeDiscovery, `main`; scope
+  `optimal-edge-discovery:regions:read`; only an `x-correlator` header param; 200 →
+  `GetEdgeCloudRegionsResponse` = `array<EdgeCloudRegion(string, ^[A-Za-z0-9-]+$,
+  ≤64), maxItems 20>`; errors 400/401/403/404/422/429). A static "helper" catalog
+  with no request input, so no functional/control planes beyond the auth error set:
+  the handler returns the **distinct** `edgeCloudRegion` values of the fixed 6-entry
+  `EDGE_ZONES` table in table order (new `distinct_regions`), scope-gated via
+  `Claims::require_scope`, `x-correlator` echoed. Spec: added the `/regions`
+  operation + `GetEdgeCloudRegionsResponse`/`EdgeCloudRegion` schemas +
+  `x-camarasim-scenarios` (noting canonical 400/404/422 are unreachable here — no
+  input to reject). Tests: `distinct_regions` unit + 4 router tests (200 catalog
+  with pattern-valid regions; 403 on the zones scope; 401 no token; correlator
+  echo). No new dependency (reuses the existing table). `cargo test` 1099 passed;
+  `cargo build --release` OK. — binary: 2.3M (2,343,000 bytes)
 - 2026-08-05 — Phase 5 (other CAMARA APIs): **Optimal Edge Discovery vwip
   `POST /retrieve-optimal-edge-cloud-zones` (`discoverOptimalEdge`)** — a new
   stateless, device-keyed edge/MEC discovery API, the *ranked* successor to Simple

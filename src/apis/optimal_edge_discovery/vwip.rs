@@ -1,9 +1,14 @@
 //! Optimal Edge Discovery **vwip** (CAMARA Optimal Edge Discovery, work-in-progress).
 //!
-//! One endpoint (this slice):
+//! Two endpoints:
 //! - `POST /optimal-edge-discovery/vwip/retrieve-optimal-edge-cloud-zones` —
 //!   return a **ranked** list of the edge cloud zones optimal for a device
 //!   (operationId `discoverOptimalEdge`).
+//! - `GET /optimal-edge-discovery/vwip/regions` — the read-only helper that lists
+//!   the edge cloud **regions** where zones are available (operationId
+//!   `getRegions`). No request body / identifier: a static catalog of the distinct
+//!   regions of the fixed [`EDGE_ZONES`] table, protected by the
+//!   `optimal-edge-discovery:regions:read` scope. `x-correlator` echoed.
 //!
 //! ## What it does
 //!
@@ -73,7 +78,7 @@
 use axum::body::Bytes;
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::post;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::json;
@@ -83,8 +88,11 @@ use crate::auth::verify::Claims;
 use crate::errors::CamaraError;
 use crate::scenarios;
 
-/// The OAuth2 scope the endpoint requires (CAMARA Optimal Edge Discovery).
+/// The OAuth2 scope `discoverOptimalEdge` requires (CAMARA Optimal Edge Discovery).
 const READ_SCOPE: &str = "optimal-edge-discovery:edge-zones:read";
+
+/// The OAuth2 scope the `getRegions` helper requires.
+const REGIONS_SCOPE: &str = "optimal-edge-discovery:regions:read";
 
 /// The operator's fixed edge cloud zones, each `(edgeCloudZoneName,
 /// edgeCloudProvider, edgeCloudRegion)`. The identifier's trailing three digits
@@ -103,10 +111,12 @@ const EDGE_ZONES: [(&str, &str, &str); 6] = [
 
 /// Routes for Optimal Edge Discovery vwip, mounted at their canonical URLs.
 pub fn routes() -> Router {
-    Router::new().route(
-        "/optimal-edge-discovery/vwip/retrieve-optimal-edge-cloud-zones",
-        post(retrieve_optimal_edge_cloud_zones),
-    )
+    Router::new()
+        .route(
+            "/optimal-edge-discovery/vwip/retrieve-optimal-edge-cloud-zones",
+            post(retrieve_optimal_edge_cloud_zones),
+        )
+        .route("/optimal-edge-discovery/vwip/regions", get(get_regions))
 }
 
 /// Request body (CAMARA `OptimalEdgeDiscoveryInfo`). `applicationProfileId` is
@@ -254,6 +264,42 @@ async fn retrieve_optimal_edge_cloud_zones(
     }
 
     with_correlator((StatusCode::OK, Json(out)).into_response(), &correlator)
+}
+
+/// `GET /optimal-edge-discovery/vwip/regions` (`getRegions`).
+///
+/// A read-only helper that lists the edge cloud **regions** where zones are
+/// available. There is no request body and no device identifier — it is a static
+/// catalog, so it has no functional/control planes beyond the auth error set. The
+/// regions are the **distinct** `edgeCloudRegion` values of the fixed
+/// [`EDGE_ZONES`] table, in table order (the canonical schema caps the list at 20;
+/// the table holds 6). Protected by the `optimal-edge-discovery:regions:read` scope.
+async fn get_regions(claims: Claims, headers: HeaderMap) -> Response {
+    // Optional correlation header, echoed on every response (CAMARA Commonalities).
+    let correlator = headers.get("x-correlator").cloned();
+
+    // Endpoint authorisation: the token must carry the regions scope.
+    if let Err(e) = claims.require_scope(REGIONS_SCOPE) {
+        return with_correlator(e.into_response(), &correlator);
+    }
+
+    let regions = distinct_regions();
+    with_correlator(
+        (StatusCode::OK, Json(json!(regions))).into_response(),
+        &correlator,
+    )
+}
+
+/// The distinct `edgeCloudRegion` values of the fixed [`EDGE_ZONES`] table, in
+/// table order (first occurrence wins). The `getRegions` catalog.
+fn distinct_regions() -> Vec<&'static str> {
+    let mut regions: Vec<&'static str> = Vec::new();
+    for (_, _, region) in EDGE_ZONES {
+        if !regions.contains(&region) {
+            regions.push(region);
+        }
+    }
+    regions
 }
 
 /// A ranked candidate edge cloud zone: the fixed-table fields plus the
@@ -882,6 +928,99 @@ mod tests {
         let (status, _, body) = post_retrieve(None, &body, None).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
         assert_eq!(body["code"], "UNAUTHENTICATED");
+    }
+
+    // --- getRegions (GET /regions) ----------------------------------------
+
+    const REGIONS_PATH: &str = "/optimal-edge-discovery/vwip/regions";
+
+    /// GET the regions helper with an optional Bearer token and optional
+    /// `x-correlator`. Returns (status, headers, json-or-null).
+    async fn get_regions_req(
+        token: Option<&str>,
+        correlator: Option<&str>,
+    ) -> (StatusCode, HeaderMap, Value) {
+        let mut builder = Request::builder()
+            .method("GET")
+            .uri(REGIONS_PATH)
+            .header("host", HOST);
+        if let Some(t) = token {
+            builder = builder.header("authorization", format!("Bearer {t}"));
+        }
+        if let Some(c) = correlator {
+            builder = builder.header("x-correlator", c);
+        }
+        let response = app()
+            .oneshot(builder.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let headers = response.headers().clone();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, headers, json)
+    }
+
+    #[test]
+    fn distinct_regions_are_the_tables_regions_in_order() {
+        let regions = distinct_regions();
+        // The fixed table's six regions are all distinct, so all six are listed.
+        assert_eq!(
+            regions,
+            vec![
+                "eu-west-1",
+                "eu-central-1",
+                "us-east-1",
+                "us-west-2",
+                "ap-south-1",
+                "ap-northeast-1",
+            ]
+        );
+        // Comfortably inside the schema's maxItems: 20.
+        assert!(regions.len() <= 20);
+    }
+
+    #[tokio::test]
+    async fn get_regions_returns_the_region_catalog() {
+        let token = mint_token(REGIONS_SCOPE).await;
+        let (status, _, body) = get_regions_req(Some(&token), None).await;
+        assert_eq!(status, StatusCode::OK);
+        let regions = body.as_array().unwrap();
+        assert_eq!(regions.len(), distinct_regions().len());
+        assert_eq!(regions[0], "eu-west-1");
+        // Every region matches the canonical `^[A-Za-z0-9-]+$` pattern.
+        assert!(regions
+            .iter()
+            .all(|r| is_valid_region(r.as_str().unwrap())));
+    }
+
+    #[tokio::test]
+    async fn get_regions_requires_its_own_scope() {
+        // The zone-discovery scope is not the regions scope → 403.
+        let token = mint_token(READ_SCOPE).await;
+        let (status, _, body) = get_regions_req(Some(&token), None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["code"], "PERMISSION_DENIED");
+    }
+
+    #[tokio::test]
+    async fn get_regions_without_a_token_is_unauthenticated() {
+        let (status, _, body) = get_regions_req(None, None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["code"], "UNAUTHENTICATED");
+    }
+
+    #[tokio::test]
+    async fn get_regions_echoes_the_correlator() {
+        let token = mint_token(REGIONS_SCOPE).await;
+        let (status, headers, _) = get_regions_req(Some(&token), Some("corr-regions")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-regions")
+        );
     }
 
     #[tokio::test]

@@ -12,8 +12,9 @@
 # release.
 #
 # Serves `POST /retrieve-optimal-edge-cloud-zones` (`discoverOptimalEdge`): the
-# ranked list of edge cloud zones optimal for a device. (The read-only
-# `GET /regions` is deferred to a later slice.)
+# ranked list of edge cloud zones optimal for a device; and `GET /regions`
+# (`getRegions`): the read-only helper listing the edge cloud regions where zones
+# are available.
 openapi: 3.0.3
 info:
   title: Optimal Edge Discovery
@@ -266,6 +267,65 @@ paths:
           - input: no `device` and a non-line token subject
             result: "422 MISSING_IDENTIFIER"
 
+  /regions:
+    get:
+      operationId: getRegions
+      summary: List the edge cloud regions where zones are available
+      description: |
+        A read-only helper that returns the edge cloud **regions** in which the
+        operator runs edge cloud zones. CamaraSim returns the **distinct**
+        `edgeCloudRegion` values of its fixed edge-zone table, in table order.
+
+        There is no request body and no device identifier, so this operation has
+        no parameter-driven functional cases — it is a static catalog (the same
+        `edgeCloudRegion` values the `discoverOptimalEdge` filter accepts). It
+        requires the `optimal-edge-discovery:regions:read` scope.
+      security:
+        - openId:
+            - optimal-edge-discovery:regions:read
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+      responses:
+        "200":
+          description: The edge cloud regions where zones are available.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GetEdgeCloudRegionsResponse"
+              examples:
+                regions:
+                  summary: The fixed CamaraSim region catalog
+                  value:
+                    - eu-west-1
+                    - eu-central-1
+                    - us-east-1
+                    - us-west-2
+                    - ap-south-1
+                    - ap-northeast-1
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+      x-camarasim-scenarios:
+        description: >-
+          A static catalog with no request input, so no parameter-driven cases:
+          any authorised call returns the same fixed list of distinct regions
+          (docs/DESIGN.md §7). Only the auth error set applies. Canonical Optimal
+          Edge Discovery (wip) additionally declares 400/404/422 for this helper;
+          CamaraSim has no input to reject, so those are unreachable here.
+        cases:
+          - input: any request carrying the regions scope
+            result: "200 — the distinct edge cloud regions of the fixed zone table"
+          - input: a token without the `optimal-edge-discovery:regions:read` scope
+            result: "403 PERMISSION_DENIED"
+          - input: no access token
+            result: "401 UNAUTHENTICATED"
+
 components:
   securitySchemes:
     openId:
@@ -428,6 +488,23 @@ components:
         - unknown
       default: unknown
       example: active
+
+    GetEdgeCloudRegionsResponse:
+      type: array
+      maxItems: 20
+      description: >-
+        The edge cloud regions where zones are available (the `getRegions`
+        helper). CamaraSim returns the distinct `edgeCloudRegion` values of its
+        fixed 6-entry zone table.
+      items:
+        $ref: "#/components/schemas/EdgeCloudRegion"
+
+    EdgeCloudRegion:
+      type: string
+      description: The common name of an edge cloud region.
+      maxLength: 64
+      pattern: '^[A-Za-z0-9-]+$'
+      example: "us-east-1"
 
     DeviceResponse:
       type: object
