@@ -100,6 +100,7 @@ use crate::auth::verify::Claims;
 use crate::errors::CamaraError;
 use crate::scenarios;
 
+use super::notifications;
 use super::store;
 
 /// Scope required to create a session (CAMARA SessionInsights).
@@ -465,12 +466,43 @@ async fn send_session_metrics(
 
     // Keyed only on the store state: the session must exist to accept metrics.
     match store::get(&session_id) {
-        Some(_) => with_correlator(StatusCode::NO_CONTENT.into_response(), &correlator),
+        Some(info) => {
+            // CAMARA returns `204` and delivers the resulting quality score
+            // *later* on the session's `sink`. Fire-and-forget a synthetic
+            // `network-quality-score` CloudEvent — deterministically derived from
+            // the submitted metrics (docs/DESIGN.md §7) — so it never sits on the
+            // request path. `sinkCredential` auth is a deferred sub-step.
+            deliver_quality_score(&info, &session_id, &payload);
+            with_correlator(StatusCode::NO_CONTENT.into_response(), &correlator)
+        }
         None => with_correlator(
             CamaraError::not_found("No session found for the provided sessionId.").into_response(),
             &correlator,
         ),
     }
+}
+
+/// Fire-and-forget a `network-quality-score` CloudEvent to the session's stored
+/// `sink`, derived from the submitted `payload`. A no-op when the stored session
+/// records no `sink` (defensive — `createSession` always requires one). Delivery
+/// itself is best-effort and non-blocking ([`notifications::spawn_delivery`]);
+/// `http://` sinks only (an `https://` sink is a documented no-op cut — no TLS
+/// client). `sinkCredential` auth is deferred, so the callback is unauthenticated.
+fn deliver_quality_score(info: &Value, session_id: &str, payload: &MetricsPayload) {
+    let Some(sink) = info.get("sink").and_then(Value::as_str) else {
+        return;
+    };
+    let loss = payload.packet_loss_error_rate.unwrap_or(0);
+    let delay = payload.packet_delay.as_ref().and_then(|d| d.value).unwrap_or(0);
+    let jitter = payload.jitter.as_ref().and_then(|d| d.value).unwrap_or(0);
+    let score = notifications::quality_score(loss, delay, jitter);
+    let event = notifications::quality_score_event(
+        store::new_event_id(),
+        rfc3339_utc(now_unix_secs()),
+        session_id,
+        score,
+    );
+    notifications::spawn_delivery(sink.to_string(), event, None);
 }
 
 /// Validate a `MetricsPayload`: the three required figures must be present, and
@@ -1250,6 +1282,46 @@ mod tests {
                        "packetLossErrorRate":1}"#;
         let (status, _, _) = post_metrics(Some(&write), &id, body, None).await;
         assert_eq!(status, StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn metrics_deliver_a_quality_score_cloudevent_to_the_session_sink() {
+        use tokio::io::AsyncReadExt;
+
+        // A live loopback receiver stands in for the consumer's `sink`.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        // Create a session whose sink points at the receiver (http:// loopback).
+        let create = mint_token(CREATE_SCOPE).await;
+        let body = format!(
+            r#"{{"applicationProfileId":"3fa85f64-5717-4562-b3fc-2c963f66afa6",
+                 "device":{{"phoneNumber":"+123456789012"}},
+                 "applicationServer":{{"ipv4Address":"198.51.100.1"}},
+                 "sink":"http://{addr}/notify"}}"#
+        );
+        let (status, _, created) = post_session(Some(&create), &body, None).await;
+        assert_eq!(status, StatusCode::CREATED);
+        let id = created["id"].as_str().unwrap().to_string();
+
+        // Submit metrics; CAMARA answers 204, the score arrives on the sink.
+        let write = mint_token(WRITE_SCOPE).await;
+        let (status, _, _) = post_metrics(Some(&write), &id, VALID_METRICS, None).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        // The fire-and-forget delivery reaches the receiver.
+        let (mut sock, _) = listener.accept().await.unwrap();
+        let mut buf = Vec::new();
+        sock.read_to_end(&mut buf).await.unwrap();
+        let raw = String::from_utf8(buf).unwrap();
+        let (head, body) = raw.split_once("\r\n\r\n").expect("headers then body");
+        assert!(head.starts_with("POST /notify HTTP/1.1\r\n"), "request line: {head}");
+        assert!(head.contains("Content-Type: application/cloudevents+json"));
+        let event: Value = serde_json::from_str(body).expect("body is JSON");
+        assert_eq!(event["type"], notifications::EVENT_TYPE);
+        assert_eq!(event["data"]["sessionId"], id);
+        // Deterministic: packetLossErrorRate 3 → 100 − (10−3)*8 = 44.
+        assert_eq!(event["data"]["qualityScore"], 44);
     }
 
     #[tokio::test]

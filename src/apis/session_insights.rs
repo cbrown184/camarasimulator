@@ -18,6 +18,7 @@
 //!   work-in-progress — no released version yet, so mounted at its canonical
 //!   `vwip` base path, mirroring the other pre-1.0 wip APIs).
 
+pub mod notifications;
 pub mod store;
 pub mod vwip;
 

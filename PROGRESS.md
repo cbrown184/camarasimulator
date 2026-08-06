@@ -1589,8 +1589,22 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     OUT_OF_RANGE`. Spec's `410 Gone` (expired session) a documented cut (no
     retained expired state — a deleted session evicts → 404; expiry arrives with
     the deferred notifications). No new dep.
-  - [ ] CloudEvents notifications on `sink` (`quality-score` / `session-ended`) —
-    deferred (http sink; TLS deferred as elsewhere).
+  - [~] CloudEvents notifications on `sink`
+    (`src/apis/session_insights/notifications.rs`; event type
+    `org.camaraproject.session-insights.v0.network-quality-score`, mirroring QoD /
+    QoS Provisioning):
+    - [x] `network-quality-score` on `sendSessionMetrics` — a `204` for a session
+      that recorded a `sink` now fires a `network-quality-score` CloudEvent to that
+      sink (fire-and-forget over raw TCP, `http://` only — no HTTP-client dep,
+      `https://` a documented no-op cut; still `204`). `data.qualityScore` (0–100)
+      is deterministic from the submitted `MetricsPayload` (score = clamp(100 −
+      (10−packetLossErrorRate)·8 − packetDelay.value/20 − jitter.value/20, 0, 100)),
+      so the metrics are a genuine control plane. No new dep.
+    - [ ] `sinkCredential` (ACCESSTOKEN bearer) auth on the callback — deferred
+      (the `auth` arg is already threaded; landed unauthenticated first, mirroring
+      QoD's rollout order)
+    - [ ] `session-ended` CloudEvent (delete / expiry) — deferred
+    - [ ] TLS (`https://` sink) delivery (needs a rustls TLS client)
 - [ ] Other CAMARA APIs as capacity allows
 
 ## Cross-cutting (do alongside the item that needs it)
@@ -1617,6 +1631,20 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-06 — Phase 5: **Session Insights vwip — `network-quality-score` CloudEvent
+  on `sendSessionMetrics`**. First notification slice for Session Insights: a `204`
+  for a session that recorded a `sink` now fires an
+  `org.camaraproject.session-insights.v0.network-quality-score` CloudEvent to that
+  sink, fire-and-forget over raw TCP (`http://` only; `https://` a documented no-op
+  cut — no TLS client; no HTTP-client dep). New `notifications.rs` (mirrors QoD /
+  QoS Provisioning) + `store::new_event_id`. `data.qualityScore` (0–100) is
+  deterministic from the submitted metrics (`100 − (10−loss)·8 − delay/20 −
+  jitter/20`, clamped), so the `MetricsPayload` is a genuine control plane. spec:
+  metrics op docs the notification + score formula, new `NetworkQualityScoreEvent`
+  schema, scenarios record the fired event. tests: 6 new (score derivation, event
+  shape, http-sink delivery, non-http no-op, end-to-end metrics→sink). `sinkCredential`
+  auth / `session-ended` / TLS still deferred. 1249 tests green, no new dep. —
+  binary: 2.5M (2567744 B)
 - 2026-08-05 — Phase 5: **Session Insights vwip — `POST /sessions/{sessionId}/metrics`
   (`sendSessionMetrics`, scope `session-insights:sessions:write`)**. Submit the
   application-observed `MetricsPayload` (`packetDelay`/`jitter` Durations,

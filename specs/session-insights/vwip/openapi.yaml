@@ -10,8 +10,10 @@
 # `GET /sessions/{sessionId}` and `DELETE /sessions/{sessionId}` — plus
 # list-by-device (`POST /retrieve-sessions`, `retrieveSessionsByDevice`) and
 # application-observed metrics submission (`POST /sessions/{sessionId}/metrics`,
-# `sendSessionMetrics`). The CloudEvents notifications on `sink` are deferred to
-# later passes.
+# `sendSessionMetrics`). `sendSessionMetrics` now also delivers the resulting
+# `network-quality-score` CloudEvent to the session's `sink` (fire-and-forget over
+# raw TCP, `http://` sinks only — no TLS client; `sinkCredential` auth and the
+# `session-ended` event remain deferred to later passes).
 openapi: 3.0.3
 info:
   title: Session Insights
@@ -389,10 +391,11 @@ paths:
       description: |
         Report the network quality the application actually observed for the
         session (a `MetricsPayload`). CAMARA acknowledges receipt with `204 No
-        Content`; the resulting quality score is delivered later via a notification
-        on the session's `sink`, **not** in this response. CamaraSim therefore
-        validates the payload, confirms the session exists, and answers `204`
-        without persisting the metrics (notification delivery is deferred).
+        Content`; the resulting quality score is delivered **after** the response,
+        as a `network-quality-score` CloudEvent POSTed to the session's `sink`
+        (never in this response body). CamaraSim validates the payload, confirms
+        the session exists, answers `204`, and then fires that CloudEvent
+        best-effort onto its `sink`.
 
         Keyed only on the in-memory store (docs/DESIGN.md §7): a known `sessionId`
         with a valid payload → `204`; an unknown or already-deleted id → `404
@@ -400,10 +403,29 @@ paths:
         (`INVALID_ARGUMENT` for a structural problem or a bad `unit`, `OUT_OF_RANGE`
         for a numeric field outside its allowed range).
 
-        The spec's `410 Gone` (metrics for an expired session) is a documented
-        CamaraSim cut: no retained expired state exists in this slice — a deleted
-        session is evicted (→ `404`) and the expiry transition arrives with the
-        deferred `sink` notifications.
+        **`network-quality-score` notification (CamaraSim model).** On the `204`
+        path, CamaraSim POSTs a CloudEvents 1.0 envelope
+        (`application/cloudevents+json`) of `type`
+        `org.camaraproject.session-insights.v0.network-quality-score` to the stored
+        `sink`. Its `data` carries the `sessionId` and a synthetic integer
+        `qualityScore` (0–100) derived **deterministically** from the submitted
+        metrics — so the `MetricsPayload` is a genuine control plane over the
+        notified score (docs/DESIGN.md §7): the score starts at 100 and subtracts a
+        loss penalty of `(10 − packetLossErrorRate) × 8` (a higher exponent means
+        less loss, so a better link) plus `packetDelay.value / 20` and
+        `jitter.value / 20`, clamped to `0..=100` (e.g. `packetLossErrorRate: 3`,
+        `packetDelay 12 ms`, `jitter 3 ms` → `44`). Delivery is fire-and-forget over
+        a raw TCP stream (no HTTP-client dependency), so a slow or unreachable
+        `sink` never delays the `204`.
+
+        **Documented cuts.** Delivery is to `http://` sinks only — CamaraSim adds no
+        TLS client, so an `https://` sink is accepted at `createSession` but its
+        callback is a silent no-op (matches QoD / QoS Provisioning). Applying the
+        session's `sinkCredential` (ACCESSTOKEN bearer) to the callback, and the
+        `session-ended` CloudEvent, are deferred to later passes. The spec's `410
+        Gone` (metrics for an expired session) is also a cut: no retained expired
+        state exists — a deleted session is evicted (→ `404`) and the expiry
+        transition arrives with the deferred notifications.
       security:
         - openId:
             - session-insights:sessions:write
@@ -464,18 +486,24 @@ paths:
       x-camarasim-scenarios:
         description: >-
           Keyed only on the in-memory store (docs/DESIGN.md §7); the payload is
-          validated first. CAMARA acknowledges with `204` — the quality score
-          arrives later via a `sink` notification (deferred), never in this
-          response. `410 Gone` is a documented cut (no retained expired state).
+          validated first. CAMARA acknowledges with `204` and then delivers a
+          `network-quality-score` CloudEvent on the session's `sink` — the score is
+          deterministic from the submitted metrics, never in this response. `410
+          Gone` is a documented cut (no retained expired state).
         cases:
           - input: a sessionId from a prior createSession + a valid MetricsPayload
-            result: "204 No Content (metrics acknowledged)"
+            result: >-
+              204 No Content, then a network-quality-score CloudEvent fired to the
+              session's http:// sink (qualityScore deterministic from the metrics —
+              e.g. packetLossErrorRate 3 → 44)
+          - input: a valid MetricsPayload on a session whose sink is https://
+            result: "204 No Content; the notification callback is a no-op (no TLS client, documented cut)"
           - input: an unknown or already-deleted sessionId
-            result: "404 NOT_FOUND"
+            result: "404 NOT_FOUND (no notification)"
           - input: a missing required figure, malformed body, or invalid unit
-            result: "400 INVALID_ARGUMENT"
+            result: "400 INVALID_ARGUMENT (no notification)"
           - input: "a value/packetLossErrorRate outside its range (e.g. packetLossErrorRate 11)"
-            result: "400 OUT_OF_RANGE"
+            result: "400 OUT_OF_RANGE (no notification)"
 
 components:
   securitySchemes:
@@ -744,6 +772,62 @@ components:
             - EXPIRED
             - DELETED
           example: ACTIVE
+
+    NetworkQualityScoreEvent:
+      type: object
+      description: >-
+        The CloudEvents 1.0 envelope CamaraSim delivers to a session's `sink`
+        after `sendSessionMetrics` (fire-and-forget, `http://` sinks only). `data`
+        carries the `sessionId` and a synthetic `qualityScore` (0–100) derived
+        deterministically from the submitted metrics (docs/DESIGN.md §7): score =
+        clamp(100 − (10 − packetLossErrorRate)·8 − packetDelay.value/20 −
+        jitter.value/20, 0, 100).
+      required:
+        - id
+        - source
+        - type
+        - specversion
+        - time
+        - data
+      properties:
+        id:
+          type: string
+          description: Unique CloudEvent id within `source` (UUID-shaped).
+          example: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+        source:
+          type: string
+          example: "//camarasimulator/session-insights"
+        type:
+          type: string
+          enum: ["org.camaraproject.session-insights.v0.network-quality-score"]
+        specversion:
+          type: string
+          enum: ["1.0"]
+        datacontenttype:
+          type: string
+          enum: ["application/json"]
+        time:
+          type: string
+          format: date-time
+          example: "2024-01-01T14:27:08Z"
+        data:
+          type: object
+          required:
+            - sessionId
+            - qualityScore
+          properties:
+            sessionId:
+              type: string
+              format: uuid
+              example: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+            qualityScore:
+              type: integer
+              minimum: 0
+              maximum: 100
+              description: >-
+                Synthetic overall network-quality score (0 worst … 100 best),
+                deterministic from the submitted `MetricsPayload`.
+              example: 44
 
     SessionInsightsError:
       description: >-

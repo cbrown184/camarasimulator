@@ -102,6 +102,16 @@ pub fn new_session_id() -> String {
     )
 }
 
+/// Mint a fresh, opaque, UUID-shaped CloudEvent `id`.
+///
+/// CloudEvents requires the `id` to be unique within a `source`; reusing
+/// [`new_session_id`]'s minting gives that without a `uuid`/`rand` dependency
+/// (mirrors [`crate::apis::qos_provisioning::store::new_event_id`]). Used by the
+/// `quality-score` notification delivered on `sendSessionMetrics`.
+pub fn new_event_id() -> String {
+    new_session_id()
+}
+
 /// Current Unix time in seconds (server runtime clock; not on any hot loop).
 fn unix_now() -> u64 {
     SystemTime::now()
