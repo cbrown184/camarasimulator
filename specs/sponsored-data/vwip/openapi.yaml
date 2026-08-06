@@ -6,17 +6,23 @@
 # CamaraSim's parameter-driven functional cases (docs/DESIGN.md §7, §9). Backed
 # by `src/apis/sponsored_data/vwip.rs`; spec and code must not drift.
 #
-# Serves `POST /sponsorship` (`startSponsorship`).
+# Serves `POST /sponsorship` (`startSponsorship`) and
+# `GET /sponsorship/{sponsorId}/{campaignId}/{sessionId}/session-status`
+# (`getSessionStatus`).
 #
 # Divergences from the upstream CAMARA source (documented cuts):
-#   - Only the sponsorship **start** is mounted. The upstream also defines
-#     session-status / revoke reads (which need an in-memory session store) and
-#     campaign-management operations; those, and the end-of-session `webhookUrl`
-#     callback, are deferred to later passes (see PROGRESS.md). The `201`
-#     response is fully determined by the request, so no store is needed yet.
+#   - The sponsorship **start** and **session-status** reads are mounted. The
+#     upstream also defines a `revoke` read and campaign-management operations;
+#     those, and the end-of-session `webhookUrl` callback, are deferred to later
+#     passes (see PROGRESS.md). `startSponsorship` persists the granted session in
+#     an in-memory store so `getSessionStatus` can read it back.
+#   - `getSessionStatus`'s `endReason` values `session_revoked` (needs `revoke`)
+#     and `not_available` are documented in the schema but not yet reachable.
 #   - The upstream `wip` contract declares **no** `securitySchemes`; CamaraSim
-#     assigns the canonical `<api>:<resource>:<action>` scope
-#     `sponsored-data:sponsorship:create`, resolved against the shared auth spec.
+#     assigns the canonical `<api>:<resource>:<action>` scopes
+#     `sponsored-data:sponsorship:create` (start) and
+#     `sponsored-data:sponsorship:read` (session-status), resolved against the
+#     shared auth spec.
 #   - CamaraSim inlines the request/response schemas and `$ref`s the shared error
 #     model (`../../shared/errors.yaml`) so the served spec resolves without
 #     vendoring the whole Commonalities file.
@@ -195,6 +201,109 @@ paths:
           - input: "missing/malformed sponsorId, campaignId, phoneNumber, webhookUrl, or callbackToken; or non-JSON body"
             result: "400 INVALID_ARGUMENT"
 
+  /sponsorship/{sponsorId}/{campaignId}/{sessionId}/session-status:
+    get:
+      operationId: getSessionStatus
+      summary: Read a sponsorship session's status
+      description: |
+        Read a started sponsorship session back by its `sponsorId`, `campaignId`
+        and minted `sessionId`, returning its **live** status: whether it is still
+        `active`, how much of the granted data volume has been consumed, and — once
+        it has ended — why.
+
+        The session is addressed by the opaque `sessionId`, so the store state is
+        the control plane: an unknown `sessionId`, or one whose stored
+        `sponsorId`/`campaignId` do not match the path, yields `404 NOT_FOUND`. The
+        derived status figures key off the stored session (see the operation's
+        `x-camarasim-scenarios`).
+      security:
+        - openId:
+            - sponsored-data:sponsorship:read
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+        - name: sponsorId
+          in: path
+          required: true
+          description: The sponsoring company (`local@domain.tld`) from `startSponsorship`.
+          schema:
+            $ref: "#/components/schemas/SponsorId"
+        - name: campaignId
+          in: path
+          required: true
+          description: The campaign (`UUID@domain.tld`) from `startSponsorship`.
+          schema:
+            $ref: "#/components/schemas/CampaignId"
+        - name: sessionId
+          in: path
+          required: true
+          description: The opaque session identifier minted by `startSponsorship`.
+          schema:
+            $ref: "#/components/schemas/SessionId"
+      responses:
+        "200":
+          description: Successful operation. The session's current status.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SponsorshipSessionStatus"
+              examples:
+                active:
+                  summary: An active session with data remaining
+                  value:
+                    sponsorId: acme@sponsor.example.com
+                    campaignId: 123e4567-e89b-12d3-a456-426614174000@sponsor.example.com
+                    sessionId: 8f14e45f-ceea-4e0a-9d1f-2e3c4b5a6d70
+                    phoneNumber: "+123456789012"
+                    startTime: "2024-06-01T00:00:00Z"
+                    endTime: "2024-06-01T00:10:00Z"
+                    sessionStatus: active
+                    dataVolumeConsumed: 12
+                    dataVolumeAvailable: 38
+                exhausted:
+                  summary: An inactive session that used up its grant
+                  value:
+                    sponsorId: acme@sponsor.example.com
+                    campaignId: 123e4567-e89b-12d3-a456-426614174000@sponsor.example.com
+                    sessionId: 8f14e45f-ceea-4e0a-9d1f-2e3c4b5a6d70
+                    phoneNumber: "+123456789050"
+                    startTime: "2024-06-01T00:00:00Z"
+                    endTime: "2024-06-01T00:10:00Z"
+                    sessionStatus: inactive
+                    dataVolumeConsumed: 50
+                    dataVolumeAvailable: 0
+                    endReason: data_exhausted
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          Result selected from the stored session (docs/DESIGN.md §7). The opaque
+          `sessionId` addresses the session; the stored `phoneNumber`'s trailing
+          three digits and the granted window derive the live status figures.
+        cases:
+          - input: "unknown sessionId, or sponsorId/campaignId not matching the stored session"
+            result: "404 NOT_FOUND"
+          - input: "phoneNumber trailing three digits d, grant g"
+            result: "dataVolumeConsumed = d mod (g+1); dataVolumeAvailable = g - consumed"
+          - input: "now before endTime and data remaining"
+            result: 'sessionStatus "active" (no endReason)'
+          - input: "grant fully consumed (dataVolumeAvailable 0)"
+            result: 'sessionStatus "inactive", endReason "data_exhausted"'
+          - input: "now at or after endTime"
+            result: 'sessionStatus "inactive", endReason "validity_expired"'
+
 components:
   securitySchemes:
     openId:
@@ -329,6 +438,66 @@ components:
           maximum: 1000
           description: The data volume (MB) granted for the user (echoes `dataVolume`, else the default).
           example: 50
+
+    SponsorshipSessionStatus:
+      type: object
+      additionalProperties: false
+      description: The live status of a started sponsorship session.
+      required:
+        - phoneNumber
+        - startTime
+        - endTime
+        - sessionStatus
+        - dataVolumeConsumed
+        - dataVolumeAvailable
+      properties:
+        sponsorId:
+          $ref: "#/components/schemas/SponsorId"
+        campaignId:
+          $ref: "#/components/schemas/CampaignId"
+        sessionId:
+          $ref: "#/components/schemas/SessionId"
+        phoneNumber:
+          $ref: "#/components/schemas/PhoneNumber"
+        startTime:
+          allOf:
+            - $ref: "#/components/schemas/Time"
+          description: When the sponsorship started.
+        endTime:
+          allOf:
+            - $ref: "#/components/schemas/Time"
+          description: When the sponsorship ends (`startTime + duration` minutes).
+        sessionStatus:
+          type: string
+          description: Whether the session is still serving sponsored data.
+          enum:
+            - active
+            - inactive
+          example: active
+        dataVolumeConsumed:
+          type: integer
+          minimum: 0
+          description: Volume of data consumed in the session (MBytes).
+          example: 12
+        dataVolumeAvailable:
+          type: integer
+          minimum: 0
+          description: Volume of remaining available data in the session (MBytes).
+          example: 38
+        endReason:
+          type: string
+          description: >-
+            Why the session ended — present only when `sessionStatus` is
+            `inactive`. CamaraSim reaches `validity_expired` (past `endTime`) and
+            `data_exhausted` (grant fully consumed); `session_revoked` (needs the
+            deferred `revoke` operation) and `not_available` are documented but not
+            yet reachable.
+          enum:
+            - validity_expired
+            - data_exhausted
+            - session_revoked
+            - not_available
+          example: data_exhausted
 
     SponsoredDataError:
       description: >-

@@ -1810,11 +1810,24 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     granted window. Identifier = submitted `phoneNumber`; reserved suffix →
     canonical CAMARA error; `dataVolume` (1–1000 MB, default 50) and `duration`
     (1–1440 min, default 10) are two more control planes (out-of-range → 400
-    OUT_OF_RANGE), `endTime = startTime + duration`. No persistence yet (the
-    `201` is fully determined by the request); scope CamaraSim-assigned (the wip
-    contract declares no securitySchemes). `x-correlator` echoed.
-  - [ ] `GET …/session-status` + `…/revoke` (need an in-memory session store) —
-    deferred; the end-of-session `webhookUrl` callback deferred.
+    OUT_OF_RANGE), `endTime = startTime + duration`. Now **persists** the granted
+    session in a new in-memory store (`src/apis/sponsored_data/store.rs`;
+    `Mutex<HashMap>`, no new dep) so `getSessionStatus` can read it back; scope
+    CamaraSim-assigned (the wip contract declares no securitySchemes).
+    `x-correlator` echoed.
+  - [x] `GET /sponsorship/{sponsorId}/{campaignId}/{sessionId}/session-status`
+    (`getSessionStatus`, `sponsored-data:sponsorship:read`) — reads a started
+    session back and derives its **live** status. Opaque `sessionId` → store state
+    is the control plane (unknown id, or a `sponsorId`/`campaignId` not matching
+    the stored session → 404 NOT_FOUND). Two derived planes (DESIGN §7): the
+    stored `phoneNumber`'s trailing three digits `d` → `dataVolumeConsumed =
+    d % (grant+1)`, `dataVolumeAvailable = grant − consumed`; and the granted
+    window → `sessionStatus` (`now ≥ endTime` → inactive/`validity_expired`; else
+    a fully-consumed grant → inactive/`data_exhausted`; else `active`, no
+    `endReason`). `endReason` `session_revoked`/`not_available` documented but not
+    yet reachable. `x-correlator` echoed.
+  - [ ] `DELETE …/revoke` (`revokeSponsorship`) — the end-of-session revoke read
+    (reuses the session store); the end-of-session `webhookUrl` callback deferred.
   - [ ] campaign-management operations (`/campaign/…`) — deferred.
 - [ ] Other CAMARA APIs as capacity allows
 
@@ -1842,6 +1855,22 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-06 — Phase 5 ("other APIs"): **Sponsored Data vwip — `GET
+  /sponsorship/{sponsorId}/{campaignId}/{sessionId}/session-status`**
+  (`getSessionStatus`, `sponsored-data:sponsorship:read`), making the API
+  **stateful**. New in-memory session store (`src/apis/sponsored_data/store.rs`;
+  `Mutex<HashMap>`, no new dep); `startSponsorship` now persists the granted
+  session so status reads it back. Control planes (DESIGN §7): opaque `sessionId`
+  → store state (unknown, or `sponsorId`/`campaignId` not matching the stored
+  session → 404 NOT_FOUND); stored `phoneNumber` tail → `dataVolumeConsumed =
+  d%(grant+1)` / `dataVolumeAvailable`; granted window → `sessionStatus`
+  (past `endTime` → inactive/`validity_expired`; grant fully consumed →
+  inactive/`data_exhausted`; else `active`). Spec: added the `getSessionStatus`
+  path + `SponsorshipSessionStatus` schema + `x-camarasim-scenarios` to
+  `specs/sponsored-data/vwip/openapi.yaml`. Tests: +9 (pure status derivation;
+  read-back, data-exhausted, unknown/mismatched → 404, 401, 403, x-correlator) +
+  1 store unit. `cargo test` 1371 green; `cargo build --release` ok. — binary:
+  2.77 MB (2,774,488 B, +~17.6 KB, no new dep)
 - 2026-08-06 — Phase 5 ("other APIs"): **Sponsored Data vwip — new
   phone-number-keyed CAMARA API: `POST /sponsorship`** (`startSponsorship`,
   `sponsored-data:sponsorship:create`). All remaining in-progress backlog leaves

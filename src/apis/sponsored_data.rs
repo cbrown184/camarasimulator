@@ -6,15 +6,21 @@
 //! lifecycle (`POST /sponsorship`, then session-status / revoke queries) plus
 //! campaign-management operations.
 //!
-//! CamaraSim mounts the **start** of that lifecycle first:
+//! CamaraSim mounts the sponsorship-session lifecycle first:
 //! - [`vwip`] — mounted at `/sponsored-data/vwip` (CAMARA `wip` — no released
 //!   version yet, so mounted at its canonical `vwip` base path, like the other
-//!   pre-1.0 wip APIs). Serves `POST /sponsorship` (`startSponsorship`).
+//!   pre-1.0 wip APIs). Serves `POST /sponsorship` (`startSponsorship`) and
+//!   `GET /sponsorship/{sponsorId}/{campaignId}/{sessionId}/session-status`
+//!   (`getSessionStatus`).
 //!
-//! The session-status / revoke reads (which need an in-memory session store) and
-//! the campaign-management operations, plus the `webhookUrl` end-of-session
-//! callback, are deferred to later passes (see `PROGRESS.md`).
+//! Reading a session back makes Sponsored Data **stateful**, so a shared
+//! in-memory [`store`] holds started sessions keyed by `sessionId`.
+//!
+//! The `revoke` read and the campaign-management operations, plus the
+//! `webhookUrl` end-of-session callback, are deferred to later passes (see
+//! `PROGRESS.md`).
 
+pub mod store;
 pub mod vwip;
 
 use axum::Router;

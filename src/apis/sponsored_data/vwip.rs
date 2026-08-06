@@ -1,8 +1,10 @@
 //! Sponsored Data **vwip** (CAMARA Sponsored Data, work-in-progress).
 //!
-//! One endpoint:
+//! Two endpoints:
 //! - `POST /sponsored-data/vwip/sponsorship` — start a data-sponsorship session
 //!   for a subscriber in a campaign (operationId `startSponsorship`).
+//! - `GET /sponsored-data/vwip/sponsorship/{sponsorId}/{campaignId}/{sessionId}/session-status`
+//!   — read a started session's live status (operationId `getSessionStatus`).
 //!
 //! ## What it does
 //!
@@ -44,14 +46,38 @@
 //!   `400 OUT_OF_RANGE`) and sets `endTime = startTime + duration`. When omitted
 //!   the onboarding default ([`DEFAULT_DURATION_MIN`]) applies.
 //!
-//! Session persistence (so a later `session-status`/`revoke` can read the grant)
-//! and the end-of-session `webhookUrl` callback are deferred to later passes: the
-//! `201` response is fully determined by the request, so it needs no store yet.
+//! ## Reading a session back — `getSessionStatus`
+//!
+//! `startSponsorship` now persists the granted session in the shared in-memory
+//! [`super::store`] keyed by the minted `sessionId`, so
+//! `GET …/{sponsorId}/{campaignId}/{sessionId}/session-status` can read it back.
+//! The status view is **derived at read time** from the stored grant (docs/DESIGN
+//! §7 — the input is the control plane):
+//!
+//! - **Store state (`sessionId`).** An unknown `sessionId` → `404 NOT_FOUND`; and
+//!   a session found but whose stored `sponsorId`/`campaignId` don't match the
+//!   path segments → `404 NOT_FOUND` (the session isn't addressable under that
+//!   sponsor/campaign).
+//! - **`phoneNumber` tail → data consumption.** The stored subscriber's phone
+//!   number is a second control plane: its trailing three digits `d` fix
+//!   `dataVolumeConsumed = d % (grant + 1)` (`0..=grant`) and
+//!   `dataVolumeAvailable = grant − consumed`. So `+123456789012` on the 50 MB
+//!   default consumes 12 MB (38 available), while a tail that lands on the grant
+//!   consumes it all (0 available → `data_exhausted`, below).
+//! - **The granted window → session status.** `now ≥ endTime` →
+//!   `sessionStatus:"inactive"` with `endReason:"validity_expired"`; else a
+//!   fully-consumed grant → `"inactive"` / `"data_exhausted"`; else `"active"`
+//!   (no `endReason`).
+//!
+//! The `endReason` values `session_revoked` (needs `revoke`) and `not_available`
+//! are documented but not yet reachable — the `revoke` operation and the
+//! end-of-session `webhookUrl` callback are deferred to later passes.
 
 use axum::body::Bytes;
+use axum::extract::Path;
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::post;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -60,6 +86,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
 
+use super::store::{self, SponsorshipRecord};
 use crate::auth::verify::Claims;
 use crate::errors::CamaraError;
 use crate::scenarios;
@@ -67,6 +94,9 @@ use crate::scenarios;
 /// Scope required to start a sponsorship (CamaraSim-assigned; see the module docs
 /// — the upstream `wip` contract declares no `securitySchemes`).
 const CREATE_SCOPE: &str = "sponsored-data:sponsorship:create";
+/// Scope required to read a sponsorship session's status (CamaraSim-assigned; the
+/// upstream `wip` contract declares no `securitySchemes`).
+const READ_SCOPE: &str = "sponsored-data:sponsorship:read";
 
 /// The sponsored data volume (MB) granted when the request omits `dataVolume` —
 /// the campaign's onboarding default (the spec's `50 MB` example).
@@ -86,10 +116,12 @@ const MAX_DURATION_MIN: i64 = 1440;
 
 /// Routes for Sponsored Data vwip, mounted at their canonical URLs.
 pub fn routes() -> Router {
-    Router::new().route(
-        "/sponsored-data/vwip/sponsorship",
-        post(start_sponsorship),
-    )
+    Router::new()
+        .route("/sponsored-data/vwip/sponsorship", post(start_sponsorship))
+        .route(
+            "/sponsored-data/vwip/sponsorship/:sponsor_id/:campaign_id/:session_id/session-status",
+            get(get_session_status),
+        )
 }
 
 /// The `startSponsorship` request body.
@@ -202,13 +234,27 @@ async fn start_sponsorship(claims: Claims, headers: HeaderMap, body: Bytes) -> R
         return with_correlator(err.into_response(), &correlator);
     }
 
-    // Mint the session and render the grant. No persistence yet (see module docs).
+    // Mint the session, persist the granted window, and render the grant. The
+    // clock is read once so the stored record and the rendered `201` agree.
     let session_id = mint_session_id();
+    let now = unix_now();
+    let end = now + duration * 60;
+    store::insert(
+        session_id.clone(),
+        SponsorshipRecord {
+            sponsor_id: sponsor_id.clone(),
+            campaign_id: campaign_id.clone(),
+            phone_number: phone_number.clone(),
+            start_time: now,
+            end_time: end,
+            data_volume_mb: data_volume,
+        },
+    );
     let body = build_response(
         &sponsor_id,
         &campaign_id,
         &session_id,
-        unix_now(),
+        now,
         duration,
         data_volume,
     );
@@ -234,6 +280,92 @@ fn build_response(
         "endTime": rfc3339_utc(now + duration_min * 60),
         "sponsoredDataVolume": data_volume_mb,
     })
+}
+
+/// `GET /sponsored-data/vwip/sponsorship/{sponsorId}/{campaignId}/{sessionId}/session-status`
+/// (operationId `getSessionStatus`).
+///
+/// Reads a started session back from the shared in-memory [`super::store`] and
+/// renders its **live** status. Requires a token carrying [`READ_SCOPE`]. The
+/// result is driven by the stored grant (docs/DESIGN.md §7 — see the module
+/// docs): an unknown `sessionId`, or one whose stored `sponsorId`/`campaignId`
+/// don't match the path, → `404 NOT_FOUND`; otherwise `200` with the derived
+/// [`session_status_body`]. `x-correlator` is echoed on every response.
+async fn get_session_status(
+    claims: Claims,
+    headers: HeaderMap,
+    Path((sponsor_id, campaign_id, session_id)): Path<(String, String, String)>,
+) -> Response {
+    // Optional correlation header, echoed on every response (CAMARA Commonalities).
+    let correlator = headers.get("x-correlator").cloned();
+
+    // Endpoint authorisation: the token must carry the read scope.
+    if let Err(e) = claims.require_scope(READ_SCOPE) {
+        return with_correlator(e.into_response(), &correlator);
+    }
+
+    // Store state is the control plane: unknown id, or a mismatched
+    // sponsor/campaign, is not addressable → 404 (no reserved-identifier plane on
+    // the opaque sessionId; a reserved `phoneNumber` never reached the store).
+    let record = match store::get(&session_id) {
+        Some(r) if r.sponsor_id == sponsor_id && r.campaign_id == campaign_id => r,
+        _ => {
+            return with_correlator(
+                CamaraError::not_found(
+                    "No sponsorship session found for the provided sponsorId, campaignId and sessionId.",
+                )
+                .into_response(),
+                &correlator,
+            )
+        }
+    };
+
+    let body = session_status_body(&session_id, &record, unix_now());
+    with_correlator((StatusCode::OK, Json(body)).into_response(), &correlator)
+}
+
+/// Render a started session's live `session-status` view from the stored grant.
+/// Pure over its inputs (the clock is passed in as `now`) so every derived figure
+/// is unit-testable exactly.
+///
+/// Two control planes shape the answer (docs/DESIGN.md §7):
+/// - the stored `phoneNumber`'s trailing three digits `d` fix
+///   `dataVolumeConsumed = d % (grant + 1)` (so `0..=grant`) and
+///   `dataVolumeAvailable = grant − consumed`;
+/// - the granted window vs `now`, and whether the grant is fully consumed, fix
+///   `sessionStatus`: `now ≥ endTime` → `"inactive"` / `validity_expired`; else a
+///   fully-consumed grant → `"inactive"` / `data_exhausted`; else `"active"`
+///   (no `endReason`).
+fn session_status_body(session_id: &str, record: &SponsorshipRecord, now: i64) -> Value {
+    let grant = record.data_volume_mb;
+    // `grant` is always `>= 1` (validated at start), so `grant + 1 >= 2`.
+    let tail = scenarios::trailing_three_digits(&record.phone_number).unwrap_or(0) as i64;
+    let consumed = tail % (grant + 1);
+    let available = grant - consumed;
+
+    let (status, end_reason) = if now >= record.end_time {
+        ("inactive", Some("validity_expired"))
+    } else if available == 0 {
+        ("inactive", Some("data_exhausted"))
+    } else {
+        ("active", None)
+    };
+
+    let mut body = json!({
+        "sponsorId": record.sponsor_id,
+        "campaignId": record.campaign_id,
+        "sessionId": session_id,
+        "phoneNumber": record.phone_number,
+        "startTime": rfc3339_utc(record.start_time),
+        "endTime": rfc3339_utc(record.end_time),
+        "sessionStatus": status,
+        "dataVolumeConsumed": consumed,
+        "dataVolumeAvailable": available,
+    });
+    if let Some(reason) = end_reason {
+        body["endReason"] = Value::String(reason.to_string());
+    }
+    body
 }
 
 /// A 400 `INVALID_ARGUMENT` CAMARA error, with the correlator echoed.
@@ -554,6 +686,48 @@ mod tests {
         (status, headers, json)
     }
 
+    /// Build the `session-status` URL, percent-encoding the `@` in the
+    /// `sponsorId`/`campaignId` path segments (the only reserved char they carry).
+    fn status_url(sponsor: &str, campaign: &str, session: &str) -> String {
+        format!(
+            "/sponsored-data/vwip/sponsorship/{}/{}/{}/session-status",
+            sponsor.replace('@', "%40"),
+            campaign.replace('@', "%40"),
+            session,
+        )
+    }
+
+    /// GET a `session-status` URL, returning the status, headers, and JSON body.
+    async fn get_status(
+        token: Option<&str>,
+        url: &str,
+        correlator: Option<&str>,
+    ) -> (StatusCode, HeaderMap, Value) {
+        let mut builder = Request::builder().method("GET").uri(url).header("host", HOST);
+        if let Some(t) = token {
+            builder = builder.header("authorization", format!("Bearer {t}"));
+        }
+        if let Some(c) = correlator {
+            builder = builder.header("x-correlator", c);
+        }
+        let request = builder.body(Body::empty()).unwrap();
+        let response = app().oneshot(request).await.unwrap();
+        let status = response.status();
+        let headers = response.headers().clone();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, headers, json)
+    }
+
+    /// Start a session for `phone` and return its minted `sessionId`.
+    async fn start_session(token: &str, phone: &str) -> String {
+        let (status, _, body) = post(Some(token), &body_for(phone, None, None), None).await;
+        assert_eq!(status, StatusCode::CREATED, "start should 201");
+        body["sessionId"].as_str().unwrap().to_string()
+    }
+
     #[tokio::test]
     async fn happy_path_returns_201_with_defaults_and_echoes() {
         let token = mint_token(CREATE_SCOPE).await;
@@ -697,6 +871,161 @@ mod tests {
         );
         let (status, headers, _) =
             post(Some(&token), &body_for("+123456789404", None, None), Some("corr-err")).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-err")
+        );
+    }
+
+    // --- getSessionStatus --------------------------------------------------
+
+    /// `session_status_body` derives consumption from the phone tail and status
+    /// from the window (a pure unit — the clock is an argument).
+    #[test]
+    fn session_status_body_derives_consumption_and_status() {
+        let base = SponsorshipRecord {
+            sponsor_id: SPONSOR.to_string(),
+            campaign_id: CAMPAIGN.to_string(),
+            phone_number: "+123456789012".to_string(), // tail 012 → 12
+            start_time: 1_717_200_000,
+            end_time: 1_717_200_600, // +10 min
+            data_volume_mb: 50,
+        };
+
+        // Active: now inside the window, tail 12 % 51 = 12 consumed of 50.
+        let active = session_status_body("sid-1", &base, 1_717_200_100);
+        assert_eq!(active["sessionId"], "sid-1");
+        assert_eq!(active["phoneNumber"], "+123456789012");
+        assert_eq!(active["startTime"], "2024-06-01T00:00:00Z");
+        assert_eq!(active["endTime"], "2024-06-01T00:10:00Z");
+        assert_eq!(active["sessionStatus"], "active");
+        assert_eq!(active["dataVolumeConsumed"], 12);
+        assert_eq!(active["dataVolumeAvailable"], 38);
+        assert!(active.get("endReason").is_none(), "active has no endReason");
+
+        // Expired: now past endTime → inactive / validity_expired.
+        let expired = session_status_body("sid-1", &base, base.end_time + 1);
+        assert_eq!(expired["sessionStatus"], "inactive");
+        assert_eq!(expired["endReason"], "validity_expired");
+
+        // Data-exhausted: a phone tail that lands on the grant (50 % 51 = 50) →
+        // 0 available, inactive / data_exhausted (while still inside the window).
+        let exhausted_rec = SponsorshipRecord {
+            phone_number: "+123456789050".to_string(), // tail 050 → 50
+            ..base.clone()
+        };
+        let exhausted = session_status_body("sid-2", &exhausted_rec, 1_717_200_100);
+        assert_eq!(exhausted["dataVolumeConsumed"], 50);
+        assert_eq!(exhausted["dataVolumeAvailable"], 0);
+        assert_eq!(exhausted["sessionStatus"], "inactive");
+        assert_eq!(exhausted["endReason"], "data_exhausted");
+    }
+
+    #[tokio::test]
+    async fn started_session_can_be_read_back() {
+        let create = mint_token(CREATE_SCOPE).await;
+        let read = mint_token(READ_SCOPE).await;
+        let session = start_session(&create, "+123456789012").await;
+
+        let (status, _, body) =
+            get_status(Some(&read), &status_url(SPONSOR, CAMPAIGN, &session), None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["sponsorId"], SPONSOR);
+        assert_eq!(body["campaignId"], CAMPAIGN);
+        assert_eq!(body["sessionId"], session);
+        assert_eq!(body["phoneNumber"], "+123456789012");
+        // Freshly started (10-min default window) → active, defaults consumed.
+        assert_eq!(body["sessionStatus"], "active");
+        assert_eq!(body["dataVolumeConsumed"], 12);
+        assert_eq!(body["dataVolumeAvailable"], 38);
+        assert!(body["startTime"].as_str().unwrap().ends_with('Z'));
+        assert!(body["endTime"].as_str().unwrap().ends_with('Z'));
+    }
+
+    #[tokio::test]
+    async fn data_exhausted_session_reports_inactive() {
+        let create = mint_token(CREATE_SCOPE).await;
+        let read = mint_token(READ_SCOPE).await;
+        // tail 050 → 50 consumed of the 50 MB default → 0 available.
+        let session = start_session(&create, "+123456789050").await;
+
+        let (status, _, body) =
+            get_status(Some(&read), &status_url(SPONSOR, CAMPAIGN, &session), None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["dataVolumeAvailable"], 0);
+        assert_eq!(body["sessionStatus"], "inactive");
+        assert_eq!(body["endReason"], "data_exhausted");
+    }
+
+    #[tokio::test]
+    async fn unknown_session_is_not_found() {
+        let read = mint_token(READ_SCOPE).await;
+        let url = status_url(SPONSOR, CAMPAIGN, "8f14e45f-ceea-4e0a-9d1f-2e3c4b5a6d70");
+        let (status, _, body) = get_status(Some(&read), &url, None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn mismatched_sponsor_or_campaign_is_not_found() {
+        let create = mint_token(CREATE_SCOPE).await;
+        let read = mint_token(READ_SCOPE).await;
+        let session = start_session(&create, "+123456789012").await;
+
+        // Right session, wrong sponsor → not addressable under that sponsor.
+        let wrong_sponsor = status_url("other@sponsor.example.com", CAMPAIGN, &session);
+        let (status, _, body) = get_status(Some(&read), &wrong_sponsor, None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["code"], "NOT_FOUND");
+
+        // Right session, wrong campaign → likewise 404.
+        let other_campaign = "00000000-0000-1000-8000-000000000000@sponsor.example.com";
+        let wrong_campaign = status_url(SPONSOR, other_campaign, &session);
+        let (status, _, _) = get_status(Some(&read), &wrong_campaign, None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn session_status_missing_token_is_unauthenticated() {
+        let url = status_url(SPONSOR, CAMPAIGN, "8f14e45f-ceea-4e0a-9d1f-2e3c4b5a6d70");
+        let (status, _, body) = get_status(None, &url, None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["code"], "UNAUTHENTICATED");
+    }
+
+    #[tokio::test]
+    async fn session_status_wrong_scope_is_permission_denied() {
+        // The create scope does not grant the read operation.
+        let token = mint_token(CREATE_SCOPE).await;
+        let url = status_url(SPONSOR, CAMPAIGN, "8f14e45f-ceea-4e0a-9d1f-2e3c4b5a6d70");
+        let (status, _, body) = get_status(Some(&token), &url, None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["code"], "PERMISSION_DENIED");
+    }
+
+    #[tokio::test]
+    async fn session_status_echoes_x_correlator() {
+        let create = mint_token(CREATE_SCOPE).await;
+        let read = mint_token(READ_SCOPE).await;
+        let session = start_session(&create, "+123456789012").await;
+
+        // Success path echoes.
+        let (status, headers, _) = get_status(
+            Some(&read),
+            &status_url(SPONSOR, CAMPAIGN, &session),
+            Some("corr-ok"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-ok")
+        );
+
+        // Error (404) path echoes too.
+        let url = status_url(SPONSOR, CAMPAIGN, "8f14e45f-ceea-4e0a-9d1f-2e3c4b5a6d70");
+        let (status, headers, _) = get_status(Some(&read), &url, Some("corr-err")).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
         assert_eq!(
             headers.get("x-correlator").and_then(|v| v.to_str().ok()),
