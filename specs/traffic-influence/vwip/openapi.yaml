@@ -275,6 +275,128 @@ paths:
             result: "200 with the stored TrafficInfluence resource"
           - input: an unknown/never-created trafficInfluenceID
             result: "404 NOT_FOUND"
+    patch:
+      operationId: patchTrafficInfluence
+      summary: Update a Traffic Influence resource
+      description: |
+        Update the **mutable** fields of a `TrafficInfluence` resource previously
+        created by `postTrafficInfluence`, addressed by its operator-minted
+        `trafficInfluenceID`. The request body is a JSON **merge-patch** document
+        (`application/merge-patch+json`) over the mutable placement/filter fields:
+        a supplied field is replaced, an explicit `null` clears an optional field,
+        and identity / read-only fields (`trafficInfluenceID`, `appId`, `state`)
+        are ignored. Returns `200` with the updated resource, or `404 NOT_FOUND`
+        if no such resource exists.
+
+        Two control planes (docs/DESIGN.md §7). The **body** is validated first: a
+        malformed `apiConsumerId` / `appInstanceId` / `edgeCloudRegion` /
+        `edgeCloudZoneId` / traffic filter → `400 INVALID_ARGUMENT`, a `sourcePort`
+        / `destinationPort` outside `0..=65535` → `400 OUT_OF_RANGE`. Then the
+        opaque `trafficInfluenceID` selects the **store state** — a resource still
+        held → `200` (updated), an unknown/already-deleted id → `404 NOT_FOUND`.
+        Validating the body before the store means a body `400` wins over the
+        unknown-id `404`. CamaraSim runs no provisioning worker, so a PATCH does
+        **not** re-derive the lifecycle `state` — the resource keeps its
+        create-time `state` (a documented cut). `x-correlator` is echoed on every
+        response.
+      security:
+        - openId:
+            - traffic-influence:traffic-influences:write
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+        - $ref: "#/components/parameters/TrafficInfluenceIDPath"
+      requestBody:
+        required: true
+        content:
+          application/merge-patch+json:
+            schema:
+              $ref: "#/components/schemas/PatchTrafficInfluence"
+            examples:
+              replacePlacement:
+                summary: Replace the edge-cloud placement
+                value:
+                  edgeCloudRegion: us-east-1
+                  edgeCloudZoneId: 550e8400-e29b-41d4-a716-446655440000
+              clearRegion:
+                summary: Clear an optional field with null
+                value:
+                  edgeCloudRegion: null
+      responses:
+        "200":
+          description: The updated Traffic Influence resource.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TrafficInfluence"
+              examples:
+                updated:
+                  summary: The resource after a placement update
+                  value:
+                    trafficInfluenceID: 8f14e45f-ceea-4e0a-9d1f-2e3c4b5a6d70
+                    apiConsumerId: consumer-42
+                    appId: 123e4567-e89b-12d3-a456-426614174002
+                    state: active
+                    edgeCloudRegion: us-east-1
+                    edgeCloudZoneId: 550e8400-e29b-41d4-a716-446655440000
+        "400":
+          description: |
+            400 — invalid request. CamaraSim returns `INVALID_ARGUMENT` for a
+            malformed `apiConsumerId`, `appInstanceId`, `edgeCloudRegion`,
+            `edgeCloudZoneId`, or traffic filter, or a non-JSON/non-object body;
+            and `OUT_OF_RANGE` for a `sourcePort` or `destinationPort` outside
+            `0..=65535`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TrafficInfluenceError"
+              examples:
+                invalidArgument:
+                  summary: Malformed field
+                  value:
+                    status: 400
+                    code: INVALID_ARGUMENT
+                    message: "`appInstanceId` must be a UUID or null."
+                outOfRange:
+                  summary: A port outside 0..=65535
+                  value:
+                    status: 400
+                    code: OUT_OF_RANGE
+                    message: "`sourcePort` must be between 0 and 65535."
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          Two control planes (docs/DESIGN.md §7): the request body (validated
+          first) and the opaque trafficInfluenceID's store state. The
+          trafficInfluenceID carries no reserved-error plane.
+        cases:
+          - input: "a valid merge-patch body for a trafficInfluenceID still in the store"
+            result: "200 with the updated TrafficInfluence resource (change persisted)"
+          - input: "a body field set to null for an optional field (e.g. edgeCloudRegion)"
+            result: "200 with that field removed from the resource"
+          - input: "an empty body {}"
+            result: "200 with the resource unchanged (no-op merge)"
+          - input: "read-only/identity fields (trafficInfluenceID, appId, state) in the body"
+            result: "200 — those fields are ignored, the resource keeps its create-time values"
+          - input: "malformed apiConsumerId/appInstanceId/edgeCloudRegion/edgeCloudZoneId/filter, or a non-object body"
+            result: "400 INVALID_ARGUMENT (checked before the store, so it wins over a 404)"
+          - input: "sourcePort or destinationPort outside 0..=65535"
+            result: "400 OUT_OF_RANGE"
+          - input: "an unknown/never-created/already-deleted trafficInfluenceID with a valid body"
+            result: "404 NOT_FOUND"
     delete:
       operationId: deleteTrafficInfluence
       summary: Delete a Traffic Influence resource
@@ -452,6 +574,49 @@ components:
           $ref: "#/components/schemas/SourceTrafficFilters"
         destinationTrafficFilters:
           $ref: "#/components/schemas/DestinationTrafficFilters"
+
+    PatchTrafficInfluence:
+      type: object
+      description: >-
+        A JSON merge-patch (RFC 7386) over the mutable Traffic Influence fields.
+        Any subset of the properties below may be supplied: a present value
+        replaces the stored field, and an explicit `null` clears an optional
+        field. The identity / read-only fields (`trafficInfluenceID`, `appId`,
+        `state`) are not patchable and are ignored if supplied.
+      properties:
+        apiConsumerId:
+          type: string
+          minLength: 1
+          description: >-
+            Replacement API-consumer identifier. Required on the resource, so it
+            may be replaced but not cleared (a `null` is rejected).
+          example: consumer-42
+        appInstanceId:
+          nullable: true
+          allOf:
+            - $ref: "#/components/schemas/Uuid"
+          description: New application instance to steer traffic to, or `null` to clear.
+        edgeCloudRegion:
+          type: string
+          minLength: 1
+          nullable: true
+          description: New edge-cloud region, or `null` to clear.
+          example: us-east-1
+        edgeCloudZoneId:
+          nullable: true
+          allOf:
+            - $ref: "#/components/schemas/Uuid"
+          description: New edge-cloud zone, or `null` to clear.
+        sourceTrafficFilters:
+          nullable: true
+          allOf:
+            - $ref: "#/components/schemas/SourceTrafficFilters"
+          description: New source traffic filter, or `null` to clear.
+        destinationTrafficFilters:
+          nullable: true
+          allOf:
+            - $ref: "#/components/schemas/DestinationTrafficFilters"
+          description: New destination traffic filter, or `null` to clear.
 
     TrafficInfluence:
       type: object

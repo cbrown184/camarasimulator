@@ -46,6 +46,25 @@ pub fn get(id: &str) -> Option<Value> {
         .cloned()
 }
 
+/// Apply `f` to the resource stored under `id` in place, returning the updated
+/// resource (cloned) if one was present, or `None` if there was no such resource.
+/// The get-modify-write happens under a single lock hold — never across an
+/// `.await` — so a concurrent `patchTrafficInfluence` / `deleteTrafficInfluence`
+/// on the same id can never interleave. `patchTrafficInfluence` uses the
+/// distinction to answer `200` (updated resource) vs `404 NOT_FOUND` (unknown id).
+pub fn update_with<F: FnOnce(&mut Value)>(id: &str, f: F) -> Option<Value> {
+    let mut guard = store()
+        .lock()
+        .expect("traffic-influence store not poisoned");
+    match guard.get_mut(id) {
+        Some(resource) => {
+            f(resource);
+            Some(resource.clone())
+        }
+        None => None,
+    }
+}
+
 /// Evict the resource stored under `id`, returning `true` if one was present
 /// (and is now removed) or `false` if there was no such resource. The
 /// check-and-remove happens under a single lock hold, so a concurrent
@@ -91,5 +110,29 @@ mod tests {
         assert!(remove(&id), "first remove evicts → true");
         assert!(get(&id).is_none(), "gone after remove");
         assert!(!remove(&id), "second remove → false (single-use)");
+    }
+
+    #[test]
+    fn update_with_mutates_in_place_and_unknown_is_none() {
+        // Uniquely-keyed so this shares the process-global store with nothing else.
+        let id = "ti-store-unit-update-0001".to_string();
+        assert!(
+            update_with(&id, |_| unreachable!("closure must not run for an absent id")).is_none(),
+            "nothing stored yet → None"
+        );
+        insert(
+            id.clone(),
+            json!({ "trafficInfluenceID": id, "state": "active", "edgeCloudRegion": "eu-west-1" }),
+        );
+        let updated = update_with(&id, |v| {
+            let obj = v.as_object_mut().unwrap();
+            obj.insert("edgeCloudRegion".into(), json!("us-east-1"));
+        })
+        .expect("stored → Some");
+        // The returned clone reflects the mutation …
+        assert_eq!(updated["edgeCloudRegion"], "us-east-1");
+        // … and so does a fresh read-back (the mutation persisted).
+        assert_eq!(get(&id).unwrap()["edgeCloudRegion"], "us-east-1");
+        assert_eq!(get(&id).unwrap()["state"], "active", "unrelated fields untouched");
     }
 }

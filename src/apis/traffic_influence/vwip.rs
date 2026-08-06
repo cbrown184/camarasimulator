@@ -9,6 +9,17 @@
 //!   `getTrafficInfluence`, scope `traffic-influence:traffic-influences:read`):
 //!   the opaque, operator-minted id is the only control plane — a stored resource
 //!   → `200` (returned verbatim), an unknown id → `404 NOT_FOUND`.
+//! - `PATCH /traffic-influence/vwip/traffic-influences/{trafficInfluenceID}` —
+//!   update a created resource's mutable placement/filter fields in place
+//!   (operationId `patchTrafficInfluence`, scope
+//!   `traffic-influence:traffic-influences:write`). The body is a
+//!   `merge-patch+json` document over the mutable fields: a supplied field is
+//!   replaced, an explicit `null` clears an optional field, and identity /
+//!   read-only fields (`trafficInfluenceID`, `appId`, `state`) are left untouched.
+//!   Two control planes (docs/DESIGN.md §7): the opaque, operator-minted id →
+//!   store state (`200` updated / `404 NOT_FOUND`), and the request body (a
+//!   malformed field → `400 INVALID_ARGUMENT`, a port out of range → `400
+//!   OUT_OF_RANGE`), validated before the store so a body `400` wins over `404`.
 //! - `DELETE /traffic-influence/vwip/traffic-influences/{trafficInfluenceID}` —
 //!   delete a created resource (operationId `deleteTrafficInfluence`, scope
 //!   `traffic-influence:traffic-influences:delete`): the opaque id is again the
@@ -108,7 +119,12 @@ const MAX_PORT: i64 = 65535;
 pub fn routes() -> Router {
     Router::new()
         .route(COLLECTION, post(post_traffic_influence))
-        .route(ITEM, get(get_traffic_influence).delete(delete_traffic_influence))
+        .route(
+            ITEM,
+            get(get_traffic_influence)
+                .patch(patch_traffic_influence)
+                .delete(delete_traffic_influence),
+        )
 }
 
 /// The `postTrafficInfluence` request body (`PostTrafficInfluence`). The
@@ -343,6 +359,235 @@ async fn delete_traffic_influence(
             .into_response(),
             &correlator,
         )
+    }
+}
+
+/// `PATCH /traffic-influence/vwip/traffic-influences/{trafficInfluenceID}`.
+///
+/// Updates a Traffic Influence resource's **mutable** fields in place, addressed
+/// by its opaque, operator-minted `trafficInfluenceID`. The body is a
+/// `merge-patch+json` document (CAMARA convention): a supplied mutable field is
+/// replaced, an explicit `null` clears an optional field, and the identity /
+/// read-only fields (`trafficInfluenceID`, `appId`, `state`, plus any unknown
+/// key) are ignored — the resource keeps its create-time `appId` and lifecycle
+/// `state` (CamaraSim runs no provisioning worker, so a PATCH does not re-derive
+/// `state`; a documented cut).
+///
+/// Two control planes (docs/DESIGN.md §7). The request **body** is validated
+/// first: a malformed `apiConsumerId` / `appInstanceId` / `edgeCloudRegion` /
+/// `edgeCloudZoneId` / traffic filter → `400 INVALID_ARGUMENT`, a `sourcePort` /
+/// `destinationPort` outside `0..=65535` → `400 OUT_OF_RANGE`. Then the opaque id
+/// selects the **store state**: a resource still held → `200` with the updated
+/// resource; an unknown/already-deleted id → `404 NOT_FOUND`. Validating the body
+/// before the store means a body `400` wins over the unknown-id `404` (mirrors
+/// Application Profiles' `updateApplicationProfile`). `x-correlator` is echoed on
+/// every response.
+async fn patch_traffic_influence(
+    claims: Claims,
+    headers: HeaderMap,
+    Path(traffic_influence_id): Path<String>,
+    body: Bytes,
+) -> Response {
+    // Optional correlation header, echoed on every response (CAMARA Commonalities).
+    let correlator = headers.get("x-correlator").cloned();
+
+    // Endpoint authorisation: the token must carry the write scope (update is a write).
+    if let Err(e) = claims.require_scope(WRITE_SCOPE) {
+        return with_correlator(e.into_response(), &correlator);
+    }
+
+    // Body is a JSON merge-patch document; parse then validate (400 before store).
+    let value: Value = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(_) => return invalid_argument("Request body is not valid JSON.", &correlator),
+    };
+    let merge = match validate_patch(&value) {
+        Ok(m) => m,
+        Err((code, message)) => {
+            return with_correlator(
+                CamaraError::new(StatusCode::BAD_REQUEST, code, &message).into_response(),
+                &correlator,
+            )
+        }
+    };
+
+    // Apply the merge to the stored resource atomically (get-modify-write under
+    // one lock hold): the opaque id is the store-state control plane.
+    match super::store::update_with(&traffic_influence_id, |resource| {
+        apply_merge(resource, &merge)
+    }) {
+        Some(updated) => {
+            with_correlator((StatusCode::OK, Json(updated)).into_response(), &correlator)
+        }
+        None => with_correlator(
+            CamaraError::not_found(
+                "No Traffic Influence resource found for the provided trafficInfluenceID.",
+            )
+            .into_response(),
+            &correlator,
+        ),
+    }
+}
+
+/// An ordered list of merge operations to apply to the stored resource. `Some(v)`
+/// sets a field, `None` clears it. Built by [`validate_patch`], applied by
+/// [`apply_merge`].
+type Merge = Vec<(&'static str, Option<Value>)>;
+
+/// Validate a `merge-patch+json` body against the mutable Traffic Influence
+/// fields, returning the merge operations to apply or `(code, message)` for a
+/// `400`. Identity / read-only fields (`trafficInfluenceID`, `appId`, `state`)
+/// and any unknown key are ignored (mirrors create ignoring read-only fields).
+/// Pure over its input, so it is unit-testable exactly.
+fn validate_patch(body: &Value) -> Result<Merge, (&'static str, String)> {
+    let obj = body.as_object().ok_or((
+        "INVALID_ARGUMENT",
+        "Request body must be a JSON object.".to_string(),
+    ))?;
+    let mut merge: Merge = Vec::new();
+    for (key, value) in obj {
+        match key.as_str() {
+            // `apiConsumerId` is required on the resource, so it may be replaced
+            // (non-empty string) but not cleared.
+            "apiConsumerId" => match value {
+                Value::String(s) if !s.is_empty() => merge.push(("apiConsumerId", Some(json!(s)))),
+                _ => {
+                    return Err((
+                        "INVALID_ARGUMENT",
+                        "`apiConsumerId` must be a non-empty string.".into(),
+                    ))
+                }
+            },
+            "appInstanceId" => match value {
+                Value::Null => merge.push(("appInstanceId", None)),
+                Value::String(s) if is_uuid_any(s) => merge.push(("appInstanceId", Some(json!(s)))),
+                _ => {
+                    return Err((
+                        "INVALID_ARGUMENT",
+                        "`appInstanceId` must be a UUID or null.".into(),
+                    ))
+                }
+            },
+            "edgeCloudRegion" => match value {
+                Value::Null => merge.push(("edgeCloudRegion", None)),
+                Value::String(s) if !s.is_empty() => {
+                    merge.push(("edgeCloudRegion", Some(json!(s))))
+                }
+                _ => {
+                    return Err((
+                        "INVALID_ARGUMENT",
+                        "`edgeCloudRegion` must be a non-empty string or null.".into(),
+                    ))
+                }
+            },
+            "edgeCloudZoneId" => match value {
+                Value::Null => merge.push(("edgeCloudZoneId", None)),
+                Value::String(s) if is_uuid_any(s) => merge.push(("edgeCloudZoneId", Some(json!(s)))),
+                _ => {
+                    return Err((
+                        "INVALID_ARGUMENT",
+                        "`edgeCloudZoneId` must be a UUID or null.".into(),
+                    ))
+                }
+            },
+            "sourceTrafficFilters" => match value {
+                Value::Null => merge.push(("sourceTrafficFilters", None)),
+                Value::Object(_) => {
+                    merge.push(("sourceTrafficFilters", Some(validate_source_filters(value)?)))
+                }
+                _ => {
+                    return Err((
+                        "INVALID_ARGUMENT",
+                        "`sourceTrafficFilters` must be an object or null.".into(),
+                    ))
+                }
+            },
+            "destinationTrafficFilters" => match value {
+                Value::Null => merge.push(("destinationTrafficFilters", None)),
+                Value::Object(_) => merge.push((
+                    "destinationTrafficFilters",
+                    Some(validate_destination_filters(value)?),
+                )),
+                _ => {
+                    return Err((
+                        "INVALID_ARGUMENT",
+                        "`destinationTrafficFilters` must be an object or null.".into(),
+                    ))
+                }
+            },
+            // Identity / read-only / unknown keys are ignored (see the doc comment).
+            _ => {}
+        }
+    }
+    Ok(merge)
+}
+
+/// Validate a single port value (`sourcePort` / `destinationPort`): an integer in
+/// `0..=65535`, else `OUT_OF_RANGE` (out of range) or `INVALID_ARGUMENT` (not an
+/// integer).
+fn validate_port(value: &Value, field: &str) -> Result<i64, (&'static str, String)> {
+    match value.as_i64() {
+        Some(p) if (MIN_PORT..=MAX_PORT).contains(&p) => Ok(p),
+        Some(_) => Err((
+            "OUT_OF_RANGE",
+            format!("`{field}` must be between 0 and 65535."),
+        )),
+        None => Err(("INVALID_ARGUMENT", format!("`{field}` must be an integer."))),
+    }
+}
+
+/// Validate + rebuild a `sourceTrafficFilters` object into a clean representation
+/// (the response schema forbids unknown keys, so only recognised fields survive).
+fn validate_source_filters(value: &Value) -> Result<Value, (&'static str, String)> {
+    let obj = value.as_object().expect("caller checked object");
+    let mut out = serde_json::Map::new();
+    if let Some(p) = obj.get("sourcePort") {
+        out.insert("sourcePort".into(), json!(validate_port(p, "sourcePort")?));
+    }
+    Ok(Value::Object(out))
+}
+
+/// Validate + rebuild a `destinationTrafficFilters` object into a clean
+/// representation (unknown keys dropped; port range-checked).
+fn validate_destination_filters(value: &Value) -> Result<Value, (&'static str, String)> {
+    let obj = value.as_object().expect("caller checked object");
+    let mut out = serde_json::Map::new();
+    if let Some(p) = obj.get("destinationPort") {
+        out.insert(
+            "destinationPort".into(),
+            json!(validate_port(p, "destinationPort")?),
+        );
+    }
+    if let Some(proto) = obj.get("destinationProtocol") {
+        match proto {
+            Value::String(s) => {
+                out.insert("destinationProtocol".into(), json!(s));
+            }
+            _ => {
+                return Err((
+                    "INVALID_ARGUMENT",
+                    "`destinationProtocol` must be a string.".into(),
+                ))
+            }
+        }
+    }
+    Ok(Value::Object(out))
+}
+
+/// Apply the validated merge operations to the stored resource JSON in place:
+/// `Some(v)` sets a field, `None` removes it. Pure over its inputs.
+fn apply_merge(resource: &mut Value, merge: &Merge) {
+    if let Some(obj) = resource.as_object_mut() {
+        for (key, op) in merge {
+            match op {
+                Some(v) => {
+                    obj.insert((*key).to_string(), v.clone());
+                }
+                None => {
+                    obj.remove(*key);
+                }
+            }
+        }
     }
 }
 
@@ -985,6 +1230,303 @@ mod tests {
         assert_eq!(
             headers.get("x-correlator").and_then(|v| v.to_str().ok()),
             Some("corr-del-2")
+        );
+    }
+
+    // --- patchTrafficInfluence (update) ------------------------------------
+
+    #[test]
+    fn validate_patch_accepts_known_fields_and_ignores_read_only() {
+        let body = json!({
+            "apiConsumerId": "consumer-99",
+            "edgeCloudRegion": "us-east-1",
+            "appInstanceId": ZONE,
+            "sourceTrafficFilters": { "sourcePort": 9090 },
+            // Read-only / identity / unknown keys are silently ignored.
+            "trafficInfluenceID": "spoofed",
+            "appId": APP_ORDERED,
+            "state": "error",
+            "somethingElse": 1,
+        });
+        let merge = validate_patch(&body).expect("valid patch");
+        // Only the four recognised mutable fields produced ops.
+        assert_eq!(merge.len(), 4);
+        assert!(merge.iter().all(|(k, _)| matches!(
+            *k,
+            "apiConsumerId" | "edgeCloudRegion" | "appInstanceId" | "sourceTrafficFilters"
+        )));
+    }
+
+    #[test]
+    fn validate_patch_null_clears_optional_fields() {
+        let body = json!({ "edgeCloudRegion": null, "destinationTrafficFilters": null });
+        let merge = validate_patch(&body).expect("valid patch");
+        for (key, op) in &merge {
+            assert!(op.is_none(), "{key} should be a clear op");
+        }
+    }
+
+    #[test]
+    fn validate_patch_rejects_malformed_fields() {
+        // Non-empty required, bad UUIDs, out-of-range ports, wrong types.
+        let cases: [(Value, &str); 6] = [
+            (json!({ "apiConsumerId": "" }), "INVALID_ARGUMENT"),
+            (json!({ "apiConsumerId": null }), "INVALID_ARGUMENT"),
+            (json!({ "appInstanceId": "nope" }), "INVALID_ARGUMENT"),
+            (json!({ "edgeCloudZoneId": 42 }), "INVALID_ARGUMENT"),
+            (json!({ "sourceTrafficFilters": { "sourcePort": 70000 } }), "OUT_OF_RANGE"),
+            (json!({ "destinationTrafficFilters": { "destinationPort": -1 } }), "OUT_OF_RANGE"),
+        ];
+        for (body, want) in cases {
+            let err = validate_patch(&body).expect_err(&format!("{body} should fail"));
+            assert_eq!(err.0, want, "{body}");
+        }
+        // A non-object body is rejected outright.
+        assert_eq!(validate_patch(&json!([1, 2, 3])).unwrap_err().0, "INVALID_ARGUMENT");
+    }
+
+    #[test]
+    fn apply_merge_sets_and_clears_fields() {
+        let mut resource = json!({
+            "trafficInfluenceID": "ti-x",
+            "apiConsumerId": "consumer-1",
+            "appId": APP_ACTIVE,
+            "state": "active",
+            "edgeCloudRegion": "eu-west-1",
+        });
+        let merge: Merge = vec![
+            ("edgeCloudRegion", Some(json!("us-east-1"))),
+            ("appInstanceId", Some(json!(ZONE))),
+            ("edgeCloudRegion", Some(json!("ap-south-1"))), // last write wins
+            ("apiConsumerId", Some(json!("consumer-2"))),
+        ];
+        apply_merge(&mut resource, &merge);
+        assert_eq!(resource["edgeCloudRegion"], "ap-south-1");
+        assert_eq!(resource["appInstanceId"], ZONE);
+        assert_eq!(resource["apiConsumerId"], "consumer-2");
+        // Identity / state untouched.
+        assert_eq!(resource["appId"], APP_ACTIVE);
+        assert_eq!(resource["state"], "active");
+
+        // A clear op removes the key entirely.
+        apply_merge(&mut resource, &vec![("appInstanceId", None)]);
+        assert!(resource.get("appInstanceId").is_none());
+    }
+
+    async fn patch_req(
+        token: Option<&str>,
+        id: &str,
+        correlator: Option<&str>,
+        body: Value,
+    ) -> (StatusCode, HeaderMap, Value) {
+        let mut builder = Request::builder()
+            .method("PATCH")
+            .uri(format!("{COLLECTION}/{id}"))
+            .header("host", HOST)
+            .header("content-type", "application/merge-patch+json");
+        if let Some(t) = token {
+            builder = builder.header("authorization", format!("Bearer {t}"));
+        }
+        if let Some(c) = correlator {
+            builder = builder.header("x-correlator", c);
+        }
+        let request = builder.body(Body::from(body.to_string())).unwrap();
+        let response = app().oneshot(request).await.unwrap();
+        let status = response.status();
+        let headers = response.headers().clone();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, headers, value)
+    }
+
+    async fn create_active() -> String {
+        let create = json!({
+            "apiConsumerId": CONSUMER,
+            "appId": APP_ACTIVE,
+            "edgeCloudRegion": "eu-west-1",
+            "sourceTrafficFilters": { "sourcePort": 8080 },
+        });
+        let (status, _, created) = post(Some(&token().await), None, create).await;
+        assert_eq!(status, StatusCode::CREATED);
+        created["trafficInfluenceID"].as_str().unwrap().to_string()
+    }
+
+    #[tokio::test]
+    async fn patch_updates_mutable_fields_and_persists() {
+        let id = create_active().await;
+        let patch = json!({
+            "edgeCloudRegion": "us-east-1",
+            "edgeCloudZoneId": ZONE,
+            "destinationTrafficFilters": { "destinationPort": 443, "destinationProtocol": "UDP" },
+        });
+        let (status, _, updated) = patch_req(Some(&token().await), &id, None, patch).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(updated["edgeCloudRegion"], "us-east-1");
+        assert_eq!(updated["edgeCloudZoneId"], ZONE);
+        assert_eq!(updated["destinationTrafficFilters"]["destinationProtocol"], "UDP");
+        // Identity / state / untouched create-time fields survive.
+        assert_eq!(updated["trafficInfluenceID"], id);
+        assert_eq!(updated["appId"], APP_ACTIVE);
+        assert_eq!(updated["state"], "active");
+        assert_eq!(updated["sourceTrafficFilters"]["sourcePort"], 8080);
+
+        // The change persisted: a read-back sees it.
+        let read = mint_token(READ_SCOPE).await;
+        let (status, _, fetched) = get_req(Some(&read), &id, None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(fetched, updated);
+    }
+
+    #[tokio::test]
+    async fn patch_null_clears_an_optional_field() {
+        let id = create_active().await;
+        let (status, _, updated) =
+            patch_req(Some(&token().await), &id, None, json!({ "edgeCloudRegion": null })).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(updated.get("edgeCloudRegion").is_none(), "cleared");
+        // The create-time source filter is untouched (merge patch, not replace).
+        assert_eq!(updated["sourceTrafficFilters"]["sourcePort"], 8080);
+    }
+
+    #[tokio::test]
+    async fn patch_empty_body_is_a_noop_200() {
+        let id = create_active().await;
+        let read = mint_token(READ_SCOPE).await;
+        let (_, _, before) = get_req(Some(&read), &id, None).await;
+        let (status, _, after) = patch_req(Some(&token().await), &id, None, json!({})).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(after, before, "empty merge changes nothing");
+    }
+
+    #[tokio::test]
+    async fn patch_ignores_read_only_and_identity_fields() {
+        let id = create_active().await;
+        let patch = json!({
+            "trafficInfluenceID": "spoofed",
+            "appId": APP_ORDERED,
+            "state": "error",
+            "edgeCloudRegion": "ap-south-1",
+        });
+        let (status, _, updated) = patch_req(Some(&token().await), &id, None, patch).await;
+        assert_eq!(status, StatusCode::OK);
+        // Only the mutable field changed; identity/state ignored.
+        assert_eq!(updated["trafficInfluenceID"], id);
+        assert_eq!(updated["appId"], APP_ACTIVE);
+        assert_eq!(updated["state"], "active");
+        assert_eq!(updated["edgeCloudRegion"], "ap-south-1");
+    }
+
+    #[tokio::test]
+    async fn patch_unknown_id_is_not_found() {
+        let (status, _, err) = patch_req(
+            Some(&token().await),
+            "55555555-5555-4555-8555-555555555555",
+            None,
+            json!({ "edgeCloudRegion": "us-east-1" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(err["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn patch_bad_body_400_wins_over_unknown_id_404() {
+        // A malformed body is a 400 even when the id does not exist (body checked first).
+        let (status, _, err) = patch_req(
+            Some(&token().await),
+            "66666666-6666-4666-8666-666666666666",
+            None,
+            json!({ "appInstanceId": "not-a-uuid" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(err["code"], "INVALID_ARGUMENT");
+    }
+
+    #[tokio::test]
+    async fn patch_out_of_range_port_is_rejected() {
+        let id = create_active().await;
+        let (status, _, err) = patch_req(
+            Some(&token().await),
+            &id,
+            None,
+            json!({ "sourceTrafficFilters": { "sourcePort": 99999 } }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(err["code"], "OUT_OF_RANGE");
+    }
+
+    #[tokio::test]
+    async fn patch_non_json_body_is_invalid_argument() {
+        let id = create_active().await;
+        let request = Request::builder()
+            .method("PATCH")
+            .uri(format!("{COLLECTION}/{id}"))
+            .header("host", HOST)
+            .header("authorization", format!("Bearer {}", token().await))
+            .header("content-type", "application/merge-patch+json")
+            .body(Body::from("{not json"))
+            .unwrap();
+        let response = app().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn patch_missing_token_is_unauthenticated() {
+        let (status, _, _) = patch_req(
+            None,
+            "77777777-7777-4777-8777-777777777777",
+            None,
+            json!({ "edgeCloudRegion": "us-east-1" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn patch_wrong_scope_is_permission_denied_and_resource_survives() {
+        let id = create_active().await;
+        // A read-only token must not be able to patch.
+        let read = mint_token(READ_SCOPE).await;
+        let (status, _, _) =
+            patch_req(Some(&read), &id, None, json!({ "edgeCloudRegion": "us-east-1" })).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        // Unchanged — the 403 did not mutate it.
+        let (status, _, fetched) = get_req(Some(&read), &id, None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(fetched["edgeCloudRegion"], "eu-west-1");
+    }
+
+    #[tokio::test]
+    async fn patch_echoes_x_correlator_on_success_and_error() {
+        let id = create_active().await;
+        let (status, headers, _) = patch_req(
+            Some(&token().await),
+            &id,
+            Some("corr-patch-1"),
+            json!({ "edgeCloudRegion": "us-east-1" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-patch-1")
+        );
+
+        let (status, headers, _) = patch_req(
+            Some(&token().await),
+            "88888888-8888-4888-8888-888888888888",
+            Some("corr-patch-2"),
+            json!({ "edgeCloudRegion": "us-east-1" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-patch-2")
         );
     }
 }
