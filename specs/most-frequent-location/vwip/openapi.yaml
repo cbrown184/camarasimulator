@@ -1,0 +1,387 @@
+# CamaraSim — Most Frequent Location, API version vwip (CAMARA wip).
+#
+# Vendored from the CAMARA Most Frequent Location API (most-frequent-location,
+# `wip` — no released version yet) and annotated with CamaraSim's
+# parameter-driven functional cases (docs/DESIGN.md §7, §9). Backed by
+# `src/apis/most_frequent_location/vwip.rs`; spec and code must not drift.
+#
+# Mounted at its canonical `vwip` base path (mirroring Device Visit Location /
+# Session Insights — DESIGN §9), since the upstream API has no released version.
+#
+# Serves `POST /verify`.
+openapi: 3.0.3
+info:
+  title: Most Frequent Location
+  description: |
+    Answers how frequently a device resides within a caller-supplied geographic
+    area, as a privacy-preserving `score` from `0` (never present) to `100`
+    (almost always present) — never the device's actual location.
+
+    This is the CamaraSim reference double for CAMARA Most Frequent Location
+    (`wip`). The device can be identified either by the `device` object in the
+    request body (two-legged / CIBA) or by the identity a three-legged access
+    token authenticated (in which case `device` is omitted). The endpoint
+    requires the `most-frequent-location:verify` scope.
+
+    ## Identifier resolution (two-legged vs three-legged)
+
+    The `device` object is only meaningful in two-legged auth. In a three-legged
+    token the device is already identified by the token subject:
+
+    - `device` carries an identifier **and** the token subject is itself an
+      E.164 line → `422 UNNECESSARY_IDENTIFIER`.
+    - `device` carries an identifier, subject not a line → that identifier is
+      used (two-legged). Precedence: `phoneNumber` → `networkAccessIdentifier` →
+      the IPv4 `publicAddress` → `ipv6Address`.
+    - `device` absent, subject is an E.164 line → the subject is the identifier
+      (three-legged).
+    - `device` absent **and** the subject is not a line → the device cannot be
+      identified → `422 MISSING_IDENTIFIER`.
+    - `device` present but carrying **no** identifier (`minProperties: 1`
+      violated) → `400 INVALID_ARGUMENT`.
+
+    ## Functional cases — the input is the control plane (docs/DESIGN.md §7)
+
+    Two planes drive the answer:
+
+    - **`geoReference`** is validated first. A `COVERAGE_ZONE` with `latitude`
+      out of `[-90, 90]` or `longitude` out of `[-180, 180]` → `400
+      OUT_OF_RANGE`; a `POSTAL_CODE` equal to the reserved value `00000` → `400
+      MOST_FREQUENT_LOCATION.POSTAL_CODE_NOT_VALID`; a structurally-wrong
+      `geoReference` (unknown `type`, missing required or foreign fields) → `400
+      INVALID_ARGUMENT`.
+    - **Reserved error suffix** — once the identifier is resolved, if its
+      trailing three digits name a reserved CAMARA status the endpoint answers
+      with that canonical CAMARA error (shared convention — see the referenced
+      `errors.yaml`): `…400`, `…401`, `…403`, `…404`, `…409`, `…422`, `…429`,
+      `…500`, `…503`. `…422` maps to the API's own `SERVICE_NOT_APPLICABLE`.
+    - **Score** — otherwise `score = (identifier trailing three digits + area
+      offset) % 101`, so **both** the device and the `geoReference` are genuine
+      control planes (the same device flips its score as the area changes, and
+      vice-versa). The area offset is `round(|latitude|) + round(|longitude|)`
+      for a `COVERAGE_ZONE` and the postal code's trailing three digits for a
+      `POSTAL_CODE`. A `…000` (or no-digit) identifier over a zero-offset area
+      scores `0`.
+
+    Examples: `+123456789050` over `COVERAGE_ZONE (0,0)` → `score 50`;
+    `+123456789000` over `POSTAL_CODE "SW1A 020"` → `score 20`;
+    `+123456789404` → `404 NOT_FOUND`.
+  version: "wip"
+  license:
+    name: Apache-2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0.html
+
+servers:
+  - url: "{apiRoot}/most-frequent-location/vwip"
+    variables:
+      apiRoot:
+        default: http://localhost:8080
+        description: API root, e.g. the CamaraSim base URL.
+
+paths:
+  /verify:
+    post:
+      operationId: verifyFrequentLocation
+      summary: Verify how frequently a device resides in an area
+      description: |
+        Returns a `score` (0–100) for how frequently the device resides within
+        the supplied `geoReference`. Supply a `device`, or omit it to use the
+        device identified by a three-legged access token.
+
+        See the API description for the identifier-resolution rules and the
+        parameter-driven functional cases.
+      security:
+        - openId:
+            - most-frequent-location:verify
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/VerifyFrequentLocationRequest"
+      responses:
+        "200":
+          description: The device's presence score for the requested area.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VerifyFrequentLocationResponse"
+              examples:
+                frequent:
+                  summary: Device frequently present (coverage zone)
+                  value:
+                    score: 50
+                never:
+                  summary: Device never present
+                  value:
+                    score: 0
+        "400":
+          description: |
+            400 — bad request. CamaraSim returns `OUT_OF_RANGE` for a
+            `COVERAGE_ZONE` `latitude`/`longitude` out of range,
+            `MOST_FREQUENT_LOCATION.POSTAL_CODE_NOT_VALID` for the reserved
+            `00000` postal code, or `INVALID_ARGUMENT` for any other malformed
+            request.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "../../shared/errors.yaml#/components/schemas/CamaraError"
+              examples:
+                invalidArgument:
+                  summary: Malformed request body / geoReference
+                  value:
+                    status: 400
+                    code: INVALID_ARGUMENT
+                    message: Request body is not a valid VerifyFrequentLocationRequest.
+                outOfRange:
+                  summary: Coordinates out of range
+                  value:
+                    status: 400
+                    code: OUT_OF_RANGE
+                    message: "`latitude` must be in [-90, 90] and `longitude` in [-180, 180]."
+                postalCodeNotValid:
+                  summary: Reserved invalid postal code
+                  value:
+                    status: 400
+                    code: MOST_FREQUENT_LOCATION.POSTAL_CODE_NOT_VALID
+                    message: Requested postal code value does not exist or is invalid.
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "409":
+          $ref: "../../shared/errors.yaml#/components/responses/Conflict"
+        "422":
+          description: |
+            422 — unprocessable. CamaraSim returns `MISSING_IDENTIFIER` when the
+            device cannot be identified (no `device` and a non-line subject),
+            `UNNECESSARY_IDENTIFIER` when a `device` is submitted on a
+            three-legged device token, or the reserved shared
+            `SERVICE_NOT_APPLICABLE` for the `…422` suffix.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "../../shared/errors.yaml#/components/schemas/CamaraError"
+              examples:
+                missingIdentifier:
+                  summary: The device cannot be identified
+                  value:
+                    status: 422
+                    code: MISSING_IDENTIFIER
+                    message: The device cannot be identified.
+                unnecessaryIdentifier:
+                  summary: The device is already identified by the token
+                  value:
+                    status: 422
+                    code: UNNECESSARY_IDENTIFIER
+                    message: The device is already identified by the access token.
+                serviceNotApplicable:
+                  summary: Reserved `…422` suffix
+                  value:
+                    status: 422
+                    code: SERVICE_NOT_APPLICABLE
+                    message: The service is not available for the provided identifier.
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          The score is driven by the identifier (the first present device
+          identifier, else the access token subject) and the geoReference, per
+          docs/DESIGN.md §7. The geoReference is validated first (400 plane),
+          then the identifier's reserved error suffix (shared convention in
+          errors.yaml), then the score. Note: CamaraSim represents the upstream
+          API's specific 404 IDENTIFIER_NOT_FOUND / 404 INFORMATION_NOT_AVAILABLE
+          / 422 UNSUPPORTED_IDENTIFIER sub-cases via the shared reserved-suffix
+          canonical codes (documented cut).
+        cases:
+          - input: "geoReference COVERAGE_ZONE with latitude/longitude out of range"
+            result: "400 OUT_OF_RANGE"
+          - input: "geoReference POSTAL_CODE with postalCode `00000`"
+            result: "400 MOST_FREQUENT_LOCATION.POSTAL_CODE_NOT_VALID"
+          - input: "geoReference with an unknown `type`, or missing/foreign fields"
+            result: "400 INVALID_ARGUMENT"
+          - input: identifier ending in a reserved error suffix (e.g. …404)
+            result: the canonical CAMARA error for that status
+          - input: "identifier ending in …000 (or no trailing digits) over a zero-offset area"
+            result: "200 — score 0 (never present)"
+          - input: "any other identifier + geoReference"
+            result: "200 — score (identifier trailing three digits + area offset) % 101"
+          - input: "`device` present but carrying no identifier"
+            result: "400 INVALID_ARGUMENT"
+          - input: "`device` submitted on a three-legged line token"
+            result: "422 UNNECESSARY_IDENTIFIER"
+          - input: no `device` and a non-line token subject
+            result: "422 MISSING_IDENTIFIER"
+
+components:
+  securitySchemes:
+    openId:
+      $ref: "../../auth/openapi.yaml#/components/securitySchemes/camaraOAuth"
+
+  parameters:
+    XCorrelator:
+      name: x-correlator
+      in: header
+      required: false
+      description: Correlation id for the request, echoed back on the response.
+      schema:
+        type: string
+
+  headers:
+    XCorrelator:
+      description: The `x-correlator` from the request, echoed if one was sent.
+      required: false
+      schema:
+        type: string
+
+  schemas:
+    VerifyFrequentLocationRequest:
+      type: object
+      description: A device (identifier) and a geographical reference.
+      required:
+        - geoReference
+      properties:
+        device:
+          $ref: "#/components/schemas/Device"
+        geoReference:
+          $ref: "#/components/schemas/GeoReference"
+
+    GeoReference:
+      type: object
+      description: >-
+        A geographical reference, discriminated on `type`. `COVERAGE_ZONE`
+        carries `latitude`/`longitude`; `POSTAL_CODE` carries `postalCode`.
+      required:
+        - type
+      discriminator:
+        propertyName: type
+        mapping:
+          COVERAGE_ZONE: "#/components/schemas/CoverageZone"
+          POSTAL_CODE: "#/components/schemas/PostalCode"
+      properties:
+        type:
+          $ref: "#/components/schemas/GeoReferenceType"
+
+    GeoReferenceType:
+      type: string
+      description: The kind of geographical reference supplied.
+      enum:
+        - COVERAGE_ZONE
+        - POSTAL_CODE
+
+    CoverageZone:
+      description: Coverage zone specified by latitude and longitude coordinates.
+      allOf:
+        - $ref: "#/components/schemas/GeoReference"
+        - type: object
+          required:
+            - latitude
+            - longitude
+          properties:
+            latitude:
+              type: number
+              format: double
+              minimum: -90
+              maximum: 90
+              example: 50.735851
+            longitude:
+              type: number
+              format: double
+              minimum: -180
+              maximum: 180
+              example: 7.10066
+
+    PostalCode:
+      description: Area associated with a postal / administrative code.
+      allOf:
+        - $ref: "#/components/schemas/GeoReference"
+        - type: object
+          required:
+            - postalCode
+          properties:
+            postalCode:
+              type: string
+              description: >-
+                Zip or postal code. The reserved value `00000` deterministically
+                selects `400 MOST_FREQUENT_LOCATION.POSTAL_CODE_NOT_VALID`.
+              example: "SW1A 020"
+
+    Device:
+      type: object
+      description: >-
+        Identifies the device. At least one identifier must be present. Optional
+        at the request level: omit `device` to use the device identified by a
+        three-legged access token. CamaraSim keys its functional cases off the
+        first present identifier, in the order phoneNumber →
+        networkAccessIdentifier → ipv4Address.publicAddress → ipv6Address.
+      minProperties: 1
+      properties:
+        phoneNumber:
+          type: string
+          description: A phone number in E.164 format (starting with `+`).
+          pattern: '^\+[1-9][0-9]{4,14}$'
+          example: "+123456789050"
+        networkAccessIdentifier:
+          type: string
+          description: A network access identifier assigned by the operator.
+          example: "user050@example.com"
+        ipv4Address:
+          $ref: "#/components/schemas/DeviceIpv4Addr"
+        ipv6Address:
+          type: string
+          description: The device's IPv6 address.
+          example: "2001:db8::11"
+
+    DeviceIpv4Addr:
+      type: object
+      description: >-
+        The device's IPv4 address information. CamaraSim reads `publicAddress` as
+        the identifier; `privateAddress`/`publicPort` are accepted for fidelity.
+      properties:
+        publicAddress:
+          type: string
+          example: "203.0.113.12"
+        privateAddress:
+          type: string
+          example: "192.0.2.25"
+        publicPort:
+          type: integer
+          format: int32
+          minimum: 0
+          maximum: 65535
+          example: 59765
+
+    Score:
+      type: integer
+      description: >-
+        How frequently the device resides in the requested area, from 0 (never
+        present) to 100 (almost always present).
+      minimum: 0
+      maximum: 100
+      example: 50
+
+    VerifyFrequentLocationResponse:
+      type: object
+      description: The calculated presence score.
+      required:
+        - score
+      properties:
+        score:
+          $ref: "#/components/schemas/Score"

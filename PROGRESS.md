@@ -1883,6 +1883,29 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     the pair is creatable again once `terminateCall` evicts it. A `callee` reserved
     suffix `…409` still yields the canonical `CONFLICT` (distinct code).
   - [ ] `status-changed` CloudEvents on `sink` — deferred (like QoD's first pass).
+- [x] Most Frequent Location vwip (`/most-frequent-location/vwip`; CAMARA
+  MostFrequentLocation `wip` — no released version, mounted at its canonical
+  `vwip` base path like Device Visit Location / Session Insights; stateless,
+  device-keyed area-residency score):
+  - [x] `POST /verify` (`most-frequent-location:verify`, `verifyFrequentLocation`)
+    — how frequently the device resides within a supplied `geoReference`, as a
+    privacy-preserving `{ score: 0..=100 }` (0 never present … 100 almost
+    always), never the device's location. Device-object identifier resolution +
+    the two-legged/three-legged rule (device on a line token → 422
+    `UNNECESSARY_IDENTIFIER`; no device + non-line subject → 422
+    `MISSING_IDENTIFIER`; empty `device` → 400 INVALID_ARGUMENT). Two control
+    planes (DESIGN §7): the `geoReference` (validated first — `COVERAGE_ZONE`
+    lat/long out of range → 400 OUT_OF_RANGE; `POSTAL_CODE` `00000` → 400
+    `MOST_FREQUENT_LOCATION.POSTAL_CODE_NOT_VALID`; unknown `type` / missing or
+    foreign fields → 400 INVALID_ARGUMENT) and, once the identifier is resolved,
+    its reserved error suffix → canonical CAMARA error (`…422` →
+    SERVICE_NOT_APPLICABLE); else `score = (identifier trailing three digits +
+    area offset) % 101`, so **both** the device and the area are genuine planes
+    (area offset = `round(|lat|)+round(|long|)` for a zone, postal trailing three
+    digits for a code). `x-correlator` echoed. No new dep. The upstream API's
+    specific 404 IDENTIFIER_NOT_FOUND / 404 INFORMATION_NOT_AVAILABLE / 422
+    UNSUPPORTED_IDENTIFIER sub-cases are represented via the shared reserved-suffix
+    canonical codes (documented cut). **Completes Most Frequent Location vwip.**
 - [ ] Other CAMARA APIs as capacity allows
 
 ## Cross-cutting (do alongside the item that needs it)
@@ -1908,6 +1931,8 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 ## Scan journal
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
+
+2026-08-06 18:59Z — Phase 5 (other CAMARA APIs): **Most Frequent Location vwip** — a new stateless, device-keyed API (the only non-deferred backlog item left was "Other CAMARA APIs as capacity allows"; verified the authoritative CAMARA `most-frequent-location.yaml` spec via WebFetch since ~all simpler non-spatial APIs are already done). `POST /verify` (`verifyFrequentLocation`, scope `most-frequent-location:verify`) live at `/most-frequent-location/vwip/verify`: answers `{ score: 0..=100 }` for how frequently a device resides within a supplied `geoReference`, never the location. New `src/apis/most_frequent_location/{,vwip}.rs` mirrors connected_network_type's device-object two-/three-legged identifier resolution (422 UNNECESSARY_/MISSING_IDENTIFIER, 400 empty device). Two control planes (DESIGN §7): `geoReference` validated first (COVERAGE_ZONE lat/long range → 400 OUT_OF_RANGE; POSTAL_CODE `00000` → 400 `MOST_FREQUENT_LOCATION.POSTAL_CODE_NOT_VALID`; unknown type/foreign fields → 400 INVALID_ARGUMENT), then the resolved identifier's reserved-error suffix → canonical CAMARA error (`…422`→SERVICE_NOT_APPLICABLE); else `score = (identifier trailing three digits + area offset) % 101` — both device and area are genuine planes (area offset = round(|lat|)+round(|long|) for a zone, postal trailing-three for a code). Vendored + annotated spec `specs/most-frequent-location/vwip/openapi.yaml` (GeoReference discriminator on `type`, functional cases), served at `/…/openapi.yaml`; wired into apis.rs routes/mod, openapi.rs SPECS, and the `/` catalog. IDENTIFIER_NOT_FOUND / INFORMATION_NOT_AVAILABLE / UNSUPPORTED_IDENTIFIER sub-cases folded into the shared reserved-suffix codes (documented cut). Tests: 23 new (score/area unit maths, coverage-zone & postal happy paths, area-as-second-plane, reserved suffixes incl. …422, two-/three-legged resolution, geoReference validation, auth, x-correlator). cargo test 1447 pass; cargo build --release clean, no new dep. — binary: 2,868,400 bytes (~2.73 MiB, +~28 KB)
 
 2026-08-06 17:51Z — click-to-dial: `createCall` becomes **stateful** — the top remaining actionable, dependency-free leaf: a re-create of a still-live call for the same `caller`/`callee` pair now returns `409 ALREADY_EXISTS` instead of overwriting (the `callId` is deterministic from the pair, so a duplicate id = the same live call). Changed `store::insert` → atomic `store::insert_new(id, call) -> bool` (check-and-insert under one lock hold, never across await, no new dep — mirrors blockchain_public_address's `insert`); create maps `false` → 409 ALREADY_EXISTS; a `terminateCall` evict makes the pair creatable again. A `callee` reserved suffix `…409` still yields the canonical CONFLICT (distinct code). Spec: createCall `409` now an inline response (ALREADY_EXISTS + reserved-suffix CONFLICT examples) + new scenario case + description; removed the stale "Deterministic re-create" cut. Tests: 3 new endpoint tests (409 on re-create + call unchanged; re-creatable after terminate; x-correlator on 409), store unit test rewritten (refuses duplicate, preserves live call, re-creatable after evict); gave 3 existing happy-path tests unique callees (the shared store made the old identical pair collide). Skipped the deferred cuts as before (TLS `https://` sinks need rustls; AREALIMIT spatial; campaign-management; `status-changed` sinks). Remaining Click to Dial leaf: `status-changed` CloudEvents (deferred). cargo test 1424 pass; cargo build --release clean, no new dep. — binary: 2,839,992 bytes (~2.71 MiB, +~2.3 KB)
 

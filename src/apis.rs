@@ -48,6 +48,7 @@
 //! - **Consent Info vwip** — `/consent-info/vwip/…`.
 //! - **Sponsored Data vwip** — `/sponsored-data/vwip/…`.
 //! - **Click to Dial vwip** — `/click-to-dial/vwip/…`.
+//! - **Most Frequent Location vwip** — `/most-frequent-location/vwip/…`.
 //!
 //! Plus [`openapi`], which serves each mounted API's vendored OpenAPI spec at
 //! `/{api}/v{n}/openapi.yaml` (docs/DESIGN.md §9).
@@ -78,6 +79,7 @@ pub mod kyc_tenure;
 pub mod location_retrieval;
 pub mod location_verification;
 pub mod media_streaming_rate;
+pub mod most_frequent_location;
 pub mod network_health_assessment;
 pub mod network_traffic_analysis;
 pub mod number_recycling;
@@ -133,6 +135,7 @@ pub fn routes() -> Router {
         .merge(population_density_data::routes())
         .merge(qos_provisioning::routes())
         .merge(media_streaming_rate::routes())
+        .merge(most_frequent_location::routes())
         .merge(network_health_assessment::routes())
         .merge(network_traffic_analysis::routes())
         .merge(optimal_edge_discovery::routes())
