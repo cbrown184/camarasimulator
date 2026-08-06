@@ -16,8 +16,11 @@
 //!   [`crate::apis::carrier_billing::store`]).
 //! - The stored value is the call's rendered `Call` JSON, returned verbatim by
 //!   `getCall`. `terminateCall` (`DELETE /calls/{callId}`) evicts it via
-//!   [`remove`], so a subsequent `getCall` returns `404`. Lifecycle `status`
-//!   transitions and `getRecording` arrive in later slices.
+//!   [`remove`], so a subsequent `getCall` returns `404`. `getRecording`
+//!   (`GET /calls/{callId}/recording`) reads the same stored `Call` — its
+//!   `recordingEnabled` flag decides whether a recording is available — so it
+//!   needs no store method of its own. Lifecycle `status` transitions arrive in
+//!   a later slice.
 //! - The `callId` is already a deterministic, UUID-shaped token derived from the
 //!   participant pair by `createCall`, so this store mints no ids of its own.
 

@@ -7,8 +7,8 @@
 # `src/apis/click_to_dial/vwip.rs`; spec and code must not drift.
 #
 # Serves `POST /calls` (createCall), the stateful `GET /calls/{callId}`
-# (getCall) and `DELETE /calls/{callId}` (terminateCall). The `getRecording`
-# operation is a later slice (documented cut below).
+# (getCall), `DELETE /calls/{callId}` (terminateCall) and
+# `GET /calls/{callId}/recording` (getRecording).
 openapi: 3.0.3
 info:
   title: Click to Dial
@@ -24,7 +24,9 @@ info:
     `POST /calls` (createCall) requires the `click-to-dial:calls:create` scope;
     `GET /calls/{callId}` (getCall) requires `click-to-dial:calls:read`;
     `DELETE /calls/{callId}` (terminateCall) requires
-    `click-to-dial:calls:delete`.
+    `click-to-dial:calls:delete`; `GET /calls/{callId}/recording`
+    (getRecording) requires `click-to-dial:recordings:read` (a dedicated
+    recordings scope, distinct from the call scopes).
 
     ## Two-legged, business-facing
 
@@ -74,6 +76,26 @@ info:
     unknown/never-created id → `404 NOT_FOUND`. Eviction is single-use, so a
     second getCall/terminateCall for a terminated id is a `404`.
 
+    ## getRecording — the store + `recordingEnabled` are the control plane
+
+    `GET /calls/{callId}/recording` fetches the call's recording. The `callId` is
+    the same opaque token, so the store state is the primary control plane and
+    the stored call's `recordingEnabled` flag is a second signal (docs/DESIGN.md
+    §7). Per CAMARA a recording exists only when the call was created with
+    `recordingEnabled: true`:
+
+    - a stored call with `recordingEnabled: true` → `200` with a
+      `RecordingResource` (the `callId`, a base64-encoded `content`, the
+      `contentType`, and `generatedAt`);
+    - a stored call created without recording → `404 NOT_FOUND` (none was
+      generated);
+    - an unknown/never-created `callId` → `404 NOT_FOUND`.
+
+    Both 404 cases use the canonical `NOT_FOUND` code (CAMARA does not
+    distinguish "call not found" from "recording unavailable"), differing only in
+    message. CamaraSim's `content` is a fixed, deterministic silent WAV
+    (`contentType: audio/wav`) — the simulator has no real captured media.
+
     ## Documented cuts
 
     - **Deterministic re-create.** `createCall` persists the call, but its `201`
@@ -81,9 +103,11 @@ info:
       from the participant pair, re-creating the same call overwrites the
       identical stored value (the `409 ALREADY_EXISTS` duplicate-call case, which
       would make `createCall` stateful, is a later slice).
-    - **Recording deferred.** `GET /calls/{callId}/recording` (`getRecording`)
-      and the lifecycle `status` transitions past `initiating` are a later
-      slice.
+    - **Synthetic recording.** `getRecording`'s `content` is a fixed silent WAV,
+      not real captured audio, and the recording is available as soon as the call
+      exists — the CAMARA precondition that the call session has *completed* is
+      not modelled (lifecycle `status` transitions past `initiating` remain a
+      deferred slice).
     - **Notifications deferred.** `sink` / `sinkCredential` are accepted for
       schema fidelity but not delivered to; the `status-changed` CloudEvents are
       a later slice.
@@ -379,6 +403,86 @@ paths:
           - input: an unknown, never-created, or already-terminated callId
             result: "404 NOT_FOUND"
 
+  /calls/{callId}/recording:
+    get:
+      operationId: getRecording
+      summary: Retrieve the recording of a Click to Dial call
+      description: |
+        Fetches the recording of a previously-created call. A recording exists
+        only when the call was created with `recordingEnabled: true`; otherwise
+        (or for an unknown `callId`) the endpoint returns `404 NOT_FOUND`. The
+        `callId` is opaque, so the store state — plus the stored call's
+        `recordingEnabled` flag — is the control plane (see the API
+        description). CamaraSim's `content` is a fixed, deterministic silent WAV
+        (the simulator has no real captured media).
+      security:
+        - openId:
+            - click-to-dial:recordings:read
+      parameters:
+        - $ref: "#/components/parameters/CallId"
+        - $ref: "#/components/parameters/XCorrelator"
+      responses:
+        "200":
+          description: The call recording resource.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RecordingResource"
+              examples:
+                recording:
+                  summary: A recording for a recorded call
+                  value:
+                    callId: 3fa85f64-5717-4562-b3fc-2c963f66afa6
+                    content: UklGRjQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YRAAAACAgICAgICAgICAgICAgICA
+                    contentType: audio/wav
+                    generatedAt: "2024-01-01T14:27:08Z"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          description: |
+            404 — no recording is available: either the `callId` is unknown/never
+            created, or the call exists but was not created with
+            `recordingEnabled: true` (so no recording was generated). Both use the
+            canonical `NOT_FOUND` code, differing only in message.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ClickToDialError"
+              examples:
+                callNotFound:
+                  summary: Unknown callId
+                  value:
+                    status: 404
+                    code: NOT_FOUND
+                    message: "No call found for the provided callId."
+                recordingUnavailable:
+                  summary: The call exists but has no recording
+                  value:
+                    status: 404
+                    code: NOT_FOUND
+                    message: "No recording is available for the call."
+      x-camarasim-scenarios:
+        description: >-
+          Result selected from the store state and the stored call's
+          `recordingEnabled` flag (docs/DESIGN.md §7). The `callId` is opaque, so
+          there is no reserved-identifier plane: a recorded call yields the
+          recording, a non-recorded or unknown call is a 404.
+        cases:
+          - input: a callId of a call created with recordingEnabled true
+            result: "200 { RecordingResource, contentType audio/wav }"
+          - input: a callId of a call created without recording
+            result: "404 NOT_FOUND (no recording generated)"
+          - input: an unknown/never-created callId
+            result: "404 NOT_FOUND"
+
 components:
   securitySchemes:
     openId:
@@ -491,6 +595,40 @@ components:
         recordingEnabled:
           type: boolean
           description: Whether recording is enabled for the call.
+
+    RecordingResource:
+      type: object
+      description: >-
+        A recording file for a Click to Dial call, returned by `getRecording`.
+        The audio is carried inline as base64 in `content`. In CamaraSim the
+        content is a fixed, deterministic silent WAV (`contentType: audio/wav`) —
+        the simulator has no real captured media.
+      required:
+        - callId
+        - content
+        - contentType
+      properties:
+        callId:
+          type: string
+          format: uuid
+          description: The opaque, UUID-shaped identifier of the recorded call.
+        content:
+          type: string
+          format: byte
+          maxLength: 20971520
+          description: Base64-encoded audio content of the recording.
+        contentType:
+          type: string
+          description: The media type of the recording's audio content.
+          enum:
+            - audio/wav
+            - audio/mp3
+            - audio/mpeg
+            - audio/ogg
+        generatedAt:
+          type: string
+          format: date-time
+          description: When the recording was generated (RFC 3339 UTC).
 
     CallStatus:
       type: string

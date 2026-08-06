@@ -1864,8 +1864,20 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     `getCall`/`terminateCall` is a 404). Opaque `callId` → store state is the
     only control plane (mirrors `getCall`). No `sink` signalling (deferred).
     `x-correlator` echoed. No new dep.
-  - [ ] `GET /calls/{callId}/recording` (`getRecording`) + the
-    `409 ALREADY_EXISTS` duplicate-call case — later slice.
+  - [x] `GET /calls/{callId}/recording` (`getRecording`,
+    `click-to-dial:recordings:read` — a dedicated recordings scope) — returns the
+    call's `RecordingResource` (`callId`, base64 `content`, `contentType`,
+    `generatedAt`). Two control planes (DESIGN §7): the opaque `callId` → store
+    state (mirrors `getCall`), plus the stored call's `recordingEnabled` flag — a
+    call with `recordingEnabled:true` → `200`, a call created without recording →
+    `404 NOT_FOUND` (none generated), unknown id → `404 NOT_FOUND` (both 404s use
+    the canonical `NOT_FOUND` code, per CAMARA, differing only in message). The
+    `content` is a fixed, deterministic silent WAV (`audio/wav`) — the sim has no
+    real media; the "session completed" precondition is a documented cut. No new
+    dep (reuses `base64`). `x-correlator` echoed.
+  - [ ] `409 ALREADY_EXISTS` duplicate-call case on `createCall` — makes
+    `createCall` stateful (a re-create of a live call is a 409, not an overwrite)
+    — later slice.
   - [ ] `status-changed` CloudEvents on `sink` — deferred (like QoD's first pass).
 - [ ] Other CAMARA APIs as capacity allows
 
@@ -1892,6 +1904,8 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 ## Scan journal
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
+
+2026-08-06 16:52Z — click-to-dial: add vwip `GET /calls/{callId}/recording` (getRecording, scope `click-to-dial:recordings:read`) — 200 RecordingResource (base64 silent-WAV `content`, `audio/wav`) for a `recordingEnabled:true` call; 404 NOT_FOUND for a non-recorded or unknown call; spec + scenarios updated; skipped the three top-most `[ ]` TLS-sink items (QoD/QoS-Provisioning/Session-Insights) — each needs a new rustls TLS client + TLS-server test scaffolding, an unsafe fit for one autonomous pass. cargo test 1421 pass; no new dep (reuses base64). — binary: 2,837,672 bytes (~2.71 MiB)
 
 - 2026-08-06 — Phase 5 (stateful delete): **Click to Dial vwip —
   `DELETE /calls/{callId}`** (`terminateCall`, `click-to-dial:calls:delete`), the

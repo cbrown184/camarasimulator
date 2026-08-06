@@ -1,12 +1,15 @@
 //! Click to Dial **vwip** (CAMARA Click to Dial, `wip`).
 //!
-//! Three endpoints so far:
+//! Four endpoints so far:
 //! - `POST /click-to-dial/vwip/calls` — create a Click to Dial call session
 //!   between a `caller` and a `callee` (`createCall`).
 //! - `GET /click-to-dial/vwip/calls/{callId}` — read a created call back
 //!   (`getCall`).
 //! - `DELETE /click-to-dial/vwip/calls/{callId}` — terminate a created call
 //!   (`terminateCall`), evicting it from the store.
+//! - `GET /click-to-dial/vwip/calls/{callId}/recording` — fetch the call's
+//!   recording (`getRecording`), available only when the call was created with
+//!   `recordingEnabled: true`.
 //!
 //! ## What it does
 //!
@@ -74,6 +77,28 @@
 //! token carrying the `click-to-dial:calls:delete` scope. Termination is not
 //! signalled to a `sink` (`status-changed` notifications remain deferred).
 //!
+//! ## `getRecording` — the store + `recordingEnabled` are the control plane (docs/DESIGN.md §7)
+//!
+//! `GET /calls/{callId}/recording` fetches the call's recording. The `callId` is
+//! the same opaque, UUID-shaped token, so the store state is the primary control
+//! plane (mirrors `getCall`); the stored call's `recordingEnabled` flag is a
+//! second signal. Per CAMARA, a recording exists only when the call was created
+//! with `recordingEnabled: true`:
+//!
+//! - **Stored call, recording enabled** → `200` with a
+//!   [`RecordingResource`](https://github.com/camaraproject/ClickToDial): the
+//!   `callId`, a base64-encoded `content` (a small, deterministic silent WAV — the
+//!   simulator has no real media), the `contentType` (`audio/wav`), and a
+//!   `generatedAt` instant.
+//! - **Stored call, recording not enabled** → `404 NOT_FOUND` (no recording was
+//!   generated for the call).
+//! - **Unknown/never-created `callId`** → `404 NOT_FOUND`.
+//!
+//! Both 404 cases use the canonical `NOT_FOUND` code (as CAMARA does — the spec
+//! does not distinguish "call not found" from "recording unavailable"), differing
+//! only in message. It requires a token carrying the `click-to-dial:recordings:read`
+//! scope (distinct from the call scopes).
+//!
 //! ## Documented cuts
 //!
 //! - **Deterministic re-create.** `createCall` now persists the call, but its
@@ -81,8 +106,10 @@
 //!   derived from the participant pair, re-creating the same call overwrites the
 //!   identical stored value (the `409 ALREADY_EXISTS` duplicate-call case, which
 //!   would make `createCall` stateful, is a later slice).
-//! - **Recording deferred.** `GET /calls/{callId}/recording` (`getRecording`)
-//!   and the lifecycle `status` transitions past `initiating` are a later slice.
+//! - **Synthetic recording.** `getRecording`'s `content` is a fixed silent WAV,
+//!   not real captured audio, and the recording is available as soon as the call
+//!   exists (the CAMARA precondition that the call session has *completed* is not
+//!   modelled — `status` transitions past `initiating` are a deferred slice).
 //! - **Notifications deferred.** `sink` / `sinkCredential` are accepted for
 //!   schema fidelity but not delivered to — the `status-changed` CloudEvents are
 //!   a later slice (like QoD's first create pass).
@@ -95,6 +122,8 @@ use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine as _;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -114,6 +143,15 @@ const READ_SCOPE: &str = "click-to-dial:calls:read";
 /// to Dial).
 const DELETE_SCOPE: &str = "click-to-dial:calls:delete";
 
+/// The OAuth2 scope the `GET /calls/{callId}/recording` endpoint requires (CAMARA
+/// Click to Dial — a dedicated recordings scope, distinct from the call scopes).
+const RECORDING_READ_SCOPE: &str = "click-to-dial:recordings:read";
+
+/// The `contentType` CamaraSim reports for a call recording. The synthetic
+/// content is a WAV, so this is fixed to `audio/wav` (the CAMARA enum also allows
+/// `audio/mp3`/`audio/mpeg`/`audio/ogg`).
+const RECORDING_CONTENT_TYPE: &str = "audio/wav";
+
 /// The trailing-three-digit sentinel that marks a line as unreachable
 /// (`caller`/`callee` not available). Not a reserved *error* suffix, so it is
 /// free for this API to use as a happy-path-adjacent marker.
@@ -130,6 +168,10 @@ pub fn routes() -> Router {
         .route(
             "/click-to-dial/vwip/calls/:call_id",
             get(get_call).delete(terminate_call),
+        )
+        .route(
+            "/click-to-dial/vwip/calls/:call_id/recording",
+            get(get_recording),
         )
 }
 
@@ -322,6 +364,93 @@ async fn terminate_call(
             &correlator,
         )
     }
+}
+
+/// `GET /click-to-dial/vwip/calls/{callId}/recording` — fetch a call's recording
+/// (operationId `getRecording`).
+///
+/// The `callId` is the same opaque, UUID-shaped token as `getCall`, so the store
+/// state is the primary control plane and the stored call's `recordingEnabled`
+/// flag is a second signal (docs/DESIGN.md §7). Per CAMARA a recording exists only
+/// when the call was created with `recordingEnabled: true`:
+///
+/// - stored call with `recordingEnabled: true` → `200` with a `RecordingResource`
+///   (the `callId`, a base64 `content` — a deterministic silent WAV, since the
+///   simulator has no real media — `contentType: audio/wav`, and `generatedAt`);
+/// - stored call without recording → `404 NOT_FOUND` (none was generated);
+/// - unknown/never-created id → `404 NOT_FOUND`.
+///
+/// Both 404s use the canonical `NOT_FOUND` code (CAMARA does not distinguish the
+/// two), differing only in message. Requires a token carrying
+/// `click-to-dial:recordings:read`.
+async fn get_recording(
+    claims: Claims,
+    headers: HeaderMap,
+    Path(call_id): Path<String>,
+) -> Response {
+    // Optional correlation header, echoed on every response (CAMARA Commonalities).
+    let correlator = headers.get("x-correlator").cloned();
+
+    // Endpoint authorisation: the token must carry the recordings read scope.
+    if let Err(e) = claims.require_scope(RECORDING_READ_SCOPE) {
+        return with_correlator(e.into_response(), &correlator);
+    }
+
+    // The store is the primary control plane (opaque callId, no reserved-identifier
+    // plane — mirrors getCall).
+    let Some(call) = super::store::get(&call_id) else {
+        return with_correlator(
+            CamaraError::not_found("No call found for the provided callId.").into_response(),
+            &correlator,
+        );
+    };
+
+    // A recording exists only when the call opted into recording at creation.
+    if call.get("recordingEnabled").and_then(Value::as_bool) != Some(true) {
+        return with_correlator(
+            CamaraError::not_found("No recording is available for the call.").into_response(),
+            &correlator,
+        );
+    }
+
+    // Happy path: a synthetic (silent) recording, base64-encoded per the CAMARA
+    // `RecordingResource` schema (`content` is `format: byte`).
+    let recording = json!({
+        "callId": call_id,
+        "content": BASE64.encode(silent_wav()),
+        "contentType": RECORDING_CONTENT_TYPE,
+        "generatedAt": rfc3339_utc(now_unix_secs()),
+    });
+    with_correlator(
+        (StatusCode::OK, Json(recording)).into_response(),
+        &correlator,
+    )
+}
+
+/// A minimal, valid PCM WAV file of silence: a 44-byte RIFF/WAVE header describing
+/// 16 bytes of 8-bit unsigned-PCM silence (`0x80`), 1 channel, 8 kHz. Fixed and
+/// deterministic — the simulator has no real captured audio, so `getRecording`
+/// returns this as the recording's `content` (base64-encoded by the caller).
+fn silent_wav() -> Vec<u8> {
+    /// Silence samples for 8-bit unsigned PCM (mid-scale `0x80`).
+    const SILENCE: [u8; 16] = [0x80; 16];
+    let data_len = SILENCE.len() as u32;
+    let mut wav = Vec::with_capacity(44 + SILENCE.len());
+    wav.extend_from_slice(b"RIFF");
+    wav.extend_from_slice(&(36 + data_len).to_le_bytes()); // chunk size = 36 + data
+    wav.extend_from_slice(b"WAVE");
+    wav.extend_from_slice(b"fmt ");
+    wav.extend_from_slice(&16u32.to_le_bytes()); // PCM fmt chunk size
+    wav.extend_from_slice(&1u16.to_le_bytes()); // audio format = PCM
+    wav.extend_from_slice(&1u16.to_le_bytes()); // channels = 1
+    wav.extend_from_slice(&8000u32.to_le_bytes()); // sample rate = 8 kHz
+    wav.extend_from_slice(&8000u32.to_le_bytes()); // byte rate = rate*channels*bytesPerSample
+    wav.extend_from_slice(&1u16.to_le_bytes()); // block align = 1
+    wav.extend_from_slice(&8u16.to_le_bytes()); // bits per sample = 8
+    wav.extend_from_slice(b"data");
+    wav.extend_from_slice(&data_len.to_le_bytes());
+    wav.extend_from_slice(&SILENCE);
+    wav
 }
 
 /// Derive a deterministic, UUID-shaped `callId` from the two participant
@@ -993,6 +1122,167 @@ mod tests {
         assert_eq!(
             headers.get("x-correlator").and_then(|v| v.to_str().ok()),
             Some("corr-d404")
+        );
+    }
+
+    // --- getRecording ------------------------------------------------------
+
+    #[test]
+    fn silent_wav_is_a_well_formed_riff_wave() {
+        let wav = silent_wav();
+        assert_eq!(&wav[0..4], b"RIFF");
+        assert_eq!(&wav[8..12], b"WAVE");
+        assert_eq!(&wav[12..16], b"fmt ");
+        assert_eq!(&wav[36..40], b"data");
+        // 44-byte header + 16 bytes of silence.
+        assert_eq!(wav.len(), 60);
+        // RIFF chunk size = 36 + data length (16) = 52.
+        assert_eq!(u32::from_le_bytes(wav[4..8].try_into().unwrap()), 52);
+        // data subchunk size = 16.
+        assert_eq!(u32::from_le_bytes(wav[40..44].try_into().unwrap()), 16);
+    }
+
+    /// GET `/calls/{callId}/recording` with an optional Bearer token and optional
+    /// `x-correlator`. Returns (status, headers, json-or-null).
+    async fn get_recording_by_id(
+        token: Option<&str>,
+        call_id: &str,
+        correlator: Option<&str>,
+    ) -> (StatusCode, HeaderMap, Value) {
+        let mut builder = Request::builder()
+            .method("GET")
+            .uri(format!("/click-to-dial/vwip/calls/{call_id}/recording"))
+            .header("host", HOST);
+        if let Some(t) = token {
+            builder = builder.header("authorization", format!("Bearer {t}"));
+        }
+        if let Some(c) = correlator {
+            builder = builder.header("x-correlator", c);
+        }
+        let response = app()
+            .oneshot(builder.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let headers = response.headers().clone();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, headers, json)
+    }
+
+    #[tokio::test]
+    async fn get_recording_returns_a_recording_resource_for_a_recorded_call() {
+        // Create a recording-enabled call (pair unique to this test), then fetch it.
+        let create = mint_token(CREATE_SCOPE).await;
+        let (status, _, created) = post_calls(
+            Some(&create),
+            r#"{"caller":{"number":"+123456789111"},"callee":{"number":"+123456789666"},"recordingEnabled":true}"#,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let id = created["callId"].as_str().unwrap();
+
+        let rec = mint_token(RECORDING_READ_SCOPE).await;
+        let (status, _, body) = get_recording_by_id(Some(&rec), id, None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["callId"], id);
+        assert_eq!(body["contentType"], "audio/wav");
+        let generated = body["generatedAt"].as_str().unwrap();
+        assert!(generated.ends_with('Z') && generated.len() == 20, "RFC 3339 generatedAt");
+        // `content` is base64 of a valid WAV.
+        let content = body["content"].as_str().unwrap();
+        let decoded = BASE64.decode(content).expect("content is valid base64");
+        assert_eq!(&decoded[0..4], b"RIFF");
+        assert_eq!(&decoded[8..12], b"WAVE");
+        assert_eq!(decoded, silent_wav());
+    }
+
+    #[tokio::test]
+    async fn get_recording_for_a_call_without_recording_is_404() {
+        // A call created without recordingEnabled has no recording → 404.
+        let create = mint_token(CREATE_SCOPE).await;
+        let (status, _, created) = post_calls(
+            Some(&create),
+            r#"{"caller":{"number":"+123456789111"},"callee":{"number":"+123456789667"}}"#,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let id = created["callId"].as_str().unwrap();
+
+        let rec = mint_token(RECORDING_READ_SCOPE).await;
+        let (status, _, body) = get_recording_by_id(Some(&rec), id, None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn get_recording_for_an_unknown_call_id_is_404() {
+        let rec = mint_token(RECORDING_READ_SCOPE).await;
+        let (status, _, body) =
+            get_recording_by_id(Some(&rec), "3fa85f64-5717-4562-b3fc-2c963f66afa6", None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn get_recording_without_the_recordings_scope_is_forbidden() {
+        // The call-read scope does not grant recordings:read — a distinct scope.
+        let create = mint_token(CREATE_SCOPE).await;
+        let (_, _, created) = post_calls(
+            Some(&create),
+            r#"{"caller":{"number":"+123456789111"},"callee":{"number":"+123456789668"},"recordingEnabled":true}"#,
+            None,
+        )
+        .await;
+        let id = created["callId"].as_str().unwrap();
+
+        let read = mint_token(READ_SCOPE).await;
+        let (status, _, body) = get_recording_by_id(Some(&read), id, None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["code"], "PERMISSION_DENIED");
+    }
+
+    #[tokio::test]
+    async fn get_recording_missing_token_is_unauthenticated() {
+        let (status, _, body) =
+            get_recording_by_id(None, "3fa85f64-5717-4562-b3fc-2c963f66afa6", None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["code"], "UNAUTHENTICATED");
+    }
+
+    #[tokio::test]
+    async fn x_correlator_is_echoed_on_recording_200_and_404() {
+        // 200: create a recorded call, then fetch the recording with a correlator.
+        let create = mint_token(CREATE_SCOPE).await;
+        let (_, _, created) = post_calls(
+            Some(&create),
+            r#"{"caller":{"number":"+123456789111"},"callee":{"number":"+123456789669"},"recordingEnabled":true}"#,
+            None,
+        )
+        .await;
+        let id = created["callId"].as_str().unwrap();
+        let rec = mint_token(RECORDING_READ_SCOPE).await;
+        let (status, headers, _) = get_recording_by_id(Some(&rec), id, Some("corr-rec")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-rec")
+        );
+        // 404: unknown id, correlator still echoed.
+        let (status, headers, _) = get_recording_by_id(
+            Some(&rec),
+            "00000000-0000-4000-8000-000000000000",
+            Some("corr-r404"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-r404")
         );
     }
 }
