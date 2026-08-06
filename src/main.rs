@@ -268,6 +268,12 @@ async fn catalog() -> Json<Value> {
                 "version": "vwip",
                 "base_path": "/consent-info/vwip",
                 "spec_url": "/consent-info/vwip/openapi.yaml",
+            },
+            {
+                "name": "iot-sim-fraud-prevention",
+                "version": "vwip",
+                "base_path": "/iot-sim-fraud-prevention/vwip",
+                "spec_url": "/iot-sim-fraud-prevention/vwip/openapi.yaml",
             }
         ],
         "authorization_servers": [{

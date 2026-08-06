@@ -66,6 +66,7 @@ pub mod device_reachability_status;
 pub mod device_roaming_status;
 pub mod geofencing_subscriptions;
 pub mod home_devices_qod;
+pub mod iot_sim_fraud_prevention;
 pub mod kyc_age_verification;
 pub mod kyc_fill_in;
 pub mod kyc_match;
@@ -134,5 +135,6 @@ pub fn routes() -> Router {
         .merge(device_authenticity::routes())
         .merge(session_insights::routes())
         .merge(consent_info::routes())
+        .merge(iot_sim_fraud_prevention::routes())
         .merge(openapi::routes())
 }

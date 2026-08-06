@@ -1711,6 +1711,20 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     Cuts (documented): single grouped `statusInfo` entry, stateful
     `CAPTURE_FREQUENCY_EXCEEDED`, async `callbackUrl` delivery. No new dep.
     **Completes Consent Info vwip.**
+- [~] IoT SIM Fraud Prevention vwip (`/iot-sim-fraud-prevention/vwip`; CAMARA
+  IoTSIMFraudPrevention `wip`; stateless, non-spatial, device-identifier-keyed):
+  - [x] `POST /query` (`query`, `iot-sim-fraud-prevention:query`) for
+    `queryType: IMEIBIND` — `{ imeiBind: { bindStatus, bindImei? } }`. Device
+    (phoneNumber/nai/ipv4/ipv6) or three-legged-token identifier with the CAMARA
+    two-/three-legged rule (422 `UNNECESSARY_IDENTIFIER`/`MISSING_IDENTIFIER`).
+    Two control planes (DESIGN §7): identifier reserved-error suffix; identifier
+    trailing-digit parity → BOUND (odd, with a synthesised Luhn-valid 15-digit
+    IMEI = fixed TAC `35209900` + zero-padded serial + check digit) vs UNBOUND
+    (even/`…000`/no-digits). Vendored spec's `QueryType` enum trimmed to
+    `[IMEIBIND]`, so an `AREALIMIT` request → 400 `INVALID_ARGUMENT` (documented cut).
+  - [ ] `queryType: AREALIMIT` — the spatial area-restriction query (Circle geometry).
+  - [ ] `POST /bind` (`bindDeviceImei`) — stateful IMEI/area binding.
+  - [ ] `POST /unbind` (`unBindDeviceImei`) — stateful unbinding.
 - [ ] Other CAMARA APIs as capacity allows
 
 ## Cross-cutting (do alongside the item that needs it)
@@ -1737,6 +1751,23 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-06 — Phase 5 ("other APIs"): **IoT SIM Fraud Prevention vwip — `POST
+  /query` (`IMEIBIND`)** (new CAMARA IoTSIMFraudPrevention API, version `wip`).
+  Chose a stateless, non-spatial, device-identifier-keyed slice over the
+  remaining TLS-sink items (heavy rustls dep, and all stateful → lower priority)
+  and the other unimplemented CAMARA repos (bind/unbind/edge/IoT ones are
+  stateful or spatial). Fetched + vendored the canonical upstream contract,
+  trimmed to the one operation implemented: `query` (scope
+  `iot-sim-fraud-prevention:query`), `QueryType` enum cut to `[IMEIBIND]` so an
+  `AREALIMIT` request → 400 INVALID_ARGUMENT (spec never over-claims). Device
+  (phoneNumber/nai/ipv4/ipv6) or three-legged-token identifier with the CAMARA
+  two-/three-legged 422 rule (`UNNECESSARY_IDENTIFIER`/`MISSING_IDENTIFIER`,
+  mirrors Number Recycling). Two control planes (DESIGN §7): identifier
+  reserved-error suffix; trailing-digit parity → BOUND (odd; synthesised
+  Luhn-valid 15-digit IMEI, self-contained — no new dep) vs UNBOUND. Deferred:
+  `AREALIMIT` (spatial), `POST /bind` + `POST /unbind` (stateful). Wired into
+  router, catalog, and served-spec table. 21 new tests; full suite 1314 green;
+  `cargo build --release` clean. — binary: 2.6M (2,670,192 bytes, +~31 KB, no new dep)
 - 2026-08-06 — Phase 5 ("other APIs"): **Consent Info vwip — `POST /retrieve`**
   (new API, CAMARA ConsentInfo, wip). Chose a stateless, non-spatial,
   phone-number-keyed API over the remaining TLS-sink items (each needs a heavy
