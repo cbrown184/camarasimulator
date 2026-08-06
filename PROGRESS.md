@@ -1712,19 +1712,32 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     `CAPTURE_FREQUENCY_EXCEEDED`, async `callbackUrl` delivery. No new dep.
     **Completes Consent Info vwip.**
 - [~] IoT SIM Fraud Prevention vwip (`/iot-sim-fraud-prevention/vwip`; CAMARA
-  IoTSIMFraudPrevention `wip`; stateless, non-spatial, device-identifier-keyed):
+  IoTSIMFraudPrevention `wip`; device-identifier-keyed; the `IMEIBIND` flow is
+  **stateful** over a shared in-memory binding store):
   - [x] `POST /query` (`query`, `iot-sim-fraud-prevention:query`) for
     `queryType: IMEIBIND` — `{ imeiBind: { bindStatus, bindImei? } }`. Device
     (phoneNumber/nai/ipv4/ipv6) or three-legged-token identifier with the CAMARA
     two-/three-legged rule (422 `UNNECESSARY_IDENTIFIER`/`MISSING_IDENTIFIER`).
-    Two control planes (DESIGN §7): identifier reserved-error suffix; identifier
-    trailing-digit parity → BOUND (odd, with a synthesised Luhn-valid 15-digit
-    IMEI = fixed TAC `35209900` + zero-padded serial + check digit) vs UNBOUND
+    Control planes (DESIGN §7): identifier reserved-error suffix; **a stored
+    binding wins** (BOUND with the stored IMEI); else identifier trailing-digit
+    parity → BOUND (odd, with a synthesised Luhn-valid 15-digit IMEI = fixed TAC
+    `35209900` + zero-padded serial + check digit) vs UNBOUND
     (even/`…000`/no-digits). Vendored spec's `QueryType` enum trimmed to
     `[IMEIBIND]`, so an `AREALIMIT` request → 400 `INVALID_ARGUMENT` (documented cut).
-  - [ ] `queryType: AREALIMIT` — the spatial area-restriction query (Circle geometry).
-  - [ ] `POST /bind` (`bindDeviceImei`) — stateful IMEI/area binding.
-  - [ ] `POST /unbind` (`unBindDeviceImei`) — stateful unbinding.
+  - [x] `POST /bind` (`bindDeviceImei`, `iot-sim-fraud-prevention:bind`) — binds a
+    device's SIM to its IMEI in a new in-memory store
+    (`src/apis/iot_sim_fraud_prevention/store.rs`; `Mutex<HashMap>`, no new dep),
+    `200 { bound: true }` (idempotent). Same identifier resolution + two-/three
+    -legged rule; reserved-error suffix → canonical CAMARA error. `bindType` enum
+    trimmed to `[IMEIBIND]` → `AREALIMIT` bind → 400 INVALID_ARGUMENT. A later
+    `query` sees the binding.
+  - [x] `POST /unbind` (`unBindDeviceImei`, `iot-sim-fraud-prevention:unbind`) —
+    removes the binding: present → `200 { unbound: true }` (query returns to its
+    stateless default); no binding → `422 UNNECESSARY_UNBIND_IMEI`. Same
+    identifier/reserved-error planes; `unBindType` trimmed to `[IMEIBIND]` →
+    `AREALIMIT` unbind → 400 INVALID_ARGUMENT. **Completes the IMEIBIND round-trip.**
+  - [ ] `queryType: AREALIMIT` / `bindType: AREALIMIT` — the spatial
+    area-restriction query and bind/unbind (Circle geometry) — deferred (spatial).
 - [ ] Other CAMARA APIs as capacity allows
 
 ## Cross-cutting (do alongside the item that needs it)
@@ -1751,6 +1764,29 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-06 — Phase 5: **IoT SIM Fraud Prevention vwip — stateful `IMEIBIND`
+  round-trip: `POST /bind` + `POST /unbind` + `query` store integration**. Took
+  the top unclaimed sub-item of the in-progress IoT SIM API (bind/unbind are
+  stateful → higher priority than the remaining spatial `AREALIMIT` cut and the
+  TLS-sink items). New in-memory binding store
+  (`src/apis/iot_sim_fraud_prevention/store.rs`; `Mutex<HashMap>` identifier→IMEI,
+  lock never held across await, **no new dep**). `bindDeviceImei`
+  (scope `iot-sim-fraud-prevention:bind`) records the SIM↔IMEI association →
+  `200 { bound: true }` (idempotent); `unBindDeviceImei`
+  (`…:unbind`) removes it → `200 { unbound: true }`, or `422
+  UNNECESSARY_UNBIND_IMEI` when nothing is bound; `query` now prefers a stored
+  binding (BOUND with the stored IMEI) over its stateless trailing-digit default,
+  so bind→query→unbind is coherent. Same identifier resolution + two-/three-legged
+  422 rule + reserved-error plane as `query`; `bindType`/`unBindType` trimmed to
+  `[IMEIBIND]` → `AREALIMIT` → 400 INVALID_ARGUMENT. Vendored spec extended with
+  `/bind` + `/unbind` paths, Bind/UnBind request+response schemas, `BindType`/
+  `UnBindType` enums, and `BindBadRequest400`/`UnbindBadRequest400`/`Unbind422`
+  responses (all `$ref`s resolve; wired via the existing served-spec table). 16
+  new tests (store unit, full round-trip, idempotency, unnecessary-unbind,
+  reserved suffixes, AREALIMIT/missing-type 400s, two-/three-legged 422s,
+  three-legged bind↔query coherence, scope 403s, 401, x-correlator). Full suite
+  1330 green; `cargo build --release` clean. Deferred: `AREALIMIT` (spatial).
+  — binary: 2.6M (2,693,344 bytes, +~23 KB, no new dep)
 - 2026-08-06 — Phase 5 ("other APIs"): **IoT SIM Fraud Prevention vwip — `POST
   /query` (`IMEIBIND`)** (new CAMARA IoTSIMFraudPrevention API, version `wip`).
   Chose a stateless, non-spatial, device-identifier-keyed slice over the

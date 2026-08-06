@@ -5,14 +5,17 @@
 //! SIM is blocked when it appears on a different device. The upstream CAMARA API
 //! exposes `POST /bind`, `POST /unbind`, and `POST /query`.
 //!
-//! CamaraSim currently mounts **`POST /query` for `queryType: IMEIBIND` only** — a
-//! stateless, non-spatial, device-identifier-keyed query. The bind/unbind
-//! operations are stateful mutations and the `AREALIMIT` query type is spatial;
-//! both are deferred (see `PROGRESS.md`).
+//! CamaraSim mounts the full **`IMEIBIND`** round-trip — `POST /bind`,
+//! `POST /unbind`, and `POST /query` — over a shared in-memory binding [`store`]:
+//! a bind records the device's SIM↔IMEI association, `query` reports it, and an
+//! unbind removes it. Only the `AREALIMIT` query/bind type is deferred (it is
+//! spatial — a geographic `Circle` restriction; see `PROGRESS.md`), so every
+//! `*Type` enum in the vendored spec is trimmed to `[IMEIBIND]`.
 //!
 //! One submodule per published version (docs/DESIGN.md §5, §9). So far:
 //! - [`vwip`] — mounted at `/iot-sim-fraud-prevention/vwip` (CAMARA `wip`).
 
+pub mod store;
 pub mod vwip;
 
 use axum::Router;

@@ -25,15 +25,17 @@ info:
     and `POST /query`.
 
     # CamaraSim scope (documented cut)
-    This simulator currently mounts **`POST /query` for `queryType: IMEIBIND` only**
-    — a stateless, non-spatial, device-identifier-keyed query. The bind/unbind
-    operations are stateful mutations and the `AREALIMIT` query type is spatial
-    (a geographic `Circle` restriction); both are **deferred** (see
-    `PROGRESS.md`). Accordingly the `QueryType` enum below is trimmed to
-    `[IMEIBIND]`: a request with `queryType: AREALIMIT` is rejected with
-    `400 INVALID_ARGUMENT` (it is not a value this deployment accepts), and the
-    `/bind` and `/unbind` paths are not served. The simulator never drifts from
-    the operations it actually implements.
+    This simulator mounts the full **`IMEIBIND`** round-trip — `POST /bind`
+    (`bindDeviceImei`), `POST /query` (`query`), and `POST /unbind`
+    (`unBindDeviceImei`) — over a shared in-memory binding store: a bind records
+    the device's SIM↔IMEI association, `query` reports it (a stored binding wins
+    over the stateless default), and an unbind removes it. Only the **`AREALIMIT`**
+    bind/query type is **deferred** — it is spatial (a geographic `Circle`
+    restriction), lower priority than this non-spatial slice (see `PROGRESS.md`).
+    Accordingly every `*Type` enum below is trimmed to `[IMEIBIND]`: a request
+    naming `AREALIMIT` is rejected with `400 INVALID_ARGUMENT` (it is not a value
+    this deployment accepts). The simulator never drifts from the operations it
+    actually implements.
 
     # Authorization and authentication
     The "Camara Security and Interoperability Profile" provides details of how an API consumer requests an access token. Please refer to Identity and Consent Management (https://github.com/camaraproject/IdentityAndConsentManagement/) for the released version of the profile.
@@ -62,6 +64,8 @@ servers:
         default: http://localhost:8080
         description: API root
 tags:
+  - name: Bind card fraud prevention
+    description: Operations for binding and unbinding a SIM card to a device IMEI
   - name: Query card fraud prevention
     description: Operations for querying current binding and restriction status
 paths:
@@ -190,6 +194,156 @@ paths:
       security:
         - openId:
             - "iot-sim-fraud-prevention:query"
+
+  /bind:
+    post:
+      tags:
+        - Bind card fraud prevention
+      summary: IoT SIM Fraud Prevention Bind
+      description: |
+        Bind a device's SIM card to the device IMEI (operationId
+        `bindDeviceImei`).
+
+        The device is identified either by a `device` object in the request body
+        (two-legged / CIBA) or — when `device` is omitted — by the identity a
+        three-legged access token authenticated, subject to the same exactly-one
+        identification rule as `POST /query` (`422 UNNECESSARY_IDENTIFIER` /
+        `422 MISSING_IDENTIFIER`).
+
+        ## Functional cases — the input is the control plane (docs/DESIGN.md §7)
+
+        After the shared reserved-error-suffix plane (trailing three digits naming
+        a reserved CAMARA status → that canonical error), a bind records the
+        SIM↔IMEI association in the in-memory store and answers
+        `{ "bound": true }`. The bound IMEI is deterministic from the identifier
+        (a fixed TAC `35209900`, a 6-digit serial equal to the identifier's
+        zero-padded trailing digits, and a GSMA Luhn check digit). Binding is
+        idempotent — re-binding the same device answers `{ "bound": true }` again.
+        A subsequent `POST /query` reports the device as `BOUND` with that IMEI.
+
+        Examples: `+123456789012` → `{ "bound": true }` (and thereafter query
+        BOUND); `+123456789404` → `404 NOT_FOUND`.
+      operationId: bindDeviceImei
+      parameters:
+        - $ref: "#/components/parameters/x-correlator"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BindDeviceImeiRequest"
+            examples:
+              INPUT_PHONE_NUMBER:
+                summary: bind One Device By Phone Number
+                value:
+                  device:
+                    phoneNumber: "+123456789012"
+                  bindType: "IMEIBIND"
+              INPUT_THREE_LEGGED:
+                summary: bind One Device By 3 Legged Token
+                value:
+                  bindType: "IMEIBIND"
+      responses:
+        "200":
+          description: The result of binding the device
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/x-correlator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BindDeviceImeiResponse"
+              examples:
+                BOUND:
+                  summary: The SIM has been bound to the device IMEI
+                  value:
+                    bound: true
+        "400":
+          $ref: "#/components/responses/BindBadRequest400"
+        "401":
+          $ref: "#/components/responses/Generic401"
+        "403":
+          $ref: "#/components/responses/Generic403"
+        "404":
+          $ref: "#/components/responses/Generic404"
+        "422":
+          $ref: "#/components/responses/Query422"
+        "429":
+          $ref: "#/components/responses/Generic429"
+      security:
+        - openId:
+            - "iot-sim-fraud-prevention:bind"
+
+  /unbind:
+    post:
+      tags:
+        - Bind card fraud prevention
+      summary: IoT SIM Fraud Prevention Unbind
+      description: |
+        Remove a device's SIM↔IMEI binding (operationId `unBindDeviceImei`).
+
+        The device is identified exactly as for `POST /bind`. After the shared
+        reserved-error-suffix plane, the operation is keyed on the in-memory
+        store:
+        - a device with an existing binding → `200 { "unbound": true }` (the
+          binding is removed; a subsequent `POST /query` returns to its stateless
+          default);
+        - a device with no binding → `422 UNNECESSARY_UNBIND_IMEI` (there is
+          nothing to unbind).
+
+        Examples: unbinding a previously-bound `+123456789012` → `{ "unbound":
+        true }`; unbinding a never-bound device → `422 UNNECESSARY_UNBIND_IMEI`;
+        `+123456789404` → `404 NOT_FOUND`.
+      operationId: unBindDeviceImei
+      parameters:
+        - $ref: "#/components/parameters/x-correlator"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UnBindDeviceImeiRequest"
+            examples:
+              INPUT_PHONE_NUMBER:
+                summary: unbind One Device By Phone Number
+                value:
+                  device:
+                    phoneNumber: "+123456789012"
+                  unBindType: "IMEIBIND"
+              INPUT_THREE_LEGGED:
+                summary: unbind One Device By 3 Legged Token
+                value:
+                  unBindType: "IMEIBIND"
+      responses:
+        "200":
+          description: The result of unbinding the device
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/x-correlator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UnBindDeviceImeiResponse"
+              examples:
+                UNBOUND:
+                  summary: The SIM binding has been removed
+                  value:
+                    unbound: true
+        "400":
+          $ref: "#/components/responses/UnbindBadRequest400"
+        "401":
+          $ref: "#/components/responses/Generic401"
+        "403":
+          $ref: "#/components/responses/Generic403"
+        "404":
+          $ref: "#/components/responses/Generic404"
+        "422":
+          $ref: "#/components/responses/Unbind422"
+        "429":
+          $ref: "#/components/responses/Generic429"
+      security:
+        - openId:
+            - "iot-sim-fraud-prevention:unbind"
 
 components:
   securitySchemes:
@@ -340,6 +494,65 @@ components:
       enum:
         - BOUND
         - UNBOUND
+
+    # ---------- Bind / Unbind ----------
+    BindType:
+      type: string
+      description: |
+        The type of bind operation. The upstream CAMARA API also defines
+        `AREALIMIT` (a geographic area restriction); this simulator implements the
+        non-spatial `IMEIBIND` bind only, so the enum is trimmed accordingly
+        (documented cut — see the API description).
+      enum:
+        - IMEIBIND
+
+    BindDeviceImeiRequest:
+      description: Request to bind a device's SIM card to its IMEI.
+      type: object
+      properties:
+        device:
+          $ref: "#/components/schemas/Device"
+        bindType:
+          $ref: "#/components/schemas/BindType"
+      required:
+        - bindType
+
+    BindDeviceImeiResponse:
+      description: Response indicating whether the SIM was bound.
+      type: object
+      properties:
+        bound:
+          description: Whether the SIM card was successfully bound to the device IMEI.
+          type: boolean
+          example: true
+
+    UnBindType:
+      type: string
+      description: |
+        The type of unbind operation. As with `BindType`, the `AREALIMIT` case is
+        a deferred (spatial) cut, so the enum is trimmed to `[IMEIBIND]`.
+      enum:
+        - IMEIBIND
+
+    UnBindDeviceImeiRequest:
+      description: Request to remove a device's SIM↔IMEI binding.
+      type: object
+      properties:
+        device:
+          $ref: "#/components/schemas/Device"
+        unBindType:
+          $ref: "#/components/schemas/UnBindType"
+      required:
+        - unBindType
+
+    UnBindDeviceImeiResponse:
+      description: Response indicating whether the SIM binding was removed.
+      type: object
+      properties:
+        unbound:
+          description: Whether the SIM card's IMEI binding was successfully removed.
+          type: boolean
+          example: true
 
     # ---------- Error ----------
     ErrorInfo:
@@ -512,6 +725,97 @@ components:
                 message: An explicit identifier has been provided for the device when this is already identified by the access token
             Missing Identifier:
               description: An identifier is not included in the request and the device cannot be identified from the 2-legged access token
+              value:
+                status: 422
+                code: MISSING_IDENTIFIER
+                message: The device cannot be identified.
+
+    BindBadRequest400:
+      description: Bad Request
+      headers:
+        x-correlator:
+          $ref: "#/components/headers/x-correlator"
+      content:
+        application/json:
+          schema:
+            allOf:
+              - $ref: "#/components/schemas/ErrorInfo"
+              - type: object
+                properties:
+                  status:
+                    enum:
+                      - 400
+                  code:
+                    enum:
+                      - INVALID_ARGUMENT
+                      - OUT_OF_RANGE
+          examples:
+            Invalid BindType Value:
+              value:
+                status: 400
+                code: INVALID_ARGUMENT
+                message: "The value of bindType can only be IMEIBIND"
+            Missing BindType:
+              value:
+                status: 400
+                code: INVALID_ARGUMENT
+                message: "bindType must be specified"
+
+    UnbindBadRequest400:
+      description: Bad Request
+      headers:
+        x-correlator:
+          $ref: "#/components/headers/x-correlator"
+      content:
+        application/json:
+          schema:
+            allOf:
+              - $ref: "#/components/schemas/ErrorInfo"
+              - type: object
+                properties:
+                  status:
+                    enum:
+                      - 400
+                  code:
+                    enum:
+                      - INVALID_ARGUMENT
+                      - OUT_OF_RANGE
+          examples:
+            Invalid UnBindType Value:
+              value:
+                status: 400
+                code: INVALID_ARGUMENT
+                message: "The value of unBindType can only be IMEIBIND"
+
+    Unbind422:
+      description: Unprocessable Content
+      headers:
+        x-correlator:
+          $ref: "#/components/headers/x-correlator"
+      content:
+        application/json:
+          schema:
+            allOf:
+              - $ref: "#/components/schemas/ErrorInfo"
+              - type: object
+                properties:
+                  status:
+                    enum:
+                      - 422
+                  code:
+                    enum:
+                      - MISSING_IDENTIFIER
+                      - UNSUPPORTED_IDENTIFIER
+                      - UNNECESSARY_IDENTIFIER
+                      - UNNECESSARY_UNBIND_IMEI
+          examples:
+            Unnecessary Unbind Imei:
+              description: The device has no IMEI binding to remove
+              value:
+                status: 422
+                code: UNNECESSARY_UNBIND_IMEI
+                message: The device has no IMEI binding to remove.
+            Missing Identifier:
               value:
                 status: 422
                 code: MISSING_IDENTIFIER
