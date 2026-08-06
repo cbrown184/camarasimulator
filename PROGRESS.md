@@ -943,6 +943,23 @@ response). Optional `app` narrows to one application (unknown → empty page; th
 `x-correlator` echoed on every response. **This begins the NetworkInsights
 suite's second API and completes the suite's two published stateless surfaces.**
 
+**Sponsored Data vwip** `POST /sponsorship` is now live at
+`/sponsored-data/vwip/sponsorship` (`startSponsorship`, scope
+`sponsored-data:sponsorship:create`): a sponsoring company (`sponsorId`) funds a
+subscriber's (`phoneNumber`) mobile data within a campaign (`campaignId`), and
+the operator returns `201` with a minted opaque `sessionId` and the granted
+window. Three control planes (DESIGN §7): the `phoneNumber` reserved-error suffix
+→ canonical CAMARA error (`…422` → not eligible, `…409` → duplicate session);
+`dataVolume` (1–1000 MB, default 50) echoed as `sponsoredDataVolume`; and
+`duration` (1–1440 min, default 10) sets `endTime = startTime + duration` — both
+out-of-range → 400 `OUT_OF_RANGE`. Required-field patterns (`sponsorId`
+`local@domain`, `campaignId` `UUID@domain`, E.164 `phoneNumber`, v4-UUID
+`callbackToken`) → 400 `INVALID_ARGUMENT`. Self-contained validators + RFC 3339
+formatter + UUID-v4 `sessionId` minter (no new dependency). Persistence (for
+`session-status`/`revoke`), the `webhookUrl` callback, and campaign management
+are deferred to later passes; the scope is CamaraSim-assigned (the wip contract
+declares no securitySchemes). `x-correlator` echoed on every response.
+
 ## In progress (claimed this pass)
 
 _None._  <!-- agent: put the claimed item + run timestamp here, clear it when done -->
@@ -1786,6 +1803,19 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     `AREALIMIT` unbind → 400 INVALID_ARGUMENT. **Completes the IMEIBIND round-trip.**
   - [ ] `queryType: AREALIMIT` / `bindType: AREALIMIT` — the spatial
     area-restriction query and bind/unbind (Circle geometry) — deferred (spatial).
+- [~] Sponsored Data vwip (`/sponsored-data/vwip`; CAMARA SponsoredData `wip`;
+  phone-number-keyed sponsorship lifecycle):
+  - [x] `POST /sponsorship` (`startSponsorship`, `sponsored-data:sponsorship:create`)
+    — start a sponsorship session → `201` with a minted `sessionId` and the
+    granted window. Identifier = submitted `phoneNumber`; reserved suffix →
+    canonical CAMARA error; `dataVolume` (1–1000 MB, default 50) and `duration`
+    (1–1440 min, default 10) are two more control planes (out-of-range → 400
+    OUT_OF_RANGE), `endTime = startTime + duration`. No persistence yet (the
+    `201` is fully determined by the request); scope CamaraSim-assigned (the wip
+    contract declares no securitySchemes). `x-correlator` echoed.
+  - [ ] `GET …/session-status` + `…/revoke` (need an in-memory session store) —
+    deferred; the end-of-session `webhookUrl` callback deferred.
+  - [ ] campaign-management operations (`/campaign/…`) — deferred.
 - [ ] Other CAMARA APIs as capacity allows
 
 ## Cross-cutting (do alongside the item that needs it)
@@ -1812,6 +1842,27 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-06 — Phase 5 ("other APIs"): **Sponsored Data vwip — new
+  phone-number-keyed CAMARA API: `POST /sponsorship`** (`startSponsorship`,
+  `sponsored-data:sponsorship:create`). All remaining in-progress backlog leaves
+  were deferred cuts (TLS `https://` sinks needing rustls; spatial IoT
+  `AREALIMIT`) and every clean stateless/non-spatial CAMARA repo is already
+  mounted, so — respecting phase order — picked the simplest *first endpoint* of
+  a not-yet-covered API: Sponsored Data's `POST /sponsorship`, a non-spatial,
+  phone-number-keyed sponsorship-session create (mirrors QoD's `createSession`
+  shape). Fetched + vendored the canonical upstream contract, trimmed to the one
+  operation implemented. Three control planes (DESIGN §7): `phoneNumber`
+  reserved-error suffix; `dataVolume` (1–1000 MB, default 50); `duration`
+  (1–1440 min, default 10, → `endTime`). Required-field patterns validated
+  (email-ish `sponsorId`, `UUID@domain` `campaignId`, E.164 `phoneNumber`, v4
+  `callbackToken`) → 400; out-of-range volume/duration → 400 OUT_OF_RANGE. No
+  persistence yet (the `201` is fully determined by the request) — session store
+  + `session-status`/`revoke`, the `webhookUrl` callback, and campaign management
+  deferred; scope CamaraSim-assigned (wip contract has no securitySchemes).
+  Self-contained validators + RFC 3339 formatter + UUID minter — **no new
+  dependency** (reuses `sha2`). Wired into `apis.rs` router + `openapi.rs` served
+  specs + `/` catalog. 16 new tests; `cargo test` 1362 pass, `cargo build
+  --release` green. — binary: 2,756,840 bytes (~2.76 MB, +~28 KB, no new dep)
 - 2026-08-06 — Phase 5: **Network Traffic Analysis vwip — new stateless,
   non-spatial CAMARA API: `GET /traffic-analysis`** (`getTrafficAnalysis`,
   `network-traffic-analysis:traffic-analysis:read`). All in-progress backlog leaf

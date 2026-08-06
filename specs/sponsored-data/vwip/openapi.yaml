@@ -1,0 +1,353 @@
+# CamaraSim — Sponsored Data, API version vwip (CAMARA Sponsored Data, wip).
+#
+# Vendored from the CAMARA Sponsored Data API (work-in-progress — no released
+# version yet, so mounted at its canonical `vwip` base path
+# `/sponsored-data/vwip`, like the other pre-1.0 wip APIs) and annotated with
+# CamaraSim's parameter-driven functional cases (docs/DESIGN.md §7, §9). Backed
+# by `src/apis/sponsored_data/vwip.rs`; spec and code must not drift.
+#
+# Serves `POST /sponsorship` (`startSponsorship`).
+#
+# Divergences from the upstream CAMARA source (documented cuts):
+#   - Only the sponsorship **start** is mounted. The upstream also defines
+#     session-status / revoke reads (which need an in-memory session store) and
+#     campaign-management operations; those, and the end-of-session `webhookUrl`
+#     callback, are deferred to later passes (see PROGRESS.md). The `201`
+#     response is fully determined by the request, so no store is needed yet.
+#   - The upstream `wip` contract declares **no** `securitySchemes`; CamaraSim
+#     assigns the canonical `<api>:<resource>:<action>` scope
+#     `sponsored-data:sponsorship:create`, resolved against the shared auth spec.
+#   - CamaraSim inlines the request/response schemas and `$ref`s the shared error
+#     model (`../../shared/errors.yaml`) so the served spec resolves without
+#     vendoring the whole Commonalities file.
+#   - CamaraSim exposes the full shared reserved-error set (so every reserved
+#     suffix is reachable) via the `phoneNumber` identifier.
+openapi: 3.0.3
+info:
+  title: Sponsored Data
+  description: |
+    The Sponsored Data API lets a **sponsoring company** fund an end-user's
+    mobile data: the operator grants a bounded data volume for a bounded time to
+    the subscriber and bills the sponsor, not the user. `POST /sponsorship`
+    starts such a session and returns its `sessionId`.
+
+    This is the CamaraSim reference double for CAMARA Sponsored Data (wip). The
+    `/sponsorship` endpoint requires the `sponsored-data:sponsorship:create`
+    scope (CamaraSim-assigned — the upstream `wip` contract declares no security
+    schemes).
+
+    ## Functional cases — the input is the control plane (docs/DESIGN.md §7)
+
+    Three independent control planes drive the answer:
+
+    - **Reserved error suffix (`phoneNumber`).** The sponsored subscriber's
+      `phoneNumber` is the identifier: if its trailing three digits name a
+      reserved CAMARA status the endpoint answers with that canonical CAMARA
+      error (shared convention — see the referenced `errors.yaml`): `…400`,
+      `…401`, `…403`, `…404`, `…409`, `…422`, `…429`, `…500`, `…503`. So `…422`
+      exercises "the subscriber is not eligible for sponsorship" and `…409` a
+      duplicate active session.
+    - **`dataVolume` (MB).** Optional; when present it must be `1..=1000` (else
+      `400 OUT_OF_RANGE`) and is echoed as `sponsoredDataVolume`. When omitted the
+      campaign's onboarding default (`50 MB`) applies.
+    - **`duration` (minutes).** Optional; when present it must be `1..=1440` (else
+      `400 OUT_OF_RANGE`) and sets `endTime = startTime + duration`. When omitted
+      the onboarding default (`10 minutes`) applies.
+
+    `startTime` is the moment the session is granted; `endTime` is
+    `startTime + duration` minutes. `sessionId` is opaque (UUID-shaped).
+  version: "wip"
+  license:
+    name: Apache-2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0.html
+
+externalDocs:
+  description: Project documentation at CAMARA
+  url: https://github.com/camaraproject/SponsoredData
+
+servers:
+  - url: "{apiRoot}/sponsored-data/vwip"
+    variables:
+      apiRoot:
+        default: http://localhost:8080
+        description: API root, e.g. the CamaraSim base URL.
+
+paths:
+  /sponsorship:
+    post:
+      operationId: startSponsorship
+      summary: Start a sponsorship session
+      description: |
+        Request the sponsorship of a subscriber (`phoneNumber`) within a campaign,
+        optionally bounding it with a `dataVolume` (MB) and `duration` (minutes).
+        On success returns `201` with the granted window and a minted `sessionId`.
+
+        The subscriber's `phoneNumber` is the control-plane identifier — see the
+        API description for the parameter-driven functional cases (its trailing
+        three digits select a reserved CAMARA error; `dataVolume`/`duration`
+        bound the grant or fall back to the onboarding defaults).
+      security:
+        - openId:
+            - sponsored-data:sponsorship:create
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/StartSponsorship"
+            examples:
+              minimal:
+                summary: Required fields only (onboarding defaults apply)
+                value:
+                  sponsorId: acme@sponsor.example.com
+                  campaignId: 123e4567-e89b-12d3-a456-426614174000@sponsor.example.com
+                  phoneNumber: "+123456789012"
+                  webhookUrl: https://sponsor.example.com/webhook
+                  callbackToken: 550e8400-e29b-41d4-a716-446655440000
+              bounded:
+                summary: Explicit volume and duration
+                value:
+                  sponsorId: acme@sponsor.example.com
+                  campaignId: 123e4567-e89b-12d3-a456-426614174000@sponsor.example.com
+                  phoneNumber: "+123456789012"
+                  dataVolume: 250
+                  duration: 30
+                  webhookUrl: https://sponsor.example.com/webhook
+                  callbackToken: 550e8400-e29b-41d4-a716-446655440000
+      responses:
+        "201":
+          description: Successful operation. New sponsorship session created.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SponsorshipSession"
+              examples:
+                created:
+                  summary: A granted session (10-minute default window, 50 MB)
+                  value:
+                    sponsorId: acme@sponsor.example.com
+                    campaignId: 123e4567-e89b-12d3-a456-426614174000@sponsor.example.com
+                    sessionId: 8f14e45f-ceea-4e0a-9d1f-2e3c4b5a6d70
+                    startTime: "2024-06-01T00:00:00Z"
+                    endTime: "2024-06-01T00:10:00Z"
+                    sponsoredDataVolume: 50
+        "400":
+          description: |
+            400 — invalid request. CamaraSim returns `INVALID_ARGUMENT` for a
+            missing/malformed `sponsorId`, `campaignId`, `phoneNumber`,
+            `webhookUrl`, or `callbackToken`, or a non-JSON body; and
+            `OUT_OF_RANGE` for a `dataVolume` outside `1..=1000` or a `duration`
+            outside `1..=1440`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SponsoredDataError"
+              examples:
+                invalidArgument:
+                  summary: Missing or malformed field
+                  value:
+                    status: 400
+                    code: INVALID_ARGUMENT
+                    message: "`phoneNumber` must be an E.164 number (e.g. +123456789012)."
+                outOfRange:
+                  summary: dataVolume or duration out of range
+                  value:
+                    status: 400
+                    code: OUT_OF_RANGE
+                    message: "`dataVolume` must be between 1 and 1000 MB."
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "409":
+          $ref: "../../shared/errors.yaml#/components/responses/Conflict"
+        "422":
+          $ref: "../../shared/errors.yaml#/components/responses/ServiceNotApplicable"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          Result selected from the `phoneNumber` identifier and the optional
+          `dataVolume` / `duration` bounds (docs/DESIGN.md §7). Reserved error
+          suffixes come from the shared convention in errors.yaml.
+        cases:
+          - input: phoneNumber ending in a reserved error suffix (e.g. …404, …422, …409)
+            result: the canonical CAMARA error for that status
+          - input: "no dataVolume / duration supplied"
+            result: "201 with sponsoredDataVolume 50 MB and a 10-minute window"
+          - input: "dataVolume within 1..=1000"
+            result: "201 with sponsoredDataVolume echoing the request"
+          - input: "duration within 1..=1440"
+            result: "201 with endTime = startTime + duration minutes"
+          - input: "dataVolume outside 1..=1000, or duration outside 1..=1440"
+            result: "400 OUT_OF_RANGE"
+          - input: "missing/malformed sponsorId, campaignId, phoneNumber, webhookUrl, or callbackToken; or non-JSON body"
+            result: "400 INVALID_ARGUMENT"
+
+components:
+  securitySchemes:
+    openId:
+      $ref: "../../auth/openapi.yaml#/components/securitySchemes/camaraOAuth"
+
+  parameters:
+    XCorrelator:
+      name: x-correlator
+      in: header
+      required: false
+      description: Correlation id for the request, echoed back on the response.
+      schema:
+        type: string
+
+  headers:
+    XCorrelator:
+      description: The `x-correlator` from the request, echoed if one was sent.
+      required: false
+      schema:
+        type: string
+
+  schemas:
+    SponsorId:
+      type: string
+      description: Unique sponsor identifier (`local@domain.tld`), assigned during onboarding.
+      pattern: "^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$"
+      example: acme@sponsor.example.com
+
+    CampaignId:
+      type: string
+      description: Unique campaign identifier (`UUID@domain.tld`), assigned during onboarding.
+      pattern: "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$"
+      example: 123e4567-e89b-12d3-a456-426614174000@sponsor.example.com
+
+    SessionId:
+      type: string
+      format: uuid
+      description: Opaque, unique session identifier minted by the operator.
+      pattern: "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+      example: 8f14e45f-ceea-4e0a-9d1f-2e3c4b5a6d70
+
+    PhoneNumber:
+      type: string
+      description: >-
+        The sponsored subscriber's phone number in E.164 format, prefixed with
+        `+`. This is the control-plane identifier (see the API description).
+      pattern: '^\+[1-9][0-9]{4,14}$'
+      example: "+123456789012"
+
+    WebhookUrl:
+      type: string
+      format: uri
+      description: URL the operator will call on session status changes (delivery deferred).
+      example: https://sponsor.example.com/webhook
+
+    Time:
+      type: string
+      format: date-time
+      description: An RFC 3339 / ISO 8601 date-time with timezone, e.g. `2024-06-01T00:00:00Z`.
+      example: "2024-06-01T00:00:00Z"
+
+    StartSponsorship:
+      type: object
+      description: Parameters for creating a new sponsorship session.
+      required:
+        - sponsorId
+        - campaignId
+        - phoneNumber
+        - webhookUrl
+        - callbackToken
+      properties:
+        sponsorId:
+          $ref: "#/components/schemas/SponsorId"
+        campaignId:
+          $ref: "#/components/schemas/CampaignId"
+        phoneNumber:
+          $ref: "#/components/schemas/PhoneNumber"
+        dataVolume:
+          type: integer
+          minimum: 1
+          maximum: 1000
+          description: >-
+            Data volume (MB) to sponsor. If omitted, the campaign's onboarding
+            default (50 MB) applies.
+          example: 250
+        duration:
+          type: integer
+          minimum: 1
+          maximum: 1440
+          description: >-
+            Duration (minutes) of the sponsorship. If omitted, the campaign's
+            onboarding default (10 minutes) applies.
+          example: 30
+        webhookUrl:
+          $ref: "#/components/schemas/WebhookUrl"
+        callbackToken:
+          type: string
+          format: uuid
+          pattern: "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
+          description: Version-4 UUID security token for authenticating webhook notifications.
+          example: 550e8400-e29b-41d4-a716-446655440000
+
+    SponsorshipSession:
+      type: object
+      additionalProperties: false
+      description: A granted sponsorship session.
+      required:
+        - sponsorId
+        - campaignId
+        - sessionId
+        - startTime
+        - endTime
+        - sponsoredDataVolume
+      properties:
+        sponsorId:
+          $ref: "#/components/schemas/SponsorId"
+        campaignId:
+          $ref: "#/components/schemas/CampaignId"
+        sessionId:
+          $ref: "#/components/schemas/SessionId"
+        startTime:
+          allOf:
+            - $ref: "#/components/schemas/Time"
+          description: When the sponsorship started.
+        endTime:
+          allOf:
+            - $ref: "#/components/schemas/Time"
+          description: When the sponsorship ends (`startTime + duration` minutes).
+        sponsoredDataVolume:
+          type: integer
+          minimum: 1
+          maximum: 1000
+          description: The data volume (MB) granted for the user (echoes `dataVolume`, else the default).
+          example: 50
+
+    SponsoredDataError:
+      description: >-
+        The CAMARA error body for this API — the shared `CamaraError` shape with
+        the Sponsored Data `code` set.
+      allOf:
+        - $ref: "../../shared/errors.yaml#/components/schemas/CamaraError"
+        - type: object
+          properties:
+            code:
+              type: string
+              enum:
+                - INVALID_ARGUMENT
+                - OUT_OF_RANGE
+                - UNAUTHENTICATED
+                - PERMISSION_DENIED
+                - NOT_FOUND
+                - CONFLICT
+                - SERVICE_NOT_APPLICABLE
+                - TOO_MANY_REQUESTS
+                - INTERNAL
+                - UNAVAILABLE

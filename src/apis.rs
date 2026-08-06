@@ -46,6 +46,7 @@
 //! - **Device Authenticity vwip** — `/device-authenticity/vwip/…`.
 //! - **Session Insights vwip** — `/session-insights/vwip/…`.
 //! - **Consent Info vwip** — `/consent-info/vwip/…`.
+//! - **Sponsored Data vwip** — `/sponsored-data/vwip/…`.
 //!
 //! Plus [`openapi`], which serves each mounted API's vendored OpenAPI spec at
 //! `/{api}/v{n}/openapi.yaml` (docs/DESIGN.md §9).
@@ -90,6 +91,7 @@ pub mod region_device_count;
 pub mod session_insights;
 pub mod sim_swap;
 pub mod simple_edge_discovery;
+pub mod sponsored_data;
 pub mod subscription_status;
 pub mod verified_caller;
 
@@ -139,5 +141,6 @@ pub fn routes() -> Router {
         .merge(session_insights::routes())
         .merge(consent_info::routes())
         .merge(iot_sim_fraud_prevention::routes())
+        .merge(sponsored_data::routes())
         .merge(openapi::routes())
 }
