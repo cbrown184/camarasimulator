@@ -30,7 +30,8 @@
 //! deferred notifications).
 //!
 //! (`deleteSession` also delivers the terminal `session-ended` CloudEvent to the
-//! session's `sink`; the expiry (`SESSION_EXPIRED`) leg is deferred to a later pass.)
+//! session's `sink`; a time-bounded session likewise fires it — with
+//! `terminationReason: SESSION_EXPIRED` — when it reaches its `expiresAt`.)
 //!
 //! ## What it does
 //!
@@ -91,9 +92,13 @@
 //!   but the (simulated) network drops it early: after a short fixed grace it is
 //!   evicted and the **terminal** `session-ended` CloudEvent
 //!   (`terminationReason: NETWORK_TERMINATED`) is delivered to the session's
-//!   `sink` (fire-and-forget; see [`spawn_network_termination`]). The
-//!   `SESSION_EXPIRED` (expiry-timer) leg remains deferred — the fixed 24 h
-//!   lifetime is not exercisable by a real timer in a test.
+//!   `sink` (fire-and-forget; see [`spawn_network_termination`]).
+//! - **Session expiry (time-bounded session).** A session with an `expiresAt`
+//!   (any non-`…000`, non-`…001` tail) runs to that instant, then an async expiry
+//!   timer ([`spawn_session_expiry`]) evicts it and delivers the **terminal**
+//!   `session-ended` CloudEvent (`terminationReason: SESSION_EXPIRED`) to its
+//!   `sink`. The three terminal transitions (delete / network-termination /
+//!   expiry) are mutually exclusive — exactly one fires per session.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -293,9 +298,11 @@ async fn create_session(claims: Claims, headers: HeaderMap, body: Bytes) -> Resp
     if let Some(app_session_id) = req.application_session_id {
         info["applicationSessionId"] = json!(app_session_id);
     }
-    let open_ended = matches!(scenarios::trailing_three_digits(&resolved.id), None | Some(0));
+    let tail = scenarios::trailing_three_digits(&resolved.id);
+    let open_ended = matches!(tail, None | Some(0));
+    let expires_at = now + SESSION_LIFETIME_SECS;
     if !open_ended {
-        info["expiresAt"] = json!(rfc3339_utc(now + SESSION_LIFETIME_SECS));
+        info["expiresAt"] = json!(rfc3339_utc(expires_at));
     }
 
     // If the session records an ACCESSTOKEN `sinkCredential`, stash the derived
@@ -312,14 +319,21 @@ async fn create_session(claims: Claims, headers: HeaderMap, body: Bytes) -> Resp
 
     store::insert(id.clone(), info.clone());
 
-    // A `…001` identifier selects network-initiated termination: the (simulated)
-    // network drops the freshly-created session early (`spawn_network_termination`)
-    // and delivers the terminal `session-ended` CloudEvent
-    // (`terminationReason: NETWORK_TERMINATED`) to its `sink`. Spawned *after* the
-    // insert so the timer always sees the stored session. Every created session has
-    // a `sink` (required above), so there is always somewhere to notify.
-    if scenarios::trailing_three_digits(&resolved.id) == Some(NETWORK_TERMINATION_TAIL) {
+    // Schedule the session's terminal `session-ended` transition. Spawned *after*
+    // the insert so the timer always sees the stored session; every created session
+    // has a `sink` (required above), so there is always somewhere to notify. The
+    // three cases are mutually exclusive (exactly one terminal event ever fires):
+    // - `…001` → network-initiated termination: the (simulated) network drops the
+    //   session early ([`spawn_network_termination`], short fixed grace) →
+    //   `terminationReason: NETWORK_TERMINATED`.
+    // - any other **time-bounded** tail → the session runs to its `expiresAt`, then
+    //   the expiry timer ([`spawn_session_expiry`]) evicts it →
+    //   `terminationReason: SESSION_EXPIRED`.
+    // - **open-ended** (`…000`/no-digits) → no `expiresAt`, so no timer.
+    if tail == Some(NETWORK_TERMINATION_TAIL) {
         spawn_network_termination(id, sink);
+    } else if !open_ended {
+        spawn_session_expiry(id, sink, expires_at);
     }
 
     with_correlator((StatusCode::CREATED, Json(info)).into_response(), &correlator)
@@ -359,6 +373,43 @@ fn spawn_network_termination(session_id: String, sink: String) {
     });
 }
 
+/// Schedule the `SESSION_EXPIRED` `session-ended` transition for a time-bounded
+/// session.
+///
+/// Spawns a fire-and-forget async timer (never on the request path,
+/// docs/DESIGN.md §11) that waits until `expires_at` (the session's `expiresAt`,
+/// Unix seconds), then — if the session still exists — evicts it and delivers the
+/// **terminal** `session-ended` CloudEvent (`terminationReason: SESSION_EXPIRED`)
+/// to `sink`. This models the session simply reaching the end of its lifetime,
+/// distinct from an early `NETWORK_TERMINATED` drop or a consumer `SESSION_DELETED`.
+///
+/// A `deleteSession` (or a concurrent `spawn_network_termination`) that removed the
+/// session first makes this a no-op (`store::remove` is then `None`, so exactly one
+/// terminal event fires). The stashed ACCESSTOKEN `sinkCredential` bearer
+/// authenticates the callback and is *taken* single-use (the event is terminal).
+/// The sleep is async, so the (single-node, in-memory) runtime is never blocked; a
+/// non-positive remaining time (an already-past `expires_at`) fires immediately.
+fn spawn_session_expiry(session_id: String, sink: String, expires_at: i64) {
+    tokio::spawn(async move {
+        let now = now_unix_secs();
+        if now < expires_at {
+            tokio::time::sleep(std::time::Duration::from_secs((expires_at - now) as u64)).await;
+        }
+        // Expired. Evict it; if a concurrent delete/network-termination beat us,
+        // `remove` is None and we send nothing (that path already fired its terminal
+        // event).
+        if store::remove(&session_id).is_some() {
+            let event = notifications::session_ended_event(
+                store::new_event_id(),
+                rfc3339_utc(now_unix_secs()),
+                &session_id,
+                "SESSION_EXPIRED",
+            );
+            notifications::spawn_delivery(sink, event, store::take_credential(&session_id));
+        }
+    });
+}
+
 /// `GET /session-insights/vwip/sessions/{sessionId}`.
 async fn get_session(claims: Claims, headers: HeaderMap, Path(session_id): Path<String>) -> Response {
     let correlator = headers.get("x-correlator").cloned();
@@ -385,7 +436,8 @@ async fn get_session(claims: Claims, headers: HeaderMap, Path(session_id): Path<
 /// [`super::notifications`]). The network-initiated `session-ended` leg
 /// (`NETWORK_TERMINATED`) is scheduled from `createSession` for a `…001`
 /// identifier ([`spawn_network_termination`]); the session **expiry**
-/// (`SESSION_EXPIRED`) leg remains deferred to a later pass.
+/// (`SESSION_EXPIRED`) leg is scheduled from `createSession` for a time-bounded
+/// session ([`spawn_session_expiry`]).
 async fn delete_session(
     claims: Claims,
     headers: HeaderMap,
@@ -1431,6 +1483,71 @@ mod tests {
         let read = mint_token(READ_SCOPE).await;
         let (status, _, _) = get_session_req(Some(&read), &session_id, None).await;
         assert_eq!(status, StatusCode::NOT_FOUND, "network-terminated → evicted");
+    }
+
+    #[tokio::test]
+    async fn an_expired_session_fires_session_ended_session_expired_and_is_evicted() {
+        use tokio::io::AsyncReadExt;
+        use tokio::net::TcpListener;
+
+        // A loopback receiver stands in for the consumer's `sink`.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let sink = format!("http://{addr}/si-notify");
+
+        // Insert a time-bounded session directly, with an already-past `expiresAt`
+        // and an ACCESSTOKEN sinkCredential, then drive the very timer
+        // `createSession` schedules ([`spawn_session_expiry`]). A past expiry means
+        // it fires immediately, so the fixed 24 h lifetime need not elapse in the
+        // test — the same code path a live 24 h session takes at its `expiresAt`.
+        let id = store::new_session_id();
+        let now = now_unix_secs();
+        let info = json!({
+            "id": id,
+            "status": "ACTIVE",
+            "device": { "phoneNumber": "+123456789012" },
+            "sink": sink,
+            "startsAt": rfc3339_utc(now - 100),
+            "expiresAt": rfc3339_utc(now - 10),
+        });
+        store::insert(id.clone(), info);
+        store::insert_credential(id.clone(), "Bearer ex-secret".to_string());
+
+        spawn_session_expiry(id.clone(), sink.clone(), now - 10);
+
+        // Receive the fire-and-forget terminal `session-ended` CloudEvent.
+        let (mut sock, _) = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            listener.accept(),
+        )
+        .await
+        .expect("expiry callback arrives")
+        .unwrap();
+        let mut buf = Vec::new();
+        sock.read_to_end(&mut buf).await.unwrap();
+        let raw = String::from_utf8(buf).unwrap();
+        let (head, event_body) = raw.split_once("\r\n\r\n").expect("headers then body");
+        assert!(
+            head.starts_with("POST /si-notify HTTP/1.1\r\n"),
+            "request line: {head}"
+        );
+        assert!(head.contains("Content-Type: application/cloudevents+json"));
+        // The stashed ACCESSTOKEN sinkCredential bearer authenticates the callback.
+        assert!(
+            head.contains("Authorization: Bearer ex-secret\r\n"),
+            "callback carries the sinkCredential bearer: {head}"
+        );
+
+        let event: Value = serde_json::from_str(event_body).expect("body is JSON");
+        assert_eq!(
+            event["type"],
+            "org.camaraproject.session-insights.v0.session-ended"
+        );
+        assert_eq!(event["data"]["sessionId"], json!(id));
+        assert_eq!(event["data"]["terminationReason"], "SESSION_EXPIRED");
+
+        // The session was evicted at expiry: it is now gone.
+        assert!(store::get(&id).is_none(), "expired → evicted from the store");
     }
 
     // --- Retrieve sessions by device ---------------------------------------

@@ -16,10 +16,12 @@
 # terminal `session-ended` CloudEvent (`terminationReason: SESSION_DELETED`) to the
 # session's `sink` too, and `createSession` schedules the network-initiated
 # `session-ended` leg (`terminationReason: NETWORK_TERMINATED`) for a `…001`
-# identifier — the (simulated) network drops the session early. A session's
-# ACCESSTOKEN `sinkCredential` bearer authenticates every callback
-# (`Authorization: Bearer`); the `session-ended` expiry (`SESSION_EXPIRED`) leg
-# and `https://` (TLS) sink delivery remain deferred to later passes.
+# identifier — the (simulated) network drops the session early. A time-bounded
+# session likewise fires the terminal `session-ended` leg
+# (`terminationReason: SESSION_EXPIRED`) when it reaches its `expiresAt`
+# (`createSession` schedules the expiry timer). A session's ACCESSTOKEN
+# `sinkCredential` bearer authenticates every callback (`Authorization: Bearer`);
+# only `https://` (TLS) sink delivery remains deferred to a later pass.
 openapi: 3.0.3
 info:
   title: Session Insights
@@ -98,8 +100,17 @@ paths:
         session's ACCESSTOKEN `sinkCredential` bearer (stashed here) authenticates
         the callback and is taken single-use (the event is terminal). A concurrent
         `deleteSession` that removed the session first makes this a no-op (exactly
-        one terminal event fires). The `SESSION_EXPIRED` (expiry-timer) leg remains
-        deferred.
+        one terminal event fires).
+
+        **Session expiry (CamaraSim model).** A time-bounded session (any
+        non-`…000`, non-`…001` tail, so it has an `expiresAt`) runs to that instant,
+        then an async expiry timer scheduled here evicts it and delivers the
+        **terminal** `session-ended` CloudEvent (`data.terminationReason:
+        SESSION_EXPIRED`) to its `sink` — same fire-and-forget transport and
+        ACCESSTOKEN `sinkCredential` bearer as the other legs. The three terminal
+        transitions (`SESSION_DELETED` / `NETWORK_TERMINATED` / `SESSION_EXPIRED`)
+        are mutually exclusive — exactly one fires per session. An **open-ended**
+        session (`…000`/no-digits, no `expiresAt`) has no expiry timer.
       security:
         - openId:
             - session-insights:sessions:create
@@ -211,7 +222,11 @@ paths:
           - input: "identifier trailing digits …000 (or no digits)"
             result: "201 ACTIVE, open-ended (no expiresAt)"
           - input: "identifier with any other trailing digits (e.g. …012)"
-            result: "201 ACTIVE, time-bounded (expiresAt = startsAt + 24h)"
+            result: >-
+              201 ACTIVE, time-bounded (expiresAt = startsAt + 24h); an expiry
+              timer is scheduled so at expiresAt the session is evicted and a
+              terminal session-ended CloudEvent (terminationReason SESSION_EXPIRED)
+              is delivered to the http sink (ACCESSTOKEN sinkCredential bearer applied)
           - input: "identifier trailing digits …001 (network-termination scenario)"
             result: >-
               201 ACTIVE, then the simulated network drops it early — after a
@@ -288,8 +303,9 @@ paths:
         `sinkCredential` bearer (stashed at `createSession`) is applied to the
         callback as `Authorization: Bearer <token>` and taken single-use (the event
         is terminal). The network-initiated (`NETWORK_TERMINATED`) leg of
-        `session-ended` is scheduled from `createSession` for a `…001` identifier;
-        the `SESSION_EXPIRED` (expiry) leg remains deferred.
+        `session-ended` is scheduled from `createSession` for a `…001` identifier,
+        and the `SESSION_EXPIRED` (expiry) leg from `createSession` for a
+        time-bounded session; the three terminal legs are mutually exclusive.
       security:
         - openId:
             - session-insights:sessions:delete
@@ -477,10 +493,11 @@ paths:
         TLS client, so an `https://` sink is accepted at `createSession` but its
         callback is a silent no-op (matches QoD / QoS Provisioning). A
         `PLAIN`/`REFRESHTOKEN` `sinkCredential` (or none) sends the callback
-        unauthenticated. The `session-ended` CloudEvent (delete / expiry) is deferred
-        to a later pass. The spec's `410 Gone` (metrics for an expired session) is
-        also a cut: no retained expired state exists — a deleted session is evicted
-        (→ `404`) and the expiry transition arrives with the deferred notifications.
+        unauthenticated. The `session-ended` CloudEvent legs (delete /
+        network-termination / expiry) are delivered on their own transitions, not
+        here. The spec's `410 Gone` (metrics for an expired session) is a cut: no
+        retained expired state exists — an expired or deleted session is evicted, so
+        metrics against it answer `404` rather than `410`.
       security:
         - openId:
             - session-insights:sessions:write
@@ -894,8 +911,10 @@ components:
         The CloudEvents 1.0 envelope CamaraSim delivers to a session's `sink` when
         the session ends — the session's **terminal** notification, after which no
         further events are delivered. CamaraSim emits it from `deleteSession`
-        (fire-and-forget, `http://` sinks only). `data` (CAMARA `SessionEndedData`)
-        carries the `sessionId` and the `terminationReason`.
+        (`SESSION_DELETED`), from the `…001` network-termination timer
+        (`NETWORK_TERMINATED`), and from the expiry timer of a time-bounded session
+        (`SESSION_EXPIRED`) — fire-and-forget, `http://` sinks only. `data` (CAMARA
+        `SessionEndedData`) carries the `sessionId` and the `terminationReason`.
       required:
         - id
         - source
@@ -938,8 +957,9 @@ components:
               type: string
               description: >-
                 Why the session ended. CamaraSim fires `SESSION_DELETED` from
-                `deleteSession`; the other reasons cover expiry / access-token
-                expiry / network-initiated termination (deferred legs).
+                `deleteSession`, `NETWORK_TERMINATED` from the `…001`
+                network-termination timer, and `SESSION_EXPIRED` from a time-bounded
+                session's expiry timer. `ACCESS_TOKEN_EXPIRED` is a documented cut.
               enum:
                 - NETWORK_TERMINATED
                 - SESSION_EXPIRED

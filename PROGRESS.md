@@ -1622,9 +1622,16 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
         `sink` (fire-and-forget over raw TCP, `http://` only; ACCESSTOKEN
         `sinkCredential` bearer applied, taken single-use; exactly-once vs a
         concurrent delete). No new dep.
-      - [ ] `SESSION_EXPIRED` (expiry timer) leg — deferred: the session lifetime
-        is a fixed 24 h, so a real expiry timer can't be exercised in a test
-        (would need a caller-controlled/short lifetime to ship tested)
+      - [x] `SESSION_EXPIRED` (expiry timer) leg — `createSession` schedules an
+        async expiry timer (`spawn_session_expiry`) for a time-bounded, sink-bearing
+        session; at `expiresAt` it evicts the session and delivers the terminal
+        `session-ended` CloudEvent (`terminationReason: SESSION_EXPIRED`) over raw
+        TCP (`http://` only; ACCESSTOKEN `sinkCredential` bearer applied, taken
+        single-use). Mutually exclusive with `SESSION_DELETED`/`NETWORK_TERMINATED`
+        (exactly-once via `store::remove`). The fixed 24 h lifetime is not waited on
+        in a test — the timer is exercised end-to-end by driving it with an
+        already-past `expiresAt` (fires immediately), the same code path a live
+        session takes at expiry. No new dep.
     - [ ] TLS (`https://` sink) delivery (needs a rustls TLS client)
 - [ ] Other CAMARA APIs as capacity allows
 
@@ -1652,6 +1659,19 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-06 — Phase 5: **Session Insights vwip — `session-ended` `SESSION_EXPIRED`
+  (expiry-timer) leg**. `createSession` now schedules an async expiry timer
+  (`spawn_session_expiry`) for a time-bounded, sink-bearing session (any non-`…000`,
+  non-`…001` tail): at `expiresAt` it evicts the session and delivers the terminal
+  `session-ended` CloudEvent (`terminationReason: SESSION_EXPIRED`) over raw TCP
+  (`http://` only), ACCESSTOKEN `sinkCredential` bearer applied + taken single-use,
+  exactly-once vs a concurrent delete/network-termination. Overcame the prior
+  "can't be tested" deferral: the timer fires immediately when driven with an
+  already-past `expiresAt`, so the real path is exercised end-to-end without waiting
+  the fixed 24 h. Spec: header + createSession/delete/metrics descriptions +
+  `x-camarasim-scenarios` time-bounded case + `SessionEndedEvent` enum note refreshed.
+  Test: past-expiry session → SESSION_EXPIRED CloudEvent + bearer + eviction. No new
+  dep. `cargo test` 1258 passing; binary: 2,586,096 bytes (~2.5M, unchanged).
 - 2026-08-06 — Phase 5: **Session Insights vwip — `session-ended` `NETWORK_TERMINATED`
   leg on `createSession`**. A `…001` identifier now creates an ordinary `ACTIVE`
   session, then the simulated network drops it early: `spawn_network_termination`
