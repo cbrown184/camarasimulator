@@ -1857,8 +1857,15 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     id. Opaque `callId` → store state is the only control plane (no
     reserved-identifier plane; mirrors QoD `getSession` / Carrier Billing
     `retrievePayment`). `x-correlator` echoed.
-  - [ ] `DELETE /calls/{callId}` (`terminateCall`), `GET /calls/{callId}/recording`
-    (`getRecording`) + the `409 ALREADY_EXISTS` duplicate-call case — later slice.
+  - [x] stateful `DELETE /calls/{callId}` (`terminateCall`,
+    `click-to-dial:calls:delete`) — evicts the call from the shared store
+    (`store::remove`, atomic check-and-remove) → `204 No Content`; unknown/
+    already-terminated id → `404 NOT_FOUND` (single-use eviction, so a later
+    `getCall`/`terminateCall` is a 404). Opaque `callId` → store state is the
+    only control plane (mirrors `getCall`). No `sink` signalling (deferred).
+    `x-correlator` echoed. No new dep.
+  - [ ] `GET /calls/{callId}/recording` (`getRecording`) + the
+    `409 ALREADY_EXISTS` duplicate-call case — later slice.
   - [ ] `status-changed` CloudEvents on `sink` — deferred (like QoD's first pass).
 - [ ] Other CAMARA APIs as capacity allows
 
@@ -1886,6 +1893,24 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-06 — Phase 5 (stateful delete): **Click to Dial vwip —
+  `DELETE /calls/{callId}`** (`terminateCall`, `click-to-dial:calls:delete`), the
+  natural next slice after `getCall`. New `store::remove` (atomic check-and-remove
+  under the store lock, **no new dep**): a present call → `204 No Content` and is
+  evicted; unknown/already-terminated id → `404 NOT_FOUND` (single-use, so a later
+  `getCall`/`terminateCall` is a 404). Opaque `callId` → store state is the only
+  control plane (mirrors `getCall`); no `sink` signalling (deferred). `x-correlator`
+  echoed. Left the higher-priority backlog leaves alone as before: the three
+  TLS-sink cases still need a rustls TLS client (heavy dep vs the raw-TCP,
+  HTTP-client-free CloudEvents design — not a small pass), and `AREALIMIT` /
+  campaign-management / `status-changed` sinks are deferred cuts; picked the top
+  remaining actionable, dependency-free leaf. Deferred within Click to Dial:
+  `getRecording` + the `409 ALREADY_EXISTS` duplicate-call case. Spec: `delete`
+  op on `/calls/{callId}` (`204` response + `terminateCall` `x-camarasim-scenarios`)
+  in the vendored `click-to-dial/vwip` spec; description/cuts updated
+  (catalog↔spec contract test still green). 6 new tests (5 endpoint + 1 store
+  unit); `cargo test` 1414 green; `cargo build --release` clean. — binary:
+  2,827,104 bytes (~2.83 MB, +~5.7 KB, no new dep)
 - 2026-08-06 — Phase 3/5 (stateful read-back): **Click to Dial vwip —
   `GET /calls/{callId}`** (`getCall`, `click-to-dial:calls:read`), making the API
   stateful. The immediately-preceding pass added the stateless `createCall`; this

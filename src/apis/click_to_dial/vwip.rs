@@ -1,10 +1,12 @@
 //! Click to Dial **vwip** (CAMARA Click to Dial, `wip`).
 //!
-//! Two endpoints so far:
+//! Three endpoints so far:
 //! - `POST /click-to-dial/vwip/calls` — create a Click to Dial call session
 //!   between a `caller` and a `callee` (`createCall`).
 //! - `GET /click-to-dial/vwip/calls/{callId}` — read a created call back
 //!   (`getCall`).
+//! - `DELETE /click-to-dial/vwip/calls/{callId}` — terminate a created call
+//!   (`terminateCall`), evicting it from the store.
 //!
 //! ## What it does
 //!
@@ -62,6 +64,16 @@
 //! `Call`; an unknown/never-created id → `404 NOT_FOUND`. It requires a token
 //! carrying the `click-to-dial:calls:read` scope.
 //!
+//! ## `terminateCall` — the store is the only control plane (docs/DESIGN.md §7)
+//!
+//! `DELETE /calls/{callId}` terminates a created call: it evicts the call from
+//! the shared [`super::store`] and returns `204 No Content`, or `404 NOT_FOUND`
+//! for an unknown/never-created id. As with `getCall`, the `callId` is opaque, so
+//! the store state is the only control plane; eviction is single-use, so a
+//! subsequent `getCall`/`terminateCall` for the same id is a `404`. It requires a
+//! token carrying the `click-to-dial:calls:delete` scope. Termination is not
+//! signalled to a `sink` (`status-changed` notifications remain deferred).
+//!
 //! ## Documented cuts
 //!
 //! - **Deterministic re-create.** `createCall` now persists the call, but its
@@ -69,9 +81,8 @@
 //!   derived from the participant pair, re-creating the same call overwrites the
 //!   identical stored value (the `409 ALREADY_EXISTS` duplicate-call case, which
 //!   would make `createCall` stateful, is a later slice).
-//! - **Terminate / recording deferred.** `DELETE /calls/{callId}`
-//!   (`terminateCall`) and `GET /calls/{callId}/recording` (`getRecording`), plus
-//!   the lifecycle `status` transitions past `initiating`, are a later slice.
+//! - **Recording deferred.** `GET /calls/{callId}/recording` (`getRecording`)
+//!   and the lifecycle `status` transitions past `initiating` are a later slice.
 //! - **Notifications deferred.** `sink` / `sinkCredential` are accepted for
 //!   schema fidelity but not delivered to — the `status-changed` CloudEvents are
 //!   a later slice (like QoD's first create pass).
@@ -99,6 +110,10 @@ const CREATE_SCOPE: &str = "click-to-dial:calls:create";
 /// Dial).
 const READ_SCOPE: &str = "click-to-dial:calls:read";
 
+/// The OAuth2 scope the `DELETE /calls/{callId}` endpoint requires (CAMARA Click
+/// to Dial).
+const DELETE_SCOPE: &str = "click-to-dial:calls:delete";
+
 /// The trailing-three-digit sentinel that marks a line as unreachable
 /// (`caller`/`callee` not available). Not a reserved *error* suffix, so it is
 /// free for this API to use as a happy-path-adjacent marker.
@@ -112,7 +127,10 @@ const RECORDING_UNSUPPORTED_TAIL: u16 = 777;
 pub fn routes() -> Router {
     Router::new()
         .route("/click-to-dial/vwip/calls", post(create_call))
-        .route("/click-to-dial/vwip/calls/:call_id", get(get_call))
+        .route(
+            "/click-to-dial/vwip/calls/:call_id",
+            get(get_call).delete(terminate_call),
+        )
 }
 
 /// A call participant (`caller` / `callee`) — an object carrying a `number`
@@ -269,6 +287,40 @@ async fn get_call(claims: Claims, headers: HeaderMap, Path(call_id): Path<String
             CamaraError::not_found("No call found for the provided callId.").into_response(),
             &correlator,
         ),
+    }
+}
+
+/// `DELETE /click-to-dial/vwip/calls/{callId}` — terminate a created call
+/// (operationId `terminateCall`).
+///
+/// Evicts the call held in the shared in-memory [`super::store`] under `callId`
+/// and answers `204 No Content` (the call was terminated), or `404 NOT_FOUND` for
+/// an unknown/never-created id. Like `getCall`, the `callId` is an opaque,
+/// UUID-shaped token, so there is no reserved-identifier control plane — the store
+/// state is the only control plane, and a second terminate of the same id is a
+/// `404` (single-use eviction). Requires a token carrying
+/// `click-to-dial:calls:delete`. Termination is not signalled to a `sink`
+/// (`status-changed` notifications remain a deferred slice).
+async fn terminate_call(
+    claims: Claims,
+    headers: HeaderMap,
+    Path(call_id): Path<String>,
+) -> Response {
+    // Optional correlation header, echoed on every response (CAMARA Commonalities).
+    let correlator = headers.get("x-correlator").cloned();
+
+    // Endpoint authorisation: the token must carry this API's delete scope.
+    if let Err(e) = claims.require_scope(DELETE_SCOPE) {
+        return with_correlator(e.into_response(), &correlator);
+    }
+
+    if super::store::remove(&call_id) {
+        with_correlator(StatusCode::NO_CONTENT.into_response(), &correlator)
+    } else {
+        with_correlator(
+            CamaraError::not_found("No call found for the provided callId.").into_response(),
+            &correlator,
+        )
     }
 }
 
@@ -820,6 +872,127 @@ mod tests {
         assert_eq!(
             headers.get("x-correlator").and_then(|v| v.to_str().ok()),
             Some("corr-404")
+        );
+    }
+
+    // --- terminateCall (stateful delete) -----------------------------------
+
+    /// DELETE `/calls/{callId}` with an optional Bearer token and optional
+    /// `x-correlator`. Returns (status, headers, json-or-null). A `204` carries
+    /// no body, so the json is `Null`.
+    async fn delete_call_by_id(
+        token: Option<&str>,
+        call_id: &str,
+        correlator: Option<&str>,
+    ) -> (StatusCode, HeaderMap, Value) {
+        let mut builder = Request::builder()
+            .method("DELETE")
+            .uri(format!("/click-to-dial/vwip/calls/{call_id}"))
+            .header("host", HOST);
+        if let Some(t) = token {
+            builder = builder.header("authorization", format!("Bearer {t}"));
+        }
+        if let Some(c) = correlator {
+            builder = builder.header("x-correlator", c);
+        }
+        let response = app()
+            .oneshot(builder.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let headers = response.headers().clone();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, headers, json)
+    }
+
+    #[tokio::test]
+    async fn terminate_evicts_the_call_and_a_later_get_is_404() {
+        // Create with a pair unique to this test (process-global store), then
+        // terminate it and confirm it is gone.
+        let create = mint_token(CREATE_SCOPE).await;
+        let (status, _, created) = post_calls(
+            Some(&create),
+            r#"{"caller":{"number":"+123456789111"},"callee":{"number":"+123456789444"}}"#,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let id = created["callId"].as_str().unwrap();
+
+        // Terminate → 204 No Content, empty body.
+        let del = mint_token(DELETE_SCOPE).await;
+        let (status, _, body) = delete_call_by_id(Some(&del), id, None).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(body, Value::Null, "204 carries no body");
+
+        // The call is now gone: getCall returns 404.
+        let read = mint_token(READ_SCOPE).await;
+        let (status, _, got) = get_call_by_id(Some(&read), id, None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(got["code"], "NOT_FOUND");
+
+        // A second terminate is also a 404 (single-use eviction).
+        let (status, _, body) = delete_call_by_id(Some(&del), id, None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn terminate_unknown_call_id_is_404() {
+        let del = mint_token(DELETE_SCOPE).await;
+        let (status, _, body) =
+            delete_call_by_id(Some(&del), "3fa85f64-5717-4562-b3fc-2c963f66afa6", None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn terminate_without_the_delete_scope_is_forbidden() {
+        // A token carrying only the create scope may not terminate.
+        let create = mint_token(CREATE_SCOPE).await;
+        let (status, _, body) =
+            delete_call_by_id(Some(&create), "3fa85f64-5717-4562-b3fc-2c963f66afa6", None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["code"], "PERMISSION_DENIED");
+    }
+
+    #[tokio::test]
+    async fn terminate_missing_token_is_unauthenticated() {
+        let (status, _, body) =
+            delete_call_by_id(None, "3fa85f64-5717-4562-b3fc-2c963f66afa6", None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["code"], "UNAUTHENTICATED");
+    }
+
+    #[tokio::test]
+    async fn x_correlator_is_echoed_on_terminate_204_and_404() {
+        // 204: create, then terminate with a correlator.
+        let create = mint_token(CREATE_SCOPE).await;
+        let (_, _, created) = post_calls(
+            Some(&create),
+            r#"{"caller":{"number":"+123456789111"},"callee":{"number":"+123456789555"}}"#,
+            None,
+        )
+        .await;
+        let id = created["callId"].as_str().unwrap();
+        let del = mint_token(DELETE_SCOPE).await;
+        let (status, headers, _) = delete_call_by_id(Some(&del), id, Some("corr-del")).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-del")
+        );
+        // 404: unknown id, correlator still echoed.
+        let (status, headers, _) =
+            delete_call_by_id(Some(&del), "00000000-0000-4000-8000-000000000000", Some("corr-d404"))
+                .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-d404")
         );
     }
 }

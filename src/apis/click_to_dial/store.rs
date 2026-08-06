@@ -15,9 +15,9 @@
 //!   [`crate::apis::quality_on_demand::store`] and
 //!   [`crate::apis::carrier_billing::store`]).
 //! - The stored value is the call's rendered `Call` JSON, returned verbatim by
-//!   `getCall` — the created representation is the source of truth for this slice
-//!   (lifecycle `status` transitions and `terminateCall` / `getRecording` arrive
-//!   in later slices).
+//!   `getCall`. `terminateCall` (`DELETE /calls/{callId}`) evicts it via
+//!   [`remove`], so a subsequent `getCall` returns `404`. Lifecycle `status`
+//!   transitions and `getRecording` arrive in later slices.
 //! - The `callId` is already a deterministic, UUID-shaped token derived from the
 //!   participant pair by `createCall`, so this store mints no ids of its own.
 
@@ -56,6 +56,19 @@ pub fn get(id: &str) -> Option<Value> {
         .cloned()
 }
 
+/// Remove the `Call` stored under `id`, returning `true` if a call was present
+/// (and is now gone) or `false` if no such call existed. `terminateCall` uses the
+/// distinction to answer `204 No Content` (the call was terminated) vs
+/// `404 NOT_FOUND` (unknown/never-created id). The check-and-remove is atomic
+/// under the store lock, so two concurrent terminates never both see the call.
+pub fn remove(id: &str) -> bool {
+    store()
+        .lock()
+        .expect("click-to-dial call store not poisoned")
+        .remove(id)
+        .is_some()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -71,6 +84,19 @@ mod tests {
         insert(id.to_string(), call.clone());
         assert_eq!(get(id), Some(call));
         assert!(get("store-unit-no-such-call").is_none());
+    }
+
+    #[test]
+    fn remove_reports_presence_and_evicts_the_call() {
+        let id = "store-unit-call-c";
+        // Removing something never stored → false (nothing to terminate).
+        assert!(!remove(id), "unknown id → false");
+        insert(id.to_string(), json!({ "callId": id, "status": "initiating" }));
+        // First remove sees the call and evicts it.
+        assert!(remove(id), "present id → true");
+        assert!(get(id).is_none(), "evicted → gone");
+        // A second remove no longer sees it (single-use eviction).
+        assert!(!remove(id), "already removed → false");
     }
 
     #[test]
