@@ -9,6 +9,13 @@
 //!   `getTrafficInfluence`, scope `traffic-influence:traffic-influences:read`):
 //!   the opaque, operator-minted id is the only control plane — a stored resource
 //!   → `200` (returned verbatim), an unknown id → `404 NOT_FOUND`.
+//! - `DELETE /traffic-influence/vwip/traffic-influences/{trafficInfluenceID}` —
+//!   delete a created resource (operationId `deleteTrafficInfluence`, scope
+//!   `traffic-influence:traffic-influences:delete`): the opaque id is again the
+//!   only control plane — a stored resource → `202 Accepted` (evicted from the
+//!   store, single-use), an unknown/already-deleted id → `404 NOT_FOUND`. The
+//!   upstream deletion is asynchronous (`202`, resource → `deletion in
+//!   progress`); the sim honours the `202` but evicts synchronously.
 //!
 //! ## What it does
 //!
@@ -80,6 +87,10 @@ const WRITE_SCOPE: &str = "traffic-influence:traffic-influences:write";
 /// upstream `wip` contract (`traffic-influence:traffic-influences:read`).
 const READ_SCOPE: &str = "traffic-influence:traffic-influences:read";
 
+/// Scope required to delete a Traffic Influence resource. Declared by the
+/// upstream `wip` contract (`traffic-influence:traffic-influences:delete`).
+const DELETE_SCOPE: &str = "traffic-influence:traffic-influences:delete";
+
 /// Base path of the resource collection, used both to mount the route and to
 /// build the `201` `Location` header.
 const COLLECTION: &str = "/traffic-influence/vwip/traffic-influences";
@@ -97,7 +108,7 @@ const MAX_PORT: i64 = 65535;
 pub fn routes() -> Router {
     Router::new()
         .route(COLLECTION, post(post_traffic_influence))
-        .route(ITEM, get(get_traffic_influence))
+        .route(ITEM, get(get_traffic_influence).delete(delete_traffic_influence))
 }
 
 /// The `postTrafficInfluence` request body (`PostTrafficInfluence`). The
@@ -288,6 +299,50 @@ async fn get_traffic_influence(
             .into_response(),
             &correlator,
         ),
+    }
+}
+
+/// `DELETE /traffic-influence/vwip/traffic-influences/{trafficInfluenceID}`.
+///
+/// Deletes a Traffic Influence resource created by [`post_traffic_influence`],
+/// addressed by its opaque, operator-minted `trafficInfluenceID`. Upstream the
+/// deletion is asynchronous — the resource transitions to `deletion in progress`
+/// and the operator answers `202 Accepted` — so CamaraSim honours the `202`
+/// contract but evicts the resource synchronously from the shared in-memory
+/// [`super::store`] (the sim has no background lifecycle worker): a `deletion in
+/// progress` / `deleted` steady state is a documented cut (see the spec).
+///
+/// Like the read leg, the `trafficInfluenceID` is opaque, so it carries **no**
+/// reserved-identifier control plane: the stored state is the only plane
+/// (docs/DESIGN.md §7). A resource still in the store → `202 Accepted` (evicted,
+/// single-use), so a subsequent `getTrafficInfluence` / `deleteTrafficInfluence`
+/// on the same id → `404 NOT_FOUND`; an unknown id (never created, already
+/// deleted, or minted in a different process) → `404 NOT_FOUND`. Mirrors Click to
+/// Dial's `terminateCall` and QoS Provisioning's `revokeQosAssignment`.
+async fn delete_traffic_influence(
+    claims: Claims,
+    headers: HeaderMap,
+    Path(traffic_influence_id): Path<String>,
+) -> Response {
+    // Optional correlation header, echoed on every response (CAMARA Commonalities).
+    let correlator = headers.get("x-correlator").cloned();
+
+    // Endpoint authorisation: the token must carry the delete scope.
+    if let Err(e) = claims.require_scope(DELETE_SCOPE) {
+        return with_correlator(e.into_response(), &correlator);
+    }
+
+    if super::store::remove(&traffic_influence_id) {
+        // Async-deletion contract: 202 Accepted, no body.
+        with_correlator(StatusCode::ACCEPTED.into_response(), &correlator)
+    } else {
+        with_correlator(
+            CamaraError::not_found(
+                "No Traffic Influence resource found for the provided trafficInfluenceID.",
+            )
+            .into_response(),
+            &correlator,
+        )
     }
 }
 
@@ -814,6 +869,122 @@ mod tests {
         assert_eq!(
             headers.get("x-correlator").and_then(|v| v.to_str().ok()),
             Some("corr-get-2")
+        );
+    }
+
+    // --- deleteTrafficInfluence --------------------------------------------
+
+    async fn delete_req(
+        token: Option<&str>,
+        id: &str,
+        correlator: Option<&str>,
+    ) -> (StatusCode, HeaderMap, Value) {
+        let mut builder = Request::builder()
+            .method("DELETE")
+            .uri(format!("{COLLECTION}/{id}"))
+            .header("host", HOST);
+        if let Some(t) = token {
+            builder = builder.header("authorization", format!("Bearer {t}"));
+        }
+        if let Some(c) = correlator {
+            builder = builder.header("x-correlator", c);
+        }
+        let request = builder.body(Body::empty()).unwrap();
+        let response = app().oneshot(request).await.unwrap();
+        let status = response.status();
+        let headers = response.headers().clone();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, headers, value)
+    }
+
+    #[tokio::test]
+    async fn delete_evicts_a_created_resource_and_read_back_is_404() {
+        // Create, then delete → 202, then a read-back is 404 (single-use eviction).
+        let (status, _, created) = post(Some(&token().await), None, create_body(APP_ACTIVE)).await;
+        assert_eq!(status, StatusCode::CREATED);
+        let id = created["trafficInfluenceID"].as_str().expect("id minted").to_string();
+
+        let del = mint_token(DELETE_SCOPE).await;
+        let (status, _, body) = delete_req(Some(&del), &id, None).await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        // 202 carries no body.
+        assert_eq!(body, Value::Null);
+        // Evicted from the store.
+        assert!(super::super::store::get(&id).is_none());
+
+        // A subsequent read is 404.
+        let read = mint_token(READ_SCOPE).await;
+        let (status, _, err) = get_req(Some(&read), &id, None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(err["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn delete_is_single_use_second_delete_is_404() {
+        let (_, _, created) = post(Some(&token().await), None, create_body(APP_ACTIVE)).await;
+        let id = created["trafficInfluenceID"].as_str().unwrap().to_string();
+
+        let del = mint_token(DELETE_SCOPE).await;
+        let (status, _, _) = delete_req(Some(&del), &id, None).await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        let (status, _, err) = delete_req(Some(&del), &id, None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(err["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn delete_unknown_id_is_not_found() {
+        let del = mint_token(DELETE_SCOPE).await;
+        let (status, _, body) =
+            delete_req(Some(&del), "33333333-3333-4333-8333-333333333333", None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn delete_missing_token_is_unauthenticated() {
+        let (status, _, _) =
+            delete_req(None, "33333333-3333-4333-8333-333333333333", None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn delete_wrong_scope_is_permission_denied_and_resource_survives() {
+        // The write scope does not grant delete; the resource must survive a 403.
+        let (_, _, created) = post(Some(&token().await), None, create_body(APP_ACTIVE)).await;
+        let id = created["trafficInfluenceID"].as_str().unwrap().to_string();
+
+        let wrong = mint_token(WRITE_SCOPE).await;
+        let (status, _, _) = delete_req(Some(&wrong), &id, None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        // Still readable — the 403 did not evict it.
+        let read = mint_token(READ_SCOPE).await;
+        let (status, _, _) = get_req(Some(&read), &id, None).await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn delete_echoes_x_correlator_on_success_and_error() {
+        let (_, _, created) = post(Some(&token().await), None, create_body(APP_ACTIVE)).await;
+        let id = created["trafficInfluenceID"].as_str().unwrap().to_string();
+        let del = mint_token(DELETE_SCOPE).await;
+
+        let (status, headers, _) = delete_req(Some(&del), &id, Some("corr-del-1")).await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-del-1")
+        );
+
+        let (status, headers, _) =
+            delete_req(Some(&del), "44444444-4444-4444-8444-444444444444", Some("corr-del-2")).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-del-2")
         );
     }
 }

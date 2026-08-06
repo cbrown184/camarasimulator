@@ -46,6 +46,21 @@ pub fn get(id: &str) -> Option<Value> {
         .cloned()
 }
 
+/// Evict the resource stored under `id`, returning `true` if one was present
+/// (and is now removed) or `false` if there was no such resource. The
+/// check-and-remove happens under a single lock hold, so a concurrent
+/// `deleteTrafficInfluence` on the same id can succeed at most once.
+/// `deleteTrafficInfluence` uses the distinction to answer `202` (deletion
+/// accepted for a resource that existed) vs `404 NOT_FOUND` (unknown/already
+/// deleted id).
+pub fn remove(id: &str) -> bool {
+    store()
+        .lock()
+        .expect("traffic-influence store not poisoned")
+        .remove(id)
+        .is_some()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -64,5 +79,17 @@ mod tests {
         assert_eq!(got["trafficInfluenceID"], id);
         assert_eq!(got["state"], "ordered");
         assert!(get("ti-store-unit-no-such").is_none());
+    }
+
+    #[test]
+    fn remove_evicts_once_then_reports_absent() {
+        // Uniquely-keyed so this shares the process-global store with nothing else.
+        let id = "ti-store-unit-remove-0001".to_string();
+        assert!(!remove(&id), "nothing stored yet → false");
+        insert(id.clone(), json!({ "trafficInfluenceID": id, "state": "active" }));
+        assert!(get(&id).is_some(), "stored → present");
+        assert!(remove(&id), "first remove evicts → true");
+        assert!(get(&id).is_none(), "gone after remove");
+        assert!(!remove(&id), "second remove → false (single-use)");
     }
 }

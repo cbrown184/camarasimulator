@@ -6,16 +6,22 @@
 # CamaraSim's parameter-driven functional cases (docs/DESIGN.md §7, §9). Backed
 # by `src/apis/traffic_influence/vwip.rs`; spec and code must not drift.
 #
-# Serves `POST /traffic-influences` (`postTrafficInfluence`) and
-# `GET /traffic-influences/{trafficInfluenceID}` (`getTrafficInfluence`).
+# Serves `POST /traffic-influences` (`postTrafficInfluence`),
+# `GET /traffic-influences/{trafficInfluenceID}` (`getTrafficInfluence`) and
+# `DELETE /traffic-influences/{trafficInfluenceID}` (`deleteTrafficInfluence`).
 #
 # Divergences from the upstream CAMARA source (documented cuts):
-#   - The resource **create** (for "any user") and **read** legs are mounted.
-#     The upstream also defines `PATCH`/`DELETE /traffic-influences/{id}`, a
+#   - The resource **create** (for "any user"), **read** and **delete** legs are
+#     mounted. The upstream also defines `PATCH /traffic-influences/{id}`, a
 #     per-device create (`POST /traffic-influence-devices`), and CloudEvents
 #     change notifications; those are deferred to later passes (see PROGRESS.md).
-#     `postTrafficInfluence` persists the created resource in an in-memory store
-#     and `getTrafficInfluence` reads it back.
+#     `postTrafficInfluence` persists the created resource in an in-memory store,
+#     `getTrafficInfluence` reads it back, and `deleteTrafficInfluence` evicts it.
+#   - The upstream DELETE is **asynchronous** — it answers `202 Accepted` and the
+#     resource transitions to `deletion in progress`, then `deleted`. CamaraSim
+#     honours the `202` contract but has no background lifecycle worker, so it
+#     evicts the resource synchronously; the `deletion in progress` / `deleted`
+#     steady states are therefore not observable (a read after delete → `404`).
 #   - The request's optional `subscriptionRequest` (CloudEvents subscription) is
 #     not modelled this pass — the notifications subsystem is deferred (like QoD's
 #     first pass), so it is omitted from the request schema.
@@ -268,6 +274,56 @@ paths:
           - input: a trafficInfluenceID of a resource still in the store
             result: "200 with the stored TrafficInfluence resource"
           - input: an unknown/never-created trafficInfluenceID
+            result: "404 NOT_FOUND"
+    delete:
+      operationId: deleteTrafficInfluence
+      summary: Delete a Traffic Influence resource
+      description: |
+        Delete a `TrafficInfluence` resource previously created by
+        `postTrafficInfluence`, addressed by its operator-minted
+        `trafficInfluenceID`, to stop influencing the traffic. Upstream the
+        deletion is asynchronous: the operator answers `202 Accepted` and the
+        resource transitions to `deletion in progress`.
+
+        The `trafficInfluenceID` is opaque and operator-minted, so — like the read
+        leg — it carries **no** reserved-error control plane: the stored state is
+        the only functional plane (docs/DESIGN.md §7). A resource still held in the
+        in-memory store → `202 Accepted` (CamaraSim evicts it synchronously,
+        single-use — see the documented cut); an unknown/already-deleted id → `404
+        NOT_FOUND`. `x-correlator` is echoed on every response.
+      security:
+        - openId:
+            - traffic-influence:traffic-influences:delete
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+        - $ref: "#/components/parameters/TrafficInfluenceIDPath"
+      responses:
+        "202":
+          description: Deletion accepted; the resource is being deleted. CamaraSim
+            evicts it synchronously, so a later read of the same id is `404`.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          Result selected from the stored state (docs/DESIGN.md §7). The
+          `trafficInfluenceID` is opaque, so there is no reserved-error plane.
+        cases:
+          - input: a trafficInfluenceID of a resource still in the store
+            result: "202 Accepted (the resource is evicted, single-use)"
+          - input: an unknown/never-created/already-deleted trafficInfluenceID
             result: "404 NOT_FOUND"
 
 components:
