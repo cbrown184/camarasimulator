@@ -49,6 +49,7 @@
 //! - **Sponsored Data vwip** — `/sponsored-data/vwip/…`.
 //! - **Click to Dial vwip** — `/click-to-dial/vwip/…`.
 //! - **Most Frequent Location vwip** — `/most-frequent-location/vwip/…`.
+//! - **Traffic Influence vwip** — `/traffic-influence/vwip/…`.
 //!
 //! Plus [`openapi`], which serves each mounted API's vendored OpenAPI spec at
 //! `/{api}/v{n}/openapi.yaml` (docs/DESIGN.md §9).
@@ -97,6 +98,7 @@ pub mod sim_swap;
 pub mod simple_edge_discovery;
 pub mod sponsored_data;
 pub mod subscription_status;
+pub mod traffic_influence;
 pub mod verified_caller;
 
 use axum::Router;
@@ -148,5 +150,6 @@ pub fn routes() -> Router {
         .merge(iot_sim_fraud_prevention::routes())
         .merge(sponsored_data::routes())
         .merge(click_to_dial::routes())
+        .merge(traffic_influence::routes())
         .merge(openapi::routes())
 }
