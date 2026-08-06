@@ -10,19 +10,22 @@
 //! per-device create (`POST /traffic-influence-devices`), and CloudEvents
 //! change notifications.
 //!
-//! CamaraSim mounts the resource create + read legs:
+//! CamaraSim mounts the resource lifecycle + the per-device create:
 //! - [`vwip`] — mounted at `/traffic-influence/vwip` (CAMARA `wip` — no released
 //!   version yet, so mounted at its canonical `vwip` base path, like the other
-//!   pre-1.0 wip APIs). Serves `POST /traffic-influences` (`postTrafficInfluence`)
-//!   and `GET /traffic-influences/{trafficInfluenceID}` (`getTrafficInfluence`).
+//!   pre-1.0 wip APIs). Serves `POST /traffic-influences` (`postTrafficInfluence`),
+//!   `POST /traffic-influence-devices` (`postTrafficInfluenceDevice`),
+//!   `GET`/`PATCH`/`DELETE /traffic-influences/{trafficInfluenceID}`.
 //!
 //! Creating a resource that can later be read back makes Traffic Influence
 //! **stateful**, so a shared in-memory [`store`] holds created resources keyed by
-//! `trafficInfluenceID`; `getTrafficInfluence` reads them back.
+//! `trafficInfluenceID`; `getTrafficInfluence` reads them back. The per-device
+//! create makes the same `TrafficInfluence` resource from the same fields plus a
+//! required `device` object; for privacy the device is validated only, never
+//! echoed nor persisted.
 //!
-//! The update/delete operations, the per-device create, and the
-//! `subscriptionRequest` CloudEvents notifications are deferred to later passes
-//! (see `PROGRESS.md`).
+//! The `subscriptionRequest` CloudEvents notifications are deferred to a later
+//! pass (see `PROGRESS.md`).
 
 pub mod store;
 pub mod vwip;

@@ -94,6 +94,12 @@ use crate::scenarios;
 /// upstream `wip` contract (`traffic-influence:traffic-influences:write`).
 const WRITE_SCOPE: &str = "traffic-influence:traffic-influences:write";
 
+/// Scope required to create a **per-device** Traffic Influence resource. The
+/// upstream `wip` contract gives the device create its own resource scope
+/// (`traffic-influence:traffic-influence-devices:write`), distinct from the
+/// collection write scope above.
+const DEVICE_WRITE_SCOPE: &str = "traffic-influence:traffic-influence-devices:write";
+
 /// Scope required to read a Traffic Influence resource back. Declared by the
 /// upstream `wip` contract (`traffic-influence:traffic-influences:read`).
 const READ_SCOPE: &str = "traffic-influence:traffic-influences:read";
@@ -105,6 +111,11 @@ const DELETE_SCOPE: &str = "traffic-influence:traffic-influences:delete";
 /// Base path of the resource collection, used both to mount the route and to
 /// build the `201` `Location` header.
 const COLLECTION: &str = "/traffic-influence/vwip/traffic-influences";
+
+/// Path of the per-device create collection (`postTrafficInfluenceDevice`). It
+/// creates the **same** `TrafficInfluence` resource as [`COLLECTION`] (read back
+/// via [`ITEM`]), so the `201` `Location` still points under [`COLLECTION`].
+const DEVICE_COLLECTION: &str = "/traffic-influence/vwip/traffic-influence-devices";
 
 /// Route for a single resource, keyed by its `trafficInfluenceID` path parameter
 /// (Axum 0.6 `:param` syntax). Read back by [`get_traffic_influence`].
@@ -119,6 +130,7 @@ const MAX_PORT: i64 = 65535;
 pub fn routes() -> Router {
     Router::new()
         .route(COLLECTION, post(post_traffic_influence))
+        .route(DEVICE_COLLECTION, post(post_traffic_influence_device))
         .route(
             ITEM,
             get(get_traffic_influence)
@@ -163,6 +175,53 @@ struct DestinationTrafficFilters {
     destination_protocol: Option<String>,
 }
 
+/// The `postTrafficInfluenceDevice` request body (`PostTrafficInfluenceDevice`).
+/// Upstream this schema **extends** `PostTrafficInfluence` with a required
+/// `device`, so the shared base fields are flattened in and reuse the collection
+/// create's validation ([`validate_base`]). The `device` names the individual
+/// end-user equipment the rule applies to; the collection variant instead applies
+/// to every user in the named region/zone.
+#[derive(Deserialize)]
+struct PostTrafficInfluenceDevice {
+    #[serde(flatten)]
+    base: PostTrafficInfluence,
+    device: Option<Device>,
+}
+
+/// The CAMARA `Device` object (`minProperties: 1`). CamaraSim validates each
+/// supplied identifier's shape, but — unlike the device-query APIs — the device
+/// is **never echoed** (upstream: "for privacy reasons, if a resource is related
+/// to a user, the parameter Device is not exchanged") and is **not** a control
+/// plane: `appId` stays the sole control plane, exactly as on the collection
+/// create. `deny_unknown_fields` so an unrecognised identifier key is rejected.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Device {
+    #[serde(rename = "phoneNumber")]
+    phone_number: Option<String>,
+    #[serde(rename = "networkAccessIdentifier")]
+    network_access_identifier: Option<String>,
+    #[serde(rename = "ipv4Address")]
+    ipv4_address: Option<DeviceIpv4Addr>,
+    #[serde(rename = "ipv6Address")]
+    ipv6_address: Option<String>,
+}
+
+/// The CAMARA `DeviceIpv4Addr` object. CamaraSim treats `publicAddress` as the
+/// device's public IPv4 identifier; the other fields are accepted for schema
+/// fidelity (`publicPort` is range-checked when present).
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DeviceIpv4Addr {
+    #[serde(rename = "publicAddress")]
+    public_address: Option<String>,
+    #[serde(rename = "privateAddress")]
+    #[allow(dead_code)]
+    private_address: Option<String>,
+    #[serde(rename = "publicPort")]
+    public_port: Option<i64>,
+}
+
 /// The validated, owned inputs a happy-path create renders and stores. Pure data,
 /// so [`build_response`] is unit-testable exactly.
 struct ValidInput {
@@ -197,40 +256,117 @@ async fn post_traffic_influence(claims: Claims, headers: HeaderMap, body: Bytes)
         }
     };
 
+    // Validate the base fields into a ready-to-render `ValidInput`, then apply the
+    // `appId` control planes and emit the `201`.
+    match validate_base(req, &correlator) {
+        Ok(input) => finalize(input, &correlator),
+        Err(e) => e,
+    }
+}
+
+/// `POST /traffic-influence/vwip/traffic-influence-devices` (`postTrafficInfluenceDevice`).
+///
+/// The **per-device** create. It creates the same `TrafficInfluence` resource as
+/// [`post_traffic_influence`] — read back via [`get_traffic_influence`], and the
+/// `201` `Location` points under [`COLLECTION`] — but scopes the rule to a single
+/// end-user device named by a required `device` object, and carries its own
+/// resource scope (`traffic-influence:traffic-influence-devices:write`).
+///
+/// The `device` is validated for shape (`minProperties: 1`, each supplied
+/// identifier well-formed → otherwise `400 INVALID_ARGUMENT`, a `publicPort` out
+/// of range → `400 OUT_OF_RANGE`) but is **never echoed** in the response
+/// (upstream privacy rule) and is **not** a control plane: `appId` stays the sole
+/// control plane, exactly as on the collection create (reserved error suffix →
+/// canonical CAMARA error; trailing three digits → resource `state`). The base
+/// fields are validated first (same order and errors as the collection create),
+/// then the `device`, so a malformed base field's `400` wins over a malformed
+/// `device`, and both `400`s win over an `appId` reserved-suffix scenario.
+/// `x-correlator` is echoed on every response.
+async fn post_traffic_influence_device(
+    claims: Claims,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    // Optional correlation header, echoed on every response (CAMARA Commonalities).
+    let correlator = headers.get("x-correlator").cloned();
+
+    // Endpoint authorisation: the token must carry the per-device write scope.
+    if let Err(e) = claims.require_scope(DEVICE_WRITE_SCOPE) {
+        return with_correlator(e.into_response(), &correlator);
+    }
+
+    // Body is mandatory; parse strictly.
+    let req: PostTrafficInfluenceDevice = match serde_json::from_slice(&body) {
+        Ok(req) => req,
+        Err(_) => {
+            return invalid_argument(
+                "Request body is not a valid PostTrafficInfluenceDevice.",
+                &correlator,
+            )
+        }
+    };
+
+    // Validate the shared base fields first (same order/errors as the collection
+    // create), then the required per-device `device` object.
+    let input = match validate_base(req.base, &correlator) {
+        Ok(input) => input,
+        Err(e) => return e,
+    };
+    if let Err(e) = validate_device(req.device, &correlator) {
+        return e;
+    }
+
+    finalize(input, &correlator)
+}
+
+/// Validate a `PostTrafficInfluence` body into the owned [`ValidInput`] a happy
+/// path renders. Shared by both the collection create ([`post_traffic_influence`])
+/// and the per-device create ([`post_traffic_influence_device`], which layers its
+/// own `device` validation on top). Returns the ready `400` response on the first
+/// malformed field.
+fn validate_base(
+    req: PostTrafficInfluence,
+    correlator: &Option<HeaderValue>,
+) -> Result<ValidInput, Response> {
     // Required fields.
     let api_consumer_id = match req.api_consumer_id.as_deref() {
         Some(s) if !s.is_empty() => s.to_string(),
-        Some(_) => return invalid_argument("`apiConsumerId` must not be empty.", &correlator),
-        None => return invalid_argument("`apiConsumerId` is required.", &correlator),
+        Some(_) => return Err(invalid_argument("`apiConsumerId` must not be empty.", correlator)),
+        None => return Err(invalid_argument("`apiConsumerId` is required.", correlator)),
     };
     let app_id = match req.app_id.as_deref() {
         Some(s) if is_uuid_any(s) => s.to_string(),
-        Some(_) => return invalid_argument("`appId` must be a UUID.", &correlator),
-        None => return invalid_argument("`appId` is required.", &correlator),
+        Some(_) => return Err(invalid_argument("`appId` must be a UUID.", correlator)),
+        None => return Err(invalid_argument("`appId` is required.", correlator)),
     };
 
     // Optional placement fields — validated only when present.
     let app_instance_id = match req.app_instance_id.as_deref() {
         None => None,
         Some(s) if is_uuid_any(s) => Some(s.to_string()),
-        Some(_) => return invalid_argument("`appInstanceId` must be a UUID.", &correlator),
+        Some(_) => return Err(invalid_argument("`appInstanceId` must be a UUID.", correlator)),
     };
     let edge_cloud_zone_id = match req.edge_cloud_zone_id.as_deref() {
         None => None,
         Some(s) if is_uuid_any(s) => Some(s.to_string()),
-        Some(_) => return invalid_argument("`edgeCloudZoneId` must be a UUID.", &correlator),
+        Some(_) => return Err(invalid_argument("`edgeCloudZoneId` must be a UUID.", correlator)),
     };
     let edge_cloud_region = match req.edge_cloud_region.as_deref() {
         None => None,
         Some(s) if !s.is_empty() => Some(s.to_string()),
-        Some(_) => return invalid_argument("`edgeCloudRegion` must not be empty.", &correlator),
+        Some(_) => return Err(invalid_argument("`edgeCloudRegion` must not be empty.", correlator)),
     };
 
     // Optional traffic filters — ports are range-checked.
     let source_port = match req.source_traffic_filters.and_then(|f| f.source_port) {
         None => None,
         Some(p) if (MIN_PORT..=MAX_PORT).contains(&p) => Some(p),
-        Some(_) => return out_of_range("`sourcePort` must be between 0 and 65535.", &correlator),
+        Some(_) => {
+            return Err(out_of_range(
+                "`sourcePort` must be between 0 and 65535.",
+                correlator,
+            ))
+        }
     };
     let (destination_port, destination_protocol) = match req.destination_traffic_filters {
         None => (None, None),
@@ -239,27 +375,17 @@ async fn post_traffic_influence(claims: Claims, headers: HeaderMap, body: Bytes)
                 None => None,
                 Some(p) if (MIN_PORT..=MAX_PORT).contains(&p) => Some(p),
                 Some(_) => {
-                    return out_of_range(
+                    return Err(out_of_range(
                         "`destinationPort` must be between 0 and 65535.",
-                        &correlator,
-                    )
+                        correlator,
+                    ))
                 }
             };
             (port, f.destination_protocol)
         }
     };
 
-    // The `appId` is the identifier and a control plane (docs/DESIGN.md §7).
-    if let Some(err) = scenarios::reserved_error(&app_id) {
-        return with_correlator(err.into_response(), &correlator);
-    }
-
-    // Second control plane: the `appId` tail selects the created resource state.
-    let state = derive_state(&app_id);
-
-    // Mint the resource, render it, persist it, and return `201` with `Location`.
-    let id = mint_id();
-    let input = ValidInput {
+    Ok(ValidInput {
         api_consumer_id,
         app_id,
         app_instance_id,
@@ -268,7 +394,92 @@ async fn post_traffic_influence(claims: Claims, headers: HeaderMap, body: Bytes)
         source_port,
         destination_port,
         destination_protocol,
+    })
+}
+
+/// Validate the per-device create's required `device` object. It must be present
+/// and carry at least one identifier (`minProperties: 1`), each supplied
+/// identifier well-formed. The device is not stored or echoed (privacy), so this
+/// only gates the request. Returns the ready `400` response on any problem.
+fn validate_device(device: Option<Device>, correlator: &Option<HeaderValue>) -> Result<(), Response> {
+    let device = match device {
+        Some(d) => d,
+        None => return Err(invalid_argument("`device` is required.", correlator)),
     };
+
+    let mut any = false;
+    if let Some(phone) = device.phone_number.as_deref() {
+        if !is_valid_e164(phone) {
+            return Err(invalid_argument(
+                "`device.phoneNumber` must be in E.164 format (e.g. +123456789).",
+                correlator,
+            ));
+        }
+        any = true;
+    }
+    if let Some(nai) = device.network_access_identifier.as_deref() {
+        if nai.is_empty() {
+            return Err(invalid_argument(
+                "`device.networkAccessIdentifier` must not be empty.",
+                correlator,
+            ));
+        }
+        any = true;
+    }
+    if let Some(v4) = &device.ipv4_address {
+        match v4.public_address.as_deref() {
+            Some(a) if !a.is_empty() => {}
+            _ => {
+                return Err(invalid_argument(
+                    "`device.ipv4Address.publicAddress` is required.",
+                    correlator,
+                ))
+            }
+        }
+        if let Some(port) = v4.public_port {
+            if !(MIN_PORT..=MAX_PORT).contains(&port) {
+                return Err(out_of_range(
+                    "`device.ipv4Address.publicPort` must be between 0 and 65535.",
+                    correlator,
+                ));
+            }
+        }
+        any = true;
+    }
+    if let Some(v6) = device.ipv6_address.as_deref() {
+        if v6.is_empty() {
+            return Err(invalid_argument(
+                "`device.ipv6Address` must not be empty.",
+                correlator,
+            ));
+        }
+        any = true;
+    }
+    if !any {
+        return Err(invalid_argument(
+            "`device` must contain at least one identifier.",
+            correlator,
+        ));
+    }
+    Ok(())
+}
+
+/// Apply the `appId` control planes and emit the `201`. Shared by the collection
+/// and per-device creates: both mint an opaque `trafficInfluenceID`, persist the
+/// rendered `TrafficInfluence` in the shared store (so it reads back via
+/// [`get_traffic_influence`]), and answer `201` with a `Location` under
+/// [`COLLECTION`].
+fn finalize(input: ValidInput, correlator: &Option<HeaderValue>) -> Response {
+    // The `appId` is the identifier and a control plane (docs/DESIGN.md §7).
+    if let Some(err) = scenarios::reserved_error(&input.app_id) {
+        return with_correlator(err.into_response(), correlator);
+    }
+
+    // Second control plane: the `appId` tail selects the created resource state.
+    let state = derive_state(&input.app_id);
+
+    // Mint the resource, render it, persist it, and return `201` with `Location`.
+    let id = mint_id();
     let resource = build_response(&id, state, &input);
     super::store::insert(id.clone(), resource.clone());
 
@@ -279,7 +490,7 @@ async fn post_traffic_influence(claims: Claims, headers: HeaderMap, body: Bytes)
             .headers_mut()
             .insert(HeaderName::from_static("location"), value);
     }
-    with_correlator(response, &correlator)
+    with_correlator(response, correlator)
 }
 
 /// `GET /traffic-influence/vwip/traffic-influences/{trafficInfluenceID}`.
@@ -665,6 +876,19 @@ fn with_correlator(mut response: Response, correlator: &Option<HeaderValue>) -> 
             .insert(HeaderName::from_static("x-correlator"), value.clone());
     }
     response
+}
+
+/// Whether `s` matches the CAMARA `phoneNumber` pattern `^\+[1-9][0-9]{4,14}$`:
+/// a leading `+`, then 5–15 digits, the first of which is non-zero. Mirrors
+/// `connected_network_type::v0_2::is_valid_e164`.
+fn is_valid_e164(s: &str) -> bool {
+    let Some(digits) = s.strip_prefix('+') else {
+        return false;
+    };
+    let bytes = digits.as_bytes();
+    (5..=15).contains(&bytes.len())
+        && matches!(bytes[0], b'1'..=b'9')
+        && bytes.iter().all(u8::is_ascii_digit)
 }
 
 /// Whether `s` is a canonical UUID string (8-4-4-4-12 hex with hyphens), any
@@ -1527,6 +1751,305 @@ mod tests {
         assert_eq!(
             headers.get("x-correlator").and_then(|v| v.to_str().ok()),
             Some("corr-patch-2")
+        );
+    }
+
+    // --- postTrafficInfluenceDevice (per-device create) --------------------
+
+    async fn device_token() -> String {
+        mint_token(DEVICE_WRITE_SCOPE).await
+    }
+
+    /// A minimal per-device create body: base fields + a `device` with one id.
+    fn device_body(app_id: &str) -> Value {
+        json!({
+            "apiConsumerId": CONSUMER,
+            "appId": app_id,
+            "device": { "phoneNumber": "+123456789012" },
+        })
+    }
+
+    async fn post_device(
+        token: Option<&str>,
+        correlator: Option<&str>,
+        body: Value,
+    ) -> (StatusCode, HeaderMap, Value) {
+        let mut builder = Request::builder()
+            .method("POST")
+            .uri(DEVICE_COLLECTION)
+            .header("host", HOST)
+            .header("content-type", "application/json");
+        if let Some(t) = token {
+            builder = builder.header("authorization", format!("Bearer {t}"));
+        }
+        if let Some(c) = correlator {
+            builder = builder.header("x-correlator", c);
+        }
+        let request = builder.body(Body::from(body.to_string())).unwrap();
+        let response = app().oneshot(request).await.unwrap();
+        let status = response.status();
+        let headers = response.headers().clone();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, headers, value)
+    }
+
+    #[test]
+    fn validate_device_accepts_each_identifier_and_rejects_malformed() {
+        let none: Option<HeaderValue> = None;
+        // Each single identifier is accepted.
+        let phone = Device {
+            phone_number: Some("+123456789012".into()),
+            network_access_identifier: None,
+            ipv4_address: None,
+            ipv6_address: None,
+        };
+        assert!(validate_device(Some(phone), &none).is_ok());
+        let nai = Device {
+            phone_number: None,
+            network_access_identifier: Some("123456789@nai.example".into()),
+            ipv4_address: None,
+            ipv6_address: None,
+        };
+        assert!(validate_device(Some(nai), &none).is_ok());
+        let v4 = Device {
+            phone_number: None,
+            network_access_identifier: None,
+            ipv4_address: Some(DeviceIpv4Addr {
+                public_address: Some("203.0.113.1".into()),
+                private_address: None,
+                public_port: Some(443),
+            }),
+            ipv6_address: None,
+        };
+        assert!(validate_device(Some(v4), &none).is_ok());
+        // Absent device → error; empty device (minProperties 1) → error.
+        assert!(validate_device(None, &none).is_err());
+        let empty = Device {
+            phone_number: None,
+            network_access_identifier: None,
+            ipv4_address: None,
+            ipv6_address: None,
+        };
+        assert!(validate_device(Some(empty), &none).is_err());
+        // Malformed phone number → error.
+        let bad_phone = Device {
+            phone_number: Some("12345".into()),
+            network_access_identifier: None,
+            ipv4_address: None,
+            ipv6_address: None,
+        };
+        assert!(validate_device(Some(bad_phone), &none).is_err());
+        // ipv4 without a publicAddress → error; out-of-range publicPort → error.
+        let v4_no_addr = Device {
+            phone_number: None,
+            network_access_identifier: None,
+            ipv4_address: Some(DeviceIpv4Addr {
+                public_address: None,
+                private_address: None,
+                public_port: None,
+            }),
+            ipv6_address: None,
+        };
+        assert!(validate_device(Some(v4_no_addr), &none).is_err());
+        let v4_bad_port = Device {
+            phone_number: None,
+            network_access_identifier: None,
+            ipv4_address: Some(DeviceIpv4Addr {
+                public_address: Some("203.0.113.1".into()),
+                private_address: None,
+                public_port: Some(70000),
+            }),
+            ipv6_address: None,
+        };
+        assert!(validate_device(Some(v4_bad_port), &none).is_err());
+    }
+
+    #[tokio::test]
+    async fn device_happy_path_creates_a_readable_resource_and_never_echoes_the_device() {
+        let (status, headers, body) =
+            post_device(Some(&device_token().await), None, device_body(APP_ACTIVE)).await;
+        assert_eq!(status, StatusCode::CREATED);
+        // Same TrafficInfluence resource shape: id/appId/state, and appId is the
+        // control plane (…174002 tail → active).
+        assert_eq!(body["appId"], APP_ACTIVE);
+        assert_eq!(body["state"], "active");
+        let id = body["trafficInfluenceID"].as_str().expect("id minted");
+        assert!(is_uuid_any(id));
+        // The device is never echoed (upstream privacy rule).
+        assert!(body.get("device").is_none(), "device must not be echoed");
+        // Location points under the collection, and the resource reads back there.
+        let location = headers
+            .get("location")
+            .and_then(|v| v.to_str().ok())
+            .expect("Location header");
+        assert_eq!(location, format!("{COLLECTION}/{id}"));
+        let read = mint_token(READ_SCOPE).await;
+        let (status, _, fetched) = get_req(Some(&read), id, None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(fetched, body, "read-back is verbatim");
+    }
+
+    #[tokio::test]
+    async fn device_state_reflects_the_app_id_tail() {
+        let t = device_token().await;
+        for (app, want) in [(APP_ORDERED, "ordered"), (APP_CREATED, "created"), (APP_ACTIVE, "active")]
+        {
+            let (status, _, body) = post_device(Some(&t), None, device_body(app)).await;
+            assert_eq!(status, StatusCode::CREATED, "app {app}");
+            assert_eq!(body["state"], want, "app {app}");
+        }
+    }
+
+    #[tokio::test]
+    async fn device_reserved_app_id_suffix_selects_a_canonical_camara_error() {
+        let t = device_token().await;
+        for (suffix, want) in [
+            ("404", StatusCode::NOT_FOUND),
+            ("409", StatusCode::CONFLICT),
+            ("429", StatusCode::TOO_MANY_REQUESTS),
+        ] {
+            let app = format!("123e4567-e89b-12d3-a456-426614174{suffix}");
+            let (status, _, _) = post_device(Some(&t), None, device_body(&app)).await;
+            assert_eq!(status, want, "suffix {suffix}");
+        }
+    }
+
+    #[tokio::test]
+    async fn device_accepts_each_identifier_kind_over_the_router() {
+        let t = device_token().await;
+        let devices = [
+            json!({ "phoneNumber": "+123456789012" }),
+            json!({ "networkAccessIdentifier": "123456789@nai.example" }),
+            json!({ "ipv4Address": { "publicAddress": "203.0.113.1", "publicPort": 443 } }),
+            json!({ "ipv6Address": "2001:db8::1" }),
+        ];
+        for device in devices {
+            let body = json!({ "apiConsumerId": CONSUMER, "appId": APP_ACTIVE, "device": device });
+            let (status, _, _) = post_device(Some(&t), None, body.clone()).await;
+            assert_eq!(status, StatusCode::CREATED, "{body}");
+        }
+    }
+
+    #[tokio::test]
+    async fn device_missing_or_empty_is_invalid_argument() {
+        let t = device_token().await;
+        let cases = [
+            json!({ "apiConsumerId": CONSUMER, "appId": APP_ACTIVE }), // no device
+            json!({ "apiConsumerId": CONSUMER, "appId": APP_ACTIVE, "device": {} }), // minProperties 1
+        ];
+        for body in cases {
+            let (status, _, err) = post_device(Some(&t), None, body.clone()).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+            assert_eq!(err["code"], "INVALID_ARGUMENT", "{body}");
+        }
+    }
+
+    #[tokio::test]
+    async fn device_malformed_identifiers_are_rejected() {
+        let t = device_token().await;
+        // Malformed phone → 400 INVALID_ARGUMENT.
+        let bad_phone =
+            json!({ "apiConsumerId": CONSUMER, "appId": APP_ACTIVE, "device": { "phoneNumber": "12345" } });
+        let (status, _, err) = post_device(Some(&t), None, bad_phone).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(err["code"], "INVALID_ARGUMENT");
+        // ipv4 without publicAddress → 400 INVALID_ARGUMENT.
+        let v4_no_addr = json!({
+            "apiConsumerId": CONSUMER, "appId": APP_ACTIVE,
+            "device": { "ipv4Address": { "privateAddress": "10.0.0.1" } },
+        });
+        let (status, _, err) = post_device(Some(&t), None, v4_no_addr).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(err["code"], "INVALID_ARGUMENT");
+        // Unknown identifier key → 400 (deny_unknown_fields on Device).
+        let unknown = json!({
+            "apiConsumerId": CONSUMER, "appId": APP_ACTIVE,
+            "device": { "imsi": "123456789012345" },
+        });
+        let (status, _, _) = post_device(Some(&t), None, unknown).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn device_ipv4_public_port_out_of_range_is_out_of_range() {
+        let t = device_token().await;
+        let body = json!({
+            "apiConsumerId": CONSUMER, "appId": APP_ACTIVE,
+            "device": { "ipv4Address": { "publicAddress": "203.0.113.1", "publicPort": 70000 } },
+        });
+        let (status, _, err) = post_device(Some(&t), None, body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(err["code"], "OUT_OF_RANGE");
+    }
+
+    #[tokio::test]
+    async fn device_shares_base_field_validation() {
+        // The base fields are validated by the same code as the collection create:
+        // a bad appId → 400, and a base 400 wins over any device problem.
+        let t = device_token().await;
+        let bad_app =
+            json!({ "apiConsumerId": CONSUMER, "appId": "nope", "device": { "phoneNumber": "bad" } });
+        let (status, _, err) = post_device(Some(&t), None, bad_app).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(err["code"], "INVALID_ARGUMENT");
+        let no_consumer = json!({ "appId": APP_ACTIVE, "device": { "phoneNumber": "+123456789012" } });
+        let (status, _, err) = post_device(Some(&t), None, no_consumer).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(err["code"], "INVALID_ARGUMENT");
+    }
+
+    #[tokio::test]
+    async fn device_create_requires_the_device_scope() {
+        // The collection write scope is NOT sufficient for the per-device create.
+        let collection = mint_token(WRITE_SCOPE).await;
+        let (status, _, _) = post_device(Some(&collection), None, device_body(APP_ACTIVE)).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        // The dedicated device scope works.
+        let device = device_token().await;
+        let (status, _, _) = post_device(Some(&device), None, device_body(APP_ACTIVE)).await;
+        assert_eq!(status, StatusCode::CREATED);
+    }
+
+    #[tokio::test]
+    async fn device_missing_token_is_unauthenticated() {
+        let (status, _, _) = post_device(None, None, device_body(APP_ACTIVE)).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn device_non_json_body_is_invalid_argument() {
+        let request = Request::builder()
+            .method("POST")
+            .uri(DEVICE_COLLECTION)
+            .header("host", HOST)
+            .header("authorization", format!("Bearer {}", device_token().await))
+            .header("content-type", "application/json")
+            .body(Body::from("{not json"))
+            .unwrap();
+        let response = app().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn device_x_correlator_is_echoed_on_success_and_error() {
+        let t = device_token().await;
+        let (status, headers, _) =
+            post_device(Some(&t), Some("corr-dev-1"), device_body(APP_ACTIVE)).await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-dev-1")
+        );
+        let app404 = "123e4567-e89b-12d3-a456-426614174404";
+        let (status, headers, _) =
+            post_device(Some(&t), Some("corr-dev-2"), device_body(app404)).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-dev-2")
         );
     }
 }

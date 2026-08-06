@@ -7,16 +7,25 @@
 # by `src/apis/traffic_influence/vwip.rs`; spec and code must not drift.
 #
 # Serves `POST /traffic-influences` (`postTrafficInfluence`),
-# `GET /traffic-influences/{trafficInfluenceID}` (`getTrafficInfluence`) and
+# `POST /traffic-influence-devices` (`postTrafficInfluenceDevice`),
+# `GET /traffic-influences/{trafficInfluenceID}` (`getTrafficInfluence`),
+# `PATCH /traffic-influences/{trafficInfluenceID}` (`patchTrafficInfluence`) and
 # `DELETE /traffic-influences/{trafficInfluenceID}` (`deleteTrafficInfluence`).
 #
 # Divergences from the upstream CAMARA source (documented cuts):
-#   - The resource **create** (for "any user"), **read** and **delete** legs are
-#     mounted. The upstream also defines `PATCH /traffic-influences/{id}`, a
-#     per-device create (`POST /traffic-influence-devices`), and CloudEvents
-#     change notifications; those are deferred to later passes (see PROGRESS.md).
-#     `postTrafficInfluence` persists the created resource in an in-memory store,
-#     `getTrafficInfluence` reads it back, and `deleteTrafficInfluence` evicts it.
+#   - The resource **create** (for "any user"), **per-device create**, **read**,
+#     **update** and **delete** legs are mounted. The upstream also defines
+#     CloudEvents change notifications (`subscriptionRequest`); those are deferred
+#     to a later pass (see PROGRESS.md). `postTrafficInfluence` /
+#     `postTrafficInfluenceDevice` persist the created resource in an in-memory
+#     store, `getTrafficInfluence` reads it back, `patchTrafficInfluence` updates
+#     it, and `deleteTrafficInfluence` evicts it.
+#   - `postTrafficInfluenceDevice` takes the same fields as `postTrafficInfluence`
+#     plus a required `device` object. For privacy the device is validated only —
+#     it is never echoed in the response nor persisted (upstream: "if a resource
+#     is related to a user, the parameter Device is not exchanged"). `appId` stays
+#     the sole control plane; the created resource reads back through
+#     `/traffic-influences/{trafficInfluenceID}`.
 #   - The upstream DELETE is **asynchronous** — it answers `202 Accepted` and the
 #     resource transitions to `deletion in progress`, then `deleted`. CamaraSim
 #     honours the `202` contract but has no background lifecycle worker, so it
@@ -213,6 +222,150 @@ paths:
             result: "400 INVALID_ARGUMENT"
           - input: "sourcePort or destinationPort outside 0..=65535"
             result: "400 OUT_OF_RANGE"
+
+  /traffic-influence-devices:
+    post:
+      operationId: postTrafficInfluenceDevice
+      summary: Create a Traffic Influence resource (for a specific device)
+      description: |
+        Create a `TrafficInfluence` resource that steers a **single end-user
+        device's** traffic toward a chosen edge-cloud placement. Identical to
+        `postTrafficInfluence` except the request additionally carries a required
+        `device` object naming the individual user equipment (the collection
+        variant instead applies to every user in the named region/zone).
+
+        On success returns `201` with the created `TrafficInfluence` resource — a
+        minted `trafficInfluenceID`, the requested placement echoed back, and a
+        lifecycle `state`. For privacy the `device` is **never echoed** in the
+        response and is not persisted; it is validated only. The resource is read
+        back / updated / deleted through `/traffic-influences/{trafficInfluenceID}`
+        (the `201` `Location` points there).
+
+        The `appId` remains the sole control-plane identifier — see the API
+        description for the parameter-driven functional cases (its trailing three
+        digits select a reserved CAMARA error, else the created resource `state`).
+        The `device` is validated for shape only and does not drive the result.
+      security:
+        - openId:
+            - traffic-influence:traffic-influence-devices:write
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PostTrafficInfluenceDevice"
+            examples:
+              byPhoneNumber:
+                summary: Device named by phone number
+                value:
+                  apiConsumerId: consumer-42
+                  appId: 123e4567-e89b-12d3-a456-426614174002
+                  device:
+                    phoneNumber: "+123456789012"
+              byIpv4:
+                summary: Device named by public IPv4 address, with a placement
+                value:
+                  apiConsumerId: consumer-42
+                  appId: 123e4567-e89b-12d3-a456-426614174002
+                  edgeCloudRegion: eu-west-1
+                  device:
+                    ipv4Address:
+                      publicAddress: 203.0.113.1
+                      publicPort: 443
+      responses:
+        "201":
+          description: TrafficInfluence resource created; the resource is returned
+            with its `trafficInfluenceID` and `state` set. The `device` is not
+            echoed (privacy).
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+            Location:
+              description: URL of the created Traffic Influence resource (under
+                `/traffic-influences`).
+              schema:
+                type: string
+              example: /traffic-influence/vwip/traffic-influences/8f14e45f-ceea-4e0a-9d1f-2e3c4b5a6d70
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TrafficInfluence"
+              examples:
+                active:
+                  summary: A created resource in the active state (no device echoed)
+                  value:
+                    trafficInfluenceID: 8f14e45f-ceea-4e0a-9d1f-2e3c4b5a6d70
+                    apiConsumerId: consumer-42
+                    appId: 123e4567-e89b-12d3-a456-426614174002
+                    state: active
+        "400":
+          description: |
+            400 — invalid request. CamaraSim returns `INVALID_ARGUMENT` for a
+            missing/malformed base field (`apiConsumerId`, `appId`,
+            `appInstanceId`, `edgeCloudRegion`, `edgeCloudZoneId`), a non-JSON
+            body, or a missing/empty/malformed `device` (`minProperties: 1`, an
+            E.164 `phoneNumber`, a non-empty `networkAccessIdentifier`, an
+            `ipv4Address.publicAddress`, or an unknown identifier key); and
+            `OUT_OF_RANGE` for a `sourcePort`, `destinationPort`, or
+            `device.ipv4Address.publicPort` outside `0..=65535`. A malformed base
+            field's `400` wins over a `device` `400`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TrafficInfluenceError"
+              examples:
+                missingDevice:
+                  summary: The required device object is absent
+                  value:
+                    status: 400
+                    code: INVALID_ARGUMENT
+                    message: "`device` is required."
+                emptyDevice:
+                  summary: The device carries no identifier (minProperties 1)
+                  value:
+                    status: 400
+                    code: INVALID_ARGUMENT
+                    message: "`device` must contain at least one identifier."
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "409":
+          $ref: "../../shared/errors.yaml#/components/responses/Conflict"
+        "422":
+          $ref: "../../shared/errors.yaml#/components/responses/ServiceNotApplicable"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          Result selected from the `appId` identifier exactly as
+          `postTrafficInfluence` (docs/DESIGN.md §7); the `device` is validated
+          for shape only and is never a control plane nor echoed.
+        cases:
+          - input: appId ending in a reserved error suffix (e.g. …404, …422, …409)
+            result: the canonical CAMARA error for that status
+          - input: "appId whose trailing three digits d satisfy d % 3 == 0 (e.g. …000)"
+            result: "201 with state \"ordered\" (device not echoed)"
+          - input: "appId whose trailing three digits d satisfy d % 3 == 1 (e.g. …001)"
+            result: "201 with state \"created\" (device not echoed)"
+          - input: "appId whose trailing three digits d satisfy d % 3 == 2 (e.g. …002)"
+            result: "201 with state \"active\" (device not echoed)"
+          - input: "a well-formed device (phoneNumber / networkAccessIdentifier / ipv4Address / ipv6Address)"
+            result: "201; the device is validated but not echoed or persisted"
+          - input: "missing device, an empty device object, or a malformed device identifier / unknown device key"
+            result: "400 INVALID_ARGUMENT"
+          - input: "device.ipv4Address.publicPort outside 0..=65535"
+            result: "400 OUT_OF_RANGE"
+          - input: "any base-field 400 (as postTrafficInfluence) together with a device problem"
+            result: "400 INVALID_ARGUMENT/OUT_OF_RANGE for the base field (base validated first)"
 
   /traffic-influences/{trafficInfluenceID}:
     get:
@@ -574,6 +727,63 @@ components:
           $ref: "#/components/schemas/SourceTrafficFilters"
         destinationTrafficFilters:
           $ref: "#/components/schemas/DestinationTrafficFilters"
+
+    Device:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      description: >-
+        End-user equipment the per-device influence applies to. At least one
+        identifier must be present (`minProperties: 1`). For privacy the device is
+        validated only — never echoed in the response nor persisted.
+      properties:
+        phoneNumber:
+          type: string
+          pattern: '^\+[1-9][0-9]{4,14}$'
+          description: The device's phone number in E.164 format.
+          example: "+123456789012"
+        networkAccessIdentifier:
+          type: string
+          minLength: 1
+          description: A network access identifier assigned to the device.
+          example: 123456789@nai.example
+        ipv4Address:
+          $ref: "#/components/schemas/DeviceIpv4Addr"
+        ipv6Address:
+          type: string
+          description: The device's public IPv6 address.
+          example: 2001:db8::1
+
+    DeviceIpv4Addr:
+      type: object
+      additionalProperties: false
+      description: >-
+        The device's public IPv4 address (and optional private address / public
+        port). CamaraSim requires a non-empty `publicAddress`.
+      properties:
+        publicAddress:
+          type: string
+          description: The device's public IPv4 address.
+          example: 203.0.113.1
+        privateAddress:
+          type: string
+          description: The device's private IPv4 address (accepted, unused).
+          example: 10.0.0.1
+        publicPort:
+          $ref: "#/components/schemas/Port"
+
+    PostTrafficInfluenceDevice:
+      description: >-
+        Parameters for creating a Traffic Influence resource for a **specific
+        device**. Extends `PostTrafficInfluence` with a required `device` object.
+      allOf:
+        - $ref: "#/components/schemas/PostTrafficInfluence"
+        - type: object
+          required:
+            - device
+          properties:
+            device:
+              $ref: "#/components/schemas/Device"
 
     PatchTrafficInfluence:
       type: object
