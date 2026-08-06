@@ -1,8 +1,10 @@
 //! Click to Dial **vwip** (CAMARA Click to Dial, `wip`).
 //!
-//! One endpoint so far:
+//! Two endpoints so far:
 //! - `POST /click-to-dial/vwip/calls` — create a Click to Dial call session
-//!   between a `caller` and a `callee`.
+//!   between a `caller` and a `callee` (`createCall`).
+//! - `GET /click-to-dial/vwip/calls/{callId}` — read a created call back
+//!   (`getCall`).
 //!
 //! ## What it does
 //!
@@ -13,7 +15,9 @@
 //! its opaque `callId`, the two participants echoed back, the current `status`
 //! (always `initiating` at creation — later transitions arrive via `sink`
 //! notifications, a deferred slice), the `createdAt` instant, and whether
-//! recording is enabled.
+//! recording is enabled. The created call is remembered in the shared in-memory
+//! [`super::store`], so a later `GET /calls/{callId}` returns it verbatim
+//! (`200`), or `404 NOT_FOUND` for a `callId` that was never created.
 //!
 //! The endpoint is protected: it requires a valid access token
 //! ([`crate::auth::verify::Claims`]) carrying the `click-to-dial:calls:create`
@@ -49,12 +53,25 @@
 //! `caller` and `callee` numbers → `422 SAME_CALLER_CALLEE`. `x-correlator` is
 //! echoed on every response.
 //!
+//! ## `getCall` — the store is the only control plane (docs/DESIGN.md §7)
+//!
+//! `GET /calls/{callId}` reads the created call back. The `callId` is an opaque,
+//! UUID-shaped token (not a phone number), so — unlike `createCall` — there is no
+//! reserved-identifier control plane here (mirrors QoD `getSession` / Carrier
+//! Billing `retrievePayment`): a `callId` present in the store → `200` that
+//! `Call`; an unknown/never-created id → `404 NOT_FOUND`. It requires a token
+//! carrying the `click-to-dial:calls:read` scope.
+//!
 //! ## Documented cuts
 //!
-//! - **Stateless create.** The `201` is fully determined by the request; the
-//!   call is not persisted, so the stateful `getCall` / `terminateCall` /
-//!   `getRecording` operations (and the `409 ALREADY_EXISTS` duplicate-call
-//!   case, which needs stored state) are a later slice.
+//! - **Deterministic re-create.** `createCall` now persists the call, but its
+//!   `201` is still fully determined by the request; because the `callId` is
+//!   derived from the participant pair, re-creating the same call overwrites the
+//!   identical stored value (the `409 ALREADY_EXISTS` duplicate-call case, which
+//!   would make `createCall` stateful, is a later slice).
+//! - **Terminate / recording deferred.** `DELETE /calls/{callId}`
+//!   (`terminateCall`) and `GET /calls/{callId}/recording` (`getRecording`), plus
+//!   the lifecycle `status` transitions past `initiating`, are a later slice.
 //! - **Notifications deferred.** `sink` / `sinkCredential` are accepted for
 //!   schema fidelity but not delivered to — the `status-changed` CloudEvents are
 //!   a later slice (like QoD's first create pass).
@@ -62,9 +79,10 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::body::Bytes;
+use axum::extract::Path;
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::post;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -77,6 +95,10 @@ use crate::scenarios;
 /// The OAuth2 scope the `POST /calls` endpoint requires (CAMARA Click to Dial).
 const CREATE_SCOPE: &str = "click-to-dial:calls:create";
 
+/// The OAuth2 scope the `GET /calls/{callId}` endpoint requires (CAMARA Click to
+/// Dial).
+const READ_SCOPE: &str = "click-to-dial:calls:read";
+
 /// The trailing-three-digit sentinel that marks a line as unreachable
 /// (`caller`/`callee` not available). Not a reserved *error* suffix, so it is
 /// free for this API to use as a happy-path-adjacent marker.
@@ -88,7 +110,9 @@ const RECORDING_UNSUPPORTED_TAIL: u16 = 777;
 
 /// Routes for Click to Dial vwip, mounted at their canonical URLs.
 pub fn routes() -> Router {
-    Router::new().route("/click-to-dial/vwip/calls", post(create_call))
+    Router::new()
+        .route("/click-to-dial/vwip/calls", post(create_call))
+        .route("/click-to-dial/vwip/calls/:call_id", get(get_call))
 }
 
 /// A call participant (`caller` / `callee`) — an object carrying a `number`
@@ -206,15 +230,46 @@ async fn create_call(claims: Claims, headers: HeaderMap, body: Bytes) -> Respons
     }
 
     // Happy path: the platform accepts the call, which starts in `initiating`.
+    let id = call_id(&req.caller.number, &req.callee.number);
     let call = json!({
-        "callId": call_id(&req.caller.number, &req.callee.number),
+        "callId": id,
         "caller": { "number": req.caller.number },
         "callee": { "number": req.callee.number },
         "status": "initiating",
         "createdAt": rfc3339_utc(now_unix_secs()),
         "recordingEnabled": recording_enabled,
     });
+    // Remember the created call so `getCall` can read it back. The `callId` is
+    // deterministic from the pair, so a re-create overwrites the identical value.
+    super::store::insert(id, call.clone());
     with_correlator((StatusCode::CREATED, Json(call)).into_response(), &correlator)
+}
+
+/// `GET /click-to-dial/vwip/calls/{callId}` — read a created call back
+/// (operationId `getCall`).
+///
+/// Returns the `Call` held in the shared in-memory [`super::store`] under
+/// `callId` (`200`), or `404 NOT_FOUND` for an unknown/never-created id. The
+/// `callId` is an opaque UUID-shaped token, so — unlike `createCall` — there is
+/// no reserved-identifier control plane here (mirrors QoD `getSession` / Carrier
+/// Billing `retrievePayment`): the store state is the only control plane.
+/// Requires a token carrying `click-to-dial:calls:read`.
+async fn get_call(claims: Claims, headers: HeaderMap, Path(call_id): Path<String>) -> Response {
+    // Optional correlation header, echoed on every response (CAMARA Commonalities).
+    let correlator = headers.get("x-correlator").cloned();
+
+    // Endpoint authorisation: the token must carry this API's read scope.
+    if let Err(e) = claims.require_scope(READ_SCOPE) {
+        return with_correlator(e.into_response(), &correlator);
+    }
+
+    match super::store::get(&call_id) {
+        Some(call) => with_correlator((StatusCode::OK, Json(call)).into_response(), &correlator),
+        None => with_correlator(
+            CamaraError::not_found("No call found for the provided callId.").into_response(),
+            &correlator,
+        ),
+    }
 }
 
 /// Derive a deterministic, UUID-shaped `callId` from the two participant
@@ -427,6 +482,36 @@ mod tests {
     async fn call_ok(body: &str) -> (StatusCode, HeaderMap, Value) {
         let token = mint_token(CREATE_SCOPE).await;
         post_calls(Some(&token), body, None).await
+    }
+
+    /// GET `/calls/{callId}` with an optional Bearer token and optional
+    /// `x-correlator`. Returns (status, headers, json-or-null).
+    async fn get_call_by_id(
+        token: Option<&str>,
+        call_id: &str,
+        correlator: Option<&str>,
+    ) -> (StatusCode, HeaderMap, Value) {
+        let mut builder = Request::builder()
+            .method("GET")
+            .uri(format!("/click-to-dial/vwip/calls/{call_id}"))
+            .header("host", HOST);
+        if let Some(t) = token {
+            builder = builder.header("authorization", format!("Bearer {t}"));
+        }
+        if let Some(c) = correlator {
+            builder = builder.header("x-correlator", c);
+        }
+        let response = app()
+            .oneshot(builder.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let headers = response.headers().clone();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, headers, json)
     }
 
     // --- Happy path --------------------------------------------------------
@@ -651,6 +736,90 @@ mod tests {
         assert_eq!(
             headers.get("x-correlator").and_then(|v| v.to_str().ok()),
             Some("corr-err")
+        );
+    }
+
+    // --- getCall (stateful read-back) --------------------------------------
+
+    #[tokio::test]
+    async fn get_returns_the_created_call() {
+        // Create with a pair unique to this test (so the process-global store is
+        // not shared with another case), then read it back by its callId.
+        let create = mint_token(CREATE_SCOPE).await;
+        let (status, _, created) = post_calls(
+            Some(&create),
+            r#"{"caller":{"number":"+123456789111"},"callee":{"number":"+123456789222"},"recordingEnabled":true}"#,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let id = created["callId"].as_str().unwrap();
+
+        let read = mint_token(READ_SCOPE).await;
+        let (status, _, got) = get_call_by_id(Some(&read), id, None).await;
+        assert_eq!(status, StatusCode::OK);
+        // The read-back is the created representation, verbatim.
+        assert_eq!(got, created);
+        assert_eq!(got["callId"], id);
+        assert_eq!(got["caller"]["number"], "+123456789111");
+        assert_eq!(got["callee"]["number"], "+123456789222");
+        assert_eq!(got["status"], "initiating");
+        assert_eq!(got["recordingEnabled"], true);
+    }
+
+    #[tokio::test]
+    async fn get_unknown_call_id_is_404() {
+        let read = mint_token(READ_SCOPE).await;
+        let (status, _, body) =
+            get_call_by_id(Some(&read), "3fa85f64-5717-4562-b3fc-2c963f66afa6", None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn get_without_the_read_scope_is_forbidden() {
+        // A token carrying only the create scope may not read.
+        let create = mint_token(CREATE_SCOPE).await;
+        let (status, _, body) =
+            get_call_by_id(Some(&create), "3fa85f64-5717-4562-b3fc-2c963f66afa6", None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["code"], "PERMISSION_DENIED");
+    }
+
+    #[tokio::test]
+    async fn get_missing_token_is_unauthenticated() {
+        let (status, _, body) =
+            get_call_by_id(None, "3fa85f64-5717-4562-b3fc-2c963f66afa6", None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["code"], "UNAUTHENTICATED");
+    }
+
+    #[tokio::test]
+    async fn x_correlator_is_echoed_on_get_200_and_404() {
+        // 200: create, then read back with a correlator.
+        let create = mint_token(CREATE_SCOPE).await;
+        let (_, _, created) = post_calls(
+            Some(&create),
+            r#"{"caller":{"number":"+123456789111"},"callee":{"number":"+123456789333"}}"#,
+            None,
+        )
+        .await;
+        let id = created["callId"].as_str().unwrap();
+        let read = mint_token(READ_SCOPE).await;
+        let (status, headers, _) = get_call_by_id(Some(&read), id, Some("corr-get")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-get")
+        );
+        // 404: unknown id, correlator still echoed.
+        let (status, headers, _) =
+            get_call_by_id(Some(&read), "00000000-0000-4000-8000-000000000000", Some("corr-404"))
+                .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-404")
         );
     }
 }

@@ -6,8 +6,9 @@
 # functional cases (docs/DESIGN.md §7, §9). Backed by
 # `src/apis/click_to_dial/vwip.rs`; spec and code must not drift.
 #
-# Serves `POST /calls` (createCall). The stateful read/terminate/recording
-# operations are a later slice (documented cut below).
+# Serves `POST /calls` (createCall) and the stateful `GET /calls/{callId}`
+# (getCall). The `terminateCall` / `getRecording` operations are a later slice
+# (documented cut below).
 openapi: 3.0.3
 info:
   title: Click to Dial
@@ -19,8 +20,9 @@ info:
     media. The call's progress is reported back to the application and — when
     enabled — the call can be recorded.
 
-    This is the CamaraSim reference double for CAMARA Click to Dial (`wip`). The
-    `/calls` endpoint requires the `click-to-dial:calls:create` scope.
+    This is the CamaraSim reference double for CAMARA Click to Dial (`wip`).
+    `POST /calls` (createCall) requires the `click-to-dial:calls:create` scope;
+    `GET /calls/{callId}` (getCall) requires `click-to-dial:calls:read`.
 
     ## Two-legged, business-facing
 
@@ -59,12 +61,25 @@ info:
     present but not in E.164 form → `422 INVALID_PHONE_NUMBER`; identical
     `caller` and `callee` numbers → `422 SAME_CALLER_CALLEE`.
 
+    ## getCall — the store is the only control plane
+
+    `GET /calls/{callId}` reads a created call back. The `callId` is an opaque,
+    UUID-shaped token (not a phone number), so — unlike `createCall` — there is
+    no reserved-identifier control plane here (mirrors QoD `getSession` / Carrier
+    Billing `retrievePayment`): a `callId` present in the store → `200` that
+    `Call`; an unknown/never-created id → `404 NOT_FOUND`.
+
     ## Documented cuts
 
-    - **Stateless create.** The `201` is fully determined by the request; the
-      call is not persisted, so the stateful `getCall` / `terminateCall` /
-      `getRecording` operations — and the `409 ALREADY_EXISTS` duplicate-call
-      case, which needs stored state — are a later slice.
+    - **Deterministic re-create.** `createCall` persists the call, but its `201`
+      is still fully determined by the request; because the `callId` is derived
+      from the participant pair, re-creating the same call overwrites the
+      identical stored value (the `409 ALREADY_EXISTS` duplicate-call case, which
+      would make `createCall` stateful, is a later slice).
+    - **Terminate / recording deferred.** `DELETE /calls/{callId}`
+      (`terminateCall`) and `GET /calls/{callId}/recording` (`getRecording`),
+      plus the lifecycle `status` transitions past `initiating`, are a later
+      slice.
     - **Notifications deferred.** `sink` / `sinkCredential` are accepted for
       schema fidelity but not delivered to; the `status-changed` CloudEvents are
       a later slice.
@@ -233,6 +248,77 @@ paths:
           - input: missing caller/callee/number, unknown field, or malformed body
             result: "400 INVALID_ARGUMENT"
 
+  /calls/{callId}:
+    get:
+      operationId: getCall
+      summary: Retrieve a Click to Dial call session
+      description: |
+        Reads a previously-created call back by its `callId`. Returns `200` with
+        the stored `Call`, or `404 NOT_FOUND` for a `callId` that was never
+        created. The `callId` is an opaque, UUID-shaped token, so the store state
+        is the only control plane (there is no reserved-identifier convention
+        here — see the API description).
+      security:
+        - openId:
+            - click-to-dial:calls:read
+      parameters:
+        - $ref: "#/components/parameters/CallId"
+        - $ref: "#/components/parameters/XCorrelator"
+      responses:
+        "200":
+          description: The call was found.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Call"
+              examples:
+                found:
+                  summary: A stored call, still initiating
+                  value:
+                    callId: 3fa85f64-5717-4562-b3fc-2c963f66afa6
+                    caller:
+                      number: "+123456789111"
+                    callee:
+                      number: "+123456789222"
+                    status: initiating
+                    createdAt: "2024-01-01T14:27:08Z"
+                    recordingEnabled: true
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          description: |
+            404 — no call was found for the provided `callId` (unknown or never
+            created).
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ClickToDialError"
+              examples:
+                notFound:
+                  summary: Unknown callId
+                  value:
+                    status: 404
+                    code: NOT_FOUND
+                    message: "No call found for the provided callId."
+      x-camarasim-scenarios:
+        description: >-
+          Result selected from the store state only (docs/DESIGN.md §7). The
+          `callId` is opaque, so there is no reserved-identifier plane: a stored
+          id returns the call, an unknown id is a 404.
+        cases:
+          - input: a callId returned by a prior createCall
+            result: "200 { Call }"
+          - input: an unknown/never-created callId
+            result: "404 NOT_FOUND"
+
 components:
   securitySchemes:
     openId:
@@ -246,6 +332,15 @@ components:
       description: Correlation id for the request, echoed back on the response.
       schema:
         type: string
+
+    CallId:
+      name: callId
+      in: path
+      required: true
+      description: The opaque, UUID-shaped identifier of a created call.
+      schema:
+        type: string
+        format: uuid
 
   headers:
     XCorrelator:

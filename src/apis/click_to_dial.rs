@@ -16,10 +16,14 @@
 //! One submodule per major version (docs/DESIGN.md §5, §9). So far:
 //! - [`vwip`] — mounted at `/click-to-dial/vwip` (CAMARA Click to Dial, `wip` —
 //!   no released version yet, so mounted at its canonical `vwip` base path,
-//!   mirroring Verified Caller / Sponsored Data). Serves the `createCall`
-//!   endpoint; the stateful read/terminate/recording operations are a later
-//!   slice.
+//!   mirroring Verified Caller / Sponsored Data). Serves `createCall`
+//!   (`POST /calls`) and the stateful `getCall` (`GET /calls/{callId}`); the
+//!   `terminateCall` / `getRecording` operations are a later slice.
+//!
+//! Reading a created call back makes Click to Dial **stateful**, so a shared
+//! in-memory [`store`] holds created calls keyed by `callId`.
 
+pub mod store;
 pub mod vwip;
 
 use axum::Router;

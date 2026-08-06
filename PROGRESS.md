@@ -1850,9 +1850,15 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     → 400 INVALID_ARGUMENT. `callId` deterministic UUID-shaped from the pair (no
     new dep). Stateless create (the `201` is fully determined by the request);
     `x-correlator` echoed.
-  - [ ] stateful `GET /calls/{callId}` (`getCall`), `DELETE /calls/{callId}`
-    (`terminateCall`), `GET /calls/{callId}/recording` (`getRecording`) + the
-    `409 ALREADY_EXISTS` duplicate-call case — need a session store; deferred.
+  - [x] stateful `GET /calls/{callId}` (`getCall`, `click-to-dial:calls:read`) —
+    `createCall` now **persists** the created call in a new in-memory store
+    (`src/apis/click_to_dial/store.rs`; `Mutex<HashMap>`, no new dep) so `getCall`
+    reads it back verbatim (`200`) or `404 NOT_FOUND` for an unknown/never-created
+    id. Opaque `callId` → store state is the only control plane (no
+    reserved-identifier plane; mirrors QoD `getSession` / Carrier Billing
+    `retrievePayment`). `x-correlator` echoed.
+  - [ ] `DELETE /calls/{callId}` (`terminateCall`), `GET /calls/{callId}/recording`
+    (`getRecording`) + the `409 ALREADY_EXISTS` duplicate-call case — later slice.
   - [ ] `status-changed` CloudEvents on `sink` — deferred (like QoD's first pass).
 - [ ] Other CAMARA APIs as capacity allows
 
@@ -1880,6 +1886,24 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-06 — Phase 3/5 (stateful read-back): **Click to Dial vwip —
+  `GET /calls/{callId}`** (`getCall`, `click-to-dial:calls:read`), making the API
+  stateful. The immediately-preceding pass added the stateless `createCall`; this
+  is the natural next slice. `createCall` now **persists** the created `Call` in a
+  new in-memory store (`src/apis/click_to_dial/store.rs`; `Mutex<HashMap>`, lock
+  never held across `.await`, **no new dep**), and `getCall` reads it back verbatim
+  (`200`) or `404 NOT_FOUND` for an unknown/never-created id. Opaque `callId` →
+  store state is the only control plane (no reserved-identifier plane here; mirrors
+  QoD `getSession` / Carrier Billing `retrievePayment`). `createCall`'s `201` is
+  unchanged (a re-create overwrites the identical deterministic value; `409
+  ALREADY_EXISTS` still deferred). Skipped the three deferred TLS-sink leaves
+  (`https://` sinks need a rustls TLS client — a heavy dep vs the project's raw-TCP,
+  HTTP-client-free CloudEvents design; not a small/testable pass) and the spatial
+  `AREALIMIT` / campaign-management cuts. Spec: `getCall` path + `CallId` param +
+  `getCall` `x-camarasim-scenarios` in the vendored `click-to-dial/vwip` spec
+  (catalog↔spec contract test still green). 7 new tests (5 endpoint + 2 store
+  units); `cargo test` 1408 green; `cargo build --release` clean. — binary:
+  2,821,368 bytes (~2.82 MB, +~7.5 KB, no new dep)
 - 2026-08-06 — Phase 5 ("other APIs"): **Click to Dial vwip — new
   two-legged CAMARA API: `POST /calls`** (`createCall`,
   `click-to-dial:calls:create`). All remaining in-progress backlog leaves are
