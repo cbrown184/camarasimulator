@@ -48,9 +48,14 @@
 //!   `recordingEnabled` is `true` and the `callee` number ends `777`, that line
 //!   cannot be recorded → `422 RECORDING_NOT_SUPPORTED`. (`777` is a documented
 //!   CamaraSim sentinel; recording on any other line is honoured.)
-//! - **Happy path.** Any other pair → `201` with a `Call` whose `status` is
-//!   `initiating`. `callId` is a deterministic, UUID-shaped token derived from
-//!   the two numbers (SHA-256; no `uuid`/`rand` dependency).
+//! - **Duplicate call (`409`).** The `callId` is deterministic from the pair, so
+//!   a re-create of a still-live call (one not yet terminated) for the *same*
+//!   caller/callee pair → `409 ALREADY_EXISTS`. This is the one create case keyed
+//!   on **store state** rather than the request alone, making `createCall`
+//!   stateful; the pair becomes creatable again once `terminateCall` evicts it.
+//! - **Happy path.** Any other pair, not already live → `201` with a `Call` whose
+//!   `status` is `initiating`. `callId` is a deterministic, UUID-shaped token
+//!   derived from the two numbers (SHA-256; no `uuid`/`rand` dependency).
 //!
 //! Validation: a malformed body, an unknown field, or a missing
 //! `caller`/`callee`/`number` → `400 INVALID_ARGUMENT`; a participant number
@@ -101,11 +106,6 @@
 //!
 //! ## Documented cuts
 //!
-//! - **Deterministic re-create.** `createCall` now persists the call, but its
-//!   `201` is still fully determined by the request; because the `callId` is
-//!   derived from the participant pair, re-creating the same call overwrites the
-//!   identical stored value (the `409 ALREADY_EXISTS` duplicate-call case, which
-//!   would make `createCall` stateful, is a later slice).
 //! - **Synthetic recording.** `getRecording`'s `content` is a fixed silent WAV,
 //!   not real captured audio, and the recording is available as soon as the call
 //!   exists (the CAMARA precondition that the call session has *completed* is not
@@ -300,8 +300,13 @@ async fn create_call(claims: Claims, headers: HeaderMap, body: Bytes) -> Respons
         "recordingEnabled": recording_enabled,
     });
     // Remember the created call so `getCall` can read it back. The `callId` is
-    // deterministic from the pair, so a re-create overwrites the identical value.
-    super::store::insert(id, call.clone());
+    // deterministic from the pair, so a still-live call for the same pair already
+    // occupies this id — a re-create is a `409 ALREADY_EXISTS`, not an overwrite
+    // (the store is the control plane here). The pair becomes creatable again once
+    // `terminateCall` evicts the call.
+    if !super::store::insert_new(id, call.clone()) {
+        return with_correlator(already_exists().into_response(), &correlator);
+    }
     with_correlator((StatusCode::CREATED, Json(call)).into_response(), &correlator)
 }
 
@@ -513,6 +518,16 @@ fn invalid_argument(message: &str, correlator: &Option<HeaderValue>) -> Response
     with_correlator(CamaraError::invalid_argument(message).into_response(), correlator)
 }
 
+/// A `409 ALREADY_EXISTS` CAMARA error — a still-live call already exists for
+/// this exact caller/callee pair (the deterministic `callId` is already taken).
+fn already_exists() -> CamaraError {
+    CamaraError::new(
+        StatusCode::CONFLICT,
+        "ALREADY_EXISTS",
+        "A call already exists for this caller and callee. Terminate it before creating a new one.",
+    )
+}
+
 /// A 422 CAMARA error with a Click-to-Dial-specific `code`, correlator echoed.
 fn unprocessable(code: &str, message: &str, correlator: &Option<HeaderValue>) -> Response {
     with_correlator(
@@ -716,8 +731,10 @@ mod tests {
 
     #[tokio::test]
     async fn recording_enabled_is_echoed_on_the_happy_path() {
+        // A callee unique to this test — createCall is now store-keyed (a repeat
+        // of the same pair is a 409), so each happy-path test uses its own pair.
         let (status, _, body) = call_ok(
-            r#"{"caller":{"number":"+123456789111"},"callee":{"number":"+123456789012"},"recordingEnabled":true}"#,
+            r#"{"caller":{"number":"+123456789111"},"callee":{"number":"+123456789013"},"recordingEnabled":true}"#,
         )
         .await;
         assert_eq!(status, StatusCode::CREATED);
@@ -727,7 +744,7 @@ mod tests {
     #[tokio::test]
     async fn sink_and_credential_are_accepted_but_do_not_change_the_result() {
         let (status, _, body) = call_ok(
-            r#"{"caller":{"number":"+123456789111"},"callee":{"number":"+123456789012"},"sink":"http://cb.test/notify","sinkCredential":{"credentialType":"ACCESSTOKEN","accessToken":"x","accessTokenType":"bearer"}}"#,
+            r#"{"caller":{"number":"+123456789111"},"callee":{"number":"+123456789014"},"sink":"http://cb.test/notify","sinkCredential":{"credentialType":"ACCESSTOKEN","accessToken":"x","accessTokenType":"bearer"}}"#,
         )
         .await;
         assert_eq!(status, StatusCode::CREATED);
@@ -807,6 +824,65 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::CREATED);
         assert_eq!(body["status"], "initiating");
+    }
+
+    // --- Duplicate call (409 ALREADY_EXISTS, store-keyed) ------------------
+
+    #[tokio::test]
+    async fn recreating_a_live_call_is_409_already_exists() {
+        // A pair unique to this test so the process-global store is not shared.
+        let body = r#"{"caller":{"number":"+123456789111"},"callee":{"number":"+123456789700"}}"#;
+        let token = mint_token(CREATE_SCOPE).await;
+
+        // First create wins → 201.
+        let (status, _, created) = post_calls(Some(&token), body, None).await;
+        assert_eq!(status, StatusCode::CREATED);
+        let id = created["callId"].as_str().unwrap().to_string();
+
+        // Re-creating the exact same pair while the call is still live → 409.
+        let (status, _, body2) = post_calls(Some(&token), body, None).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body2["code"], "ALREADY_EXISTS");
+        assert_eq!(body2["status"], 409);
+
+        // The live call is unchanged (not overwritten): getCall still returns it.
+        let read = mint_token(READ_SCOPE).await;
+        let (status, _, got) = get_call_by_id(Some(&read), &id, None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(got, created);
+    }
+
+    #[tokio::test]
+    async fn a_pair_is_creatable_again_after_the_call_is_terminated() {
+        let body = r#"{"caller":{"number":"+123456789111"},"callee":{"number":"+123456789701"}}"#;
+        let create = mint_token(CREATE_SCOPE).await;
+
+        // Create, then terminate.
+        let (status, _, created) = post_calls(Some(&create), body, None).await;
+        assert_eq!(status, StatusCode::CREATED);
+        let id = created["callId"].as_str().unwrap().to_string();
+        let del = mint_token(DELETE_SCOPE).await;
+        let (status, _, _) = delete_call_by_id(Some(&del), &id, None).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        // With the call evicted, the same pair is creatable again → 201.
+        let (status, _, recreated) = post_calls(Some(&create), body, None).await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(recreated["callId"], id, "same deterministic id");
+    }
+
+    #[tokio::test]
+    async fn x_correlator_is_echoed_on_the_409_duplicate() {
+        let body = r#"{"caller":{"number":"+123456789111"},"callee":{"number":"+123456789702"}}"#;
+        let token = mint_token(CREATE_SCOPE).await;
+        let (status, _, _) = post_calls(Some(&token), body, None).await;
+        assert_eq!(status, StatusCode::CREATED);
+        let (status, headers, _) = post_calls(Some(&token), body, Some("corr-409")).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-409")
+        );
     }
 
     // --- Validation & auth -------------------------------------------------
@@ -894,10 +970,10 @@ mod tests {
     #[tokio::test]
     async fn x_correlator_is_echoed_on_201_and_error() {
         let token = mint_token(CREATE_SCOPE).await;
-        // 201.
+        // 201 — a callee unique to this test (createCall is store-keyed now).
         let (status, headers, _) = post_calls(
             Some(&token),
-            r#"{"caller":{"number":"+123456789111"},"callee":{"number":"+123456789012"}}"#,
+            r#"{"caller":{"number":"+123456789111"},"callee":{"number":"+123456789015"}}"#,
             Some("corr-201"),
         )
         .await;

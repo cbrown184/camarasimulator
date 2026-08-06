@@ -1875,9 +1875,13 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     `content` is a fixed, deterministic silent WAV (`audio/wav`) — the sim has no
     real media; the "session completed" precondition is a documented cut. No new
     dep (reuses `base64`). `x-correlator` echoed.
-  - [ ] `409 ALREADY_EXISTS` duplicate-call case on `createCall` — makes
-    `createCall` stateful (a re-create of a live call is a 409, not an overwrite)
-    — later slice.
+  - [x] `409 ALREADY_EXISTS` duplicate-call case on `createCall` — makes
+    `createCall` **stateful**: the `callId` is deterministic from the pair, so a
+    re-create of a still-live call for the same `caller`/`callee` pair → `409
+    ALREADY_EXISTS` (store-keyed control plane) rather than an overwrite. New
+    atomic `store::insert_new` (check-and-insert under one lock hold, no new dep);
+    the pair is creatable again once `terminateCall` evicts it. A `callee` reserved
+    suffix `…409` still yields the canonical `CONFLICT` (distinct code).
   - [ ] `status-changed` CloudEvents on `sink` — deferred (like QoD's first pass).
 - [ ] Other CAMARA APIs as capacity allows
 
@@ -1904,6 +1908,8 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 ## Scan journal
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
+
+2026-08-06 17:51Z — click-to-dial: `createCall` becomes **stateful** — the top remaining actionable, dependency-free leaf: a re-create of a still-live call for the same `caller`/`callee` pair now returns `409 ALREADY_EXISTS` instead of overwriting (the `callId` is deterministic from the pair, so a duplicate id = the same live call). Changed `store::insert` → atomic `store::insert_new(id, call) -> bool` (check-and-insert under one lock hold, never across await, no new dep — mirrors blockchain_public_address's `insert`); create maps `false` → 409 ALREADY_EXISTS; a `terminateCall` evict makes the pair creatable again. A `callee` reserved suffix `…409` still yields the canonical CONFLICT (distinct code). Spec: createCall `409` now an inline response (ALREADY_EXISTS + reserved-suffix CONFLICT examples) + new scenario case + description; removed the stale "Deterministic re-create" cut. Tests: 3 new endpoint tests (409 on re-create + call unchanged; re-creatable after terminate; x-correlator on 409), store unit test rewritten (refuses duplicate, preserves live call, re-creatable after evict); gave 3 existing happy-path tests unique callees (the shared store made the old identical pair collide). Skipped the deferred cuts as before (TLS `https://` sinks need rustls; AREALIMIT spatial; campaign-management; `status-changed` sinks). Remaining Click to Dial leaf: `status-changed` CloudEvents (deferred). cargo test 1424 pass; cargo build --release clean, no new dep. — binary: 2,839,992 bytes (~2.71 MiB, +~2.3 KB)
 
 2026-08-06 16:52Z — click-to-dial: add vwip `GET /calls/{callId}/recording` (getRecording, scope `click-to-dial:recordings:read`) — 200 RecordingResource (base64 silent-WAV `content`, `audio/wav`) for a `recordingEnabled:true` call; 404 NOT_FOUND for a non-recorded or unknown call; spec + scenarios updated; skipped the three top-most `[ ]` TLS-sink items (QoD/QoS-Provisioning/Session-Insights) — each needs a new rustls TLS client + TLS-server test scaffolding, an unsafe fit for one autonomous pass. cargo test 1421 pass; no new dep (reuses base64). — binary: 2,837,672 bytes (~2.71 MiB)
 

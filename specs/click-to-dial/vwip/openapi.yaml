@@ -56,9 +56,16 @@ info:
       cannot be recorded → `422 RECORDING_NOT_SUPPORTED`. (`777` is a documented
       CamaraSim sentinel; recording on any other line is honoured, and `777`
       without recording is a normal, reachable line.)
-    - **Happy path.** Any other pair → `201` with a `Call` whose `status` is
-      `initiating`. `callId` is a deterministic, UUID-shaped token derived from
-      the two numbers.
+    - **Duplicate call (`409`).** Because the `callId` is deterministic from the
+      pair, re-creating a call that is still live (not yet terminated) for the
+      same `caller`/`callee` pair → `409 ALREADY_EXISTS`. This is the one
+      `createCall` case keyed on **store state** rather than the request alone,
+      making `createCall` stateful; the pair is creatable again once
+      `terminateCall` evicts the call. (A `callee` reserved suffix `…409` also
+      yields a 409, but with the canonical `CONFLICT` code.)
+    - **Happy path.** Any other pair, not already live → `201` with a `Call` whose
+      `status` is `initiating`. `callId` is a deterministic, UUID-shaped token
+      derived from the two numbers.
 
     Validation: a malformed body, an unknown field, or a missing
     `caller`/`callee`/`number` → `400 INVALID_ARGUMENT`; a participant number
@@ -98,11 +105,6 @@ info:
 
     ## Documented cuts
 
-    - **Deterministic re-create.** `createCall` persists the call, but its `201`
-      is still fully determined by the request; because the `callId` is derived
-      from the participant pair, re-creating the same call overwrites the
-      identical stored value (the `409 ALREADY_EXISTS` duplicate-call case, which
-      would make `createCall` stateful, is a later slice).
     - **Synthetic recording.** `getRecording`'s `content` is a fixed silent WAV,
       not real captured audio, and the recording is available as soon as the call
       exists — the CAMARA precondition that the call session has *completed* is
@@ -137,7 +139,10 @@ paths:
         via `sink` notifications, a deferred slice) — see the API description for
         the parameter-driven functional cases (the `callee` identifier selects a
         reserved error or an availability/recording case; the pair of numbers is
-        echoed back).
+        echoed back). The `callId` is deterministic from the pair, so re-creating
+        a call that is still live (not yet terminated) for the same
+        `caller`/`callee` pair returns `409 ALREADY_EXISTS` (a store-keyed control
+        plane) rather than overwriting it.
       security:
         - openId:
             - click-to-dial:calls:create
@@ -194,7 +199,34 @@ paths:
         "404":
           $ref: "../../shared/errors.yaml#/components/responses/NotFound"
         "409":
-          $ref: "../../shared/errors.yaml#/components/responses/Conflict"
+          description: |
+            409 — conflict with the current state. CamaraSim returns
+            `ALREADY_EXISTS` when a still-live call already exists for the same
+            `caller`/`callee` pair (the `callId` is deterministic from the pair,
+            so a re-create before the call is terminated is a conflict, not an
+            overwrite — this is the store-keyed control plane that makes
+            `createCall` stateful), and the canonical `CONFLICT` when the `callee`
+            number's reserved suffix is `…409`.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ClickToDialError"
+              examples:
+                alreadyExists:
+                  summary: A live call already exists for this caller/callee pair
+                  value:
+                    status: 409
+                    code: ALREADY_EXISTS
+                    message: "A call already exists for this caller and callee. Terminate it before creating a new one."
+                conflict:
+                  summary: callee reserved suffix …409
+                  value:
+                    status: 409
+                    code: CONFLICT
+                    message: "A specified resource duplicate entry found."
         "422":
           description: |
             422 — the request is well-formed but cannot be processed. CamaraSim
@@ -259,8 +291,10 @@ paths:
         cases:
           - input: callee number ending in a reserved error suffix (e.g. …404)
             result: the canonical CAMARA error for that status
-          - input: "non-reserved callee, distinct caller, no line ending 000"
+          - input: "non-reserved callee, distinct caller, no line ending 000, not already live"
             result: "201 { Call, status = initiating }"
+          - input: "a re-create of a still-live call for the same caller/callee pair"
+            result: "409 ALREADY_EXISTS (store-keyed; not an overwrite)"
           - input: callee number ending 000
             result: "422 CALLEE_NOT_AVAILABLE"
           - input: caller number ending 000

@@ -23,6 +23,11 @@
 //!   a later slice.
 //! - The `callId` is already a deterministic, UUID-shaped token derived from the
 //!   participant pair by `createCall`, so this store mints no ids of its own.
+//!   Because the id is deterministic, an id already present means the *same*
+//!   caller/callee pair already has a live call — so [`insert_new`] refuses the
+//!   duplicate (`createCall` maps it to `409 ALREADY_EXISTS`), rather than
+//!   overwriting; the pair becomes creatable again only once `terminateCall`
+//!   evicts it.
 
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
@@ -36,16 +41,26 @@ fn store() -> &'static Mutex<HashMap<String, Value>> {
     STORE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// Store `call` (its rendered `Call` JSON) under `id`. `createCall` calls this so
-/// the call can later be read back by `getCall`. A repeat `createCall` for the
-/// same participant pair mints the same deterministic `callId` and overwrites the
-/// identical value — a no-op for observable behaviour (the `409 ALREADY_EXISTS`
-/// duplicate-call case is a later slice).
-pub fn insert(id: String, call: Value) {
-    store()
+/// Store `call` (its rendered `Call` JSON) under `id`, unless a call already
+/// exists under that id. `createCall` calls this so the call can later be read
+/// back by `getCall`. Because the `callId` is deterministic from the participant
+/// pair, an id already present means the *same* caller/callee pair already has a
+/// live call.
+///
+/// Returns `true` when the call was newly inserted, `false` when one already
+/// existed — `createCall` maps the latter to `409 ALREADY_EXISTS` (rather than
+/// overwriting the live call). The whole check-and-insert runs under a single
+/// lock hold (never across an `.await`), so two concurrent creates of the same
+/// pair can't both win.
+pub fn insert_new(id: String, call: Value) -> bool {
+    let mut map = store()
         .lock()
-        .expect("click-to-dial call store not poisoned")
-        .insert(id, call);
+        .expect("click-to-dial call store not poisoned");
+    if map.contains_key(&id) {
+        return false;
+    }
+    map.insert(id, call);
+    true
 }
 
 /// Fetch the `Call` stored under `id`, or `None` if no such call exists (never
@@ -84,7 +99,7 @@ mod tests {
         let id = "store-unit-call-a";
         assert!(get(id).is_none(), "not stored yet → None");
         let call = json!({ "callId": id, "status": "initiating" });
-        insert(id.to_string(), call.clone());
+        assert!(insert_new(id.to_string(), call.clone()), "first insert wins");
         assert_eq!(get(id), Some(call));
         assert!(get("store-unit-no-such-call").is_none());
     }
@@ -94,7 +109,7 @@ mod tests {
         let id = "store-unit-call-c";
         // Removing something never stored → false (nothing to terminate).
         assert!(!remove(id), "unknown id → false");
-        insert(id.to_string(), json!({ "callId": id, "status": "initiating" }));
+        assert!(insert_new(id.to_string(), json!({ "callId": id, "status": "initiating" })));
         // First remove sees the call and evicts it.
         assert!(remove(id), "present id → true");
         assert!(get(id).is_none(), "evicted → gone");
@@ -103,13 +118,19 @@ mod tests {
     }
 
     #[test]
-    fn insert_overwrites_the_same_id_with_an_identical_value() {
-        // A repeat createCall for the same pair re-inserts the same value; the
-        // store stays consistent and the read-back is unchanged.
+    fn insert_new_refuses_a_duplicate_id_and_keeps_the_stored_call() {
+        // A repeat createCall for the same pair mints the same deterministic id;
+        // the second insert must be refused (→ 409 ALREADY_EXISTS) and must not
+        // overwrite the live call.
         let id = "store-unit-call-b";
         let call = json!({ "callId": id, "status": "initiating" });
-        insert(id.to_string(), call.clone());
-        insert(id.to_string(), call.clone());
-        assert_eq!(get(id), Some(call));
+        assert!(insert_new(id.to_string(), call.clone()), "first insert wins");
+        // A different value under the same id: refused, original preserved.
+        let other = json!({ "callId": id, "status": "different" });
+        assert!(!insert_new(id.to_string(), other), "duplicate id → false");
+        assert_eq!(get(id), Some(call), "the live call is not overwritten");
+        // Once evicted, the id is creatable again.
+        assert!(remove(id));
+        assert!(insert_new(id.to_string(), json!({ "callId": id })), "re-creatable after evict");
     }
 }
