@@ -6,23 +6,29 @@
 # CamaraSim's parameter-driven functional cases (docs/DESIGN.md §7, §9). Backed
 # by `src/apis/sponsored_data/vwip.rs`; spec and code must not drift.
 #
-# Serves `POST /sponsorship` (`startSponsorship`) and
+# Serves `POST /sponsorship` (`startSponsorship`),
 # `GET /sponsorship/{sponsorId}/{campaignId}/{sessionId}/session-status`
-# (`getSessionStatus`).
+# (`getSessionStatus`) and
+# `DELETE /sponsorship/{sponsorId}/{campaignId}/{sessionId}/revoke`
+# (`revokeSponsorship`).
 #
 # Divergences from the upstream CAMARA source (documented cuts):
-#   - The sponsorship **start** and **session-status** reads are mounted. The
-#     upstream also defines a `revoke` read and campaign-management operations;
-#     those, and the end-of-session `webhookUrl` callback, are deferred to later
-#     passes (see PROGRESS.md). `startSponsorship` persists the granted session in
-#     an in-memory store so `getSessionStatus` can read it back.
-#   - `getSessionStatus`'s `endReason` values `session_revoked` (needs `revoke`)
-#     and `not_available` are documented in the schema but not yet reachable.
+#   - The sponsorship **start**, **session-status** read and **revoke** are
+#     mounted. The upstream also defines campaign-management operations; those,
+#     and the end-of-session `webhookUrl` callback, are deferred to later passes
+#     (see PROGRESS.md). `startSponsorship` persists the granted session in an
+#     in-memory store so `getSessionStatus` can read it back and
+#     `revokeSponsorship` can evict it.
+#   - `getSessionStatus`'s `endReason` values `session_revoked` and
+#     `not_available` are documented in the schema but not reachable through a
+#     status read: `revokeSponsorship` **evicts** the session, so a revoked
+#     session's status `404`s rather than reporting `session_revoked`.
 #   - The upstream `wip` contract declares **no** `securitySchemes`; CamaraSim
 #     assigns the canonical `<api>:<resource>:<action>` scopes
-#     `sponsored-data:sponsorship:create` (start) and
-#     `sponsored-data:sponsorship:read` (session-status), resolved against the
-#     shared auth spec.
+#     `sponsored-data:sponsorship:create` (start),
+#     `sponsored-data:sponsorship:read` (session-status) and
+#     `sponsored-data:sponsorship:delete` (revoke), resolved against the shared
+#     auth spec.
 #   - CamaraSim inlines the request/response schemas and `$ref`s the shared error
 #     model (`../../shared/errors.yaml`) so the served spec resolves without
 #     vendoring the whole Commonalities file.
@@ -304,6 +310,90 @@ paths:
           - input: "now at or after endTime"
             result: 'sessionStatus "inactive", endReason "validity_expired"'
 
+  /sponsorship/{sponsorId}/{campaignId}/{sessionId}/revoke:
+    delete:
+      operationId: revokeSponsorship
+      summary: Revoke a sponsorship session
+      description: |
+        Revoke an active sponsorship, preventing further use of sponsored data
+        for the subscriber. The session is addressed by its `sponsorId`,
+        `campaignId` and opaque `sessionId`; on success it is **evicted** and the
+        operation returns `200` with the revoked window and
+        `requestResult:"successful_revocation"`.
+
+        The store state is the only control plane: an unknown `sessionId`, or one
+        whose stored `sponsorId`/`campaignId` do not match the path, yields
+        `404 NOT_FOUND` (a mismatch leaves the session in place). Revoke is
+        single-use — because the session is evicted, a second revoke of the same
+        session `404`s (see the operation's `x-camarasim-scenarios`).
+      security:
+        - openId:
+            - sponsored-data:sponsorship:delete
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+        - name: sponsorId
+          in: path
+          required: true
+          description: The sponsoring company (`local@domain.tld`) from `startSponsorship`.
+          schema:
+            $ref: "#/components/schemas/SponsorId"
+        - name: campaignId
+          in: path
+          required: true
+          description: The campaign (`UUID@domain.tld`) from `startSponsorship`.
+          schema:
+            $ref: "#/components/schemas/CampaignId"
+        - name: sessionId
+          in: path
+          required: true
+          description: The opaque session identifier minted by `startSponsorship`.
+          schema:
+            $ref: "#/components/schemas/SessionId"
+      responses:
+        "200":
+          description: Session revoked successfully. The revoked session is evicted.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RevokedSponsorship"
+              examples:
+                revoked:
+                  summary: A revoked session
+                  value:
+                    sponsorId: acme@sponsor.example.com
+                    campaignId: 123e4567-e89b-12d3-a456-426614174000@sponsor.example.com
+                    sessionId: 8f14e45f-ceea-4e0a-9d1f-2e3c4b5a6d70
+                    phoneNumber: "+123456789012"
+                    startTime: "2024-06-01T00:00:00Z"
+                    endTime: "2024-06-01T00:10:00Z"
+                    requestResult: successful_revocation
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          Result selected from the stored session (docs/DESIGN.md §7). The opaque
+          `sessionId` addresses the session; a matching revoke evicts it.
+        cases:
+          - input: "sessionId of a stored session whose sponsorId/campaignId match the path"
+            result: '200 with requestResult "successful_revocation"; the session is evicted'
+          - input: "unknown sessionId, or sponsorId/campaignId not matching the stored session"
+            result: "404 NOT_FOUND (a mismatch leaves the session in place)"
+          - input: "sessionId of an already-revoked session (single-use)"
+            result: "404 NOT_FOUND"
+
 components:
   securitySchemes:
     openId:
@@ -489,15 +579,52 @@ components:
           description: >-
             Why the session ended — present only when `sessionStatus` is
             `inactive`. CamaraSim reaches `validity_expired` (past `endTime`) and
-            `data_exhausted` (grant fully consumed); `session_revoked` (needs the
-            deferred `revoke` operation) and `not_available` are documented but not
-            yet reachable.
+            `data_exhausted` (grant fully consumed); `session_revoked` and
+            `not_available` are documented but not reachable through a status
+            read: `revokeSponsorship` evicts the session, so a revoked session's
+            status `404`s rather than reporting `session_revoked`.
           enum:
             - validity_expired
             - data_exhausted
             - session_revoked
             - not_available
           example: data_exhausted
+
+    RevokedSponsorship:
+      type: object
+      additionalProperties: false
+      description: The result of revoking a sponsorship session — the revoked window.
+      required:
+        - sponsorId
+        - campaignId
+        - sessionId
+        - phoneNumber
+        - startTime
+        - endTime
+        - requestResult
+      properties:
+        sponsorId:
+          $ref: "#/components/schemas/SponsorId"
+        campaignId:
+          $ref: "#/components/schemas/CampaignId"
+        sessionId:
+          $ref: "#/components/schemas/SessionId"
+        phoneNumber:
+          $ref: "#/components/schemas/PhoneNumber"
+        startTime:
+          allOf:
+            - $ref: "#/components/schemas/Time"
+          description: When the sponsorship started.
+        endTime:
+          allOf:
+            - $ref: "#/components/schemas/Time"
+          description: When the sponsorship was scheduled to end (`startTime + duration` minutes).
+        requestResult:
+          type: string
+          description: The outcome of the revoke request.
+          enum:
+            - successful_revocation
+          example: successful_revocation
 
     SponsoredDataError:
       description: >-

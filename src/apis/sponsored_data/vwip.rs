@@ -1,10 +1,12 @@
 //! Sponsored Data **vwip** (CAMARA Sponsored Data, work-in-progress).
 //!
-//! Two endpoints:
+//! Three endpoints:
 //! - `POST /sponsored-data/vwip/sponsorship` — start a data-sponsorship session
 //!   for a subscriber in a campaign (operationId `startSponsorship`).
 //! - `GET /sponsored-data/vwip/sponsorship/{sponsorId}/{campaignId}/{sessionId}/session-status`
 //!   — read a started session's live status (operationId `getSessionStatus`).
+//! - `DELETE /sponsored-data/vwip/sponsorship/{sponsorId}/{campaignId}/{sessionId}/revoke`
+//!   — revoke (evict) a started session (operationId `revokeSponsorship`).
 //!
 //! ## What it does
 //!
@@ -69,15 +71,28 @@
 //!   fully-consumed grant → `"inactive"` / `"data_exhausted"`; else `"active"`
 //!   (no `endReason`).
 //!
-//! The `endReason` values `session_revoked` (needs `revoke`) and `not_available`
-//! are documented but not yet reachable — the `revoke` operation and the
-//! end-of-session `webhookUrl` callback are deferred to later passes.
+//! ## Revoking a session — `revokeSponsorship`
+//!
+//! `DELETE …/{sponsorId}/{campaignId}/{sessionId}/revoke` (scope
+//! `sponsored-data:sponsorship:delete`) **evicts** the addressed session from
+//! the store and answers `200` with the revoked window and
+//! `requestResult:"successful_revocation"`. Like `getSessionStatus` the opaque
+//! `sessionId` is the only control plane (docs/DESIGN.md §7): an unknown id, or a
+//! `sponsorId`/`campaignId` not matching the stored session, → `404 NOT_FOUND`
+//! (and a mismatch leaves the session in place). Revoke is single-use — a second
+//! revoke of the same session `404`s.
+//!
+//! Because revoke evicts the session, the `getSessionStatus` `endReason` value
+//! `session_revoked` remains unreachable through a subsequent status read (a
+//! revoked session is gone, so its status `404`s); it and `not_available` stay
+//! documented-but-unreached. The end-of-session `webhookUrl` callback and
+//! campaign-management operations are still deferred to later passes.
 
 use axum::body::Bytes;
 use axum::extract::Path;
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -97,6 +112,9 @@ const CREATE_SCOPE: &str = "sponsored-data:sponsorship:create";
 /// Scope required to read a sponsorship session's status (CamaraSim-assigned; the
 /// upstream `wip` contract declares no `securitySchemes`).
 const READ_SCOPE: &str = "sponsored-data:sponsorship:read";
+/// Scope required to revoke a sponsorship session (CamaraSim-assigned; the
+/// upstream `wip` contract declares no `securitySchemes`).
+const DELETE_SCOPE: &str = "sponsored-data:sponsorship:delete";
 
 /// The sponsored data volume (MB) granted when the request omits `dataVolume` —
 /// the campaign's onboarding default (the spec's `50 MB` example).
@@ -121,6 +139,10 @@ pub fn routes() -> Router {
         .route(
             "/sponsored-data/vwip/sponsorship/:sponsor_id/:campaign_id/:session_id/session-status",
             get(get_session_status),
+        )
+        .route(
+            "/sponsored-data/vwip/sponsorship/:sponsor_id/:campaign_id/:session_id/revoke",
+            delete(revoke_sponsorship),
         )
 }
 
@@ -366,6 +388,66 @@ fn session_status_body(session_id: &str, record: &SponsorshipRecord, now: i64) -
         body["endReason"] = Value::String(reason.to_string());
     }
     body
+}
+
+/// `DELETE /sponsored-data/vwip/sponsorship/{sponsorId}/{campaignId}/{sessionId}/revoke`
+/// (operationId `revokeSponsorship`).
+///
+/// Revokes an active sponsorship, preventing further use of sponsored data for
+/// the subscriber. Requires a token carrying [`DELETE_SCOPE`]. The session is
+/// addressed by the opaque `sessionId`, so — exactly like `getSessionStatus` —
+/// the store state is the only control plane (docs/DESIGN.md §7): an unknown
+/// `sessionId`, or one whose stored `sponsorId`/`campaignId` don't match the
+/// path, → `404 NOT_FOUND` (and a mismatch leaves the session in place). A match
+/// **evicts** the session (single-use: a second revoke then `404`s) and returns
+/// `200` with the revoked window and `requestResult:"successful_revocation"`.
+/// `x-correlator` is echoed on every response.
+async fn revoke_sponsorship(
+    claims: Claims,
+    headers: HeaderMap,
+    Path((sponsor_id, campaign_id, session_id)): Path<(String, String, String)>,
+) -> Response {
+    // Optional correlation header, echoed on every response (CAMARA Commonalities).
+    let correlator = headers.get("x-correlator").cloned();
+
+    // Endpoint authorisation: the token must carry the delete scope.
+    if let Err(e) = claims.require_scope(DELETE_SCOPE) {
+        return with_correlator(e.into_response(), &correlator);
+    }
+
+    // Store state is the control plane: evict an addressable session (single-use);
+    // an unknown id, or a sponsor/campaign not matching the stored session, → 404
+    // (and a mismatch is left in place — see `store::remove_matching`).
+    let record = match store::remove_matching(&session_id, &sponsor_id, &campaign_id) {
+        Some(r) => r,
+        None => {
+            return with_correlator(
+                CamaraError::not_found(
+                    "No sponsorship session found for the provided sponsorId, campaignId and sessionId.",
+                )
+                .into_response(),
+                &correlator,
+            )
+        }
+    };
+
+    let body = revoke_response(&session_id, &record);
+    with_correlator((StatusCode::OK, Json(body)).into_response(), &correlator)
+}
+
+/// Build the `200` revocation representation from the evicted grant. Pure over
+/// its inputs so the shape is unit-testable exactly. `requestResult` is the
+/// upstream's fixed success token `successful_revocation`.
+fn revoke_response(session_id: &str, record: &SponsorshipRecord) -> Value {
+    json!({
+        "sponsorId": record.sponsor_id,
+        "campaignId": record.campaign_id,
+        "sessionId": session_id,
+        "phoneNumber": record.phone_number,
+        "startTime": rfc3339_utc(record.start_time),
+        "endTime": rfc3339_utc(record.end_time),
+        "requestResult": "successful_revocation",
+    })
 }
 
 /// A 400 `INVALID_ARGUMENT` CAMARA error, with the correlator echoed.
@@ -728,6 +810,44 @@ mod tests {
         body["sessionId"].as_str().unwrap().to_string()
     }
 
+    /// Build the `revoke` URL, percent-encoding the `@` in the sponsor/campaign
+    /// path segments (mirrors `status_url`).
+    fn revoke_url(sponsor: &str, campaign: &str, session: &str) -> String {
+        format!(
+            "/sponsored-data/vwip/sponsorship/{}/{}/{}/revoke",
+            sponsor.replace('@', "%40"),
+            campaign.replace('@', "%40"),
+            session,
+        )
+    }
+
+    /// DELETE a `revoke` URL, returning the status, headers, and JSON body.
+    async fn delete_revoke(
+        token: Option<&str>,
+        url: &str,
+        correlator: Option<&str>,
+    ) -> (StatusCode, HeaderMap, Value) {
+        let mut builder = Request::builder()
+            .method("DELETE")
+            .uri(url)
+            .header("host", HOST);
+        if let Some(t) = token {
+            builder = builder.header("authorization", format!("Bearer {t}"));
+        }
+        if let Some(c) = correlator {
+            builder = builder.header("x-correlator", c);
+        }
+        let request = builder.body(Body::empty()).unwrap();
+        let response = app().oneshot(request).await.unwrap();
+        let status = response.status();
+        let headers = response.headers().clone();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, headers, json)
+    }
+
     #[tokio::test]
     async fn happy_path_returns_201_with_defaults_and_echoes() {
         let token = mint_token(CREATE_SCOPE).await;
@@ -1030,6 +1150,137 @@ mod tests {
         assert_eq!(
             headers.get("x-correlator").and_then(|v| v.to_str().ok()),
             Some("corr-err")
+        );
+    }
+
+    // --- revokeSponsorship -------------------------------------------------
+
+    #[test]
+    fn revoke_response_carries_the_window_and_success_result() {
+        let record = SponsorshipRecord {
+            sponsor_id: SPONSOR.to_string(),
+            campaign_id: CAMPAIGN.to_string(),
+            phone_number: "+123456789012".to_string(),
+            start_time: 1_717_200_000, // 2024-06-01T00:00:00Z
+            end_time: 1_717_200_600,   // +10 min
+            data_volume_mb: 50,
+        };
+        let body = revoke_response("sid-9", &record);
+        assert_eq!(body["sponsorId"], SPONSOR);
+        assert_eq!(body["campaignId"], CAMPAIGN);
+        assert_eq!(body["sessionId"], "sid-9");
+        assert_eq!(body["phoneNumber"], "+123456789012");
+        assert_eq!(body["startTime"], "2024-06-01T00:00:00Z");
+        assert_eq!(body["endTime"], "2024-06-01T00:10:00Z");
+        assert_eq!(body["requestResult"], "successful_revocation");
+    }
+
+    #[tokio::test]
+    async fn revoke_evicts_the_session_and_is_single_use() {
+        let create = mint_token(CREATE_SCOPE).await;
+        let read = mint_token(READ_SCOPE).await;
+        let del = mint_token(DELETE_SCOPE).await;
+        let session = start_session(&create, "+123456789012").await;
+
+        // The session is readable before revoke.
+        let (status, _, _) =
+            get_status(Some(&read), &status_url(SPONSOR, CAMPAIGN, &session), None).await;
+        assert_eq!(status, StatusCode::OK);
+
+        // Revoke → 200 with the revoked window and the success result.
+        let (status, _, body) =
+            delete_revoke(Some(&del), &revoke_url(SPONSOR, CAMPAIGN, &session), None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["sessionId"], session);
+        assert_eq!(body["sponsorId"], SPONSOR);
+        assert_eq!(body["campaignId"], CAMPAIGN);
+        assert_eq!(body["phoneNumber"], "+123456789012");
+        assert_eq!(body["requestResult"], "successful_revocation");
+
+        // The session is gone: a subsequent status read 404s...
+        let (status, _, _) =
+            get_status(Some(&read), &status_url(SPONSOR, CAMPAIGN, &session), None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "revoked session should be evicted");
+
+        // ...and a second revoke of the same session 404s (single-use).
+        let (status, _, _) =
+            delete_revoke(Some(&del), &revoke_url(SPONSOR, CAMPAIGN, &session), None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn revoke_unknown_session_is_not_found() {
+        let del = mint_token(DELETE_SCOPE).await;
+        let url = revoke_url(SPONSOR, CAMPAIGN, "8f14e45f-ceea-4e0a-9d1f-2e3c4b5a6d70");
+        let (status, _, body) = delete_revoke(Some(&del), &url, None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn revoke_mismatched_sponsor_is_not_found_and_keeps_the_session() {
+        let create = mint_token(CREATE_SCOPE).await;
+        let read = mint_token(READ_SCOPE).await;
+        let del = mint_token(DELETE_SCOPE).await;
+        let session = start_session(&create, "+123456789012").await;
+
+        // A revoke addressed under the wrong sponsor is not found...
+        let url = revoke_url("someone-else@sponsor.example.com", CAMPAIGN, &session);
+        let (status, _, _) = delete_revoke(Some(&del), &url, None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        // ...and must NOT have evicted the session — it still reads back.
+        let (status, _, _) =
+            get_status(Some(&read), &status_url(SPONSOR, CAMPAIGN, &session), None).await;
+        assert_eq!(status, StatusCode::OK, "a mismatch must not evict the session");
+    }
+
+    #[tokio::test]
+    async fn revoke_missing_token_is_unauthenticated() {
+        let url = revoke_url(SPONSOR, CAMPAIGN, "8f14e45f-ceea-4e0a-9d1f-2e3c4b5a6d70");
+        let (status, _, _) = delete_revoke(None, &url, None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn revoke_wrong_scope_is_permission_denied() {
+        // A read-scoped token may not revoke.
+        let read = mint_token(READ_SCOPE).await;
+        let url = revoke_url(SPONSOR, CAMPAIGN, "8f14e45f-ceea-4e0a-9d1f-2e3c4b5a6d70");
+        let (status, _, _) = delete_revoke(Some(&read), &url, None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn revoke_echoes_x_correlator() {
+        let create = mint_token(CREATE_SCOPE).await;
+        let del = mint_token(DELETE_SCOPE).await;
+        let session = start_session(&create, "+123456789012").await;
+
+        // Success path echoes.
+        let (status, headers, _) = delete_revoke(
+            Some(&del),
+            &revoke_url(SPONSOR, CAMPAIGN, &session),
+            Some("corr-rev-ok"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-rev-ok")
+        );
+
+        // Error (404) path echoes too (the session is already revoked).
+        let (status, headers, _) = delete_revoke(
+            Some(&del),
+            &revoke_url(SPONSOR, CAMPAIGN, &session),
+            Some("corr-rev-err"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-rev-err")
         );
     }
 }

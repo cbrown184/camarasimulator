@@ -68,6 +68,29 @@ pub fn get(id: &str) -> Option<SponsorshipRecord> {
         .cloned()
 }
 
+/// Evict the session stored under `id`, but **only** when its stored
+/// `sponsorId` / `campaignId` match the addressing path segments, returning the
+/// removed record. Returns `None` when the id is unknown *or* the stored
+/// sponsor/campaign don't match — and in the mismatch case the session is left
+/// in place (it isn't addressable under that sponsor/campaign, so it must not be
+/// evicted). The check-and-remove happens under a single lock, so it is atomic.
+///
+/// `revokeSponsorship` uses this: `Some` → `200` (single-use — a second revoke
+/// of the same session then sees `None`); `None` → `404 NOT_FOUND`.
+pub fn remove_matching(
+    id: &str,
+    sponsor_id: &str,
+    campaign_id: &str,
+) -> Option<SponsorshipRecord> {
+    let mut map = store()
+        .lock()
+        .expect("sponsored-data session store not poisoned");
+    match map.get(id) {
+        Some(r) if r.sponsor_id == sponsor_id && r.campaign_id == campaign_id => map.remove(id),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -94,5 +117,31 @@ mod tests {
         assert_eq!(got.phone_number, "+123456789012");
         assert_eq!(got.data_volume_mb, 50);
         assert!(get("sd-store-unit-no-such").is_none());
+    }
+
+    #[test]
+    fn remove_matching_evicts_only_a_matching_session() {
+        let rec = record();
+        // Unknown id → None (nothing to evict).
+        assert!(remove_matching("sd-store-unit-no-such-2", &rec.sponsor_id, &rec.campaign_id).is_none());
+
+        // A stored session with a mismatched sponsor/campaign is NOT evicted.
+        let id = "sd-store-unit-0002".to_string();
+        insert(id.clone(), rec.clone());
+        assert!(
+            remove_matching(&id, "someone-else@sponsor.example.com", &rec.campaign_id).is_none(),
+            "mismatched sponsor → None"
+        );
+        assert!(remove_matching(&id, &rec.sponsor_id, "other-campaign").is_none(), "mismatched campaign → None");
+        assert!(get(&id).is_some(), "a mismatch must leave the session in place");
+
+        // A matching remove evicts and returns the record; a second remove is None.
+        let removed = remove_matching(&id, &rec.sponsor_id, &rec.campaign_id).expect("match → Some");
+        assert_eq!(removed.phone_number, rec.phone_number);
+        assert!(get(&id).is_none(), "evicted → gone");
+        assert!(
+            remove_matching(&id, &rec.sponsor_id, &rec.campaign_id).is_none(),
+            "single-use → second revoke is None"
+        );
     }
 }

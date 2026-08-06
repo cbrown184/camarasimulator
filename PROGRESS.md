@@ -1826,8 +1826,16 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     a fully-consumed grant → inactive/`data_exhausted`; else `active`, no
     `endReason`). `endReason` `session_revoked`/`not_available` documented but not
     yet reachable. `x-correlator` echoed.
-  - [ ] `DELETE …/revoke` (`revokeSponsorship`) — the end-of-session revoke read
-    (reuses the session store); the end-of-session `webhookUrl` callback deferred.
+  - [x] `DELETE /sponsorship/{sponsorId}/{campaignId}/{sessionId}/revoke`
+    (`revokeSponsorship`, `sponsored-data:sponsorship:delete`) — evicts the
+    addressed session from the shared store (single-use) and returns `200` with
+    the revoked window + `requestResult:"successful_revocation"`. Opaque
+    `sessionId` → store state is the only control plane (like `getSessionStatus`):
+    unknown id, or a `sponsorId`/`campaignId` not matching the stored session, →
+    `404 NOT_FOUND` (a mismatch leaves the session in place); a second revoke →
+    `404`. Because revoke evicts, `getSessionStatus`'s `endReason` `session_revoked`
+    stays documented-but-unreached. The end-of-session `webhookUrl` callback is
+    still deferred. New `store::remove_matching` (atomic check-and-remove).
   - [ ] campaign-management operations (`/campaign/…`) — deferred.
 - [ ] Other CAMARA APIs as capacity allows
 
@@ -1855,6 +1863,27 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-06 — Phase 5 ("other APIs"): **Sponsored Data vwip — `DELETE
+  /sponsorship/{sponsorId}/{campaignId}/{sessionId}/revoke`** (`revokeSponsorship`,
+  new CamaraSim-assigned scope `sponsored-data:sponsorship:delete`), the last
+  remaining Sponsored Data operation bar the deferred campaign-management set. The
+  three earlier-phase `[ ]` leaves are the same deferred TLS-sink infra (a
+  `https://` sink needs a rustls TLS client + a TLS test harness — a dedicated
+  dependency-adding pass, not a small increment) so I took this clean stateful
+  single-endpoint DELETE instead. Confirmed the upstream contract by fetching the
+  CAMARA SponsoredData spec: `DELETE …/revoke` → `200 { sponsorId, campaignId,
+  sessionId, phoneNumber, startTime, endTime, requestResult:"successful_revocation" }`.
+  Store state is the only control plane (like `getSessionStatus`): a matching id
+  is **evicted** (single-use) → 200; unknown id, or a `sponsorId`/`campaignId`
+  mismatch → 404 (a mismatch is left in place). New atomic
+  `store::remove_matching` (check-and-remove under one lock, no new dep). Revoke
+  evicts, so `getSessionStatus`'s `endReason` `session_revoked` stays
+  documented-but-unreached. Spec: added the `revoke` path + `RevokedSponsorship`
+  schema + `x-camarasim-scenarios`, refreshed the header/endReason notes in
+  `specs/sponsored-data/vwip/openapi.yaml`. Tests: +6 vwip (pure body shape;
+  evict+single-use, unknown→404, mismatch keeps session, 401, 403, x-correlator)
+  + 1 store unit (`remove_matching`). `cargo test` 1379 green; `cargo build
+  --release` ok. — binary: 2.78 MB (2,784,904 B, +~10.4 KB, no new dep)
 - 2026-08-06 — Phase 5 ("other APIs"): **Sponsored Data vwip — `GET
   /sponsorship/{sponsorId}/{campaignId}/{sessionId}/session-status`**
   (`getSessionStatus`, `sponsored-data:sponsorship:read`), making the API
