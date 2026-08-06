@@ -37,6 +37,7 @@
 //! - **Population Density Data vwip** — `/population-density-data/vwip/…`.
 //! - **QoS Provisioning v0.3** — `/qos-provisioning/v0.3/…`.
 //! - **Media Streaming Rate vwip** — `/media-streaming-rate/vwip/…`.
+//! - **Network Health Assessment vwip** — `/network-health-assessment/vwip/…`.
 //! - **Optimal Edge Discovery vwip** — `/optimal-edge-discovery/vwip/…`.
 //! - **Verified Caller vwip** — `/verified-caller/vwip/…`.
 //! - **Application Profiles vwip** — `/application-profiles/vwip/…`.
@@ -70,6 +71,7 @@ pub mod kyc_tenure;
 pub mod location_retrieval;
 pub mod location_verification;
 pub mod media_streaming_rate;
+pub mod network_health_assessment;
 pub mod number_recycling;
 pub mod number_verification;
 pub mod one_time_password_sms;
@@ -122,6 +124,7 @@ pub fn routes() -> Router {
         .merge(population_density_data::routes())
         .merge(qos_provisioning::routes())
         .merge(media_streaming_rate::routes())
+        .merge(network_health_assessment::routes())
         .merge(optimal_edge_discovery::routes())
         .merge(verified_caller::routes())
         .merge(application_profiles::routes())

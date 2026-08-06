@@ -256,6 +256,12 @@ async fn catalog() -> Json<Value> {
                 "version": "vwip",
                 "base_path": "/session-insights/vwip",
                 "spec_url": "/session-insights/vwip/openapi.yaml",
+            },
+            {
+                "name": "network-health-assessment",
+                "version": "vwip",
+                "base_path": "/network-health-assessment/vwip",
+                "spec_url": "/network-health-assessment/vwip/openapi.yaml",
             }
         ],
         "authorization_servers": [{

@@ -883,6 +883,24 @@ order (`…000` → `allowed` default, `…001` → `lost`, `…002` → `stolen
 `now − d hours`. `lastChecked` is a fresh RFC 3339 UTC timestamp (self-contained
 formatter, no new dependency). `x-correlator` echoed on every response.
 
+**Network Health Assessment vwip** is now live at
+`/network-health-assessment/vwip/health-scores` (`getHealthScores`, scope
+`network-health-assessment:health-scores:read`) — CamaraSim's first
+**network-keyed** API and its first from the CAMARA NetworkInsights suite. It is a
+two-legged (`client_credentials`) service query returning an *aggregate,
+network-level* health score, never any device/user data. The caller names a
+network (`networkId`, a UUID query param) and a module (`netType` query param:
+`NET`/`NET_WIRELESS`/`NET_TRANSPORT`/`NET_CORE`) and gets `{ networkId, netType,
+score, scoringTime }`. Two control planes (DESIGN §7): the `networkId`
+reserved-error suffix → canonical CAMARA error (a UUID carries digits, so the
+shared convention applies unchanged, e.g. `…-000000000404` → 404 NOT_FOUND); else
+its trailing three digits `d` set the score (`d/10`) and `netType` shifts it per
+module (`score = clamp(d/10 − moduleIndex, 0, 100)`; `NET`=0…`NET_CORE`=3), with
+`…000`/no-digits → the spec's no-data `{ score: null, scoringTime: null }`.
+`scoringTime` is a fresh RFC 3339 UTC timestamp (self-contained formatter, no new
+dependency). `x-correlator` echoed on every response. The sibling Network Traffic
+Analysis API of the suite is out of scope.
+
 ## In progress (claimed this pass)
 
 _None._  <!-- agent: put the claimed item + run timestamp here, clear it when done -->
@@ -1633,6 +1651,25 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
         already-past `expiresAt` (fires immediately), the same code path a live
         session takes at expiry. No new dep.
     - [ ] TLS (`https://` sink) delivery (needs a rustls TLS client)
+- [x] Network Health Assessment vwip (`/network-health-assessment/vwip`; CAMARA
+  NetworkInsights, wip — no released version yet, mounted at its canonical `vwip`
+  base path; stateless, non-spatial, **network-keyed** aggregate health score —
+  never device-level data, so two-legged only):
+  - [x] `GET /health-scores` (`network-health-assessment:health-scores:read`,
+    `getHealthScores`) — the latest aggregate health score of a network module
+    (`{ networkId, netType, score, scoringTime }`). Two required query params:
+    `networkId` (UUID; missing/non-UUID → 400 INVALID_ARGUMENT) and `netType`
+    (`NET`/`NET_WIRELESS`/`NET_TRANSPORT`/`NET_CORE`; missing/unknown → 400
+    INVALID_ARGUMENT). Two control planes (DESIGN §7): the `networkId`
+    reserved-error suffix → canonical CAMARA error (UUIDs contain digits, so the
+    shared convention applies unchanged, e.g. `…-000000000404` → 404 NOT_FOUND);
+    else the `networkId`'s trailing three digits `d` set the score band and
+    `netType` shifts it per module — `d == 000`/no-digits → no data
+    (`score:null`, `scoringTime:null`), else `score = clamp(d/10 − moduleIndex,
+    0, 100)` (`NET`=0…`NET_CORE`=3). `scoringTime` = now (self-contained RFC 3339
+    formatter, no new dep). `x-correlator` echoed. The sibling Network Traffic
+    Analysis API of the NetworkInsights suite remains out of scope.
+    **Completes Network Health Assessment vwip.**
 - [ ] Other CAMARA APIs as capacity allows
 
 ## Cross-cutting (do alongside the item that needs it)
@@ -1659,6 +1696,25 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-06 — Phase 5 ("other APIs"): **Network Health Assessment vwip — `GET
+  /health-scores`** (new API, CAMARA NetworkInsights suite, wip). CamaraSim's
+  first **network-keyed** aggregate API: a two-legged (`client_credentials`)
+  query returning a network module's latest `0..100` health `score` (never
+  device-level data). Vendored the canonical CAMARA contract (verified against
+  the upstream `NetworkInsights/code/API_definitions/network-health-assessment.yaml`:
+  `getHealthScores`, scope `network-health-assessment:health-scores:read`, required
+  `networkId` (UUID) + `netType` (`NET`/`NET_WIRELESS`/`NET_TRANSPORT`/`NET_CORE`)
+  query params, `HealthInfo` `{networkId, netType, score?, scoringTime?}`). Two
+  control planes (DESIGN §7): the `networkId` reserved-error suffix → canonical
+  CAMARA error (UUIDs carry digits, shared convention applies unchanged); else the
+  trailing three digits `d` set the score (`d/10`) and `netType` shifts it per
+  module (`clamp(d/10 − moduleIndex, 0, 100)`), with `…000`/no-digits → the spec's
+  no-data `{score:null, scoringTime:null}`. Wired into the router, catalog, and
+  served-spec table; self-contained RFC 3339 formatter (mirrors
+  connected_network_type); **no new dependency**. 13 new tests (score bands,
+  per-module shift, clamp, no-data, reserved suffixes, UUID/netType validation,
+  auth, x-correlator). `cargo test` 1271 passing; `cargo build --release` OK.
+  — binary: 2.5M (2,606,056 B, +~20 KB for the new module/spec, no new dep)
 - 2026-08-06 — Phase 5: **Session Insights vwip — `session-ended` `SESSION_EXPIRED`
   (expiry-timer) leg**. `createSession` now schedules an async expiry timer
   (`spawn_session_expiry`) for a time-bounded, sink-bearing session (any non-`…000`,
