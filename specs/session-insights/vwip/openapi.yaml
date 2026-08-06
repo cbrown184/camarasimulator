@@ -12,9 +12,11 @@
 # application-observed metrics submission (`POST /sessions/{sessionId}/metrics`,
 # `sendSessionMetrics`). `sendSessionMetrics` now also delivers the resulting
 # `network-quality-score` CloudEvent to the session's `sink` (fire-and-forget over
-# raw TCP, `http://` sinks only — no TLS client). A session's ACCESSTOKEN
-# `sinkCredential` bearer now authenticates that callback (`Authorization: Bearer`);
-# the `session-ended` event and `https://` (TLS) sink delivery remain deferred to
+# raw TCP, `http://` sinks only — no TLS client). `deleteSession` now delivers the
+# terminal `session-ended` CloudEvent (`terminationReason: SESSION_DELETED`) to the
+# session's `sink` too. A session's ACCESSTOKEN `sinkCredential` bearer authenticates
+# both callbacks (`Authorization: Bearer`); the `session-ended` expiry
+# (`SESSION_EXPIRED`) leg and `https://` (TLS) sink delivery remain deferred to
 # later passes.
 openapi: 3.0.3
 info:
@@ -252,8 +254,19 @@ paths:
       description: |
         Delete the session resource identified by `sessionId`. Keyed only on the
         in-memory store: a session that exists is evicted (single-use) → `204 No
-        Content`; an unknown or already-deleted id → `404 NOT_FOUND`. No
-        `session-ended` CloudEvent is emitted (notifications are deferred).
+        Content`; an unknown or already-deleted id → `404 NOT_FOUND`.
+
+        **`session-ended` notification (CamaraSim model).** When the deleted session
+        recorded a `sink`, CamaraSim delivers the **terminal** `session-ended`
+        CloudEvent (type
+        `org.camaraproject.session-insights.v0.session-ended`, `data.terminationReason:
+        SESSION_DELETED`) to that `sink` — fire-and-forget over raw TCP, `http://`
+        sinks only (an `https://` sink is a documented no-op cut — no TLS client), so
+        a slow or unreachable sink never delays the `204`. The session's ACCESSTOKEN
+        `sinkCredential` bearer (stashed at `createSession`) is applied to the
+        callback as `Authorization: Bearer <token>` and taken single-use (the event
+        is terminal). The `SESSION_EXPIRED` (expiry) and network-initiated
+        (`NETWORK_TERMINATED`) legs of `session-ended` remain deferred.
       security:
         - openId:
             - session-insights:sessions:delete
@@ -287,9 +300,17 @@ paths:
           Keyed only on the in-memory store (docs/DESIGN.md §7).
         cases:
           - input: a sessionId returned by a prior createSession (not yet deleted)
-            result: "204 No Content; the session is evicted (single-use)"
+            result: >-
+              204 No Content; the session is evicted (single-use) and a terminal
+              session-ended CloudEvent (terminationReason SESSION_DELETED) is fired
+              to its sink (http:// only)
+          - input: >-
+              a deleted session whose sink recorded an ACCESSTOKEN sinkCredential
+            result: >-
+              the session-ended callback carries Authorization Bearer <token> (the
+              secret is never echoed by GET/retrieve; taken single-use)
           - input: an unknown or already-deleted sessionId
-            result: "404 NOT_FOUND"
+            result: "404 NOT_FOUND (no notification)"
 
   /retrieve-sessions:
     post:
@@ -843,6 +864,65 @@ components:
                 Synthetic overall network-quality score (0 worst … 100 best),
                 deterministic from the submitted `MetricsPayload`.
               example: 44
+
+    SessionEndedEvent:
+      type: object
+      description: >-
+        The CloudEvents 1.0 envelope CamaraSim delivers to a session's `sink` when
+        the session ends — the session's **terminal** notification, after which no
+        further events are delivered. CamaraSim emits it from `deleteSession`
+        (fire-and-forget, `http://` sinks only). `data` (CAMARA `SessionEndedData`)
+        carries the `sessionId` and the `terminationReason`.
+      required:
+        - id
+        - source
+        - type
+        - specversion
+        - time
+        - data
+      properties:
+        id:
+          type: string
+          description: Unique CloudEvent id within `source` (UUID-shaped).
+          example: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+        source:
+          type: string
+          example: "//camarasimulator/session-insights"
+        type:
+          type: string
+          enum: ["org.camaraproject.session-insights.v0.session-ended"]
+        specversion:
+          type: string
+          enum: ["1.0"]
+        datacontenttype:
+          type: string
+          enum: ["application/json"]
+        time:
+          type: string
+          format: date-time
+          example: "2024-01-01T14:27:08Z"
+        data:
+          type: object
+          required:
+            - sessionId
+            - terminationReason
+          properties:
+            sessionId:
+              type: string
+              format: uuid
+              example: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+            terminationReason:
+              type: string
+              description: >-
+                Why the session ended. CamaraSim fires `SESSION_DELETED` from
+                `deleteSession`; the other reasons cover expiry / access-token
+                expiry / network-initiated termination (deferred legs).
+              enum:
+                - NETWORK_TERMINATED
+                - SESSION_EXPIRED
+                - ACCESS_TOKEN_EXPIRED
+                - SESSION_DELETED
+              example: SESSION_DELETED
 
     SessionInsightsError:
       description: >-

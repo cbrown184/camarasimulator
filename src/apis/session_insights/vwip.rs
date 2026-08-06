@@ -5,7 +5,8 @@
 //! - `POST   /session-insights/vwip/sessions` — create a session (`createSession`).
 //! - `GET    /session-insights/vwip/sessions/{sessionId}` — read it (`getSession`).
 //! - `DELETE /session-insights/vwip/sessions/{sessionId}` — delete it
-//!   (`deleteSession`).
+//!   (`deleteSession`); fires the terminal `session-ended` CloudEvent
+//!   (`terminationReason: SESSION_DELETED`) on the session's `sink`.
 //! - `POST   /session-insights/vwip/retrieve-sessions` — list a device's sessions
 //!   (`retrieveSessionsByDevice`).
 //! - `POST   /session-insights/vwip/sessions/{sessionId}/metrics` — submit the
@@ -28,7 +29,8 @@
 //! slice (a deleted session is evicted → `404`; expiry transitions arrive with the
 //! deferred notifications).
 //!
-//! (The CloudEvents notifications on `sink` are deferred to later passes.)
+//! (`deleteSession` also delivers the terminal `session-ended` CloudEvent to the
+//! session's `sink`; the expiry (`SESSION_EXPIRED`) leg is deferred to a later pass.)
 //!
 //! ## What it does
 //!
@@ -310,8 +312,12 @@ async fn get_session(claims: Claims, headers: HeaderMap, Path(session_id): Path<
 ///
 /// Deletes the session resource. Keyed only on the stored state (docs/DESIGN.md
 /// §7): a session that exists is evicted → `204 No Content` (single-use); an
-/// unknown (or already-deleted) id → `404 NOT_FOUND`. No CloudEvent is emitted
-/// (`session-ended` notifications on `sink` are deferred to a later pass).
+/// unknown (or already-deleted) id → `404 NOT_FOUND`. If the deleted session
+/// recorded a `sink`, the **terminal** `session-ended` CloudEvent
+/// (`terminationReason: SESSION_DELETED`) is delivered to it — best-effort,
+/// fire-and-forget, so a slow or unreachable sink never delays this response (see
+/// [`super::notifications`]). Session **expiry** (`SESSION_EXPIRED`) and
+/// network-initiated termination remain deferred to a later pass.
 async fn delete_session(
     claims: Claims,
     headers: HeaderMap,
@@ -322,10 +328,34 @@ async fn delete_session(
         return with_correlator(e.into_response(), &correlator);
     }
     match store::remove(&session_id) {
-        Some(_) => {
-            // Drop any stashed sink credential so a deleted session's secret does
-            // not linger in memory (single-use take, discarded).
-            let _ = store::take_credential(&session_id);
+        Some(info) => {
+            // Notify the session's `sink` (if any) that it has ended because the
+            // consumer deleted it — the terminal `session-ended` CloudEvent
+            // (`terminationReason: SESSION_DELETED`). Fire-and-forget so a slow or
+            // unreachable sink never delays this response. The stashed ACCESSTOKEN
+            // `sinkCredential` bearer authenticates the callback and is *taken*
+            // single-use: `session-ended` is terminal, so no later callback needs
+            // it and the secret does not linger in memory.
+            match info.get("sink").and_then(Value::as_str) {
+                Some(sink) => {
+                    let event = notifications::session_ended_event(
+                        store::new_event_id(),
+                        rfc3339_utc(now_unix_secs()),
+                        &session_id,
+                        "SESSION_DELETED",
+                    );
+                    notifications::spawn_delivery(
+                        sink.to_string(),
+                        event,
+                        store::take_credential(&session_id),
+                    );
+                }
+                // No sink to notify; still drop any stashed credential (defensive —
+                // createSession always requires a sink).
+                None => {
+                    let _ = store::take_credential(&session_id);
+                }
+            }
             with_correlator(StatusCode::NO_CONTENT.into_response(), &correlator)
         }
         None => with_correlator(
@@ -1182,6 +1212,99 @@ mod tests {
         assert_eq!(
             headers.get("x-correlator").and_then(|v| v.to_str().ok()),
             Some("corr-del-404")
+        );
+    }
+
+    #[tokio::test]
+    async fn deleting_a_session_with_a_sink_fires_a_session_ended_cloudevent() {
+        use tokio::io::AsyncReadExt;
+        use tokio::net::TcpListener;
+
+        // A loopback receiver stands in for the consumer's `sink`.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let sink = format!("http://{addr}/si-notify");
+
+        // Create a session that records the http sink…
+        let create = mint_token(CREATE_SCOPE).await;
+        let body = format!(
+            r#"{{"applicationProfileId":"3fa85f64-5717-4562-b3fc-2c963f66afa6",
+                 "device":{{"phoneNumber":"+123456789012"}},
+                 "applicationServer":{{"ipv4Address":"198.51.100.1"}},
+                 "sink":"{sink}"}}"#
+        );
+        let (status, _, created) = post_session(Some(&create), &body, None).await;
+        assert_eq!(status, StatusCode::CREATED);
+        let session_id = created["id"].as_str().unwrap().to_string();
+
+        // …then delete it: 204 to the caller, and a session-ended CloudEvent to sink.
+        let del = mint_token(DELETE_SCOPE).await;
+        let (status, _, _) = delete_session_req(Some(&del), &session_id, None).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        // Receive the fire-and-forget notification the handler spawned.
+        let (mut sock, _) = listener.accept().await.unwrap();
+        let mut buf = Vec::new();
+        sock.read_to_end(&mut buf).await.unwrap();
+        let raw = String::from_utf8(buf).unwrap();
+        let (head, event_body) = raw.split_once("\r\n\r\n").expect("headers then body");
+        assert!(
+            head.starts_with("POST /si-notify HTTP/1.1\r\n"),
+            "request line: {head}"
+        );
+        assert!(head.contains("Content-Type: application/cloudevents+json"));
+
+        let event: Value = serde_json::from_str(event_body).expect("body is JSON");
+        assert_eq!(
+            event["type"],
+            "org.camaraproject.session-insights.v0.session-ended"
+        );
+        assert_eq!(event["specversion"], "1.0");
+        assert_eq!(event["datacontenttype"], "application/json");
+        assert!(event["id"].is_string() && event["time"].is_string());
+        assert_eq!(event["data"]["sessionId"], json!(session_id));
+        assert_eq!(event["data"]["terminationReason"], "SESSION_DELETED");
+    }
+
+    #[tokio::test]
+    async fn a_session_ended_notification_carries_the_sink_credential_bearer() {
+        use tokio::io::AsyncReadExt;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let sink = format!("http://{addr}/si-notify");
+
+        // Create a session with an ACCESSTOKEN sinkCredential…
+        let create = mint_token(CREATE_SCOPE).await;
+        let body = format!(
+            r#"{{"applicationProfileId":"3fa85f64-5717-4562-b3fc-2c963f66afa6",
+                 "device":{{"phoneNumber":"+123456789012"}},
+                 "applicationServer":{{"ipv4Address":"198.51.100.1"}},
+                 "sink":"{sink}",
+                 "sinkCredential":{{"credentialType":"ACCESSTOKEN","accessToken":"cb-secret","accessTokenType":"bearer"}}}}"#
+        );
+        let (status, _, created) = post_session(Some(&create), &body, None).await;
+        assert_eq!(status, StatusCode::CREATED);
+        // The secret is never echoed in the returned representation.
+        assert!(
+            !serde_json::to_string(&created).unwrap().contains("cb-secret"),
+            "sinkCredential secret must never be echoed"
+        );
+        let session_id = created["id"].as_str().unwrap().to_string();
+
+        // …delete it and confirm the callback carries the bearer.
+        let del = mint_token(DELETE_SCOPE).await;
+        let (status, _, _) = delete_session_req(Some(&del), &session_id, None).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        let (mut sock, _) = listener.accept().await.unwrap();
+        let mut buf = Vec::new();
+        sock.read_to_end(&mut buf).await.unwrap();
+        let raw = String::from_utf8(buf).unwrap();
+        assert!(
+            raw.contains("Authorization: Bearer cb-secret\r\n"),
+            "session-ended callback carries the sinkCredential bearer: {raw}"
         );
     }
 

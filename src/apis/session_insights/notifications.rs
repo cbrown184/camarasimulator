@@ -44,6 +44,13 @@ use tokio::net::TcpStream;
 /// session-insights v0, canonical `org.camaraproject.<api>.v<n>.<event>` shape).
 pub const EVENT_TYPE: &str = "org.camaraproject.session-insights.v0.network-quality-score";
 
+/// The CloudEvent `type` for a session ending (CAMARA session-insights v0,
+/// canonical `org.camaraproject.<api>.v<n>.<event>` shape). It is the session's
+/// **terminal** notification — CAMARA delivers it once, when the session ends for
+/// any reason (deletion, expiry, or network-initiated termination), and no further
+/// notifications follow.
+pub const SESSION_ENDED_EVENT_TYPE: &str = "org.camaraproject.session-insights.v0.session-ended";
+
 /// The CloudEvent `source` — a uri-reference identifying the simulator's Session
 /// Insights provider context (CloudEvents requires `id` to be unique within
 /// `source`).
@@ -84,6 +91,33 @@ pub fn quality_score_event(event_id: String, time: String, session_id: &str, sco
         "data": {
             "sessionId": session_id,
             "qualityScore": score,
+        },
+    })
+}
+
+/// Build the `session-ended` CloudEvent (CloudEvents 1.0 envelope).
+///
+/// Pure: the caller supplies the unique `event_id` ([`super::store::new_event_id`])
+/// and the RFC 3339 `time`, so this is deterministic and directly testable. `data`
+/// is the CAMARA `SessionEndedData` — the `sessionId` and the `terminationReason`,
+/// one of `NETWORK_TERMINATED` / `SESSION_EXPIRED` / `ACCESS_TOKEN_EXPIRED` /
+/// `SESSION_DELETED` (CamaraSim fires `SESSION_DELETED` from `deleteSession`).
+pub fn session_ended_event(
+    event_id: String,
+    time: String,
+    session_id: &str,
+    termination_reason: &str,
+) -> Value {
+    json!({
+        "id": event_id,
+        "source": SOURCE,
+        "type": SESSION_ENDED_EVENT_TYPE,
+        "specversion": "1.0",
+        "datacontenttype": "application/json",
+        "time": time,
+        "data": {
+            "sessionId": session_id,
+            "terminationReason": termination_reason,
         },
     })
 }
@@ -212,6 +246,24 @@ mod tests {
         assert_eq!(e["time"], "2024-01-01T00:00:00Z");
         assert_eq!(e["data"]["sessionId"], "11111111-2222-4333-8444-555555555555");
         assert_eq!(e["data"]["qualityScore"], 87);
+    }
+
+    #[test]
+    fn session_ended_event_has_the_camara_cloudevent_shape() {
+        let e = session_ended_event(
+            "evt-end".to_string(),
+            "2024-01-01T00:00:00Z".to_string(),
+            "11111111-2222-4333-8444-555555555555",
+            "SESSION_DELETED",
+        );
+        assert_eq!(e["id"], "evt-end");
+        assert_eq!(e["source"], SOURCE);
+        assert_eq!(e["type"], SESSION_ENDED_EVENT_TYPE);
+        assert_eq!(e["specversion"], "1.0");
+        assert_eq!(e["datacontenttype"], "application/json");
+        assert_eq!(e["time"], "2024-01-01T00:00:00Z");
+        assert_eq!(e["data"]["sessionId"], "11111111-2222-4333-8444-555555555555");
+        assert_eq!(e["data"]["terminationReason"], "SESSION_DELETED");
     }
 
     #[test]

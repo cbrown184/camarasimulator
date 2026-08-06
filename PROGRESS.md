@@ -1607,7 +1607,14 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
       (never echoed by `GET`/`retrieve-sessions`), *peeked* non-destructively on each
       `sendSessionMetrics` delivery (metrics may repeat), and dropped on delete.
       `PLAIN`/`REFRESHTOKEN` a documented cut. No new dep (mirrors QoS Provisioning).
-    - [ ] `session-ended` CloudEvent (delete / expiry) — deferred
+    - [~] `session-ended` CloudEvent:
+      - [x] `SESSION_DELETED` on `deleteSession` — a deleted session that recorded a
+        `sink` receives the terminal
+        `org.camaraproject.session-insights.v0.session-ended` CloudEvent
+        (`data.terminationReason: SESSION_DELETED`), fire-and-forget over raw TCP
+        (`http://` only; no HTTP-client dep); ACCESSTOKEN `sinkCredential` bearer
+        applied and taken single-use (the event is terminal). Still `204` to the caller.
+      - [ ] `SESSION_EXPIRED` (expiry timer) / `NETWORK_TERMINATED` legs — deferred
     - [ ] TLS (`https://` sink) delivery (needs a rustls TLS client)
 - [ ] Other CAMARA APIs as capacity allows
 
@@ -1635,6 +1642,22 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-06 — Phase 5: **Session Insights vwip — `session-ended` CloudEvent
+  (`SESSION_DELETED`) on `deleteSession`**. The delete leg of the deferred
+  `session-ended` notification: a deleted session that recorded a `sink` now receives
+  the **terminal** `org.camaraproject.session-insights.v0.session-ended` CloudEvent
+  (`data.terminationReason: SESSION_DELETED`), fire-and-forget over raw TCP (`http://`
+  only; `https://`/TLS a documented cut; no HTTP-client dep). Verified the canonical
+  event against the live CAMARA SessionInsights spec (`session-ended` + `SessionEndedData`
+  `{sessionId, terminationReason: NETWORK_TERMINATED|SESSION_EXPIRED|ACCESS_TOKEN_EXPIRED|
+  SESSION_DELETED}`). The ACCESSTOKEN `sinkCredential` bearer authenticates the callback
+  and is *taken* single-use (terminal event → nothing later needs it; secret never
+  echoed). New `notifications::session_ended_event` builder + `SESSION_ENDED_EVENT_TYPE`;
+  `deleteSession` fires it (still `204`). `SESSION_EXPIRED` (expiry timer) /
+  `NETWORK_TERMINATED` legs + TLS sink still deferred. spec: header + delete op doc the
+  event, delete scenarios record it, new `SessionEndedEvent` schema. tests: 3 new (event
+  shape, end-to-end delete→sink fires SESSION_DELETED, callback carries the bearer + secret
+  never echoed). 1256 tests green, no new dep. — binary: 2.5M (2574720 B)
 - 2026-08-06 — Phase 5: **Session Insights vwip — `sinkCredential` (ACCESSTOKEN
   bearer) auth on the `network-quality-score` callback**. A session created with a
   `credentialType: ACCESSTOKEN` `sinkCredential` now authenticates its callback with
