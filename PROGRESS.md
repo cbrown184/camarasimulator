@@ -1614,7 +1614,17 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
         (`data.terminationReason: SESSION_DELETED`), fire-and-forget over raw TCP
         (`http://` only; no HTTP-client dep); ACCESSTOKEN `sinkCredential` bearer
         applied and taken single-use (the event is terminal). Still `204` to the caller.
-      - [ ] `SESSION_EXPIRED` (expiry timer) / `NETWORK_TERMINATED` legs — deferred
+      - [x] `NETWORK_TERMINATED` leg — a `…001` identifier creates an ordinary
+        `ACTIVE` session, but `createSession` schedules an early network drop
+        (`spawn_network_termination`, 1 s fixed grace, mirroring QoD/QoS
+        Provisioning): the session is evicted and the terminal `session-ended`
+        CloudEvent (`terminationReason: NETWORK_TERMINATED`) is delivered to the
+        `sink` (fire-and-forget over raw TCP, `http://` only; ACCESSTOKEN
+        `sinkCredential` bearer applied, taken single-use; exactly-once vs a
+        concurrent delete). No new dep.
+      - [ ] `SESSION_EXPIRED` (expiry timer) leg — deferred: the session lifetime
+        is a fixed 24 h, so a real expiry timer can't be exercised in a test
+        (would need a caller-controlled/short lifetime to ship tested)
     - [ ] TLS (`https://` sink) delivery (needs a rustls TLS client)
 - [ ] Other CAMARA APIs as capacity allows
 
@@ -1642,6 +1652,18 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-06 — Phase 5: **Session Insights vwip — `session-ended` `NETWORK_TERMINATED`
+  leg on `createSession`**. A `…001` identifier now creates an ordinary `ACTIVE`
+  session, then the simulated network drops it early: `spawn_network_termination`
+  (1 s fixed grace, mirroring QoD/QoS Provisioning's `…001` convention) evicts the
+  session and delivers the terminal `session-ended` CloudEvent
+  (`terminationReason: NETWORK_TERMINATED`) to the `http://` sink, fire-and-forget
+  over raw TCP (no HTTP-client dep); ACCESSTOKEN `sinkCredential` bearer applied and
+  taken single-use, exactly-once vs a concurrent delete. Spec: createSession
+  description + `x-camarasim-scenarios` `…001` case; header + delete notes refreshed.
+  Test: `…001` session → NETWORK_TERMINATED CloudEvent + bearer + eviction (404).
+  The `SESSION_EXPIRED` expiry-timer leg stays deferred (fixed 24 h lifetime isn't
+  timer-testable). 1257 tests green, no new dep. — binary: 2.5M (2579608 B)
 - 2026-08-06 — Phase 5: **Session Insights vwip — `session-ended` CloudEvent
   (`SESSION_DELETED`) on `deleteSession`**. The delete leg of the deferred
   `session-ended` notification: a deleted session that recorded a `sink` now receives

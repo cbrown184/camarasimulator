@@ -14,10 +14,12 @@
 # `network-quality-score` CloudEvent to the session's `sink` (fire-and-forget over
 # raw TCP, `http://` sinks only — no TLS client). `deleteSession` now delivers the
 # terminal `session-ended` CloudEvent (`terminationReason: SESSION_DELETED`) to the
-# session's `sink` too. A session's ACCESSTOKEN `sinkCredential` bearer authenticates
-# both callbacks (`Authorization: Bearer`); the `session-ended` expiry
-# (`SESSION_EXPIRED`) leg and `https://` (TLS) sink delivery remain deferred to
-# later passes.
+# session's `sink` too, and `createSession` schedules the network-initiated
+# `session-ended` leg (`terminationReason: NETWORK_TERMINATED`) for a `…001`
+# identifier — the (simulated) network drops the session early. A session's
+# ACCESSTOKEN `sinkCredential` bearer authenticates every callback
+# (`Authorization: Bearer`); the `session-ended` expiry (`SESSION_EXPIRED`) leg
+# and `https://` (TLS) sink delivery remain deferred to later passes.
 openapi: 3.0.3
 info:
   title: Session Insights
@@ -84,6 +86,20 @@ paths:
         See the API description for the parameter-driven functional cases (the
         resolved identifier's trailing three digits select an open-ended vs a
         time-bounded session, or a reserved CAMARA error).
+
+        **Network-initiated termination (CamaraSim model).** A `…001` identifier
+        creates an ordinary `ACTIVE` session, but the (simulated) network then
+        drops it early: after a short fixed grace the session is evicted and the
+        **terminal** `session-ended` CloudEvent (type
+        `org.camaraproject.session-insights.v0.session-ended`,
+        `data.terminationReason: NETWORK_TERMINATED`) is delivered to its `sink` —
+        fire-and-forget over raw TCP, `http://` sinks only (an `https://` sink is a
+        documented no-op cut — no TLS client), so nothing delays the `201`. The
+        session's ACCESSTOKEN `sinkCredential` bearer (stashed here) authenticates
+        the callback and is taken single-use (the event is terminal). A concurrent
+        `deleteSession` that removed the session first makes this a no-op (exactly
+        one terminal event fires). The `SESSION_EXPIRED` (expiry-timer) leg remains
+        deferred.
       security:
         - openId:
             - session-insights:sessions:create
@@ -196,6 +212,12 @@ paths:
             result: "201 ACTIVE, open-ended (no expiresAt)"
           - input: "identifier with any other trailing digits (e.g. …012)"
             result: "201 ACTIVE, time-bounded (expiresAt = startsAt + 24h)"
+          - input: "identifier trailing digits …001 (network-termination scenario)"
+            result: >-
+              201 ACTIVE, then the simulated network drops it early — after a
+              short grace the session is evicted and a terminal session-ended
+              CloudEvent (terminationReason NETWORK_TERMINATED) is delivered to
+              the http sink (ACCESSTOKEN sinkCredential bearer applied)
           - input: no device and no token subject
             result: "422 MISSING_IDENTIFIER"
           - input: missing applicationProfileId / applicationServer / sink, or a malformed sink or phoneNumber
@@ -265,8 +287,9 @@ paths:
         a slow or unreachable sink never delays the `204`. The session's ACCESSTOKEN
         `sinkCredential` bearer (stashed at `createSession`) is applied to the
         callback as `Authorization: Bearer <token>` and taken single-use (the event
-        is terminal). The `SESSION_EXPIRED` (expiry) and network-initiated
-        (`NETWORK_TERMINATED`) legs of `session-ended` remain deferred.
+        is terminal). The network-initiated (`NETWORK_TERMINATED`) leg of
+        `session-ended` is scheduled from `createSession` for a `…001` identifier;
+        the `SESSION_EXPIRED` (expiry) leg remains deferred.
       security:
         - openId:
             - session-insights:sessions:delete
