@@ -11,12 +11,9 @@
 //! async runtime.
 //!
 //! Like Carrier Billing (and unlike the small typed Sponsored Data record), the
-//! store keeps the **rendered** `TrafficInfluence` JSON so a future
-//! `getTrafficInfluenceById` can return it verbatim. `postTrafficInfluence`
-//! (this pass) is the only writer; the reader lands in a later pass (see
-//! `PROGRESS.md`), so `get` is currently exercised only by the unit tests below.
-
-#![allow(dead_code)] // `get` is used by the read-back endpoint, which lands next pass.
+//! store keeps the **rendered** `TrafficInfluence` JSON so `getTrafficInfluence`
+//! can return it verbatim. `postTrafficInfluence` writes; `getTrafficInfluence`
+//! reads (see `vwip.rs`).
 
 use serde_json::Value;
 use std::collections::HashMap;
@@ -39,9 +36,8 @@ pub fn insert(id: String, resource: Value) {
 }
 
 /// Fetch the resource stored under `id`, or `None` if no such resource exists
-/// (never created, or created in a different process). A future
-/// `getTrafficInfluenceById` uses the distinction to answer `200` (found) vs
-/// `404 NOT_FOUND` (unknown id).
+/// (never created, or created in a different process). `getTrafficInfluence`
+/// uses the distinction to answer `200` (found) vs `404 NOT_FOUND` (unknown id).
 pub fn get(id: &str) -> Option<Value> {
     store()
         .lock()

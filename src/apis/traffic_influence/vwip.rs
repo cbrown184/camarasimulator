@@ -1,9 +1,14 @@
 //! Traffic Influence **vwip** (CAMARA Traffic Influence, work-in-progress).
 //!
-//! One endpoint this pass:
+//! Endpoints:
 //! - `POST /traffic-influence/vwip/traffic-influences` — create a
 //!   `TrafficInfluence` resource that steers an application's traffic toward a
 //!   chosen edge-cloud placement (operationId `postTrafficInfluence`).
+//! - `GET /traffic-influence/vwip/traffic-influences/{trafficInfluenceID}` —
+//!   read a created resource back from the in-memory store (operationId
+//!   `getTrafficInfluence`, scope `traffic-influence:traffic-influences:read`):
+//!   the opaque, operator-minted id is the only control plane — a stored resource
+//!   → `200` (returned verbatim), an unknown id → `404 NOT_FOUND`.
 //!
 //! ## What it does
 //!
@@ -51,9 +56,10 @@
 //! response.
 
 use axum::body::Bytes;
+use axum::extract::Path;
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::post;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -70,9 +76,17 @@ use crate::scenarios;
 /// upstream `wip` contract (`traffic-influence:traffic-influences:write`).
 const WRITE_SCOPE: &str = "traffic-influence:traffic-influences:write";
 
+/// Scope required to read a Traffic Influence resource back. Declared by the
+/// upstream `wip` contract (`traffic-influence:traffic-influences:read`).
+const READ_SCOPE: &str = "traffic-influence:traffic-influences:read";
+
 /// Base path of the resource collection, used both to mount the route and to
 /// build the `201` `Location` header.
 const COLLECTION: &str = "/traffic-influence/vwip/traffic-influences";
+
+/// Route for a single resource, keyed by its `trafficInfluenceID` path parameter
+/// (Axum 0.6 `:param` syntax). Read back by [`get_traffic_influence`].
+const ITEM: &str = "/traffic-influence/vwip/traffic-influences/:traffic_influence_id";
 
 /// The smallest / largest TCP/UDP port a traffic filter may name (`Port` is
 /// `minimum: 0`, `maximum: 65535`).
@@ -81,7 +95,9 @@ const MAX_PORT: i64 = 65535;
 
 /// Routes for Traffic Influence vwip, mounted at their canonical URLs.
 pub fn routes() -> Router {
-    Router::new().route(COLLECTION, post(post_traffic_influence))
+    Router::new()
+        .route(COLLECTION, post(post_traffic_influence))
+        .route(ITEM, get(get_traffic_influence))
 }
 
 /// The `postTrafficInfluence` request body (`PostTrafficInfluence`). The
@@ -237,6 +253,42 @@ async fn post_traffic_influence(claims: Claims, headers: HeaderMap, body: Bytes)
             .insert(HeaderName::from_static("location"), value);
     }
     with_correlator(response, &correlator)
+}
+
+/// `GET /traffic-influence/vwip/traffic-influences/{trafficInfluenceID}`.
+///
+/// Reads back a Traffic Influence resource created by [`post_traffic_influence`].
+/// The `trafficInfluenceID` is opaque and operator-minted, so it carries no
+/// reserved-identifier control plane (unlike the `appId` on create): the stored
+/// state is the only plane (docs/DESIGN.md §7). A resource still in the shared
+/// in-memory [`super::store`] is returned verbatim (`200`); an unknown id — never
+/// created, or minted in a different process — is `404 NOT_FOUND`. Mirrors
+/// Quality on Demand's `getSession` and Click to Dial's `getCall`.
+async fn get_traffic_influence(
+    claims: Claims,
+    headers: HeaderMap,
+    Path(traffic_influence_id): Path<String>,
+) -> Response {
+    // Optional correlation header, echoed on every response (CAMARA Commonalities).
+    let correlator = headers.get("x-correlator").cloned();
+
+    // Endpoint authorisation: the token must carry the read scope.
+    if let Err(e) = claims.require_scope(READ_SCOPE) {
+        return with_correlator(e.into_response(), &correlator);
+    }
+
+    match super::store::get(&traffic_influence_id) {
+        Some(resource) => {
+            with_correlator((StatusCode::OK, Json(resource)).into_response(), &correlator)
+        }
+        None => with_correlator(
+            CamaraError::not_found(
+                "No Traffic Influence resource found for the provided trafficInfluenceID.",
+            )
+            .into_response(),
+            &correlator,
+        ),
+    }
 }
 
 /// Select the created resource's lifecycle `state` from the `appId` tail
@@ -661,5 +713,107 @@ mod tests {
         let (status, headers, _) = post(Some(&t), Some("corr-ti-2"), create_body(app404)).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
         assert_eq!(headers.get("x-correlator").and_then(|v| v.to_str().ok()), Some("corr-ti-2"));
+    }
+
+    // --- getTrafficInfluence (read-back) -----------------------------------
+
+    async fn get_req(
+        token: Option<&str>,
+        id: &str,
+        correlator: Option<&str>,
+    ) -> (StatusCode, HeaderMap, Value) {
+        let mut builder = Request::builder()
+            .method("GET")
+            .uri(format!("{COLLECTION}/{id}"))
+            .header("host", HOST);
+        if let Some(t) = token {
+            builder = builder.header("authorization", format!("Bearer {t}"));
+        }
+        if let Some(c) = correlator {
+            builder = builder.header("x-correlator", c);
+        }
+        let request = builder.body(Body::empty()).unwrap();
+        let response = app().oneshot(request).await.unwrap();
+        let status = response.status();
+        let headers = response.headers().clone();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, headers, value)
+    }
+
+    #[tokio::test]
+    async fn get_reads_back_a_created_resource_verbatim() {
+        // Create with the full optional set so read-back proves the whole shape.
+        let create = json!({
+            "apiConsumerId": CONSUMER,
+            "appId": APP_ACTIVE,
+            "edgeCloudRegion": "eu-west-1",
+            "edgeCloudZoneId": ZONE,
+            "sourceTrafficFilters": { "sourcePort": 8080 },
+            "destinationTrafficFilters": { "destinationPort": 443, "destinationProtocol": "TCP" },
+        });
+        let (status, _, created) = post(Some(&token().await), None, create).await;
+        assert_eq!(status, StatusCode::CREATED);
+        let id = created["trafficInfluenceID"].as_str().expect("id minted");
+
+        let read = mint_token(READ_SCOPE).await;
+        let (status, _, fetched) = get_req(Some(&read), id, None).await;
+        assert_eq!(status, StatusCode::OK);
+        // The stored representation is returned verbatim.
+        assert_eq!(fetched, created);
+        assert_eq!(fetched["state"], "active");
+        assert_eq!(fetched["edgeCloudZoneId"], ZONE);
+        assert_eq!(fetched["destinationTrafficFilters"]["destinationProtocol"], "TCP");
+    }
+
+    #[tokio::test]
+    async fn get_unknown_id_is_not_found() {
+        let read = mint_token(READ_SCOPE).await;
+        let (status, _, body) =
+            get_req(Some(&read), "11111111-1111-4111-8111-111111111111", None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn get_missing_token_is_unauthenticated() {
+        let (status, _, _) = get_req(None, "11111111-1111-4111-8111-111111111111", None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn get_wrong_scope_is_permission_denied() {
+        // The write scope does not grant read.
+        let (status, _, created) = post(Some(&token().await), None, create_body(APP_ACTIVE)).await;
+        assert_eq!(status, StatusCode::CREATED);
+        let id = created["trafficInfluenceID"].as_str().unwrap().to_string();
+
+        let wrong = mint_token(WRITE_SCOPE).await;
+        let (status, _, _) = get_req(Some(&wrong), &id, None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn get_echoes_x_correlator_on_success_and_error() {
+        let (_, _, created) = post(Some(&token().await), None, create_body(APP_ACTIVE)).await;
+        let id = created["trafficInfluenceID"].as_str().unwrap().to_string();
+        let read = mint_token(READ_SCOPE).await;
+
+        let (status, headers, _) = get_req(Some(&read), &id, Some("corr-get-1")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-get-1")
+        );
+
+        let (status, headers, _) =
+            get_req(Some(&read), "22222222-2222-4222-8222-222222222222", Some("corr-get-2")).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-get-2")
+        );
     }
 }
