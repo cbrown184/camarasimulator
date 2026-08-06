@@ -44,6 +44,7 @@
 //! - **Subscription Status vwip** — `/subscription-status/vwip/…`.
 //! - **Device Authenticity vwip** — `/device-authenticity/vwip/…`.
 //! - **Session Insights vwip** — `/session-insights/vwip/…`.
+//! - **Consent Info vwip** — `/consent-info/vwip/…`.
 //!
 //! Plus [`openapi`], which serves each mounted API's vendored OpenAPI spec at
 //! `/{api}/v{n}/openapi.yaml` (docs/DESIGN.md §9).
@@ -54,6 +55,7 @@ pub mod call_forwarding_signal;
 pub mod carrier_billing;
 pub mod connected_network_type;
 pub mod connectivity_insights;
+pub mod consent_info;
 pub mod customer_insights;
 pub mod device_authenticity;
 pub mod device_data_volume;
@@ -131,5 +133,6 @@ pub fn routes() -> Router {
         .merge(subscription_status::routes())
         .merge(device_authenticity::routes())
         .merge(session_insights::routes())
+        .merge(consent_info::routes())
         .merge(openapi::routes())
 }

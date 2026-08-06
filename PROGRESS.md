@@ -901,6 +901,24 @@ module (`score = clamp(d/10 − moduleIndex, 0, 100)`; `NET`=0…`NET_CORE`=3), 
 dependency). `x-correlator` echoed on every response. The sibling Network Traffic
 Analysis API of the suite is out of scope.
 
+**Consent Info vwip** is now live at `/consent-info/vwip/retrieve`
+(`retrieveStatus`, scope `consent-info:retrieve`) — a stateless, non-spatial,
+phone-number-keyed consent-status query. The caller declares the `scopes` it
+needs and the `purpose` (`dpv:<Purpose>`) it needs them for, identifies a line
+(two-legged submitted `phoneNumber` / three-legged E.164 `sub`, with the usual
+422 `UNNECESSARY_IDENTIFIER` / `MISSING_IDENTIFIER` rule), and gets back whether
+consent is valid for processing (`{ statusInfo: [{ scopes, purpose,
+statusValidForProcessing, statusReason?, expirationDate? }], captureUrl? }`).
+Three control planes (DESIGN §7): the identifier reserved-error suffix → canonical
+CAMARA error; the identifier's trailing three digits pick the consent state
+(`d % 6`: valid / PENDING / REQUESTED / DENIED / EXPIRED / OBJECTED), so a valid
+consent carries a future `expirationDate` and an EXPIRED one a past date; and
+`requestCaptureUrl` gates a deterministic top-level `captureUrl` (FNV-1a token,
+no dep) offered only when consent is not valid. Two request-level 403 planes —
+a `forbidden` scope → `NOT_ALLOWED_SCOPES_PURPOSE`, a malformed `callbackUrl` →
+`INVALID_CALLBACK_URL`. `x-correlator` echoed on every response. This is
+CamaraSim's first Identity-and-Consent-Management-adjacent consent API.
+
 ## In progress (claimed this pass)
 
 _None._  <!-- agent: put the claimed item + run timestamp here, clear it when done -->
@@ -1670,6 +1688,29 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     formatter, no new dep). `x-correlator` echoed. The sibling Network Traffic
     Analysis API of the NetworkInsights suite remains out of scope.
     **Completes Network Health Assessment vwip.**
+- [x] Consent Info vwip (`/consent-info/vwip`; CAMARA ConsentInfo, wip — no
+  released version yet, mounted at its canonical `vwip` base path; stateless,
+  non-spatial, phone-number-keyed consent-status query):
+  - [x] `POST /retrieve` (`consent-info:retrieve`, `retrieveStatus`) —
+    `{ statusInfo: [{ scopes, purpose, statusValidForProcessing, statusReason?,
+    expirationDate? }], captureUrl? }`, whether the consent for a set of `scopes`
+    under a declared `purpose` (`dpv:<Purpose>`) is currently valid for
+    processing. Same two-legged (submitted `phoneNumber`) / three-legged (E.164
+    `sub`) identifier rule as Subscription Status with 422 `UNNECESSARY_IDENTIFIER`
+    / `MISSING_IDENTIFIER`. Three control planes (DESIGN §7): identifier
+    reserved-error suffix → canonical CAMARA error (`…404` → NOT_FOUND over the
+    API's own IDENTIFIER_NOT_FOUND, `…422` → SERVICE_NOT_APPLICABLE); the
+    identifier's trailing three digits `d` pick the consent state (`d % 6`: 0 →
+    valid + future expiry, 1 → PENDING, 2 → REQUESTED, 3 → DENIED, 4 → EXPIRED +
+    past expiry, 5 → OBJECTED); and `requestCaptureUrl` gates a deterministic
+    top-level `captureUrl` (FNV-1a token, no dep) offered only when consent is
+    not valid. Two request-level 403 planes: a scope containing `forbidden` →
+    `CONSENT_INFO.NOT_ALLOWED_SCOPES_PURPOSE`; a bad `callbackUrl` →
+    `CONSENT_INFO.INVALID_CALLBACK_URL`. Validation: missing/unknown field, empty
+    `scopes`, bad `purpose` pattern, non-E.164 `phoneNumber` → 400 INVALID_ARGUMENT.
+    Cuts (documented): single grouped `statusInfo` entry, stateful
+    `CAPTURE_FREQUENCY_EXCEEDED`, async `callbackUrl` delivery. No new dep.
+    **Completes Consent Info vwip.**
 - [ ] Other CAMARA APIs as capacity allows
 
 ## Cross-cutting (do alongside the item that needs it)
@@ -1696,6 +1737,22 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-06 — Phase 5 ("other APIs"): **Consent Info vwip — `POST /retrieve`**
+  (new API, CAMARA ConsentInfo, wip). Chose a stateless, non-spatial,
+  phone-number-keyed API over the remaining TLS-sink items (each needs a heavy
+  rustls TLS client — against "keep the binary small", and all belong to
+  *stateful* APIs, so lower priority than a new stateless/non-spatial one by phase
+  order). Fetched the canonical upstream contract (`consent-info/vwip`:
+  `retrieveStatus`, scope `consent-info:retrieve`; body `{scopes, purpose,
+  requestCaptureUrl, phoneNumber?, callbackUrl?}`; response `{statusInfo[],
+  captureUrl?}`) and vendored it. Three control planes (DESIGN §7): identifier
+  reserved-error suffix; identifier trailing digits → consent state (`d % 6` over
+  valid/PENDING/REQUESTED/DENIED/EXPIRED/OBJECTED); `requestCaptureUrl` gates the
+  `captureUrl`. Two request 403 planes (`NOT_ALLOWED_SCOPES_PURPOSE` via a
+  `forbidden` scope, `INVALID_CALLBACK_URL`). Mirrors Subscription Status's
+  two-/three-legged identifier rule. No new dependency (self-contained RFC 3339
+  formatter + FNV-1a capture token). 22 new tests; full suite 1293 green;
+  `cargo build --release` clean. binary: 2.6M (2,639,104 bytes).
 - 2026-08-06 — Phase 5 ("other APIs"): **Network Health Assessment vwip — `GET
   /health-scores`** (new API, CAMARA NetworkInsights suite, wip). CamaraSim's
   first **network-keyed** aggregate API: a two-legged (`client_credentials`)
