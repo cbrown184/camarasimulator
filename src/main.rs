@@ -264,6 +264,12 @@ async fn catalog() -> Json<Value> {
                 "spec_url": "/network-health-assessment/vwip/openapi.yaml",
             },
             {
+                "name": "network-traffic-analysis",
+                "version": "vwip",
+                "base_path": "/network-traffic-analysis/vwip",
+                "spec_url": "/network-traffic-analysis/vwip/openapi.yaml",
+            },
+            {
                 "name": "consent-info",
                 "version": "vwip",
                 "base_path": "/consent-info/vwip",

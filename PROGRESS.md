@@ -899,7 +899,7 @@ module (`score = clamp(d/10 − moduleIndex, 0, 100)`; `NET`=0…`NET_CORE`=3), 
 `…000`/no-digits → the spec's no-data `{ score: null, scoringTime: null }`.
 `scoringTime` is a fresh RFC 3339 UTC timestamp (self-contained formatter, no new
 dependency). `x-correlator` echoed on every response. The sibling Network Traffic
-Analysis API of the suite is out of scope.
+Analysis API of the suite is now live too (see below).
 
 **Consent Info vwip** is now live at `/consent-info/vwip/retrieve`
 (`retrieveStatus`, scope `consent-info:retrieve`) — a stateless, non-spatial,
@@ -918,6 +918,30 @@ no dep) offered only when consent is not valid. Two request-level 403 planes —
 a `forbidden` scope → `NOT_ALLOWED_SCOPES_PURPOSE`, a malformed `callbackUrl` →
 `INVALID_CALLBACK_URL`. `x-correlator` echoed on every response. This is
 CamaraSim's first Identity-and-Consent-Management-adjacent consent API.
+
+**Network Traffic Analysis vwip** is now live at
+`/network-traffic-analysis/vwip/traffic-analysis` (`getTrafficAnalysis`, scope
+`network-traffic-analysis:traffic-analysis:read`) — the traffic counterpart of
+Network Health Assessment in the NetworkInsights suite, and stateless,
+non-spatial, network-keyed like it. The caller names a network (`networkId`
+UUID), a window (`startDate`/`endDate`, RFC 3339) and a granularity (`frequency`
+= `DAY`/`HOUR`), and gets aggregated, per-application (DPI-detected) traffic
+records — `{ app, accessCount, accessUpFlow, accessDownFlow, accessFlow,
+startDate, endDate, accessDate, ipv4Address?, description? }` (`accessFlow` always
+`up + down`) — plus a `pagination` envelope. Three control planes (DESIGN §7):
+the `networkId` reserved-error suffix → canonical CAMARA error (UUIDs carry
+digits, so `…404` → 404 "networkId not found"); its trailing three digits `d` set
+the application count (`(d % 5) + 1`, from a fixed 5-entry DPI catalog) and scale
+the traffic counters, with `…000`/no-digits → the spec's no-data `200` (empty
+`records`); and the window × `frequency` set the number of time slots (whole
+`DAY`/`HOUR` units in `[startDate, endDate)`, min 1, capped at 100 to bound the
+response). Optional `app` narrows to one application (unknown → empty page; the
+`app` field is still present per record); `page`/`perPage` window the result
+(`perPage` ≤ 100). Validation mirrors the sibling: bad/missing params → 400
+`INVALID_ARGUMENT`, `endDate <= startDate` / out-of-range paging → 400
+`OUT_OF_RANGE`. Self-contained RFC 3339 parser + formatter (no new dependency).
+`x-correlator` echoed on every response. **This begins the NetworkInsights
+suite's second API and completes the suite's two published stateless surfaces.**
 
 ## In progress (claimed this pass)
 
@@ -1686,8 +1710,32 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     (`score:null`, `scoringTime:null`), else `score = clamp(d/10 − moduleIndex,
     0, 100)` (`NET`=0…`NET_CORE`=3). `scoringTime` = now (self-contained RFC 3339
     formatter, no new dep). `x-correlator` echoed. The sibling Network Traffic
-    Analysis API of the NetworkInsights suite remains out of scope.
+    Analysis API of the NetworkInsights suite is now implemented (see below).
     **Completes Network Health Assessment vwip.**
+- [x] Network Traffic Analysis vwip (`/network-traffic-analysis/vwip`; CAMARA
+  NetworkInsights, wip — no released version yet, mounted at its canonical `vwip`
+  base path; stateless, non-spatial, **network-keyed** aggregate traffic query —
+  the traffic counterpart of Network Health Assessment, so two-legged only):
+  - [x] `GET /traffic-analysis` (`network-traffic-analysis:traffic-analysis:read`,
+    `getTrafficAnalysis`) — aggregated, per-application DPI traffic records for a
+    network over a window (`{ records: [{ app, accessCount, accessUpFlow,
+    accessDownFlow, accessFlow (=up+down), startDate, endDate, accessDate,
+    ipv4Address?, description? }], pagination }`). Required query params:
+    `networkId` (UUID), `startDate`/`endDate` (RFC 3339), `frequency`
+    (`DAY`/`HOUR`); optional `app` filter (≤128), `page` (default 1), `perPage`
+    (default 20, max 100). Three control planes (DESIGN §7): the `networkId`
+    reserved-error suffix → canonical CAMARA error (UUIDs carry digits, so `…404`
+    → 404 NOT_FOUND); its trailing three digits `d` → application count
+    (`(d % 5) + 1` from a fixed 5-entry DPI catalog) + traffic scale, `…000`/
+    no-digits → the spec's no-data `200` (empty `records`); and window ×
+    `frequency` → number of time slots (whole units in `[startDate, endDate)`,
+    min 1, **capped at 100** to bound the response — a documented cut). `app`
+    filters to one application (unknown → empty page; `app` still present per
+    record); `page`/`perPage` window the result. Validation: bad/missing param →
+    400 INVALID_ARGUMENT; `endDate <= startDate` / paging `<1` / `perPage > 100`
+    → 400 OUT_OF_RANGE. Self-contained RFC 3339 parser + formatter, no new dep.
+    `x-correlator` echoed. **Completes Network Traffic Analysis vwip.** (The
+    NetworkInsights suite's async/subscription surfaces remain out of scope.)
 - [x] Consent Info vwip (`/consent-info/vwip`; CAMARA ConsentInfo, wip — no
   released version yet, mounted at its canonical `vwip` base path; stateless,
   non-spatial, phone-number-keyed consent-status query):
@@ -1764,6 +1812,24 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-06 — Phase 5: **Network Traffic Analysis vwip — new stateless,
+  non-spatial CAMARA API: `GET /traffic-analysis`** (`getTrafficAnalysis`,
+  `network-traffic-analysis:traffic-analysis:read`). All in-progress backlog leaf
+  items were deferred cuts (TLS `https://` sinks needing rustls; spatial IoT
+  `AREALIMIT`), so per phase discipline picked a new stateless/non-spatial API:
+  the NetworkInsights suite's Network Traffic Analysis, the traffic counterpart of
+  the already-done Network Health Assessment (which had flagged it "out of scope").
+  Vendored the canonical CAMARA spec (fetched from the NetworkInsights repo) and
+  annotated it with the parameter-driven cases; inlined the Commonalities
+  `DateTime`/`Page`/`PerPage`/`Pagination` schemas so it resolves against the
+  shared `errors.yaml`/`auth`. Three control planes (DESIGN §7): `networkId`
+  reserved-error suffix; `networkId` trailing digits → app count (`(d%5)+1` from a
+  fixed DPI catalog) + traffic scale (`…000` → no-data empty `records`); window ×
+  `frequency` (DAY/HOUR) → time-slot count (min 1, capped at 100). `app` filter +
+  `page`/`perPage` paging. Server stays non-blocking; **no new dependency**
+  (self-contained RFC 3339 parser+formatter, mirroring the sibling modules).
+  Wired into `apis.rs` router + `openapi.rs` served specs + `/` catalog. 16 new
+  tests; `cargo test` 1346 pass, `cargo build --release` green. — binary: 2,728,696 bytes (~2.7 MB)
 - 2026-08-06 — Phase 5: **IoT SIM Fraud Prevention vwip — stateful `IMEIBIND`
   round-trip: `POST /bind` + `POST /unbind` + `query` store integration**. Took
   the top unclaimed sub-item of the in-progress IoT SIM API (bind/unbind are
