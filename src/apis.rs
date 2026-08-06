@@ -47,6 +47,7 @@
 //! - **Session Insights vwip** — `/session-insights/vwip/…`.
 //! - **Consent Info vwip** — `/consent-info/vwip/…`.
 //! - **Sponsored Data vwip** — `/sponsored-data/vwip/…`.
+//! - **Click to Dial vwip** — `/click-to-dial/vwip/…`.
 //!
 //! Plus [`openapi`], which serves each mounted API's vendored OpenAPI spec at
 //! `/{api}/v{n}/openapi.yaml` (docs/DESIGN.md §9).
@@ -55,6 +56,7 @@ pub mod application_profiles;
 pub mod blockchain_public_address;
 pub mod call_forwarding_signal;
 pub mod carrier_billing;
+pub mod click_to_dial;
 pub mod connected_network_type;
 pub mod connectivity_insights;
 pub mod consent_info;
@@ -142,5 +144,6 @@ pub fn routes() -> Router {
         .merge(consent_info::routes())
         .merge(iot_sim_fraud_prevention::routes())
         .merge(sponsored_data::routes())
+        .merge(click_to_dial::routes())
         .merge(openapi::routes())
 }

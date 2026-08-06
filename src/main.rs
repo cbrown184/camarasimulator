@@ -286,6 +286,12 @@ async fn catalog() -> Json<Value> {
                 "version": "vwip",
                 "base_path": "/sponsored-data/vwip",
                 "spec_url": "/sponsored-data/vwip/openapi.yaml",
+            },
+            {
+                "name": "click-to-dial",
+                "version": "vwip",
+                "base_path": "/click-to-dial/vwip",
+                "spec_url": "/click-to-dial/vwip/openapi.yaml",
             }
         ],
         "authorization_servers": [{

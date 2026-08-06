@@ -1837,6 +1837,23 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     stays documented-but-unreached. The end-of-session `webhookUrl` callback is
     still deferred. New `store::remove_matching` (atomic check-and-remove).
   - [ ] campaign-management operations (`/campaign/…`) — deferred.
+- [~] Click to Dial vwip (`/click-to-dial/vwip`; CAMARA ClickToDial `wip`;
+  two-legged, business-facing call origination):
+  - [x] `POST /calls` (`createCall`, `click-to-dial:calls:create`) — create a
+    call between `caller` and `callee` → `201` `Call { status: initiating }`.
+    Two-legged (both participants in the body, like Verified Caller — no
+    identifier dance). The `callee` is the identifier: reserved suffix →
+    canonical CAMARA error; `…000` → 422 CALLEE_NOT_AVAILABLE; a `…000` caller →
+    422 CALLER_NOT_AVAILABLE (checked first); `recordingEnabled` + a `…777`
+    callee → 422 RECORDING_NOT_SUPPORTED; equal numbers → 422 SAME_CALLER_CALLEE;
+    a non-E.164 number → 422 INVALID_PHONE_NUMBER; missing/unknown field/bad body
+    → 400 INVALID_ARGUMENT. `callId` deterministic UUID-shaped from the pair (no
+    new dep). Stateless create (the `201` is fully determined by the request);
+    `x-correlator` echoed.
+  - [ ] stateful `GET /calls/{callId}` (`getCall`), `DELETE /calls/{callId}`
+    (`terminateCall`), `GET /calls/{callId}/recording` (`getRecording`) + the
+    `409 ALREADY_EXISTS` duplicate-call case — need a session store; deferred.
+  - [ ] `status-changed` CloudEvents on `sink` — deferred (like QoD's first pass).
 - [ ] Other CAMARA APIs as capacity allows
 
 ## Cross-cutting (do alongside the item that needs it)
@@ -1863,6 +1880,33 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-06 — Phase 5 ("other APIs"): **Click to Dial vwip — new
+  two-legged CAMARA API: `POST /calls`** (`createCall`,
+  `click-to-dial:calls:create`). All remaining in-progress backlog leaves are
+  the same deferred cuts (TLS `https://` sinks needing rustls — no clean
+  pure-Rust TLS given the project's ring/OpenSSL-free design, §11; spatial IoT
+  `AREALIMIT`; Sponsored Data campaign-management), so — respecting phase order
+  (stateless/non-spatial preferred) — picked the first endpoint of a not-yet-
+  mounted CAMARA API. Verified the whole GitHub org repo list against the 44
+  already-mounted; the remaining uncovered stateless-ish, non-spatial candidate
+  was Click to Dial (PredictiveConnectivityData/RainfallIntensity are spatial;
+  bookings/management APIs are heavier state). Fetched + vendored the canonical
+  upstream contract, trimmed to the one operation implemented. Two-legged/
+  business-facing (both participants in the body, like Verified Caller — no
+  identifier dance). Callee is the identifier: reserved suffix → canonical CAMARA
+  error; `…000` callee → 422 CALLEE_NOT_AVAILABLE, `…000` caller → 422
+  CALLER_NOT_AVAILABLE (checked first); `recordingEnabled` + `…777` callee → 422
+  RECORDING_NOT_SUPPORTED (`777` alone is reachable); equal numbers → 422
+  SAME_CALLER_CALLEE; non-E.164 → 422 INVALID_PHONE_NUMBER; missing/unknown-field/
+  bad-body → 400 INVALID_ARGUMENT. `Call { status: initiating }`; `callId`
+  deterministic UUID from the pair (reuses `sha2`, **no new dep**). Stateless
+  create — persistence + `getCall`/`terminateCall`/`getRecording` + the 409
+  ALREADY_EXISTS case + `status-changed` notifications deferred (documented cuts).
+  Wired into `apis.rs` router + `openapi.rs` served specs + `/` catalog. Spec:
+  new `specs/click-to-dial/vwip/openapi.yaml` (createCall path, CreateCallRequest/
+  Call/Party/CallStatus/ClickToDialError schemas + `x-camarasim-scenarios`). 19
+  new tests; `cargo test` 1401 green; `cargo build --release` clean. — binary:
+  2,813,880 bytes (~2.7 MB, +~29 KB, no new dep)
 - 2026-08-06 — Phase 5 ("other APIs"): **Sponsored Data vwip — `DELETE
   /sponsorship/{sponsorId}/{campaignId}/{sessionId}/revoke`** (`revokeSponsorship`,
   new CamaraSim-assigned scope `sponsored-data:sponsorship:delete`), the last
