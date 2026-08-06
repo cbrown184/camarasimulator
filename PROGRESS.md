@@ -1600,9 +1600,13 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
       is deterministic from the submitted `MetricsPayload` (score = clamp(100 −
       (10−packetLossErrorRate)·8 − packetDelay.value/20 − jitter.value/20, 0, 100)),
       so the metrics are a genuine control plane. No new dep.
-    - [ ] `sinkCredential` (ACCESSTOKEN bearer) auth on the callback — deferred
-      (the `auth` arg is already threaded; landed unauthenticated first, mirroring
-      QoD's rollout order)
+    - [x] `sinkCredential` (ACCESSTOKEN bearer) auth on the callback — a session
+      created with an ACCESSTOKEN `sinkCredential` now authenticates its
+      `network-quality-score` callback (`Authorization: Bearer`). The derived bearer
+      is stashed in a `sessionId`-keyed credential side-store at `createSession`
+      (never echoed by `GET`/`retrieve-sessions`), *peeked* non-destructively on each
+      `sendSessionMetrics` delivery (metrics may repeat), and dropped on delete.
+      `PLAIN`/`REFRESHTOKEN` a documented cut. No new dep (mirrors QoS Provisioning).
     - [ ] `session-ended` CloudEvent (delete / expiry) — deferred
     - [ ] TLS (`https://` sink) delivery (needs a rustls TLS client)
 - [ ] Other CAMARA APIs as capacity allows
@@ -1631,6 +1635,20 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-06 — Phase 5: **Session Insights vwip — `sinkCredential` (ACCESSTOKEN
+  bearer) auth on the `network-quality-score` callback**. A session created with a
+  `credentialType: ACCESSTOKEN` `sinkCredential` now authenticates its callback with
+  `Authorization: Bearer <token>` (RFC 6750). New `sink_authorization` helper +
+  credential side-store (`store::insert_credential`/`peek_credential`/`take_credential`),
+  mirroring QoS Provisioning: the derived bearer is stashed by `sessionId` at
+  `createSession` (never echoed by `GET`/`retrieve-sessions`), *peeked*
+  non-destructively on every `sendSessionMetrics` delivery (metrics may repeat), and
+  dropped on `deleteSession`. `PLAIN`/`REFRESHTOKEN` (or none) → unauthenticated
+  (documented cut); `https://`/TLS sink + `session-ended` still deferred. spec: metrics
+  op docs the bearer auth + secret-never-echoed, `sinkCredential` schema updated. tests:
+  4 new (helper enum, authenticated delivery, end-to-end callback carries bearer + GET
+  never echoes it, side-store peek/take). 1253 tests green, no new dep. — binary: 2.5M
+  (2569960 B)
 - 2026-08-06 — Phase 5: **Session Insights vwip — `network-quality-score` CloudEvent
   on `sendSessionMetrics`**. First notification slice for Session Insights: a `204`
   for a session that recorded a `sink` now fires an

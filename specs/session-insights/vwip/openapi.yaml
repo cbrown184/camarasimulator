@@ -12,8 +12,10 @@
 # application-observed metrics submission (`POST /sessions/{sessionId}/metrics`,
 # `sendSessionMetrics`). `sendSessionMetrics` now also delivers the resulting
 # `network-quality-score` CloudEvent to the session's `sink` (fire-and-forget over
-# raw TCP, `http://` sinks only — no TLS client; `sinkCredential` auth and the
-# `session-ended` event remain deferred to later passes).
+# raw TCP, `http://` sinks only — no TLS client). A session's ACCESSTOKEN
+# `sinkCredential` bearer now authenticates that callback (`Authorization: Bearer`);
+# the `session-ended` event and `https://` (TLS) sink delivery remain deferred to
+# later passes.
 openapi: 3.0.3
 info:
   title: Session Insights
@@ -418,14 +420,23 @@ paths:
         a raw TCP stream (no HTTP-client dependency), so a slow or unreachable
         `sink` never delays the `204`.
 
+        **`sinkCredential` (ACCESSTOKEN) auth.** When the session was created with a
+        `sinkCredential` of `credentialType: ACCESSTOKEN`, its non-empty
+        `accessToken` is applied to the `network-quality-score` callback as an
+        `Authorization: Bearer <token>` header (RFC 6750). The secret is stashed in
+        an in-memory side-store keyed by session id at `createSession` and is
+        **never** echoed in a `SessionInfo` (`GET`/`retrieve-sessions` never return
+        it); because metrics may be submitted repeatedly, the credential is read
+        non-destructively on each delivery and dropped when the session is deleted.
+
         **Documented cuts.** Delivery is to `http://` sinks only — CamaraSim adds no
         TLS client, so an `https://` sink is accepted at `createSession` but its
-        callback is a silent no-op (matches QoD / QoS Provisioning). Applying the
-        session's `sinkCredential` (ACCESSTOKEN bearer) to the callback, and the
-        `session-ended` CloudEvent, are deferred to later passes. The spec's `410
-        Gone` (metrics for an expired session) is also a cut: no retained expired
-        state exists — a deleted session is evicted (→ `404`) and the expiry
-        transition arrives with the deferred notifications.
+        callback is a silent no-op (matches QoD / QoS Provisioning). A
+        `PLAIN`/`REFRESHTOKEN` `sinkCredential` (or none) sends the callback
+        unauthenticated. The `session-ended` CloudEvent (delete / expiry) is deferred
+        to a later pass. The spec's `410 Gone` (metrics for an expired session) is
+        also a cut: no retained expired state exists — a deleted session is evicted
+        (→ `404`) and the expiry transition arrives with the deferred notifications.
       security:
         - openId:
             - session-insights:sessions:write
@@ -629,8 +640,12 @@ components:
         sinkCredential:
           type: object
           description: >-
-            Credential the operator must present on the sink callback. Accepted for
-            schema fidelity; not used in this slice (notification delivery deferred).
+            Credential the operator presents on the sink callback. A
+            `credentialType: ACCESSTOKEN` credential's non-empty `accessToken` is
+            applied to the `network-quality-score` callback as an
+            `Authorization: Bearer <token>` header (RFC 6750); it is stored apart
+            from the `SessionInfo` and never echoed. `PLAIN`/`REFRESHTOKEN` are a
+            documented cut (the callback is sent unauthenticated).
 
     RetrieveSessionsInput:
       type: object

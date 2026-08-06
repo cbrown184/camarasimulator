@@ -27,11 +27,14 @@
 //!   TLS client, so an `https://` (or otherwise non-`http`) `sink` is parsed and
 //!   **not delivered to** — a deliberate cut for the simulator (test receivers run
 //!   on `http://` loopback), matching QoD / QoS Provisioning / Geofencing.
-//! - **`sinkCredential` auth deferred.** This slice delivers the event
-//!   unauthenticated; applying the session's `sinkCredential` (ACCESSTOKEN bearer)
-//!   is a later sub-step, mirroring how QoD landed fire-and-forget delivery first.
-//!   The `auth` argument on [`spawn_delivery`]/[`deliver`] is already threaded so
-//!   that follow-up only needs to supply a credential. All documented in the spec.
+//! - **`sinkCredential` (ACCESSTOKEN) auth.** When a session is created with a
+//!   `sinkCredential` of `credentialType: ACCESSTOKEN`, its bearer token is applied
+//!   to the `network-quality-score` callback as an `Authorization: Bearer <token>`
+//!   header ([`sink_authorization`] derives it). The secret is stashed in a
+//!   `sessionId`-keyed credential side-store at creation (never in the returned
+//!   `SessionInfo`, so `GET` never echoes it) and *peeked* on each delivery, since
+//!   metrics may be submitted repeatedly. A `PLAIN`/`REFRESHTOKEN` credential (or
+//!   none) is a documented cut → the callback is sent unauthenticated.
 
 use serde_json::{json, Value};
 use tokio::io::AsyncWriteExt;
@@ -85,10 +88,29 @@ pub fn quality_score_event(event_id: String, time: String, session_id: &str, sco
     })
 }
 
+/// Derive the `Authorization` header value from a CAMARA `SinkCredential`.
+///
+/// Returns `Some("Bearer <token>")` for a `credentialType: ACCESSTOKEN` credential
+/// carrying a non-empty `accessToken` (CAMARA's `accessTokenType` enum only permits
+/// `bearer`, so RFC 6750 `Bearer` is always the scheme). Every other shape — a
+/// missing/empty token, or a `PLAIN`/`REFRESHTOKEN` credential — returns `None`, so
+/// the notification is sent unauthenticated (documented cut). Pure and directly
+/// testable (mirrors QoD / QoS Provisioning's `sink_authorization`).
+pub fn sink_authorization(cred: &Value) -> Option<String> {
+    if cred.get("credentialType").and_then(Value::as_str) != Some("ACCESSTOKEN") {
+        return None;
+    }
+    let token = cred.get("accessToken").and_then(Value::as_str)?;
+    if token.is_empty() {
+        return None;
+    }
+    Some(format!("Bearer {token}"))
+}
+
 /// Fire-and-forget delivery of `event` to `sink`: spawn [`deliver`] onto the
 /// runtime and drop its result. Never blocks the caller (the API request path).
-/// `auth`, when present, is sent as the `Authorization` header (reserved for the
-/// later `sinkCredential` sub-step; unused in this slice).
+/// `auth`, when present, is sent as the `Authorization` header (RFC 6750 bearer,
+/// derived from the session's `sinkCredential` by [`sink_authorization`]).
 pub fn spawn_delivery(sink: String, event: Value, auth: Option<String>) {
     tokio::spawn(async move {
         let _ = deliver(&sink, &event, auth.as_deref()).await;
@@ -241,6 +263,56 @@ mod tests {
         assert_eq!(parsed["type"], EVENT_TYPE);
         assert_eq!(parsed["data"]["sessionId"], "the-session");
         assert_eq!(parsed["data"]["qualityScore"], 64);
+    }
+
+    #[test]
+    fn sink_authorization_derives_a_bearer_header_only_for_accesstoken() {
+        assert_eq!(
+            sink_authorization(&json!({
+                "credentialType": "ACCESSTOKEN",
+                "accessToken": "abc123",
+                "accessTokenType": "bearer",
+            })),
+            Some("Bearer abc123".to_string())
+        );
+        // No token, empty token, or a non-ACCESSTOKEN credential → unauthenticated.
+        assert_eq!(sink_authorization(&json!({ "credentialType": "ACCESSTOKEN" })), None);
+        assert_eq!(
+            sink_authorization(&json!({ "credentialType": "ACCESSTOKEN", "accessToken": "" })),
+            None
+        );
+        assert_eq!(
+            sink_authorization(&json!({ "credentialType": "PLAIN", "identifier": "u", "secret": "s" })),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn deliver_authenticated_posts_the_bearer_header() {
+        use tokio::io::AsyncReadExt;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let event = quality_score_event(
+            "evt-auth".to_string(),
+            "2024-01-01T00:00:00Z".to_string(),
+            "sid",
+            80,
+        );
+        let sink = format!("http://{addr}/notify");
+        let send =
+            tokio::spawn(async move { deliver(&sink, &event, Some("Bearer sekret")).await });
+
+        let (mut sock, _) = listener.accept().await.unwrap();
+        let mut buf = Vec::new();
+        sock.read_to_end(&mut buf).await.unwrap();
+        send.await.unwrap().expect("delivery succeeds");
+
+        let raw = String::from_utf8(buf).unwrap();
+        assert!(
+            raw.contains("Authorization: Bearer sekret\r\n"),
+            "bearer header present: {raw}"
+        );
     }
 
     #[tokio::test]

@@ -150,10 +150,12 @@ struct CreateSession {
     #[serde(rename = "applicationSessionId")]
     application_session_id: Option<String>,
     sink: Option<String>,
-    /// Accepted for schema fidelity; never echoed (it carries a secret) and not
-    /// used in this slice — notification delivery is deferred.
+    /// The consumer's callback credential. An `ACCESSTOKEN` credential's bearer
+    /// token is applied to the session's `network-quality-score` callbacks
+    /// (RFC 6750 `Authorization: Bearer`); it is stashed in a credential
+    /// side-store keyed by session id and is **never** echoed in the response (it
+    /// carries a secret). `PLAIN`/`REFRESHTOKEN` are a documented cut.
     #[serde(rename = "sinkCredential")]
-    #[allow(dead_code)]
     sink_credential: Option<Value>,
 }
 
@@ -273,6 +275,18 @@ async fn create_session(claims: Claims, headers: HeaderMap, body: Bytes) -> Resp
         info["expiresAt"] = json!(rfc3339_utc(now + SESSION_LIFETIME_SECS));
     }
 
+    // If the session records an ACCESSTOKEN `sinkCredential`, stash the derived
+    // bearer `Authorization` in the credential side-store (keyed by session id) so
+    // the later `network-quality-score` callback authenticates. Kept apart from the
+    // stored `SessionInfo` so `GET` never echoes the secret.
+    if let Some(auth) = req
+        .sink_credential
+        .as_ref()
+        .and_then(notifications::sink_authorization)
+    {
+        store::insert_credential(id.clone(), auth);
+    }
+
     store::insert(id, info.clone());
     with_correlator((StatusCode::CREATED, Json(info)).into_response(), &correlator)
 }
@@ -308,7 +322,12 @@ async fn delete_session(
         return with_correlator(e.into_response(), &correlator);
     }
     match store::remove(&session_id) {
-        Some(_) => with_correlator(StatusCode::NO_CONTENT.into_response(), &correlator),
+        Some(_) => {
+            // Drop any stashed sink credential so a deleted session's secret does
+            // not linger in memory (single-use take, discarded).
+            let _ = store::take_credential(&session_id);
+            with_correlator(StatusCode::NO_CONTENT.into_response(), &correlator)
+        }
         None => with_correlator(
             CamaraError::not_found("No session found for the provided sessionId.").into_response(),
             &correlator,
@@ -471,7 +490,8 @@ async fn send_session_metrics(
             // *later* on the session's `sink`. Fire-and-forget a synthetic
             // `network-quality-score` CloudEvent — deterministically derived from
             // the submitted metrics (docs/DESIGN.md §7) — so it never sits on the
-            // request path. `sinkCredential` auth is a deferred sub-step.
+            // request path. The session's ACCESSTOKEN `sinkCredential` bearer (if
+            // any) authenticates the callback.
             deliver_quality_score(&info, &session_id, &payload);
             with_correlator(StatusCode::NO_CONTENT.into_response(), &correlator)
         }
@@ -487,7 +507,10 @@ async fn send_session_metrics(
 /// records no `sink` (defensive — `createSession` always requires one). Delivery
 /// itself is best-effort and non-blocking ([`notifications::spawn_delivery`]);
 /// `http://` sinks only (an `https://` sink is a documented no-op cut — no TLS
-/// client). `sinkCredential` auth is deferred, so the callback is unauthenticated.
+/// client). The session's ACCESSTOKEN `sinkCredential` bearer (stashed at creation)
+/// is *peeked* — non-destructively, since metrics may be submitted repeatedly — and
+/// applied to the callback as an `Authorization: Bearer` header; a session with no
+/// ACCESSTOKEN credential is delivered unauthenticated.
 fn deliver_quality_score(info: &Value, session_id: &str, payload: &MetricsPayload) {
     let Some(sink) = info.get("sink").and_then(Value::as_str) else {
         return;
@@ -502,7 +525,8 @@ fn deliver_quality_score(info: &Value, session_id: &str, payload: &MetricsPayloa
         session_id,
         score,
     );
-    notifications::spawn_delivery(sink.to_string(), event, None);
+    let auth = store::peek_credential(session_id);
+    notifications::spawn_delivery(sink.to_string(), event, auth);
 }
 
 /// Validate a `MetricsPayload`: the three required figures must be present, and
@@ -1317,11 +1341,60 @@ mod tests {
         let (head, body) = raw.split_once("\r\n\r\n").expect("headers then body");
         assert!(head.starts_with("POST /notify HTTP/1.1\r\n"), "request line: {head}");
         assert!(head.contains("Content-Type: application/cloudevents+json"));
+        // No sinkCredential on this session → the callback is unauthenticated.
+        assert!(!head.contains("Authorization:"), "unauthenticated: {head}");
         let event: Value = serde_json::from_str(body).expect("body is JSON");
         assert_eq!(event["type"], notifications::EVENT_TYPE);
         assert_eq!(event["data"]["sessionId"], id);
         // Deterministic: packetLossErrorRate 3 → 100 − (10−3)*8 = 44.
         assert_eq!(event["data"]["qualityScore"], 44);
+    }
+
+    #[tokio::test]
+    async fn metrics_callback_carries_the_sink_credential_bearer_and_get_never_echoes_it() {
+        use tokio::io::AsyncReadExt;
+
+        // A live loopback receiver stands in for the consumer's `sink`.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        // Create a session with an http:// sink AND an ACCESSTOKEN sinkCredential.
+        let create = mint_token(CREATE_SCOPE).await;
+        let body = format!(
+            r#"{{"applicationProfileId":"3fa85f64-5717-4562-b3fc-2c963f66afa6",
+                 "device":{{"phoneNumber":"+123456789012"}},
+                 "applicationServer":{{"ipv4Address":"198.51.100.1"}},
+                 "sink":"http://{addr}/notify",
+                 "sinkCredential":{{"credentialType":"ACCESSTOKEN",
+                                    "accessToken":"si-sink-secret-42",
+                                    "accessTokenType":"bearer"}}}}"#
+        );
+        let (status, _, created) = post_session(Some(&create), &body, None).await;
+        assert_eq!(status, StatusCode::CREATED);
+        let id = created["id"].as_str().unwrap().to_string();
+        // The secret is never echoed in the created representation.
+        assert!(created.get("sinkCredential").is_none(), "secret not echoed");
+
+        // …nor by a subsequent GET.
+        let read = mint_token(READ_SCOPE).await;
+        let (status, _, got) = get_session_req(Some(&read), &id, None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(got.get("sinkCredential").is_none(), "GET never echoes the secret");
+
+        // Submit metrics; the score callback carries the bearer.
+        let write = mint_token(WRITE_SCOPE).await;
+        let (status, _, _) = post_metrics(Some(&write), &id, VALID_METRICS, None).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        let (mut sock, _) = listener.accept().await.unwrap();
+        let mut buf = Vec::new();
+        sock.read_to_end(&mut buf).await.unwrap();
+        let raw = String::from_utf8(buf).unwrap();
+        let (head, _) = raw.split_once("\r\n\r\n").expect("headers then body");
+        assert!(
+            head.contains("Authorization: Bearer si-sink-secret-42\r\n"),
+            "callback carries the sinkCredential bearer: {head}"
+        );
     }
 
     #[tokio::test]

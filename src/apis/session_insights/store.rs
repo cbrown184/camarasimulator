@@ -112,6 +112,48 @@ pub fn new_event_id() -> String {
     new_session_id()
 }
 
+/// The process-global **sink-credential side-store**: `sessionId` → the derived
+/// `Authorization` header value (e.g. `"Bearer <token>"`). Kept apart from the
+/// `SessionInfo` map so the secret is never echoed by `GET`/retrieve-by-device
+/// (mirrors [`crate::apis::qos_provisioning::store`]'s credential side-store).
+/// In-memory only (single node, per DESIGN §4).
+fn credentials() -> &'static Mutex<HashMap<String, String>> {
+    static CREDS: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+    CREDS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Remember the `Authorization` header value the session's notification callbacks
+/// should carry (derived from the session's `sinkCredential` at creation).
+pub fn insert_credential(id: String, auth: String) {
+    credentials()
+        .lock()
+        .expect("session-insights credential store not poisoned")
+        .insert(id, auth);
+}
+
+/// Read (clone, non-destructive) the stored `Authorization` header value for `id`,
+/// leaving it in place. Used by `sendSessionMetrics`, which may fire a
+/// `network-quality-score` callback **repeatedly** over a session's life, so the
+/// credential must survive every submission. `None` when the session carried no
+/// ACCESSTOKEN `sinkCredential`.
+pub fn peek_credential(id: &str) -> Option<String> {
+    credentials()
+        .lock()
+        .expect("session-insights credential store not poisoned")
+        .get(id)
+        .cloned()
+}
+
+/// Drop the stored `Authorization` header value for `id` (single-use take),
+/// returning it if present. Called on `deleteSession` so a deleted session's
+/// secret does not linger in memory. `None` when nothing was stored.
+pub fn take_credential(id: &str) -> Option<String> {
+    credentials()
+        .lock()
+        .expect("session-insights credential store not poisoned")
+        .remove(id)
+}
+
 /// Current Unix time in seconds (server runtime clock; not on any hot loop).
 fn unix_now() -> u64 {
     SystemTime::now()
@@ -168,6 +210,21 @@ mod tests {
         assert!(found.iter().all(|s| s["device"] == phone_a));
         // An unrelated device matches nothing.
         assert!(find_by_device(&json!({ "phoneNumber": "+15550009099" })).is_empty());
+    }
+
+    #[test]
+    fn credential_side_store_peeks_non_destructively_and_take_consumes() {
+        let id = new_session_id();
+        assert!(peek_credential(&id).is_none(), "not stored yet → None");
+        insert_credential(id.clone(), "Bearer keep".to_string());
+        // Peek clones without removing — repeated peeks (repeated metrics
+        // submissions) all see the credential…
+        assert_eq!(peek_credential(&id), Some("Bearer keep".to_string()));
+        assert_eq!(peek_credential(&id), Some("Bearer keep".to_string()));
+        // …and take drops it (single-use, on delete).
+        assert_eq!(take_credential(&id), Some("Bearer keep".to_string()));
+        assert!(peek_credential(&id).is_none(), "taken → gone");
+        assert!(take_credential(&id).is_none(), "second take → None");
     }
 
     #[test]
