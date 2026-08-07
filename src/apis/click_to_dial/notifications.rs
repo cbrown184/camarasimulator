@@ -8,16 +8,24 @@
 //! delivers it. It mirrors [`crate::apis::session_insights::notifications`] and
 //! [`crate::apis::traffic_influence::notifications`], the sibling APIs' versions.
 //!
-//! ## Scope this pass — the create-time event only
+//! ## Scope so far — the create-time and terminate events
 //!
-//! CamaraSim has no real call engine, so it models the **create-time**
-//! `status-changed` event: a single CloudEvent fired as soon as a call is
-//! created, reflecting the call's initial `status.state` (`initiating`, matching
-//! the `201` `Call` body). The later lifecycle transitions
-//! (`callingCaller`/`connected`/`disconnected`/`failed`), the terminal
-//! `disconnected` `reason`, `callDuration`, and `recordingResult` are documented
-//! cuts (no live call progression; DESIGN §7, §11) — this mirrors how QoD / QoS
-//! Provisioning / Session Insights / Traffic Influence first shipped one leg.
+//! CamaraSim has no real call engine, so it models the two **request-triggered**
+//! `status-changed` events (no background progression):
+//!
+//! - The **create-time** event: a single CloudEvent fired as soon as a call is
+//!   created, reflecting the call's initial `status.state` (`initiating`, matching
+//!   the `201` `Call` body) — see [`status_changed_event`].
+//! - The **terminate** event: when a call created with a `sink` is terminated
+//!   (`terminateCall`), a single CloudEvent reflecting the terminal `disconnected`
+//!   state, carrying a `reason` — see [`terminated_event`]. This mirrors QoD's
+//!   `deleteSession` → `DELETE_REQUESTED` event (request-triggered, not from a
+//!   live engine).
+//!
+//! The *intermediate* lifecycle transitions
+//! (`callingCaller`/`callingCallee`/`connected`, and a spontaneous `failed`), the
+//! `callDuration`, and the `recordingResult` remain documented cuts (no live call
+//! progression; DESIGN §7, §11).
 //!
 //! ## Simulator constraints & documented cuts (shared with QoD / Session Insights)
 //!
@@ -109,6 +117,25 @@ pub fn status_changed_event(
             "status": { "state": state },
         },
     })
+}
+
+/// Build the **terminal** `status-changed` CloudEvent for a call that was ended by
+/// `terminateCall`. Same CloudEvents envelope as [`status_changed_event`], with the
+/// terminal `state` (`disconnected`) and a `reason` added to `data.status` — the
+/// `reason` is meaningful on a terminal state (unlike the create-time event, where
+/// it is a documented cut). Pure and directly testable.
+pub fn terminated_event(
+    event_id: String,
+    time: String,
+    call_id: &str,
+    caller: &str,
+    callee: &str,
+    state: &str,
+    reason: &str,
+) -> Value {
+    let mut event = status_changed_event(event_id, time, call_id, caller, callee, state);
+    event["data"]["status"]["reason"] = json!(reason);
+    event
 }
 
 /// Derive the `Authorization` header value from a CAMARA `SinkCredential`.
@@ -244,6 +271,30 @@ mod tests {
         // The notification's `status` is an object `{ state }` (unlike the
         // resource's plain-string `status`).
         assert_eq!(e["data"]["status"]["state"], "initiating");
+    }
+
+    #[test]
+    fn terminated_event_adds_the_disconnect_state_and_reason() {
+        let e = terminated_event(
+            "evt-term".to_string(),
+            "2024-01-01T00:00:00Z".to_string(),
+            "the-call",
+            "+123456789111",
+            "+123456789012",
+            "disconnected",
+            "The call was terminated by the application.",
+        );
+        // Same envelope as the create-time event…
+        assert_eq!(e["type"], EVENT_TYPE);
+        assert_eq!(e["data"]["callId"], "the-call");
+        assert_eq!(e["data"]["caller"]["number"], "+123456789111");
+        assert_eq!(e["data"]["callee"]["number"], "+123456789012");
+        // …but with the terminal state and a populated reason.
+        assert_eq!(e["data"]["status"]["state"], "disconnected");
+        assert_eq!(
+            e["data"]["status"]["reason"],
+            "The call was terminated by the application."
+        );
     }
 
     #[test]

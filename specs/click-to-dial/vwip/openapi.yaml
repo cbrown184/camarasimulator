@@ -110,16 +110,19 @@ info:
       exists — the CAMARA precondition that the call session has *completed* is
       not modelled (lifecycle `status` transitions past `initiating` remain a
       deferred slice).
-    - **Notifications — create-time event only.** A `createCall` that supplies a
-      `sink` delivers one create-time `status-changed` CloudEvent reflecting the
-      call's initial `initiating` state (documented by the `createCall`
-      callback). Delivery is fire-and-forget over raw TCP to `http://` sinks only
-      (no TLS client — an `https://` sink is a no-op cut); an `ACCESSTOKEN`
+    - **Notifications — the create-time and terminate events.** A `createCall`
+      that supplies a `sink` delivers one create-time `status-changed` CloudEvent
+      reflecting the call's initial `initiating` state (documented by the
+      `createCall` callback), and `terminateCall` delivers a terminal one
+      reflecting the `disconnected` state (with a `reason` in `data.status`).
+      Delivery is fire-and-forget over raw TCP to `http://` sinks only (no TLS
+      client — an `https://` sink is a no-op cut); an `ACCESSTOKEN`
       `sinkCredential` bearer is applied to the callback, `PLAIN`/`REFRESHTOKEN`
-      are a cut. The later lifecycle transitions
-      (`connected`/`disconnected`/`failed`, with `reason`/`callDuration`/
-      `recordingResult`) and the `terminateCall` termination signal remain a
-      deferred slice — CamaraSim runs no live call engine.
+      are a cut. The *intermediate* lifecycle transitions
+      (`callingCaller`/`callingCallee`/`connected`, a spontaneous `failed`, with
+      `callDuration`/`recordingResult`) remain a deferred slice — CamaraSim runs
+      no live call engine (like QoD, which models create + delete events but no
+      mid-life stream).
 
     CamaraSim exposes the full shared reserved-error set here so every reserved
     suffix is reachable; canonical Click to Dial declares a subset.
@@ -421,8 +424,18 @@ paths:
         `404 NOT_FOUND` for a `callId` that was never created (or already
         terminated — eviction is single-use). The `callId` is an opaque,
         UUID-shaped token, so the store state is the only control plane (there is
-        no reserved-identifier convention here). Termination is not signalled to
-        a `sink` (`status-changed` notifications remain a deferred slice).
+        no reserved-identifier convention here).
+
+        When the call was created with a `sink`, terminating it delivers a single
+        **terminal** `status-changed` CloudEvent to that sink reflecting the
+        `disconnected` state (with a `reason`) — fire-and-forget, off the request
+        path; `http://` only; an ACCESSTOKEN `sinkCredential` bearer applied (both
+        recorded at create time). This mirrors QoD's `deleteSession` →
+        `DELETE_REQUESTED` event. It is **not** modelled as an OpenAPI `callbacks`
+        object here because the callback target (`sink`) was supplied on the
+        original `createCall`, not on this bodyless `DELETE` — a runtime expression
+        cannot reference it. See the `createCall` `statusChanged` callback for the
+        CloudEvent shape (`StatusChangedEvent`).
       security:
         - openId:
             - click-to-dial:calls:delete
@@ -462,12 +475,17 @@ paths:
           Result selected from the store state only (docs/DESIGN.md §7). The
           `callId` is opaque, so there is no reserved-identifier plane: a stored
           id is evicted and returns 204, an unknown/already-terminated id is a
-          404.
+          404. A terminated call that was created with an `http://` `sink` also
+          delivers one terminal `status-changed` CloudEvent (`disconnected`).
         cases:
           - input: a callId returned by a prior createCall (not yet terminated)
             result: "204 No Content (the call is evicted)"
+          - input: "a terminated call created with an http:// sink"
+            result: "204, plus a terminal status-changed CloudEvent (state=disconnected, with reason)"
+          - input: "a terminated call created with an https:// sink, or with no sink"
+            result: "204 — no CloudEvent is delivered (https no-op cut / no sink recorded)"
           - input: an unknown, never-created, or already-terminated callId
-            result: "404 NOT_FOUND"
+            result: "404 NOT_FOUND (no CloudEvent — the eviction is single-use)"
 
   /calls/{callId}/recording:
     get:
@@ -703,8 +721,11 @@ components:
       type: string
       description: >-
         The lifecycle state of the call. CamaraSim's `createCall` always returns
-        `initiating`; the remaining states are reached via `status-changed`
-        notifications (a deferred slice).
+        `initiating`; `disconnected` is reached when the call is ended by
+        `terminateCall` (carried by the terminal `status-changed` notification).
+        The intermediate states (`callingCaller`/`callingCallee`/`connected`) and
+        a spontaneous `failed` are reached only by a live call engine — a deferred
+        slice.
       enum:
         - initiating
         - callingCaller
@@ -745,10 +766,12 @@ components:
       description: >-
         The CloudEvents 1.0 envelope POSTed to a call's `sink` when its status
         changes (`type: org.camaraproject.click-to-dial.v0.status-changed`).
-        CamaraSim delivers one create-time event reflecting the `initiating`
-        state; `data` carries the fields the simulator can populate at that point
-        (the transition `reason`, `callDuration`, and `recordingResult` become
-        meaningful only once the call has progressed — a deferred slice).
+        CamaraSim delivers two request-triggered events: one at create time
+        reflecting the `initiating` state, and one at `terminateCall` reflecting
+        the terminal `disconnected` state (with a `reason` in `data.status`). The
+        intermediate transitions, `callDuration`, and `recordingResult` become
+        meaningful only once a live call engine progresses the call — a deferred
+        slice.
       required:
         - id
         - source
@@ -809,8 +832,9 @@ components:
             reason:
               type: string
               description: >-
-                The disconnection reason (only on a terminal state — a deferred
-                slice in CamaraSim).
+                The disconnection reason, present on a terminal state. CamaraSim
+                populates it on the `terminateCall` event
+                (`state: disconnected`); it is absent on the create-time event.
 
     ClickToDialError:
       description: >-

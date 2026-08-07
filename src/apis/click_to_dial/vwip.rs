@@ -79,8 +79,13 @@
 //! for an unknown/never-created id. As with `getCall`, the `callId` is opaque, so
 //! the store state is the only control plane; eviction is single-use, so a
 //! subsequent `getCall`/`terminateCall` for the same id is a `404`. It requires a
-//! token carrying the `click-to-dial:calls:delete` scope. Termination is not
-//! signalled to a `sink` (`status-changed` notifications remain deferred).
+//! token carrying the `click-to-dial:calls:delete` scope. When the call was
+//! created with a `sink`, terminating it delivers a single **terminal**
+//! `status-changed` CloudEvent reflecting the `disconnected` state (with a
+//! `reason`) — fire-and-forget, off the request path; `http://` only; the
+//! ACCESSTOKEN `sinkCredential` bearer applied (both recorded at create time). A
+//! call created without a `sink` signals nothing. This mirrors QoD's
+//! `deleteSession` → `DELETE_REQUESTED` event.
 //!
 //! ## `getRecording` — the store + `recordingEnabled` are the control plane (docs/DESIGN.md §7)
 //!
@@ -110,14 +115,16 @@
 //!   not real captured audio, and the recording is available as soon as the call
 //!   exists (the CAMARA precondition that the call session has *completed* is not
 //!   modelled — `status` transitions past `initiating` are a deferred slice).
-//! - **Notifications — create-time event only.** A `createCall` that supplies a
-//!   `sink` now delivers one create-time `status-changed` CloudEvent reflecting
-//!   the call's initial `initiating` state (see [`super::notifications`]);
-//!   `http://` sinks only, ACCESSTOKEN `sinkCredential` bearer applied. The later
-//!   lifecycle transitions (`connected`/`disconnected`/`failed`, with `reason` /
-//!   `callDuration` / `recordingResult`) and the `terminateCall` termination
-//!   signal are a deferred slice — CamaraSim runs no live call engine (like QoD's
-//!   first create pass).
+//! - **Notifications — the two request-triggered events.** A `createCall` that
+//!   supplies a `sink` delivers one create-time `status-changed` CloudEvent
+//!   reflecting the call's initial `initiating` state, and `terminateCall`
+//!   delivers a terminal one reflecting the `disconnected` state (with a `reason`);
+//!   see [`super::notifications`]. Both are `http://` sinks only, with the
+//!   ACCESSTOKEN `sinkCredential` bearer applied. The *intermediate* lifecycle
+//!   transitions (`callingCaller`/`callingCallee`/`connected`, a spontaneous
+//!   `failed`, `callDuration` / `recordingResult`) remain a deferred slice —
+//!   CamaraSim runs no live call engine (like QoD, which models create + delete
+//!   events but no mid-life stream).
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -162,6 +169,14 @@ const RECORDING_CONTENT_TYPE: &str = "audio/wav";
 /// by the `201` `Call` body and the create-time `status-changed` notification so
 /// the two never drift.
 const INITIATING_STATE: &str = "initiating";
+
+/// The call's terminal lifecycle state when ended by `terminateCall` (CAMARA
+/// `CallStatus`) — carried by the terminate-time `status-changed` notification.
+const TERMINATED_STATE: &str = "disconnected";
+
+/// The `reason` reported on the terminate-time `status-changed` notification: the
+/// call was ended through the API (`terminateCall`), not by a party hanging up.
+const TERMINATED_REASON: &str = "The call was terminated by the application.";
 
 /// The trailing-three-digit sentinel that marks a line as unreachable
 /// (`caller`/`callee` not available). Not a reserved *error* suffix, so it is
@@ -331,6 +346,11 @@ async fn create_call(claims: Claims, headers: HeaderMap, body: Bytes) -> Respons
             .sink_credential
             .as_ref()
             .and_then(notifications::sink_authorization);
+        // Remember the sink (and its derived callback auth) so `terminateCall` can
+        // deliver the terminal `status-changed` event later. Held in a side-store
+        // apart from the `Call`, so the callback secret is never echoed by
+        // `getCall`/`getRecording`.
+        super::store::insert_sink(id.clone(), sink.to_string(), auth.clone());
         let event = notifications::status_changed_event(
             notifications::new_event_id(),
             rfc3339_utc(now_unix_secs()),
@@ -396,14 +416,47 @@ async fn terminate_call(
         return with_correlator(e.into_response(), &correlator);
     }
 
-    if super::store::remove(&call_id) {
-        with_correlator(StatusCode::NO_CONTENT.into_response(), &correlator)
-    } else {
-        with_correlator(
+    // The store is the only control plane (opaque callId): a present call is
+    // evicted (returning the removed `Call`) → 204; an unknown/already-terminated
+    // id → 404. `remove` is atomic, so exactly one concurrent terminate sees the
+    // call — the terminal notification fires at most once.
+    let Some(call) = super::store::remove(&call_id) else {
+        return with_correlator(
             CamaraError::not_found("No call found for the provided callId.").into_response(),
             &correlator,
-        )
+        );
+    };
+
+    // When the call was created with a `sink`, deliver a single terminal
+    // `status-changed` CloudEvent reflecting the `disconnected` state — fire-and-
+    // forget, off the request path; `http://` only; an ACCESSTOKEN `sinkCredential`
+    // bearer applied (both recorded at create time). A call created without a
+    // `sink` has no side-store entry, so nothing is delivered. The participants
+    // come from the just-removed `Call` (the callId itself is opaque).
+    if let Some((sink, auth)) = super::store::take_sink(&call_id) {
+        let caller = call
+            .get("caller")
+            .and_then(|p| p.get("number"))
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let callee = call
+            .get("callee")
+            .and_then(|p| p.get("number"))
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let event = notifications::terminated_event(
+            notifications::new_event_id(),
+            rfc3339_utc(now_unix_secs()),
+            &call_id,
+            caller,
+            callee,
+            TERMINATED_STATE,
+            TERMINATED_REASON,
+        );
+        notifications::spawn_delivery(sink, event, auth);
     }
+
+    with_correlator(StatusCode::NO_CONTENT.into_response(), &correlator)
 }
 
 /// `GET /click-to-dial/vwip/calls/{callId}/recording` — fetch a call's recording
@@ -1514,5 +1567,123 @@ mod tests {
         let accepted =
             tokio::time::timeout(std::time::Duration::from_millis(400), listener.accept()).await;
         assert!(accepted.is_err(), "an errored create must not notify the sink");
+    }
+
+    // --- status-changed CloudEvents on `sink` (terminate-time event) -------
+
+    #[tokio::test]
+    async fn terminate_fires_a_terminal_status_changed_cloudevent() {
+        use tokio::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let sink = format!("http://{addr}/ctd-term");
+
+        // Create with a sink (unique pair for this test).
+        let create = mint_token(CREATE_SCOPE).await;
+        let body = format!(
+            r#"{{"caller":{{"number":"+123456789111"}},"callee":{{"number":"+123456789020"}},"sink":"{sink}"}}"#
+        );
+        let (status, _, created) = post_calls(Some(&create), &body, None).await;
+        assert_eq!(status, StatusCode::CREATED);
+        let id = created["callId"].as_str().unwrap().to_string();
+
+        // Connection 1 is the create-time `initiating` event; drain it.
+        let (_, first) = read_one_event(&listener).await;
+        assert_eq!(first["data"]["status"]["state"], "initiating");
+
+        // Terminate → 204, and a second event is delivered to the same sink.
+        let del = mint_token(DELETE_SCOPE).await;
+        let (status, _, _) = delete_call_by_id(Some(&del), &id, None).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        let (head, event) = read_one_event(&listener).await;
+        assert!(head.starts_with("POST /ctd-term HTTP/1.1\r\n"), "request line: {head}");
+        assert!(head.contains("Content-Type: application/cloudevents+json"));
+        assert_eq!(event["type"], notifications::EVENT_TYPE);
+        assert_eq!(event["source"], notifications::SOURCE);
+        assert_eq!(event["data"]["callId"], json!(id));
+        assert_eq!(event["data"]["caller"]["number"], "+123456789111");
+        assert_eq!(event["data"]["callee"]["number"], "+123456789020");
+        // The terminal event reports the disconnected state with a reason.
+        assert_eq!(event["data"]["status"]["state"], "disconnected");
+        assert_eq!(
+            event["data"]["status"]["reason"],
+            "The call was terminated by the application."
+        );
+    }
+
+    #[tokio::test]
+    async fn the_terminate_callback_carries_the_sink_credential_bearer() {
+        use tokio::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let sink = format!("http://{addr}/ctd-term-auth");
+
+        let create = mint_token(CREATE_SCOPE).await;
+        let body = format!(
+            r#"{{"caller":{{"number":"+123456789111"}},"callee":{{"number":"+123456789021"}},"sink":"{sink}","sinkCredential":{{"credentialType":"ACCESSTOKEN","accessToken":"ctd-term-secret","accessTokenType":"bearer"}}}}"#
+        );
+        let (status, _, created) = post_calls(Some(&create), &body, None).await;
+        assert_eq!(status, StatusCode::CREATED);
+        let id = created["callId"].as_str().unwrap().to_string();
+
+        // Drain the create-time event (also bears the token; we assert on terminate).
+        let (create_head, _) = read_one_event(&listener).await;
+        assert!(create_head.contains("Authorization: Bearer ctd-term-secret\r\n"));
+
+        // Terminate → the terminal callback also carries the recorded bearer.
+        let del = mint_token(DELETE_SCOPE).await;
+        let (status, _, _) = delete_call_by_id(Some(&del), &id, None).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let (term_head, _) = read_one_event(&listener).await;
+        assert!(
+            term_head.contains("Authorization: Bearer ctd-term-secret\r\n"),
+            "terminal callback bearer: {term_head}"
+        );
+    }
+
+    #[tokio::test]
+    async fn terminate_of_a_call_created_without_a_sink_fires_nothing() {
+        // No `sink` at create → no side-store entry → terminate delivers nothing.
+        // Nothing to time out on; the 204 stands on its own.
+        let create = mint_token(CREATE_SCOPE).await;
+        let (status, _, created) = post_calls(
+            Some(&create),
+            r#"{"caller":{"number":"+123456789111"},"callee":{"number":"+123456789022"}}"#,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let id = created["callId"].as_str().unwrap();
+
+        let del = mint_token(DELETE_SCOPE).await;
+        let (status, _, _) = delete_call_by_id(Some(&del), id, None).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn terminate_with_an_https_sink_delivers_nothing() {
+        // No TLS client, so an `https://` sink is a documented no-op cut on both
+        // legs: create is 201 and terminate is 204, but no callback connects.
+        use tokio::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let sink = format!("https://{addr}/ctd-term-tls");
+
+        let create = mint_token(CREATE_SCOPE).await;
+        let body = format!(
+            r#"{{"caller":{{"number":"+123456789111"}},"callee":{{"number":"+123456789023"}},"sink":"{sink}"}}"#
+        );
+        let (status, _, created) = post_calls(Some(&create), &body, None).await;
+        assert_eq!(status, StatusCode::CREATED);
+        let id = created["callId"].as_str().unwrap().to_string();
+
+        let del = mint_token(DELETE_SCOPE).await;
+        let (status, _, _) = delete_call_by_id(Some(&del), &id, None).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        let accepted =
+            tokio::time::timeout(std::time::Duration::from_millis(400), listener.accept()).await;
+        assert!(accepted.is_err(), "https sink must not be delivered to on terminate");
     }
 }
