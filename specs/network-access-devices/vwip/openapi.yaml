@@ -9,10 +9,13 @@
 # not drift.
 #
 # Serves `GET /network-access-devices` (list the operator-supplied network access
-# devices associated with the subscriber). The reboot-request resource lifecycle
-# (`POST/GET/PATCH/DELETE /reboot-requests…`) and the per-device
-# `GET /network-access-devices/{networkAccessDeviceId}` read are stateful and are
-# deferred to later passes (documented cut).
+# devices associated with the subscriber) and
+# `GET /network-access-devices/{networkAccessDeviceId}` (read one of those devices
+# by id). CamaraSim's device set is deterministic from the token subject, so the
+# by-id read regenerates the set and looks the id up — it needs no store (a
+# simplification of CAMARA's stateful resource read). The reboot-request resource
+# lifecycle (`POST/GET/PATCH/DELETE /reboot-requests…`) is stateful and remains
+# deferred to a later pass (documented cut).
 openapi: 3.0.3
 info:
   title: Network Access Devices
@@ -73,9 +76,16 @@ info:
       `ipv6Address`) are omitted: these are operator-managed devices, and the
       simulator reports only their operator-facing detail. Only `id` is required
       by the schema, so this is a schema-valid trim (DESIGN §9).
-    - The **reboot-request** resource lifecycle and the per-device
-      `GET /network-access-devices/{networkAccessDeviceId}` read are stateful and
-      not yet implemented.
+    - The per-device `GET /network-access-devices/{networkAccessDeviceId}` read is
+      implemented **statelessly**: the subscriber's device set is deterministic
+      from the token subject, so the read regenerates that set and returns the
+      device whose `id` matches. An id that is not in the subject's set — unknown,
+      belonging to another subscriber, or malformed — is a `404 NOT_FOUND` (there
+      is no store to tell those cases apart). This is a documented simplification
+      of CAMARA's stateful resource read.
+    - The **reboot-request** resource lifecycle
+      (`POST/GET/PATCH/DELETE /reboot-requests…`) is stateful and not yet
+      implemented.
   version: "wip"
   license:
     name: Apache-2.0
@@ -180,6 +190,92 @@ paths:
             result: "200 — two devices [unavailable, connected]"
           - input: "subject trailing digits …003"
             result: "200 — three devices [connected, disconnected, unavailable]"
+
+  /network-access-devices/{networkAccessDeviceId}:
+    get:
+      operationId: getNetworkAccessDevice
+      summary: Get a single Network Access Device by id
+      description: |
+        Reads one of the subscriber's Network Access Devices by its id.
+
+        CamaraSim's device set is deterministic from the access-token subject
+        (`sub`); this read regenerates that set and returns the device whose `id`
+        matches the path parameter, so — unlike CAMARA's stateful resource read —
+        it needs no store. See the API description for the parameter-driven
+        functional cases.
+
+        Two control planes (docs/DESIGN.md §7):
+
+        - **Reserved error suffix (subject).** As for the listing, a subject whose
+          trailing three digits name a reserved CAMARA status answers that
+          canonical error, regardless of the id (an account-level plane).
+        - **The id vs the subject's set.** An id that belongs to the subject's
+          deterministic set → `200` with that device; any other id (unknown,
+          another subscriber's, or malformed) → `404 NOT_FOUND`.
+      security:
+        - openId:
+            - network-access-devices:reboot
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+        - name: networkAccessDeviceId
+          in: path
+          required: true
+          description: The unique identifier (UUID) of the Network Access Device.
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: The requested network access device.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NetworkAccessDevice"
+              examples:
+                connectedGateway:
+                  summary: One connected gateway
+                  value:
+                    id: 3fa85f64-5717-4562-b3fc-2c963f66afa6
+                    deviceStatus: connected
+                    name: Gateway-1
+                    description: Operator-supplied network access gateway
+                    hardwareAddress:
+                      hardwareAddressType: EUI-48
+                      value: "12:34:56:78:9A:BC"
+        "400":
+          $ref: "../../shared/errors.yaml#/components/responses/InvalidArgument"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "409":
+          $ref: "../../shared/errors.yaml#/components/responses/Conflict"
+        "422":
+          $ref: "../../shared/errors.yaml#/components/responses/ServiceNotApplicable"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          Result selected from the token subject and the path id (docs/DESIGN.md
+          §7). A reserved subject suffix answers a canonical CAMARA error
+          (account-level); otherwise the id is matched against the subject's
+          deterministic device set.
+        cases:
+          - input: subject ending in a reserved error suffix (e.g. …404, …503)
+            result: the canonical CAMARA error for that status (id ignored)
+          - input: an id that belongs to the subject's device set
+            result: "200 — that NetworkAccessDevice"
+          - input: an unknown / another subscriber's / malformed id
+            result: "404 NOT_FOUND"
 
 components:
   securitySchemes:
