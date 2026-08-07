@@ -2,14 +2,22 @@
 //! ApplicationEndpointRegistration, work-in-progress — no released version yet),
 //! mounted at `/application-endpoint-registration/vwip`.
 //!
-//! This first slice implements the **register** endpoint:
+//! This module implements:
 //! - `POST /application-endpoint-lists` (operationId `registerApplicationEndpoints`,
 //!   scope `application-endpoint-registration:application-endpoints:write`) —
 //!   registers a set of application endpoints, mints an opaque
 //!   `applicationEndpointListId` ([`super::store`]), remembers the rendered
 //!   registration, and returns `200` with that id.
+//! - `GET /application-endpoint-lists/{applicationEndpointListId}` (operationId
+//!   `getApplicationEndpointsById`, scope
+//!   `application-endpoint-registration:application-endpoints:read`) — the
+//!   **read-back** leg: returns the stored registration (`200`) or `404
+//!   NOT_FOUND` for an unknown id. The id is server-minted (`format: uuid`), so a
+//!   malformed path value is a `400 INVALID_ARGUMENT`; the opaque id is the only
+//!   control plane (it was never caller-chosen, so there is no reserved-identifier
+//!   suffix on it).
 //!
-//! The read (`GET`), update (`PUT`) and deregister (`DELETE`) legs by
+//! The update (`PUT`) and deregister (`DELETE`) legs by
 //! `{applicationEndpointListId}` land in later passes.
 //!
 //! ## No device identifier — the request body is the control plane (DESIGN §7)
@@ -56,6 +64,7 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 use std::str::FromStr;
 
 use axum::body::Bytes;
+use axum::extract::Path;
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
@@ -71,16 +80,24 @@ use crate::scenarios;
 /// Scope required to register endpoints (CAMARA ApplicationEndpointRegistration).
 const WRITE_SCOPE: &str = "application-endpoint-registration:application-endpoints:write";
 
+/// Scope required to read a registration back (CAMARA ApplicationEndpointRegistration).
+const READ_SCOPE: &str = "application-endpoint-registration:application-endpoints:read";
+
 /// The nil UUID — the reserved `applicationProfileId` that names an
 /// *unidentifiable* application profile (→ `422 UNIDENTIFIABLE_APPLICATION_PROFILE`).
 const NIL_UUID: &str = "00000000-0000-0000-0000-000000000000";
 
 /// Routes for Application Endpoint Registration vwip, mounted at their canonical URLs.
 pub fn routes() -> Router {
-    Router::new().route(
-        "/application-endpoint-registration/vwip/application-endpoint-lists",
-        post(register_application_endpoints),
-    )
+    Router::new()
+        .route(
+            "/application-endpoint-registration/vwip/application-endpoint-lists",
+            post(register_application_endpoints),
+        )
+        .route(
+            "/application-endpoint-registration/vwip/application-endpoint-lists/:application_endpoint_list_id",
+            axum::routing::get(get_application_endpoints_by_id),
+        )
 }
 
 /// `ApplicationEndpointsInfo` (CAMARA ApplicationEndpointRegistration). Deriving
@@ -222,6 +239,48 @@ async fn register_application_endpoints(
         (StatusCode::OK, Json(json!(list_id))).into_response(),
         &correlator,
     )
+}
+
+/// `GET /application-endpoint-registration/vwip/application-endpoint-lists/{applicationEndpointListId}`.
+///
+/// The **read-back** leg: returns the registration stored under the opaque
+/// `applicationEndpointListId` (`200`) or `404 NOT_FOUND` for an unknown id. The
+/// id is server-minted (`format: uuid`), so a malformed path value is a `400
+/// INVALID_ARGUMENT` (mirroring Application Profiles' `getApplicationProfile`);
+/// the opaque id is the only control plane — it was never caller-chosen, so there
+/// is no reserved-identifier suffix on it. `x-correlator` is echoed.
+async fn get_application_endpoints_by_id(
+    claims: Claims,
+    headers: HeaderMap,
+    Path(application_endpoint_list_id): Path<String>,
+) -> Response {
+    // Optional correlation header, echoed on every response (CAMARA Commonalities).
+    let correlator = headers.get("x-correlator").cloned();
+
+    // Endpoint authorisation: the token must carry the read scope.
+    if let Err(e) = claims.require_scope(READ_SCOPE) {
+        return with_correlator(e.into_response(), &correlator);
+    }
+
+    // The path parameter is `format: uuid`; a malformed value is a `400` (mirrors
+    // Application Profiles' read/update/delete bad-shape → 400 vs unknown → 404).
+    if !is_uuid_shaped(&application_endpoint_list_id) {
+        return invalid_argument("`applicationEndpointListId` must be a UUID.", &correlator);
+    }
+
+    match store::get(&application_endpoint_list_id) {
+        Some(registration) => with_correlator(
+            (StatusCode::OK, Json(registration)).into_response(),
+            &correlator,
+        ),
+        None => with_correlator(
+            CamaraError::not_found(
+                "No application-endpoint list found for the provided applicationEndpointListId.",
+            )
+            .into_response(),
+            &correlator,
+        ),
+    }
 }
 
 /// Validate an `ApplicationEndpointsInfo` body (everything except the
@@ -458,6 +517,39 @@ mod tests {
         (status, headers, json)
     }
 
+    async fn get_list(
+        token: Option<&str>,
+        id: &str,
+        correlator: Option<&str>,
+    ) -> (StatusCode, HeaderMap, Value) {
+        let mut builder = Request::builder()
+            .method("GET")
+            .uri(format!("{LISTS}/{id}"))
+            .header("host", HOST);
+        if let Some(t) = token {
+            builder = builder.header("authorization", format!("Bearer {t}"));
+        }
+        if let Some(c) = correlator {
+            builder = builder.header("x-correlator", c);
+        }
+        let request = builder.body(Body::empty()).unwrap();
+        let response = app().oneshot(request).await.unwrap();
+        let status = response.status();
+        let headers = response.headers().clone();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, headers, json)
+    }
+
+    /// Register `body` and return the minted `applicationEndpointListId`.
+    async fn register_and_get_id(token: &str, body: &str) -> String {
+        let (status, _, out) = post_list(Some(token), body, None).await;
+        assert_eq!(status, StatusCode::OK);
+        out.as_str().expect("200 body is a list id").to_string()
+    }
+
     /// A minimal valid registration body with the given `applicationProfileId`.
     fn valid_body(profile_id: &str) -> String {
         json!({
@@ -660,6 +752,61 @@ mod tests {
     #[tokio::test]
     async fn missing_token_is_401() {
         let (status, _, _) = post_list(None, &valid_body(OK_PROFILE), None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    // --- Read-back: GET /application-endpoint-lists/{applicationEndpointListId} ---
+
+    #[tokio::test]
+    async fn register_then_read_back_returns_the_stored_registration() {
+        let write = mint_token(WRITE_SCOPE).await;
+        let id = register_and_get_id(&write, &valid_body(OK_PROFILE)).await;
+
+        let read = mint_token(READ_SCOPE).await;
+        let (status, headers, body) = get_list(Some(&read), &id, Some("corr-read")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(headers.get("x-correlator").unwrap(), "corr-read");
+        // The stored registration echoes the minted id and the submitted fields.
+        assert_eq!(body["applicationEndpointListId"], id);
+        assert_eq!(body["applicationProviderName"], "Acme Corp");
+        assert_eq!(body["applicationProfileId"], OK_PROFILE);
+        assert_eq!(body["applicationEndpoints"][0]["ipv4Address"], "192.0.2.10");
+        assert_eq!(body["applicationEndpoints"][0]["port"], 443);
+    }
+
+    #[tokio::test]
+    async fn read_back_unknown_id_is_404_not_found() {
+        let read = mint_token(READ_SCOPE).await;
+        // Well-formed UUID that was never registered.
+        let unknown = "abcdef01-0000-4000-8000-000000000abc";
+        let (status, headers, err) = get_list(Some(&read), unknown, Some("corr-404")).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(err["code"], "NOT_FOUND");
+        assert_eq!(headers.get("x-correlator").unwrap(), "corr-404");
+    }
+
+    #[tokio::test]
+    async fn read_back_malformed_id_is_400_invalid_argument() {
+        let read = mint_token(READ_SCOPE).await;
+        let (status, _, err) = get_list(Some(&read), "not-a-uuid", None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(err["code"], "INVALID_ARGUMENT");
+    }
+
+    #[tokio::test]
+    async fn read_back_requires_the_read_scope() {
+        // Register with the write scope, then try to read it back with only the
+        // write scope (not read) → 403.
+        let write = mint_token(WRITE_SCOPE).await;
+        let id = register_and_get_id(&write, &valid_body(OK_PROFILE)).await;
+        let (status, _, err) = get_list(Some(&write), &id, None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(err["code"], "PERMISSION_DENIED");
+    }
+
+    #[tokio::test]
+    async fn read_back_missing_token_is_401() {
+        let (status, _, _) = get_list(None, OK_PROFILE, None).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
     }
 }

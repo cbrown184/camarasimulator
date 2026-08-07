@@ -8,9 +8,11 @@
 # cases (docs/DESIGN.md §7, §9). Backed by
 # `src/apis/application_endpoint_registration/vwip.rs`; spec and code must not drift.
 #
-# This slice serves the register endpoint: `POST /application-endpoint-lists`
-# (`registerApplicationEndpoints`). The read (`GET`), update (`PUT`) and deregister
-# (`DELETE`) legs by `{applicationEndpointListId}` land in later passes.
+# This slice serves the register endpoint `POST /application-endpoint-lists`
+# (`registerApplicationEndpoints`) and the read-back leg
+# `GET /application-endpoint-lists/{applicationEndpointListId}`
+# (`getApplicationEndpointsById`). The update (`PUT`) and deregister (`DELETE`)
+# legs land in later passes.
 openapi: 3.0.3
 info:
   title: Application Endpoints Registration
@@ -200,6 +202,77 @@ paths:
           - input: over-length or multi-line applicationProviderName / applicationDescription, unknown field
             result: "400 INVALID_ARGUMENT"
 
+  /application-endpoint-lists/{applicationEndpointListId}:
+    parameters:
+      - $ref: "#/components/parameters/ApplicationEndpointListIdPath"
+    get:
+      operationId: getApplicationEndpointsById
+      summary: Retrieve a registered application-endpoint list by id
+      description: |
+        Returns the application-endpoint registration previously created by
+        `registerApplicationEndpoints`, addressed by its opaque
+        `applicationEndpointListId`.
+
+        The id is server-minted (`format: uuid`), so it is the only control plane
+        (docs/DESIGN.md §7): it was never caller-chosen, so there is no
+        reserved-identifier suffix on it. A malformed path value is a
+        `400 INVALID_ARGUMENT`; a well-formed but unknown/never-registered id is a
+        `404 NOT_FOUND`.
+      security:
+        - openId:
+            - application-endpoint-registration:application-endpoints:read
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+      responses:
+        "200":
+          description: The registration stored under the given id.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApplicationEndpointsInfoResponse"
+        "400":
+          description: |
+            400 — invalid request. CamaraSim returns `INVALID_ARGUMENT` when the
+            `applicationEndpointListId` path value is not a UUID.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApplicationEndpointRegistrationError"
+              examples:
+                invalidArgument:
+                  summary: Malformed list id
+                  value:
+                    status: 400
+                    code: INVALID_ARGUMENT
+                    message: "`applicationEndpointListId` must be a UUID."
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          Read-back keyed only on the opaque, server-minted
+          applicationEndpointListId (docs/DESIGN.md §7). No reserved-identifier
+          plane — the id was never caller-chosen.
+        cases:
+          - input: a stored applicationEndpointListId (from registerApplicationEndpoints)
+            result: "200 — the ApplicationEndpointsInfoResponse for that id"
+          - input: a well-formed but unknown/never-registered applicationEndpointListId
+            result: "404 NOT_FOUND"
+          - input: an applicationEndpointListId that is not a UUID
+            result: "400 INVALID_ARGUMENT"
+
 components:
   securitySchemes:
     openId:
@@ -213,6 +286,14 @@ components:
       description: Correlation id for the request, echoed back on the response.
       schema:
         type: string
+
+    ApplicationEndpointListIdPath:
+      name: applicationEndpointListId
+      in: path
+      required: true
+      description: The opaque id of a registered application-endpoint list.
+      schema:
+        $ref: "#/components/schemas/ApplicationEndpointListId"
 
   headers:
     XCorrelator:
@@ -348,6 +429,22 @@ components:
       readOnly: true
       description: The opaque id of a registered application-endpoint list.
       example: "98765432-e89b-12d3-a456-426614174999"
+
+    ApplicationEndpointsInfoResponse:
+      description: >-
+        A registered application-endpoint list read back by id: the submitted
+        `ApplicationEndpointsInfo` plus the server-minted
+        `applicationEndpointListId`. This is the shape CamaraSim stores at
+        registration time and returns verbatim from
+        `getApplicationEndpointsById`.
+      allOf:
+        - $ref: "#/components/schemas/ApplicationEndpointsInfo"
+        - type: object
+          required:
+            - applicationEndpointListId
+          properties:
+            applicationEndpointListId:
+              $ref: "#/components/schemas/ApplicationEndpointListId"
 
     ApplicationEndpointRegistrationError:
       description: >-

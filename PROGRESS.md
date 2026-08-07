@@ -2253,7 +2253,15 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     (`00000000-0000-0000-0000-000000000000`) → 422 `UNIDENTIFIABLE_APPLICATION_PROFILE`.
     `x-correlator` echoed.
   - [ ] `GET /application-endpoint-lists` (`getAllRegisteredApplicationEndpoints`) — list.
-  - [ ] `GET /application-endpoint-lists/{id}` (`getApplicationEndpointsById`) — read-back.
+  - [x] `GET /application-endpoint-lists/{id}` (`getApplicationEndpointsById`,
+    scope `application-endpoint-registration:application-endpoints:read`) —
+    read-back. Returns the registration stored at `registerApplicationEndpoints`
+    (the submitted `ApplicationEndpointsInfo` + minted `applicationEndpointListId`)
+    verbatim (`200`) or `404 NOT_FOUND` for an unknown id; a non-UUID path value →
+    `400 INVALID_ARGUMENT` (mirrors Application Profiles' `getApplicationProfile`).
+    The opaque server-minted id is the only control plane (no reserved-identifier
+    suffix — it was never caller-chosen). `x-correlator` echoed. Reuses the
+    existing `store::get`; no new dep.
   - [ ] `PUT /application-endpoint-lists/{id}` (`updateApplicationEndpoint`) — full replace.
   - [ ] `DELETE /application-endpoint-lists/{id}` (`deregisterApplicationEndpoint`) — deregister.
 - [ ] Other CAMARA APIs as capacity allows
@@ -2282,6 +2290,15 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-07 19:50Z — application-endpoint-registration: added the read-back leg
+  `GET /application-endpoint-lists/{applicationEndpointListId}`
+  (`getApplicationEndpointsById`, scope `…:application-endpoints:read`) — returns
+  the stored registration verbatim (`200`), `404 NOT_FOUND` for an unknown id,
+  `400 INVALID_ARGUMENT` for a non-UUID path value; reuses `store::get`, no new
+  dep. Spec: added the GET path, `ApplicationEndpointListIdPath` param, and
+  `ApplicationEndpointsInfoResponse` schema. Tests: 6 new (read-back happy path,
+  unknown→404, malformed→400, read-scope→403, missing-token→401). cargo test
+  1688 passed; release builds. — binary: 3241016 bytes (3.1M)
 - 2026-08-07 — application-endpoint-registration: added a **new API**,
   `POST /application-endpoint-lists` (`registerApplicationEndpoints`) at
   `/application-endpoint-registration/vwip` (CAMARA ApplicationEndpointRegistration, wip).

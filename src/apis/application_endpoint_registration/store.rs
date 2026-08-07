@@ -21,9 +21,10 @@
 //!   the read leg (a later pass) — the created representation is the source of
 //!   truth.
 //!
-//! The read / update / delete legs land in later passes, so [`get`] has no caller
-//! on the request path yet; the whole module is `dead_code`-allowed until then
-//! (mirroring the first slice of the QoS Provisioning / Session Insights stores).
+//! The read leg (`getApplicationEndpointsById`) now calls [`get`]; the update /
+//! delete legs land in later passes, so the module stays `dead_code`-allowed
+//! until they wire in their store operations (mirroring the first slices of the
+//! QoS Provisioning / Session Insights stores).
 
 #![allow(dead_code)]
 
