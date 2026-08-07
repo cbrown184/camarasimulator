@@ -51,6 +51,7 @@
 //! - **Most Frequent Location vwip** — `/most-frequent-location/vwip/…`.
 //! - **Traffic Influence vwip** — `/traffic-influence/vwip/…`.
 //! - **Application Endpoint Discovery vwip** — `/application-endpoint-discovery/vwip/…`.
+//! - **Predictive Connectivity Data vwip** — `/predictive-connectivity-data/vwip/…`.
 //!
 //! Plus [`openapi`], which serves each mounted API's vendored OpenAPI spec at
 //! `/{api}/v{n}/openapi.yaml` (docs/DESIGN.md §9).
@@ -91,6 +92,7 @@ pub mod one_time_password_sms;
 pub mod openapi;
 pub mod optimal_edge_discovery;
 pub mod population_density_data;
+pub mod predictive_connectivity_data;
 pub mod qos_profiles;
 pub mod qos_provisioning;
 pub mod quality_on_demand;
@@ -154,5 +156,6 @@ pub fn routes() -> Router {
         .merge(click_to_dial::routes())
         .merge(traffic_influence::routes())
         .merge(application_endpoint_discovery::routes())
+        .merge(predictive_connectivity_data::routes())
         .merge(openapi::routes())
 }
