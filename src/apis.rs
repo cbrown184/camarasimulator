@@ -50,10 +50,12 @@
 //! - **Click to Dial vwip** — `/click-to-dial/vwip/…`.
 //! - **Most Frequent Location vwip** — `/most-frequent-location/vwip/…`.
 //! - **Traffic Influence vwip** — `/traffic-influence/vwip/…`.
+//! - **Application Endpoint Discovery vwip** — `/application-endpoint-discovery/vwip/…`.
 //!
 //! Plus [`openapi`], which serves each mounted API's vendored OpenAPI spec at
 //! `/{api}/v{n}/openapi.yaml` (docs/DESIGN.md §9).
 
+pub mod application_endpoint_discovery;
 pub mod application_profiles;
 pub mod blockchain_public_address;
 pub mod call_forwarding_signal;
@@ -151,5 +153,6 @@ pub fn routes() -> Router {
         .merge(sponsored_data::routes())
         .merge(click_to_dial::routes())
         .merge(traffic_influence::routes())
+        .merge(application_endpoint_discovery::routes())
         .merge(openapi::routes())
 }

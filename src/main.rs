@@ -304,6 +304,12 @@ async fn catalog() -> Json<Value> {
                 "version": "vwip",
                 "base_path": "/traffic-influence/vwip",
                 "spec_url": "/traffic-influence/vwip/openapi.yaml",
+            },
+            {
+                "name": "application-endpoint-discovery",
+                "version": "vwip",
+                "base_path": "/application-endpoint-discovery/vwip",
+                "spec_url": "/application-endpoint-discovery/vwip/openapi.yaml",
             }
         ],
         "authorization_servers": [{
