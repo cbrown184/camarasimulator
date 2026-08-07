@@ -35,8 +35,10 @@
 #     CloudEvent is POSTed to the `sink` on create, reflecting the new resource's
 #     `state` (its `data` is the created `TrafficInfluence`). Fire-and-forget over
 #     raw TCP (no HTTP-client dep); `http://` sinks only (an `https://` sink is a
-#     no-op cut — no TLS client), `protocol: HTTP` only, an ACCESSTOKEN
-#     `sinkCredential` bearer applied (PLAIN/REFRESHTOKEN a cut). The ongoing
+#     no-op cut — no TLS client), `protocol: HTTP` only. A `sinkCredential` is
+#     applied to the callback `Authorization` header: `ACCESSTOKEN` →
+#     `Bearer <accessToken>` (RFC 6750), `PLAIN` →
+#     `Basic base64(identifier:secret)` (RFC 7617); `REFRESHTOKEN` a cut. The ongoing
 #     state-change stream, `subscriptionExpireTime` / `subscriptionMaxEvents`
 #     lifecycle, and TLS (`https://`) delivery are deferred (like QoD's first
 #     pass; see PROGRESS.md). The `TrafficInfluenceNotification` extras
@@ -233,6 +235,8 @@ paths:
             result: "201, plus a traffic-influence-change CloudEvent POSTed to the sink whose data is the created resource (fire-and-forget)"
           - input: "a valid subscriptionRequest with an ACCESSTOKEN sinkCredential"
             result: "the initial-event callback carries Authorization: Bearer <token> (the secret is never echoed)"
+          - input: "a valid subscriptionRequest with a PLAIN sinkCredential (identifier + secret)"
+            result: "the initial-event callback carries Authorization: Basic base64(identifier:secret) (RFC 7617; the secret is never echoed)"
           - input: "config.initialEvent absent/false, or an https:// sink"
             result: "201 with no delivered event (initial event only; https is a no-op TLS cut)"
           - input: "subscriptionRequest missing sink/protocol/types/config or config.subscriptionDetail, protocol not HTTP, or types not the single change event"
@@ -817,10 +821,13 @@ components:
       type: object
       description: >-
         Credential used to authenticate event delivery to the `sink`. CamaraSim
-        applies an `ACCESSTOKEN` credential's bearer token as
-        `Authorization: Bearer <token>` (RFC 6750); `PLAIN` / `REFRESHTOKEN` are
-        accepted for schema fidelity but not applied (documented cut). The secret
-        is held in memory only and never echoed in the resource.
+        applies it to the callback `Authorization` header: an `ACCESSTOKEN`
+        credential's bearer token as `Authorization: Bearer <token>` (RFC 6750),
+        and a `PLAIN` credential's `identifier`/`secret` pair as
+        `Authorization: Basic base64(identifier:secret)` (RFC 7617 HTTP Basic).
+        `REFRESHTOKEN` is accepted for schema fidelity but not applied (it needs a
+        token-exchange round trip — a documented cut). The secret is held in memory
+        only and never echoed in the resource.
       required:
         - credentialType
       properties:
@@ -835,6 +842,17 @@ components:
           type: string
           enum: [bearer]
           description: The access-token type (only `bearer` is permitted).
+        identifier:
+          type: string
+          description: >-
+            The identity (username) part of a `PLAIN` credential, applied as the
+            userid in RFC 7617 HTTP Basic auth.
+        secret:
+          type: string
+          description: >-
+            The secret (password) part of a `PLAIN` credential, applied as the
+            password in RFC 7617 HTTP Basic auth. May be empty (the schema requires
+            the field, not a value).
 
     Device:
       type: object

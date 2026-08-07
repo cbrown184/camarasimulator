@@ -276,8 +276,9 @@ struct ValidInput {
 }
 
 /// A validated `subscriptionRequest`: the callback `sink`, the derived
-/// `Authorization` header (from an ACCESSTOKEN `sinkCredential`, else `None`), and
-/// whether the consumer asked for the create-time initial event.
+/// `Authorization` header (from an ACCESSTOKEN or PLAIN `sinkCredential`, else
+/// `None`; see [`notifications::sink_authorization`]), and whether the consumer
+/// asked for the create-time initial event.
 struct ValidSubscription {
     sink: String,
     auth: Option<String>,
@@ -614,7 +615,8 @@ fn finalize(input: ValidInput, correlator: &Option<HeaderValue>) -> Response {
     // If the create carried a valid `subscriptionRequest` asking for the initial
     // event, deliver a single `traffic-influence-change` CloudEvent reflecting the
     // created resource's current state to the sink (fire-and-forget, off the
-    // request path; ACCESSTOKEN `sinkCredential` bearer applied; `http://` only).
+    // request path; ACCESSTOKEN Bearer / PLAIN Basic `sinkCredential` applied;
+    // `http://` only).
     if let Some(sub) = &input.subscription {
         if sub.initial_event {
             let event = notifications::traffic_influence_change_event(
@@ -2374,6 +2376,33 @@ mod tests {
         assert!(
             head.contains("Authorization: Bearer ti-sink-secret\r\n"),
             "authorization header present: {head}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_initial_event_callback_carries_a_plain_sink_credential_as_basic() {
+        use tokio::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let sink = format!("http://{addr}/ti-basic");
+
+        // A PLAIN sinkCredential → RFC 7617 HTTP Basic on the callback.
+        // base64("cbid:cbsecret") == "Y2JpZDpjYnNlY3JldA==".
+        let cred = json!({
+            "credentialType": "PLAIN",
+            "identifier": "cbid",
+            "secret": "cbsecret",
+        });
+        let body = create_body_sub(APP_ACTIVE, sub_request(&sink, true, Some(cred)));
+        let (status, _, created) = post(Some(&token().await), None, body).await;
+        assert_eq!(status, StatusCode::CREATED);
+        // The secret is never echoed.
+        assert!(created.get("sinkCredential").is_none());
+
+        let (head, _) = read_one_event(&listener).await;
+        assert!(
+            head.contains("Authorization: Basic Y2JpZDpjYnNlY3JldA==\r\n"),
+            "basic authorization header present: {head}"
         );
     }
 
