@@ -225,9 +225,10 @@ struct CreateCallRequest {
     /// `http://` only — see [`super::notifications`]).
     sink: Option<String>,
     /// Optional credential the platform presents on the `sink` callback. An
-    /// `ACCESSTOKEN` credential's bearer token is applied to the callback
-    /// (`super::notifications::sink_authorization`); `PLAIN`/`REFRESHTOKEN` are a
-    /// documented cut.
+    /// `ACCESSTOKEN` credential's bearer token → `Authorization: Bearer` and a
+    /// `PLAIN` credential → `Authorization: Basic base64(identifier:secret)` (RFC
+    /// 7617) are applied to the callback
+    /// (`super::notifications::sink_authorization`); `REFRESHTOKEN` is a documented cut.
     #[serde(rename = "sinkCredential")]
     sink_credential: Option<Value>,
 }
@@ -1514,6 +1515,30 @@ mod tests {
         assert!(
             head.contains("Authorization: Bearer ctd-sink-secret\r\n"),
             "authorization header present: {head}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_plain_sink_credential_authenticates_the_callback_as_basic() {
+        // A `credentialType: PLAIN` sinkCredential authenticates the callback as
+        // RFC 7617 HTTP Basic: base64("cbid:cbsecret") == "Y2JpZDpjYnNlY3JldA==".
+        use tokio::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let sink = format!("http://{addr}/ctd-plain");
+
+        let body = format!(
+            r#"{{"caller":{{"number":"+123456789111"}},"callee":{{"number":"+123456789024"}},"sink":"{sink}","sinkCredential":{{"credentialType":"PLAIN","identifier":"cbid","secret":"cbsecret"}}}}"#
+        );
+        let (status, _, created) = call_ok(&body).await;
+        assert_eq!(status, StatusCode::CREATED);
+        // The secret is never echoed in the created Call.
+        assert!(created.get("sinkCredential").is_none());
+
+        let (head, _) = read_one_event(&listener).await;
+        assert!(
+            head.contains("Authorization: Basic Y2JpZDpjYnNlY3JldA==\r\n"),
+            "basic authorization header present: {head}"
         );
     }
 

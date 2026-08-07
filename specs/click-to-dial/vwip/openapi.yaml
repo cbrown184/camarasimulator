@@ -116,9 +116,10 @@ info:
       `createCall` callback), and `terminateCall` delivers a terminal one
       reflecting the `disconnected` state (with a `reason` in `data.status`).
       Delivery is fire-and-forget over raw TCP to `http://` sinks only (no TLS
-      client — an `https://` sink is a no-op cut); an `ACCESSTOKEN`
-      `sinkCredential` bearer is applied to the callback, `PLAIN`/`REFRESHTOKEN`
-      are a cut. The *intermediate* lifecycle transitions
+      client — an `https://` sink is a no-op cut); a `sinkCredential` is applied to
+      the callback's `Authorization` header — `ACCESSTOKEN` → `Bearer <accessToken>`
+      (RFC 6750), `PLAIN` → `Basic base64(identifier:secret)` (RFC 7617) —
+      `REFRESHTOKEN` remains a cut. The *intermediate* lifecycle transitions
       (`callingCaller`/`callingCallee`/`connected`, a spontaneous `failed`, with
       `callDuration`/`recordingResult`) remain a deferred slice — CamaraSim runs
       no live call engine (like QoD, which models create + delete events but no
@@ -326,6 +327,10 @@ paths:
             result: "201 { Call, status = initiating }"
           - input: "a happy-path create that supplies a `sink` (http://)"
             result: "201, plus a create-time status-changed CloudEvent delivered to the sink"
+          - input: "a happy-path create with an ACCESSTOKEN sinkCredential"
+            result: "201; the callback carries Authorization: Bearer <accessToken> (RFC 6750)"
+          - input: "a happy-path create with a PLAIN sinkCredential (identifier + secret)"
+            result: "201; the callback carries Authorization: Basic base64(identifier:secret) (RFC 7617)"
           - input: "a create that supplies an https:// sink, or that errors before 201"
             result: "201 (https no-op cut) / the error — no CloudEvent is delivered"
           - input: "a re-create of a still-live call for the same caller/callee pair"
@@ -429,8 +434,8 @@ paths:
         When the call was created with a `sink`, terminating it delivers a single
         **terminal** `status-changed` CloudEvent to that sink reflecting the
         `disconnected` state (with a `reason`) — fire-and-forget, off the request
-        path; `http://` only; an ACCESSTOKEN `sinkCredential` bearer applied (both
-        recorded at create time). This mirrors QoD's `deleteSession` →
+        path; `http://` only; the `sinkCredential` recorded at create time applied
+        (ACCESSTOKEN → `Bearer`, PLAIN → `Basic`). This mirrors QoD's `deleteSession` →
         `DELETE_REQUESTED` event. It is **not** modelled as an OpenAPI `callbacks`
         object here because the callback target (`sink`) was supplied on the
         original `createCall`, not on this bodyless `DELETE` — a runtime expression
@@ -482,6 +487,8 @@ paths:
             result: "204 No Content (the call is evicted)"
           - input: "a terminated call created with an http:// sink"
             result: "204, plus a terminal status-changed CloudEvent (state=disconnected, with reason)"
+          - input: "a terminated call whose create recorded an ACCESSTOKEN/PLAIN sinkCredential"
+            result: "204; the terminal callback carries Authorization: Bearer/Basic accordingly"
           - input: "a terminated call created with an https:// sink, or with no sink"
             result: "204 — no CloudEvent is delivered (https no-op cut / no sink recorded)"
           - input: an unknown, never-created, or already-terminated callId
@@ -620,8 +627,8 @@ components:
         and carried explicitly (two-legged, business-facing — there is no line
         subject). `recordingEnabled` opts into call recording; when a `sink` is
         supplied, a create-time `status-changed` CloudEvent is delivered to it
-        (see the `createCall` callback), authenticated with an `ACCESSTOKEN`
-        `sinkCredential` if one is present.
+        (see the `createCall` callback), authenticated with an `ACCESSTOKEN` or
+        `PLAIN` `sinkCredential` if one is present.
       required:
         - caller
         - callee
@@ -651,7 +658,9 @@ components:
             - $ref: "#/components/schemas/SinkCredential"
           description: >-
             Optional credential presented on the `sink` callback. CamaraSim
-            applies an `ACCESSTOKEN` bearer; `PLAIN`/`REFRESHTOKEN` are a cut.
+            applies an `ACCESSTOKEN` bearer (`Authorization: Bearer`) or a `PLAIN`
+            identifier/secret pair (`Authorization: Basic base64(identifier:secret)`,
+            RFC 7617); `REFRESHTOKEN` is a cut.
 
     Call:
       type: object
@@ -738,9 +747,11 @@ components:
       type: object
       description: >-
         A credential the platform presents on the `sink` callback (CAMARA
-        Commonalities `SinkCredential`). CamaraSim applies only the `ACCESSTOKEN`
-        variant (RFC 6750 bearer); `PLAIN`/`REFRESHTOKEN` are accepted for schema
-        fidelity but not applied.
+        Commonalities `SinkCredential`). CamaraSim applies the `ACCESSTOKEN` variant
+        as an `Authorization: Bearer <accessToken>` header (RFC 6750) and the `PLAIN`
+        variant as an `Authorization: Basic base64(identifier:secret)` header (RFC
+        7617); `REFRESHTOKEN` is accepted for schema fidelity but not applied (it
+        needs a token-exchange round trip).
       required:
         - credentialType
       properties:
@@ -750,6 +761,16 @@ components:
             - PLAIN
             - ACCESSTOKEN
             - REFRESHTOKEN
+        identifier:
+          type: string
+          description: >-
+            The identity (username) for `credentialType: PLAIN`, applied as the
+            userid of the RFC 7617 Basic credential `base64(identifier:secret)`.
+        secret:
+          type: string
+          description: >-
+            The secret (password) for `credentialType: PLAIN`. An empty value is
+            permitted (the schema requires the field, not a value).
         accessToken:
           type: string
           description: The bearer token (for `credentialType: ACCESSTOKEN`).
