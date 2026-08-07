@@ -38,10 +38,10 @@
 //!   `status: UNAVAILABLE`, `statusInfo: DELETE_REQUESTED` (see
 //!   `revokeQosAssignment` below).
 //!
-//! An `AVAILABLE` assignment holds its ACCESSTOKEN `sinkCredential` bearer across
-//! callbacks (the AVAILABLE event *peeks* it; the terminal revoke / network-drop
-//! event *takes* it single-use). Only TLS (`https://` sink) delivery remains a
-//! documented cut.
+//! An `AVAILABLE` assignment holds its derived `sinkCredential` `Authorization`
+//! (ACCESSTOKEN → Bearer, PLAIN → Basic) across callbacks (the AVAILABLE event
+//! *peeks* it; the terminal revoke / network-drop event *takes* it single-use). Only
+//! TLS (`https://` sink) delivery remains a documented cut.
 //!
 //! ## Identifier resolution (two-legged vs three-legged)
 //!
@@ -137,10 +137,11 @@ struct CreateAssignment {
     qos_profile: Option<String>,
     sink: Option<String>,
     // Accepted for schema fidelity and never echoed (it carries a secret). When a
-    // `sink` is supplied, an `ACCESSTOKEN` credential's bearer token is applied to
-    // the status-change callback as an `Authorization: Bearer` header (RFC 6750,
-    // via `notifications::sink_authorization`); PLAIN/REFRESHTOKEN are a documented
-    // cut. Held in memory only (single node) and taken single-use at delivery.
+    // `sink` is supplied, the credential is applied to the status-change callback's
+    // `Authorization` header (via `notifications::sink_authorization`): `ACCESSTOKEN`
+    // → `Bearer <token>` (RFC 6750), `PLAIN` → `Basic base64(identifier:secret)`
+    // (RFC 7617); REFRESHTOKEN is a documented cut. Held in memory only (single node)
+    // and taken single-use at delivery.
     #[serde(rename = "sinkCredential")]
     sink_credential: Option<Value>,
 }
@@ -260,10 +261,10 @@ async fn create_qos_assignment(claims: Claims, headers: HeaderMap, body: Bytes) 
         &resolved.id,
     );
 
-    // If the assignment records a `sink` and an ACCESSTOKEN `sinkCredential`, stash
-    // the derived bearer `Authorization` so a later status-change callback (e.g.
-    // `DELETE_REQUESTED` on revoke) can authenticate. Kept apart from the
-    // `AssignmentInfo` so the secret is never echoed (mirrors QoD).
+    // If the assignment records a `sink` and a `sinkCredential`, stash the derived
+    // `Authorization` (ACCESSTOKEN → Bearer, PLAIN → Basic) so a later status-change
+    // callback (e.g. `DELETE_REQUESTED` on revoke) can authenticate. Kept apart from
+    // the `AssignmentInfo` so the secret is never echoed (mirrors QoD).
     if info.get("sink").is_some() {
         if let Some(auth) = req
             .sink_credential
@@ -1257,6 +1258,52 @@ mod tests {
         assert!(
             head.contains("Authorization: Bearer sink-secret-123\r\n"),
             "authorization header present: {head}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_plain_sink_credential_authenticates_the_callback_as_basic() {
+        use tokio::io::AsyncReadExt;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let sink = format!("http://{addr}/qosprov-plain");
+
+        // Create with a sink AND a PLAIN sinkCredential. A REQUESTED (`…000`)
+        // identifier isolates the DELETE_REQUESTED callback (no AVAILABLE event first).
+        let create = mint_token(CREATE_SCOPE).await;
+        let body = json!({
+            "device": { "phoneNumber": "+123456789000" },
+            "qosProfile": "QOS_E",
+            "sink": sink,
+            "sinkCredential": {
+                "credentialType": "PLAIN",
+                "identifier": "cbid",
+                "secret": "cbsecret",
+            },
+        })
+        .to_string();
+        let (status, _, created) = post_assignment(Some(&create), &body, None).await;
+        assert_eq!(status, StatusCode::CREATED);
+        // The secret is never echoed in the AssignmentInfo.
+        assert!(created.get("sinkCredential").is_none());
+        let assignment_id = created["assignmentId"].as_str().unwrap().to_string();
+
+        // Revoke → the DELETE_REQUESTED callback carries a Basic header.
+        let del = mint_token(DELETE_SCOPE).await;
+        let (status, _, _) = delete_assignment(Some(&del), &assignment_id, None).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        let (mut sock, _) = listener.accept().await.unwrap();
+        let mut buf = Vec::new();
+        sock.read_to_end(&mut buf).await.unwrap();
+        let raw = String::from_utf8(buf).unwrap();
+        let (head, _) = raw.split_once("\r\n\r\n").expect("headers then body");
+        // base64("cbid:cbsecret") == "Y2JpZDpjYnNlY3JldA==".
+        assert!(
+            head.contains("Authorization: Basic Y2JpZDpjYnNlY3JldA==\r\n"),
+            "basic authorization header present: {head}"
         );
     }
 

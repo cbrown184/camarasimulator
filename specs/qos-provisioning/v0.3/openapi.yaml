@@ -78,10 +78,12 @@ info:
       assignment is instead dropped early by the network → `status: UNAVAILABLE`,
       `statusInfo: NETWORK_TERMINATED` (and is evicted); and on revoke →
       `status: UNAVAILABLE`, `statusInfo: DELETE_REQUESTED`. A `REQUESTED`
-      assignment is not yet active, so it fires no event. An `ACCESSTOKEN`
-      `sinkCredential`'s bearer token is applied as `Authorization: Bearer …`
-      (RFC 6750) to every callback. `sinkCredential` is a secret and never echoed;
-      `PLAIN`/`REFRESHTOKEN` are accepted but not applied (documented cut).
+      assignment is not yet active, so it fires no event. A `sinkCredential` is
+      applied to every callback's `Authorization` header — an `ACCESSTOKEN` credential
+      as `Authorization: Bearer …` (RFC 6750), a `PLAIN` credential as
+      `Authorization: Basic <base64(identifier:secret)>` (RFC 7617). `sinkCredential`
+      is a secret and never echoed; `REFRESHTOKEN` is accepted but not applied
+      (documented cut).
 
     The response echoes the device back in a single-property `DeviceResponse`
     (the identifier used), and echoes a supplied `sink`. `sinkCredential` (a
@@ -287,6 +289,12 @@ paths:
               (status UNAVAILABLE, statusInfo DELETE_REQUESTED) delivered to the
               sink; an ACCESSTOKEN sinkCredential is applied as a bearer token to
               every callback"
+          - input: >-
+              "`http://` `sink` + a `PLAIN` `sinkCredential` (identifier/secret)
+              supplied at create, then revoked"
+            result: >-
+              "204, and the status-changed callback carries
+              Authorization: Basic <base64(identifier:secret)> (RFC 7617)"
           - input: "`device` present but carrying no identifier"
             result: "400 INVALID_ARGUMENT"
           - input: "`device` submitted on a three-legged line token"
@@ -305,8 +313,10 @@ paths:
                 `AVAILABLE` assignment is dropped early, and the `DELETE_REQUESTED`
                 transition on revoke (both `UNAVAILABLE`). Delivery is over
                 `http://` only (no TLS client — an `https://` sink is a documented
-                no-op cut); an `ACCESSTOKEN` `sinkCredential` is applied as an
-                `Authorization: Bearer` header on every callback.
+                no-op cut); a `sinkCredential` is applied to every callback's
+                `Authorization` header — an `ACCESSTOKEN` credential as
+                `Authorization: Bearer <token>` (RFC 6750), a `PLAIN` credential as
+                `Authorization: Basic <base64(identifier:secret)>` (RFC 7617).
               requestBody:
                 required: true
                 content:
@@ -387,9 +397,10 @@ paths:
         `deleteSession`) — **but** if the revoked assignment recorded a `sink`, it
         delivers the terminal `status-changed` CloudEvent (`status: UNAVAILABLE`,
         `statusInfo: DELETE_REQUESTED`) to it, fire-and-forget, off the request
-        path (see the `createQosAssignment` `callbacks`). An `ACCESSTOKEN`
-        `sinkCredential` supplied at create authenticates that callback with a
-        bearer token (RFC 6750).
+        path (see the `createQosAssignment` `callbacks`). A `sinkCredential`
+        supplied at create authenticates that callback — an `ACCESSTOKEN` credential
+        with a bearer token (RFC 6750), a `PLAIN` credential with HTTP Basic
+        (RFC 7617).
       security:
         - openId:
             - qos-provisioning:qos-assignments:delete
@@ -438,7 +449,8 @@ paths:
           - input: a known assignmentId whose assignment recorded an http sink
             result: >-
               "204, and a DELETE_REQUESTED status-changed CloudEvent delivered to
-              the sink (ACCESSTOKEN sinkCredential applied as a bearer token)"
+              the sink (an ACCESSTOKEN sinkCredential applied as a bearer token, a
+              PLAIN sinkCredential as Authorization: Basic base64(identifier:secret))"
           - input: an unknown or already-revoked assignmentId
             result: "404 NOT_FOUND"
 
@@ -716,25 +728,47 @@ components:
     SinkCredential:
       type: object
       description: >-
-        A credential the callback authenticates with. An `ACCESSTOKEN` credential
-        (with a non-empty `accessToken`) is applied to the notification as an
-        `Authorization: Bearer <token>` header (RFC 6750); `PLAIN`/`REFRESHTOKEN`
-        are accepted for schema fidelity but not applied (documented cut). Held in
-        memory only and never echoed (it is a secret).
+        A credential the callback authenticates with. Kept in memory only and never
+        echoed back in an `AssignmentInfo` (it carries a secret). CamaraSim applies an
+        `ACCESSTOKEN` credential (its non-empty `accessToken` is sent on the
+        status-change notification as `Authorization: Bearer <accessToken>`, RFC 6750)
+        and a `PLAIN` credential (its non-empty `identifier` + `secret` are sent as
+        `Authorization: Basic <base64(identifier:secret)>`, RFC 7617 — the standard
+        application of a plain identifier/secret pair). The `REFRESHTOKEN` credential
+        type is accepted for schema fidelity but not applied (a documented cut — it
+        needs a token-exchange round trip).
       required:
         - credentialType
       properties:
         credentialType:
           type: string
           enum: [PLAIN, ACCESSTOKEN, REFRESHTOKEN]
+          description: >-
+            The type of credential. CamaraSim applies `ACCESSTOKEN` and `PLAIN`.
         accessToken:
           type: string
+          description: >-
+            The access token, sent as `Authorization: Bearer <accessToken>` when
+            `credentialType` is `ACCESSTOKEN`.
         accessTokenExpiresUtc:
           type: string
           format: date-time
         accessTokenType:
           type: string
           enum: [bearer]
+          description: The access-token type; only `bearer` is defined.
+        identifier:
+          type: string
+          description: >-
+            The identifier (account or username) half of a `PLAIN` credential; sent
+            as the username in the callback's HTTP Basic `Authorization` header when
+            `credentialType` is `PLAIN`.
+        secret:
+          type: string
+          description: >-
+            The secret (password or passphrase) half of a `PLAIN` credential; sent
+            as the password in the callback's HTTP Basic `Authorization` header when
+            `credentialType` is `PLAIN`.
 
     AssignmentInfo:
       type: object
