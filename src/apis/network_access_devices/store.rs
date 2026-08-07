@@ -20,7 +20,8 @@
 //!   of truth for this slice.
 //!
 //! `insert` + `new_reboot_request_id` (create), `get` (`getRebootRequest` read),
-//! and `remove` (`deleteRebootRequest`) are all live.
+//! `update_with` (`updateRebootRequest` patch), and `remove`
+//! (`deleteRebootRequest`) are all live.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -64,6 +65,33 @@ pub fn remove(id: &str) -> Option<Value> {
         .lock()
         .expect("network-access-devices reboot-request store not poisoned")
         .remove(id)
+}
+
+/// Atomically update the reboot request stored under `id` (get-modify-write under
+/// a single lock hold — no `.await` while locked). The closure `f` inspects the
+/// stored `RebootRequest` and either mutates it in place (`Ok(())`) or declines
+/// (`Err(())`), so it can gate an update on the resource's current state without a
+/// second lock acquisition:
+///
+/// - `None` → no such request (`updateRebootRequest` answers `404`).
+/// - `Some(Err(()))` → the request exists but the update was declined; the stored
+///   value is left unchanged (`updateRebootRequest` answers `409`).
+/// - `Some(Ok(updated))` → the mutated `RebootRequest`, cloned out (`200`).
+///
+/// A declining closure must return `Err` **before** mutating `resource`, since a
+/// mutation is not rolled back on `Err` (the map still holds whatever `f` left).
+pub fn update_with<F>(id: &str, f: F) -> Option<Result<Value, ()>>
+where
+    F: FnOnce(&mut Value) -> Result<(), ()>,
+{
+    let mut guard = store()
+        .lock()
+        .expect("network-access-devices reboot-request store not poisoned");
+    let resource = guard.get_mut(id)?;
+    Some(match f(resource) {
+        Ok(()) => Ok(resource.clone()),
+        Err(()) => Err(()),
+    })
 }
 
 /// Mint a fresh, opaque, UUID-v4-shaped `rebootRequestId`.
@@ -131,5 +159,33 @@ mod tests {
         assert_eq!(remove(&id), Some(req));
         assert!(remove(&id).is_none(), "already removed → None");
         assert!(get(&id).is_none(), "gone from the store after remove");
+    }
+
+    #[test]
+    fn update_with_applies_declines_and_reports_missing() {
+        // Unknown id → None (a 404), and the closure never runs.
+        assert!(update_with("no-such-request", |_| {
+            panic!("closure must not run for a missing id");
+        })
+        .is_none());
+
+        let id = new_reboot_request_id();
+        insert(id.clone(), json!({ "id": id, "devices": [], "message": "before" }));
+
+        // A declining closure leaves the stored value unchanged → Some(Err).
+        assert_eq!(
+            update_with(&id, |_r| Err(())),
+            Some(Err(())),
+            "decline is reported as Some(Err)"
+        );
+        assert_eq!(get(&id).unwrap()["message"], "before", "decline mutates nothing");
+
+        // An applying closure mutates in place and returns the cloned resource.
+        let updated = update_with(&id, |r| {
+            r["message"] = json!("after");
+            Ok(())
+        });
+        assert_eq!(updated, Some(Ok(json!({ "id": id, "devices": [], "message": "after" }))));
+        assert_eq!(get(&id).unwrap()["message"], "after", "the store now holds the update");
     }
 }

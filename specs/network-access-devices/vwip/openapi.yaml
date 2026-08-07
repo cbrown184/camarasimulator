@@ -16,10 +16,11 @@
 # simplification of CAMARA's stateful resource read). It also serves
 # `POST /reboot-requests` (create a **stateful** reboot request for the
 # subscriber's devices, persisted in an in-memory store),
-# `GET /reboot-requests/{rebootRequestId}` (read one back by its minted id), and
+# `GET /reboot-requests/{rebootRequestId}` (read one back by its minted id),
+# `PATCH /reboot-requests/{rebootRequestId}` (update a still-pending scheduled
+# reboot; an immediate one that has already fired → `409 INCOMPATIBLE_STATE`), and
 # `DELETE /reboot-requests/{rebootRequestId}` (cancel/delete it, evicting it from
-# the store); the patch (update) leg of that lifecycle
-# (`PATCH /reboot-requests…`) remains deferred to a later pass (documented cut).
+# the store) — the full reboot-request lifecycle.
 openapi: 3.0.3
 info:
   title: Network Access Devices
@@ -97,12 +98,18 @@ info:
       created request back by its opaque, server-minted id (store state is the sole
       control plane — a stored id → `200`, any other → `404`), and `DELETE
       /reboot-requests/{rebootRequestId}` cancels/deletes it by evicting it from the
-      store (single-use — a stored id → `204`, any other → `404`); reboot requests
-      are not scoped per subscriber, so CAMARA's `sub`-ownership check on the
-      read/delete is not enforced. The **audit** fields `createdBy`/`modifiedBy`
-      (`format: uuid`) are omitted — the simulator's subject is not a UUID — and the
-      patch (update) leg (`PATCH /reboot-requests…`) is not yet implemented
-      (documented cuts).
+      store (single-use — a stored id → `204`, any other → `404`), and `PATCH
+      /reboot-requests/{rebootRequestId}` updates a still-pending **scheduled**
+      reboot (`merge-patch+json` over the mutable `atTime`/`message`; a stored id
+      whose request carries an `atTime` → `200`, an **immediate** reboot with no
+      `atTime` — already fired — → `409 INCOMPATIBLE_STATE`, an unknown id →
+      `404`). Reboot requests are not scoped per subscriber, so CAMARA's
+      `sub`-ownership check on the read/patch/delete is not enforced. The **audit**
+      fields `createdBy`/`modifiedBy` (`format: uuid`) are omitted — the simulator's
+      subject is not a UUID (documented cuts). CamaraSim runs no reboot engine, so
+      "already fired" is modelled by the absence of a future `atTime` rather than a
+      live status transition, and the reboot targets (`devices`) are fixed at
+      creation — a PATCH does not re-target (documented simplifications).
   version: "wip"
   license:
     name: Apache-2.0
@@ -477,6 +484,122 @@ paths:
             result: "200 — that RebootRequest, verbatim"
           - input: a well-formed UUID that was never created (or already deleted)
             result: "404 NOT_FOUND"
+    patch:
+      operationId: updateRebootRequest
+      summary: Update a reboot request by id
+      description: |
+        Updates a previously created reboot request by its server-minted `id`.
+        This is the update leg of the stateful reboot-request lifecycle. The body
+        is an [RFC 7386](https://www.rfc-editor.org/rfc/rfc7386)
+        `merge-patch+json` document over the **mutable** fields (`atTime`,
+        `message`): a supplied value replaces, an explicit `null` clears, and the
+        identity / target / audit fields (`id`, `devices`, `createdAt`,
+        `modifiedAt`) plus any unknown key are ignored. On a successful update
+        `modifiedAt` is bumped.
+
+        Two control planes (docs/DESIGN.md §7). The **request body** is validated
+        first (a malformed `atTime` or an over-long `message` → `400
+        INVALID_ARGUMENT`, before the store is consulted). Then the opaque id
+        selects the **store state**, and the stored request's **schedule state**
+        gates the update:
+
+        - A stored id whose request carries an `atTime` (a still-pending
+          **scheduled** reboot) → `200` with the updated `RebootRequest`; the
+          change persists.
+        - A stored id for an **immediate** reboot (no `atTime` — it has already
+          fired) → `409 NETWORK_ACCESS_DEVICES.INCOMPATIBLE_STATE`: an
+          in-progress/completed reboot cannot be modified. The store is left
+          unchanged.
+        - Any other id (never created, or already deleted) → `404 NOT_FOUND`.
+
+        CamaraSim runs no reboot engine, so "already fired" is modelled by the
+        absence of a future `atTime` rather than a live status transition, and the
+        reboot targets (`devices`) are fixed at creation — a PATCH does not
+        re-target (documented simplifications). Reboot requests are not scoped per
+        subscriber, so CAMARA's `sub`-ownership check on the update is not enforced
+        (a documented cut).
+      security:
+        - openId:
+            - network-access-devices:reboot
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+        - name: rebootRequestId
+          in: path
+          required: true
+          description: The unique identifier (UUID) of the reboot request.
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/merge-patch+json:
+            schema:
+              $ref: "#/components/schemas/RebootRequestUpdate"
+            examples:
+              reschedule:
+                summary: Reschedule a pending reboot and note why
+                value:
+                  atTime: "2024-07-01T03:00:00Z"
+                  message: rescheduled to a later window
+              clearMessage:
+                summary: Clear the free-text note
+                value:
+                  message: null
+      responses:
+        "200":
+          description: The updated reboot request.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RebootRequest"
+        "400":
+          $ref: "../../shared/errors.yaml#/components/responses/InvalidArgument"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "409":
+          description: |
+            The reboot request cannot be updated in its current state — it is an
+            immediate reboot that has already started (CAMARA `409` with the
+            API-specific code `NETWORK_ACCESS_DEVICES.INCOMPATIBLE_STATE`).
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NetworkAccessDevicesError"
+              example:
+                status: 409
+                code: NETWORK_ACCESS_DEVICES.INCOMPATIBLE_STATE
+                message: The reboot request has already started and can no longer be modified.
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          The request body is validated first (a `400` wins over the store/state),
+          then the opaque store-state id and the stored request's schedule state
+          (scheduled vs immediate) select the result (docs/DESIGN.md §7).
+        cases:
+          - input: a stored id for a scheduled reboot (has atTime) + a valid patch
+            result: "200 — the updated RebootRequest (modifiedAt bumped); persists"
+          - input: a stored id for an immediate reboot (no atTime)
+            result: "409 NETWORK_ACCESS_DEVICES.INCOMPATIBLE_STATE (store unchanged)"
+          - input: a well-formed UUID that was never created (or already deleted)
+            result: "404 NOT_FOUND"
+          - input: a malformed atTime or a message over 255 chars
+            result: "400 INVALID_ARGUMENT (before the store is consulted)"
     delete:
       operationId: deleteRebootRequest
       summary: Cancel/delete a reboot request by id
@@ -656,6 +779,56 @@ components:
           maxLength: 255
           description: A free-text note associated with the reboot request.
           example: nightly maintenance window
+
+    RebootRequestUpdate:
+      type: object
+      additionalProperties: false
+      description: |
+        The `merge-patch+json` document accepted by `updateRebootRequest` (RFC
+        7386). Only the **mutable** fields are honoured: a supplied `atTime` /
+        `message` replaces the stored value, an explicit `null` clears it. The
+        identity / target / audit fields (`id`, `devices`, `createdAt`,
+        `modifiedAt`) and any other key are ignored, so they are not listed here.
+        An empty object is a valid no-op patch.
+      properties:
+        atTime:
+          type: string
+          format: date-time
+          maxLength: 64
+          nullable: true
+          description: |
+            Reschedule the reboot (RFC 3339, with time zone), or `null` to clear
+            the schedule (making it an immediate reboot).
+          example: "2024-07-01T03:00:00Z"
+        message:
+          type: string
+          maxLength: 255
+          nullable: true
+          description: Replace the free-text note, or `null` to clear it.
+          example: rescheduled to a later window
+
+    NetworkAccessDevicesError:
+      type: object
+      description: |
+        The CAMARA error body with Network-Access-Devices-specific `code` values
+        (a superset of the shared base catalog for this API's `409` update case).
+      required:
+        - status
+        - code
+        - message
+      properties:
+        status:
+          type: integer
+          description: The HTTP status code, echoed in the body.
+        code:
+          type: string
+          description: Machine-readable CAMARA / Network Access Devices error code.
+          enum:
+            - CONFLICT
+            - NETWORK_ACCESS_DEVICES.INCOMPATIBLE_STATE
+        message:
+          type: string
+          description: Human-readable explanation.
 
     RebootRequest:
       type: object

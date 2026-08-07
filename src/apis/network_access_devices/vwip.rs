@@ -91,7 +91,9 @@ pub fn routes() -> Router {
         .route(REBOOT_REQUESTS, post(create_reboot_request))
         .route(
             "/network-access-devices/vwip/reboot-requests/:reboot_request_id",
-            get(get_reboot_request).delete(delete_reboot_request),
+            get(get_reboot_request)
+                .patch(update_reboot_request)
+                .delete(delete_reboot_request),
         )
 }
 
@@ -405,6 +407,161 @@ async fn delete_reboot_request(
             CamaraError::not_found("No reboot request found for the provided id.").into_response(),
             &correlator,
         ),
+    }
+}
+
+/// An ordered list of merge operations to apply to the stored `RebootRequest`.
+/// `Some(v)` sets a field, `None` clears it. Built by [`validate_reboot_patch`],
+/// applied by [`apply_reboot_merge`].
+type Merge = Vec<(&'static str, Option<Value>)>;
+
+/// `PATCH /network-access-devices/vwip/reboot-requests/{rebootRequestId}` — update
+/// a previously created reboot request (operationId `updateRebootRequest`).
+///
+/// This is the update leg of the **stateful** reboot-request lifecycle. The body
+/// is a `merge-patch+json` document (RFC 7386, the CAMARA convention, mirroring
+/// Traffic Influence's `patchTrafficInfluence`) over the **mutable** fields: a
+/// supplied `atTime` / `message` is replaced, an explicit `null` clears it, and
+/// the identity / target / audit fields (`id`, `devices`, `createdAt`,
+/// `modifiedAt`) plus any unknown key are ignored. On a successful update
+/// `modifiedAt` is bumped to now.
+///
+/// Two control planes (docs/DESIGN.md §7). The request **body** is validated
+/// first (a malformed `atTime` or an over-long `message` → `400 INVALID_ARGUMENT`,
+/// before the store is touched). Then the opaque, server-minted id selects the
+/// **store state**, and the stored request's **schedule state** gates the update:
+///
+/// - **Unknown / already-deleted id** → `404 NOT_FOUND`.
+/// - **A pending *scheduled* reboot** (the stored request carries an `atTime`) →
+///   `200` with the updated `RebootRequest`; the change persists (a later
+///   `getRebootRequest` sees it).
+/// - **An *immediate* reboot** (no `atTime` — it has already fired) → `409
+///   NETWORK_ACCESS_DEVICES.INCOMPATIBLE_STATE`: an in-progress/completed reboot
+///   cannot be modified. CamaraSim runs no reboot engine, so "already fired" is
+///   modelled by the absence of a future `atTime` rather than a live status
+///   transition (a documented simplification of CAMARA's scheduled-reboot
+///   semantics). The store is left unchanged.
+///
+/// Reboot requests are not scoped per subscriber, so CAMARA's `sub`-ownership
+/// check on the update is not enforced (a documented cut, mirroring the read /
+/// delete legs). Requires the `network-access-devices:reboot` scope.
+async fn update_reboot_request(
+    claims: Claims,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    body: Bytes,
+) -> Response {
+    // Optional correlation header, echoed on every response (CAMARA Commonalities).
+    let correlator = headers.get("x-correlator").cloned();
+
+    // Endpoint authorisation: the token must carry this API's scope.
+    if let Err(e) = claims.require_scope(SCOPE) {
+        return with_correlator(e.into_response(), &correlator);
+    }
+
+    // Body is a JSON merge-patch document; parse then validate (400 before store).
+    // An empty body is a valid no-op patch (an empty merge-patch object).
+    let value: Value = if body.is_empty() {
+        json!({})
+    } else {
+        match serde_json::from_slice(&body) {
+            Ok(v) => v,
+            Err(_) => return invalid_argument("Request body is not valid JSON.", &correlator),
+        }
+    };
+    let merge = match validate_reboot_patch(&value) {
+        Ok(m) => m,
+        Err(message) => return invalid_argument(&message, &correlator),
+    };
+
+    // Atomic get-modify-write. The schedule state gates the update: a stored
+    // request with an `atTime` (pending scheduled reboot) is modifiable; one
+    // without (an immediate reboot, already fired) declines with a 409. The
+    // decline happens before any mutation, so the store is left unchanged.
+    let now = rfc3339_utc(now_unix_secs());
+    match store::update_with(&id, |resource| {
+        if resource.get("atTime").is_none() {
+            return Err(()); // immediate reboot → INCOMPATIBLE_STATE
+        }
+        apply_reboot_merge(resource, &merge);
+        if let Some(obj) = resource.as_object_mut() {
+            obj.insert("modifiedAt".to_string(), json!(now));
+        }
+        Ok(())
+    }) {
+        Some(Ok(updated)) => {
+            with_correlator((StatusCode::OK, Json(updated)).into_response(), &correlator)
+        }
+        Some(Err(())) => with_correlator(
+            CamaraError::new(
+                StatusCode::CONFLICT,
+                "NETWORK_ACCESS_DEVICES.INCOMPATIBLE_STATE",
+                "The reboot request has already started and can no longer be modified.",
+            )
+            .into_response(),
+            &correlator,
+        ),
+        None => with_correlator(
+            CamaraError::not_found("No reboot request found for the provided id.").into_response(),
+            &correlator,
+        ),
+    }
+}
+
+/// Validate a `merge-patch+json` body against the **mutable** `RebootRequest`
+/// fields (`atTime`, `message`), returning the merge operations to apply or a
+/// `400` message. Identity / target / audit fields (`id`, `devices`, `createdAt`,
+/// `modifiedAt`) and any unknown key are ignored (mirrors Traffic Influence's
+/// `validate_patch`). Pure over its input, so it is unit-testable exactly.
+fn validate_reboot_patch(body: &Value) -> Result<Merge, String> {
+    let obj = body
+        .as_object()
+        .ok_or_else(|| "Request body must be a JSON object.".to_string())?;
+    let mut merge: Merge = Vec::new();
+    for (key, value) in obj {
+        match key.as_str() {
+            // Reschedule (or, with null, clear → immediate).
+            "atTime" => match value {
+                Value::Null => merge.push(("atTime", None)),
+                Value::String(s) if is_rfc3339(s) => merge.push(("atTime", Some(json!(s)))),
+                _ => {
+                    return Err(
+                        "`atTime` must be an RFC 3339 date-time (e.g. 2024-01-01T14:00:00Z) or null."
+                            .to_string(),
+                    )
+                }
+            },
+            "message" => match value {
+                Value::Null => merge.push(("message", None)),
+                Value::String(s) if s.chars().count() <= 255 => {
+                    merge.push(("message", Some(json!(s))))
+                }
+                _ => {
+                    return Err("`message` must be a string of at most 255 characters or null."
+                        .to_string())
+                }
+            },
+            // Identity / target / audit / unknown keys are ignored (merge-patch).
+            _ => {}
+        }
+    }
+    Ok(merge)
+}
+
+/// Apply the validated merge operations to the stored `RebootRequest` in place:
+/// `Some(v)` sets a field, `None` removes it. Pure over its inputs.
+fn apply_reboot_merge(resource: &mut Value, merge: &Merge) {
+    if let Some(obj) = resource.as_object_mut() {
+        for (key, op) in merge {
+            match op {
+                Some(v) => {
+                    obj.insert((*key).to_string(), v.clone());
+                }
+                None => {
+                    obj.remove(*key);
+                }
+            }
+        }
     }
 }
 
@@ -1336,6 +1493,274 @@ mod tests {
         assert_eq!(
             headers.get("x-correlator").and_then(|v| v.to_str().ok()),
             Some("corr-delrberr")
+        );
+    }
+
+    // --- updateRebootRequest (PATCH /reboot-requests/{id}) ------------------
+
+    #[test]
+    fn validate_reboot_patch_accepts_mutable_fields_and_ignores_read_only() {
+        // atTime + message set; identity/target/audit + unknown keys ignored.
+        let merge = validate_reboot_patch(&json!({
+            "atTime": "2024-06-01T02:00:00Z",
+            "message": "rescheduled",
+            "id": "ignored",
+            "devices": ["ignored"],
+            "createdAt": "ignored",
+            "modifiedAt": "ignored",
+            "unknown": 1,
+        }))
+        .expect("valid patch");
+        assert_eq!(
+            merge,
+            vec![
+                ("atTime", Some(json!("2024-06-01T02:00:00Z"))),
+                ("message", Some(json!("rescheduled"))),
+            ]
+        );
+
+        // Explicit nulls are clears.
+        let merge = validate_reboot_patch(&json!({ "atTime": null, "message": null }))
+            .expect("null clears");
+        assert_eq!(merge, vec![("atTime", None), ("message", None)]);
+
+        // An empty object is a valid no-op merge.
+        assert_eq!(validate_reboot_patch(&json!({})).unwrap(), Vec::new());
+
+        // Malformed values → Err.
+        assert!(validate_reboot_patch(&json!({ "atTime": "soon" })).is_err());
+        assert!(validate_reboot_patch(&json!({ "atTime": 5 })).is_err());
+        assert!(validate_reboot_patch(&json!({ "message": "x".repeat(256) })).is_err());
+        assert!(validate_reboot_patch(&json!([])).is_err()); // not an object
+    }
+
+    #[test]
+    fn apply_reboot_merge_sets_and_clears_fields() {
+        let mut r = json!({ "id": "x", "atTime": "2024-06-01T02:00:00Z", "message": "old" });
+        apply_reboot_merge(
+            &mut r,
+            &vec![("message", Some(json!("new"))), ("atTime", None)],
+        );
+        assert_eq!(r["message"], "new");
+        assert!(r.get("atTime").is_none(), "null op removed atTime");
+        assert_eq!(r["id"], "x", "untouched fields survive");
+    }
+
+    /// PATCH a reboot request by id with an optional Bearer token and `x-correlator`.
+    async fn patch_reboot_request_by_id(
+        token: Option<&str>,
+        id: &str,
+        body: &str,
+        correlator: Option<&str>,
+    ) -> (StatusCode, HeaderMap, Value) {
+        let mut builder = Request::builder()
+            .method("PATCH")
+            .uri(format!("/network-access-devices/vwip/reboot-requests/{id}"))
+            .header("host", HOST)
+            .header("content-type", "application/merge-patch+json");
+        if let Some(t) = token {
+            builder = builder.header("authorization", format!("Bearer {t}"));
+        }
+        if let Some(c) = correlator {
+            builder = builder.header("x-correlator", c);
+        }
+        let request = builder.body(Body::from(body.to_string())).unwrap();
+        let response = app().oneshot(request).await.unwrap();
+        let status = response.status();
+        let headers = response.headers().clone();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, headers, json)
+    }
+
+    /// Create a scheduled reboot request (carrying an `atTime`, so it is
+    /// modifiable) and return its id.
+    async fn create_scheduled(token: &str) -> String {
+        let (status, _, created) =
+            post_reboot_request(Some(token), Some(r#"{"atTime":"2024-06-01T02:00:00Z"}"#), None)
+                .await;
+        assert_eq!(status, StatusCode::CREATED);
+        created["id"].as_str().unwrap().to_string()
+    }
+
+    #[tokio::test]
+    async fn patch_updates_a_scheduled_reboot_and_persists() {
+        let token = mint_token(SCOPE).await;
+        let id = create_scheduled(&token).await;
+
+        let (status, _, updated) = patch_reboot_request_by_id(
+            Some(&token),
+            &id,
+            r#"{"message":"rescheduled","atTime":"2024-07-01T03:00:00Z"}"#,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(updated["message"], "rescheduled");
+        assert_eq!(updated["atTime"], "2024-07-01T03:00:00Z");
+        assert!(updated["modifiedAt"].is_string());
+        // Identity/target fields are untouched.
+        assert_eq!(updated["id"], id);
+        assert!(updated["devices"].is_array());
+
+        // The change persists: a later read sees it.
+        let (status, _, read) = get_reboot_request_by_id(Some(&token), &id, None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(read, updated);
+    }
+
+    #[tokio::test]
+    async fn patch_null_clears_message_and_empty_body_is_a_noop() {
+        let token = mint_token(SCOPE).await;
+        let (_, _, created) = post_reboot_request(
+            Some(&token),
+            Some(r#"{"atTime":"2024-06-01T02:00:00Z","message":"note"}"#),
+            None,
+        )
+        .await;
+        let id = created["id"].as_str().unwrap().to_string();
+
+        // Empty body → no-op 200, message survives.
+        let (status, _, updated) = patch_reboot_request_by_id(Some(&token), &id, "", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(updated["message"], "note");
+
+        // Explicit null clears message.
+        let (status, _, updated) =
+            patch_reboot_request_by_id(Some(&token), &id, r#"{"message":null}"#, None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(updated.get("message").is_none(), "message cleared");
+    }
+
+    #[tokio::test]
+    async fn patch_read_only_and_unknown_fields_are_ignored() {
+        let token = mint_token(SCOPE).await;
+        let id = create_scheduled(&token).await;
+
+        // Attempts to change identity/target/audit/unknown keys are ignored.
+        let (status, _, updated) = patch_reboot_request_by_id(
+            Some(&token),
+            &id,
+            r#"{"id":"hacked","devices":["11111111-1111-4111-8111-111111111111"],"createdAt":"1999-01-01T00:00:00Z","foo":1}"#,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(updated["id"], id, "id is immutable");
+        assert_ne!(updated["devices"], json!(["11111111-1111-4111-8111-111111111111"]));
+        assert_ne!(updated["createdAt"], "1999-01-01T00:00:00Z");
+    }
+
+    #[tokio::test]
+    async fn patch_an_immediate_reboot_is_incompatible_state() {
+        let token = mint_token(SCOPE).await;
+        // An immediate reboot carries no `atTime` — it has already fired.
+        let (_, _, created) = post_reboot_request(Some(&token), Some("{}"), None).await;
+        let id = created["id"].as_str().unwrap().to_string();
+        assert!(created.get("atTime").is_none());
+
+        let (status, _, resp) =
+            patch_reboot_request_by_id(Some(&token), &id, r#"{"message":"too late"}"#, None).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(resp["code"], "NETWORK_ACCESS_DEVICES.INCOMPATIBLE_STATE");
+
+        // The store is left unchanged by the declined patch.
+        assert_eq!(store::get(&id), Some(created));
+    }
+
+    #[tokio::test]
+    async fn patch_unknown_id_is_not_found() {
+        let token = mint_token(SCOPE).await;
+        let (status, _, resp) = patch_reboot_request_by_id(
+            Some(&token),
+            "00000000-0000-4000-8000-000000000000",
+            r#"{"message":"x"}"#,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(resp["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn patch_bad_body_400_wins_over_state_and_unknown_id() {
+        let token = mint_token(SCOPE).await;
+        let id = create_scheduled(&token).await;
+
+        // Malformed atTime → 400 (validated before the store/state is consulted).
+        let (status, _, resp) =
+            patch_reboot_request_by_id(Some(&token), &id, r#"{"atTime":"soon"}"#, None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(resp["code"], "INVALID_ARGUMENT");
+
+        // A body 400 beats even an unknown id (no store lookup happens).
+        let (status, _, _) = patch_reboot_request_by_id(
+            Some(&token),
+            "00000000-0000-4000-8000-000000000000",
+            "not json",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        // An over-long message → 400.
+        let long = format!(r#"{{"message":"{}"}}"#, "x".repeat(256));
+        let (status, _, _) = patch_reboot_request_by_id(Some(&token), &id, &long, None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn patch_requires_the_scope_and_a_token() {
+        let owner = mint_token(SCOPE).await;
+        let id = create_scheduled(&owner).await;
+
+        // Wrong scope → 403 (resource untouched).
+        let bad = mint_token("some:other-scope").await;
+        let (status, _, resp) =
+            patch_reboot_request_by_id(Some(&bad), &id, r#"{"message":"x"}"#, None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(resp["code"], "PERMISSION_DENIED");
+
+        // No token → 401 (resource untouched).
+        let (status, _, resp) =
+            patch_reboot_request_by_id(None, &id, r#"{"message":"x"}"#, None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(resp["code"], "UNAUTHENTICATED");
+
+        // The rejected patches did not mutate it.
+        let (_, _, read) = get_reboot_request_by_id(Some(&owner), &id, None).await;
+        assert!(read.get("message").is_none());
+    }
+
+    #[tokio::test]
+    async fn patch_echoes_x_correlator_on_success_and_error() {
+        let token = mint_token(SCOPE).await;
+        let id = create_scheduled(&token).await;
+
+        // Success.
+        let (status, headers, _) =
+            patch_reboot_request_by_id(Some(&token), &id, r#"{"message":"m"}"#, Some("corr-pat"))
+                .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-pat")
+        );
+
+        // Error (unknown id).
+        let (status, headers, _) = patch_reboot_request_by_id(
+            Some(&token),
+            "11111111-1111-4111-8111-111111111111",
+            r#"{"message":"m"}"#,
+            Some("corr-paterr"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-paterr")
         );
     }
 }

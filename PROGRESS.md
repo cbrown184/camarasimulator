@@ -2161,7 +2161,7 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     `UNSUPPORTED_SERVICE_LEVEL` (all three service levels supported).
     `x-correlator` echoed. No new dep. **Completes Predictive Connectivity Data
     vwip.**
-- [~] Network Access Devices vwip (`/network-access-devices/vwip`; CAMARA
+- [x] Network Access Devices vwip (`/network-access-devices/vwip`; CAMARA
   NetworkAccessManagement, wip — no released version yet, mounted at its
   canonical `vwip` base path; operator-managed access equipment — gateways/
   routers/access points, not end-user devices):
@@ -2188,7 +2188,7 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     with that `NetworkAccessDevice`, any other id (unknown / another subscriber's
     / malformed) → `404 NOT_FOUND`. `x-correlator` echoed. No new dep (reuses
     `sha2`). A documented simplification of CAMARA's stateful resource read.
-  - [~] Reboot Requests resource lifecycle (`POST/GET/PATCH/DELETE
+  - [x] Reboot Requests resource lifecycle (`POST/GET/PATCH/DELETE
     /reboot-requests…`, `network-access-devices:reboot`) — stateful, in-memory
     store (`src/apis/network_access_devices/store.rs`; `Mutex<HashMap>`, no new dep):
     - [x] `POST /reboot-requests` (`createRebootRequest`) — creates a reboot
@@ -2218,8 +2218,19 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
       (no reserved-identifier plane; mirrors QoD `deleteSession` / Traffic
       Influence `deleteTrafficInfluence`). `sub`-ownership not enforced (documented
       cut, mirroring the read). `x-correlator` echoed on `204` and `404`. No new dep.
-    - [ ] `PATCH /reboot-requests/{rebootRequestId}` (`updateRebootRequest`, update
-      leg; PATCH's 409 INCOMPATIBLE_STATE + scheduled-reboot semantics) — later slice.
+    - [x] `PATCH /reboot-requests/{rebootRequestId}` (`updateRebootRequest`) —
+      merge-patch update of the mutable `atTime`/`message` in place → `200`
+      updated `RebootRequest` (`modifiedAt` bumped; persists). Two control planes
+      (DESIGN §7): the request body (validated first — malformed `atTime`/over-long
+      `message` → 400 INVALID_ARGUMENT) and the opaque store-state id **plus** the
+      stored request's schedule state — a pending **scheduled** reboot (has
+      `atTime`) is modifiable → 200, an **immediate** reboot (no `atTime`, already
+      fired) → 409 `NETWORK_ACCESS_DEVICES.INCOMPATIBLE_STATE` (store unchanged),
+      unknown id → 404. Identity/target/audit fields (`id`/`devices`/`createdAt`/
+      `modifiedAt`) + unknown keys ignored; `devices` not re-targeted and "already
+      fired" modelled by the missing `atTime` (documented cuts — no reboot engine).
+      New atomic `store::update_with` (get-modify-write, decline-aware; no new dep).
+      **Completes the Reboot Requests lifecycle and Network Access Devices vwip.**
 - [ ] Other CAMARA APIs as capacity allows
 
 ## Cross-cutting (do alongside the item that needs it)
@@ -2246,6 +2257,38 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-07 17:55Z — network-access-devices: added `PATCH /reboot-requests/{rebootRequestId}`
+  (`updateRebootRequest`) — the **update leg**, the last `[ ]` leaf of the reboot-request
+  lifecycle. **This completes the Reboot Requests lifecycle and Network Access Devices vwip**
+  (both flipped `[~]`→`[x]`). Chosen as the smallest safe increment continuing the last three
+  passes' create/read/delete legs on this API: the topmost `[ ]` items across the backlog are
+  all the repeatedly-deferred heavyweight "TLS (`https://` sink) delivery" cases, which need a
+  large new rustls stack (conflicts with the "keep the binary small" guardrail — 7 duplicated
+  raw-TCP delivery modules, no egress needed) and a TLS test server with certs (hard to reach a
+  green one-pass increment) — so I journal them as still-deferred and took the safe adjacent
+  slice per the prime directive ("a tiny merged improvement beats a large unfinished one").
+  Body is `merge-patch+json` (RFC 7386, mirroring Traffic Influence's `patchTrafficInfluence`)
+  over the mutable `atTime`/`message`; a supplied value replaces, `null` clears, and
+  identity/target/audit keys (`id`/`devices`/`createdAt`/`modifiedAt`) + unknown keys are
+  ignored; `modifiedAt` bumped on success. Two control planes (DESIGN §7): the request body is
+  validated first (malformed `atTime` / >255 `message` → 400 INVALID_ARGUMENT, before the store
+  is touched — so a body 400 beats even an unknown-id 404), then the opaque store-state id **plus**
+  the stored request's **schedule state** — a pending **scheduled** reboot (carries `atTime`) →
+  `200` (persists), an **immediate** reboot (no `atTime`, already fired) → `409
+  NETWORK_ACCESS_DEVICES.INCOMPATIBLE_STATE` (store left unchanged), unknown id → `404`. No live
+  reboot engine, so "already fired" is modelled by the absent `atTime` and `devices` isn't
+  re-targeted (documented simplifications of CAMARA's scheduled-reboot semantics). New
+  decline-aware atomic `store::update_with` (get-modify-write under one lock hold, closure returns
+  `Ok`/`Err` so the 409 declines before mutating; no new dep — the `.patch()` MethodRouter method
+  needs no extra import). spec: new `patch:` op under `/reboot-requests/{rebootRequestId}`
+  (`updateRebootRequest`, 200/400/401/403/404/409/429/500/503 + merge-patch requestBody +
+  `x-camarasim-scenarios`), `RebootRequestUpdate` + `NetworkAccessDevicesError` schemas (409
+  code enum, mirroring `CarrierBillingError`), top-comment/info-cut prose updated (PATCH now live,
+  lifecycle complete). tests: +11 (store: update_with apply/decline/missing; vwip: validate_patch
+  + apply_merge pure units, scheduled-update-persists, null-clears + empty-body no-op, read-only/
+  unknown ignored, immediate→409 store-unchanged, unknown-id 404, body-400-wins matrix, scope
+  403/token 401 leave it intact, x-correlator on 200+404). cargo test 1665 pass (was 1654);
+  cargo build --release clean, no new dep. — binary: 3,191,080 bytes (~3.04 MiB)
 - 2026-08-07 — network-access-devices: added `DELETE /reboot-requests/{rebootRequestId}`
   (`deleteRebootRequest`) — the delete leg of the reboot-request lifecycle, the top
   actionable `[ ]` leaf (respecting phase order: the remaining `[ ]` items above are
