@@ -24,9 +24,13 @@
 //! required `device` object; for privacy the device is validated only, never
 //! echoed nor persisted.
 //!
-//! The `subscriptionRequest` CloudEvents notifications are deferred to a later
-//! pass (see `PROGRESS.md`).
+//! The `subscriptionRequest` CloudEvents notifications' **initial event**
+//! (`config.initialEvent: true`) is delivered on create (see [`notifications`]);
+//! the ongoing state-change stream, `subscriptionExpireTime` /
+//! `subscriptionMaxEvents` lifecycle, and TLS (`https://` sink) delivery are
+//! deferred to a later pass (see `PROGRESS.md`).
 
+pub mod notifications;
 pub mod store;
 pub mod vwip;
 

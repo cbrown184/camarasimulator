@@ -86,6 +86,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
 
+use super::notifications;
 use crate::auth::verify::Claims;
 use crate::errors::CamaraError;
 use crate::scenarios;
@@ -159,6 +160,41 @@ struct PostTrafficInfluence {
     source_traffic_filters: Option<SourceTrafficFilters>,
     #[serde(rename = "destinationTrafficFilters")]
     destination_traffic_filters: Option<DestinationTrafficFilters>,
+    /// Optional CAMARA event subscription. When present and valid, the operator
+    /// delivers `traffic-influence-change` CloudEvents to its `sink`. CamaraSim
+    /// models the **initial event** (`config.initialEvent: true`) fired on create.
+    #[serde(rename = "subscriptionRequest")]
+    subscription_request: Option<SubscriptionRequest>,
+}
+
+/// The upstream `SubscriptionRequest` (a CAMARA event subscription embedded in the
+/// create body). CamaraSim requires `sink` + `protocol` + `types` + `config`
+/// (`config.subscriptionDetail`), validates them, and — for `config.initialEvent:
+/// true` — fires a single `traffic-influence-change` CloudEvent on create. The
+/// ongoing state-change stream, `subscriptionExpireTime` / `subscriptionMaxEvents`
+/// lifecycle, and non-`HTTP` protocols are documented cuts. No `deny_unknown_fields`
+/// so accepted-not-applied config keys (e.g. `subscriptionExpireTime`) are ignored.
+#[derive(Deserialize)]
+struct SubscriptionRequest {
+    sink: Option<String>,
+    protocol: Option<String>,
+    types: Option<Vec<String>>,
+    #[serde(rename = "sinkCredential")]
+    sink_credential: Option<Value>,
+    config: Option<SubscriptionConfig>,
+}
+
+/// The `subscriptionRequest.config` object. `subscriptionDetail` is required
+/// upstream (accepted for shape only — CamaraSim reads no event-type-specific
+/// detail); `initialEvent` gates the create-time notification. Other predefined
+/// config keys (`subscriptionExpireTime`, `subscriptionMaxEvents`) are
+/// accepted-not-applied (deferred lifecycle, a documented cut).
+#[derive(Deserialize)]
+struct SubscriptionConfig {
+    #[serde(rename = "subscriptionDetail")]
+    subscription_detail: Option<Value>,
+    #[serde(rename = "initialEvent")]
+    initial_event: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -233,6 +269,19 @@ struct ValidInput {
     source_port: Option<i64>,
     destination_port: Option<i64>,
     destination_protocol: Option<String>,
+    /// The validated event subscription, if the body carried one. [`finalize`]
+    /// fires the initial `traffic-influence-change` CloudEvent from it when
+    /// `initial_event` is set.
+    subscription: Option<ValidSubscription>,
+}
+
+/// A validated `subscriptionRequest`: the callback `sink`, the derived
+/// `Authorization` header (from an ACCESSTOKEN `sinkCredential`, else `None`), and
+/// whether the consumer asked for the create-time initial event.
+struct ValidSubscription {
+    sink: String,
+    auth: Option<String>,
+    initial_event: bool,
 }
 
 /// `POST /traffic-influence/vwip/traffic-influences`.
@@ -385,6 +434,14 @@ fn validate_base(
         }
     };
 
+    // Optional event subscription — validated last, so a malformed resource field
+    // wins over a malformed subscription (and both `400`s win over the `appId`
+    // reserved-error scenario applied later in `finalize`).
+    let subscription = match req.subscription_request {
+        None => None,
+        Some(sr) => Some(validate_subscription(sr, correlator)?),
+    };
+
     Ok(ValidInput {
         api_consumer_id,
         app_id,
@@ -394,6 +451,77 @@ fn validate_base(
         source_port,
         destination_port,
         destination_protocol,
+        subscription,
+    })
+}
+
+/// Validate an optional `subscriptionRequest` into a [`ValidSubscription`].
+///
+/// The upstream `SubscriptionRequest` requires `sink`, `protocol`, `types` and
+/// `config` (with a required `config.subscriptionDetail`). CamaraSim additionally
+/// requires `protocol: HTTP` (the only delivery protocol it implements — raw-TCP,
+/// no message brokers) and the single `types` value
+/// (`org.camaraproject.traffic-influence.v1.traffic-influence-change`). The `sink`
+/// is accepted as `http://` (loopback receivers) or `https://` (upstream mandates
+/// `https://`), though only `http://` is delivered to (no TLS client — a documented
+/// cut). Any problem → `400 INVALID_ARGUMENT`.
+fn validate_subscription(
+    sr: SubscriptionRequest,
+    correlator: &Option<HeaderValue>,
+) -> Result<ValidSubscription, Response> {
+    let sink = match sr.sink.as_deref() {
+        Some(s) if is_valid_sink(s) => s.to_string(),
+        Some(_) => {
+            return Err(invalid_argument(
+                "`subscriptionRequest.sink` must be a valid `http://` or `https://` callback URL.",
+                correlator,
+            ))
+        }
+        None => return Err(invalid_argument("`subscriptionRequest.sink` is required.", correlator)),
+    };
+    match sr.protocol.as_deref() {
+        Some("HTTP") => {}
+        Some(_) => {
+            return Err(invalid_argument(
+                "`subscriptionRequest.protocol` must be `HTTP` (the only delivery protocol CamaraSim supports).",
+                correlator,
+            ))
+        }
+        None => {
+            return Err(invalid_argument(
+                "`subscriptionRequest.protocol` is required.",
+                correlator,
+            ))
+        }
+    }
+    match sr.types {
+        Some(ref v) if v.len() == 1 && v[0] == notifications::EVENT_TYPE => {}
+        Some(_) => {
+            return Err(invalid_argument(
+                "`subscriptionRequest.types` must be exactly [\"org.camaraproject.traffic-influence.v1.traffic-influence-change\"].",
+                correlator,
+            ))
+        }
+        None => return Err(invalid_argument("`subscriptionRequest.types` is required.", correlator)),
+    }
+    let config = match sr.config {
+        Some(c) => c,
+        None => return Err(invalid_argument("`subscriptionRequest.config` is required.", correlator)),
+    };
+    if config.subscription_detail.is_none() {
+        return Err(invalid_argument(
+            "`subscriptionRequest.config.subscriptionDetail` is required.",
+            correlator,
+        ));
+    }
+    let auth = sr
+        .sink_credential
+        .as_ref()
+        .and_then(notifications::sink_authorization);
+    Ok(ValidSubscription {
+        sink,
+        auth,
+        initial_event: config.initial_event.unwrap_or(false),
     })
 }
 
@@ -482,6 +610,21 @@ fn finalize(input: ValidInput, correlator: &Option<HeaderValue>) -> Response {
     let id = mint_id();
     let resource = build_response(&id, state, &input);
     super::store::insert(id.clone(), resource.clone());
+
+    // If the create carried a valid `subscriptionRequest` asking for the initial
+    // event, deliver a single `traffic-influence-change` CloudEvent reflecting the
+    // created resource's current state to the sink (fire-and-forget, off the
+    // request path; ACCESSTOKEN `sinkCredential` bearer applied; `http://` only).
+    if let Some(sub) = &input.subscription {
+        if sub.initial_event {
+            let event = notifications::traffic_influence_change_event(
+                mint_id(),
+                rfc3339_utc(now_unix_secs()),
+                &resource,
+            );
+            notifications::spawn_delivery(sub.sink.clone(), event, sub.auth.clone());
+        }
+    }
 
     let location = format!("{COLLECTION}/{id}");
     let mut response = (StatusCode::CREATED, Json(resource)).into_response();
@@ -930,6 +1073,52 @@ fn mint_id() -> String {
     )
 }
 
+/// Whether `s` is a callback `sink` CamaraSim accepts: an `http://` (loopback
+/// receivers) or `https://` (upstream mandates `https://`) URL with a non-empty
+/// authority. Only `http://` is actually delivered to (no TLS client — an
+/// `https://` sink is a documented no-op cut). Mirrors
+/// `qos_provisioning::v0_3::is_valid_sink`.
+fn is_valid_sink(s: &str) -> bool {
+    let rest = s
+        .strip_prefix("https://")
+        .or_else(|| s.strip_prefix("http://"));
+    rest.is_some_and(|rest| !rest.is_empty())
+}
+
+/// Seconds since the Unix epoch, non-blocking (`SystemTime::now`).
+fn now_unix_secs() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// Format `unix_secs` as an RFC 3339 UTC timestamp (`YYYY-MM-DDTHH:MM:SSZ`) for a
+/// CloudEvent `time`. Self-contained (no `chrono`/`time` dep; Howard Hinnant's
+/// civil-from-days), mirroring `qos_provisioning::v0_3`.
+fn rfc3339_utc(unix_secs: i64) -> String {
+    let days = unix_secs.div_euclid(86_400);
+    let secs_of_day = unix_secs.rem_euclid(86_400);
+    let (y, m, d) = civil_from_days(days);
+    let (hh, mm, ss) = (secs_of_day / 3600, (secs_of_day % 3600) / 60, secs_of_day % 60);
+    format!("{y:04}-{m:02}-{d:02}T{hh:02}:{mm:02}:{ss:02}Z")
+}
+
+/// Convert a count of days since the Unix epoch to a `(year, month, day)` civil
+/// date (Howard Hinnant's algorithm). Shared shape with `qos_provisioning`.
+fn civil_from_days(z: i64) -> (i64, u32, u32) {
+    let z = z + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64; // [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365; // [0, 399]
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11]
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32; // [1, 31]
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32; // [1, 12]
+    (if m <= 2 { y + 1 } else { y }, m, d)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -980,6 +1169,7 @@ mod tests {
             source_port: None,
             destination_port: None,
             destination_protocol: None,
+            subscription: None,
         };
         let body = build_response("ti-1", "active", &minimal);
         assert_eq!(body["trafficInfluenceID"], "ti-1");
@@ -1006,6 +1196,7 @@ mod tests {
             source_port: Some(8080),
             destination_port: Some(443),
             destination_protocol: Some("TCP".to_string()),
+            subscription: None,
         };
         let body = build_response("ti-2", "ordered", &full);
         assert_eq!(body["appInstanceId"], ZONE);
@@ -2051,5 +2242,183 @@ mod tests {
             headers.get("x-correlator").and_then(|v| v.to_str().ok()),
             Some("corr-dev-2")
         );
+    }
+
+    // --- subscriptionRequest: create-time initial CloudEvent ----------------
+
+    use crate::apis::traffic_influence::notifications::EVENT_TYPE;
+
+    /// Build a valid `subscriptionRequest` for the traffic-influence-change type.
+    fn sub_request(sink: &str, initial_event: bool, cred: Option<Value>) -> Value {
+        let mut sr = json!({
+            "sink": sink,
+            "protocol": "HTTP",
+            "types": [EVENT_TYPE],
+            "config": { "subscriptionDetail": {}, "initialEvent": initial_event },
+        });
+        if let Some(c) = cred {
+            sr["sinkCredential"] = c;
+        }
+        sr
+    }
+
+    /// A create body carrying `subscriptionRequest`.
+    fn create_body_sub(app_id: &str, sub: Value) -> Value {
+        json!({ "apiConsumerId": CONSUMER, "appId": app_id, "subscriptionRequest": sub })
+    }
+
+    /// Accept one fire-and-forget notification and return the raw head + JSON body.
+    async fn read_one_event(listener: &tokio::net::TcpListener) -> (String, Value) {
+        use tokio::io::AsyncReadExt;
+        let (mut sock, _) = listener.accept().await.unwrap();
+        let mut buf = Vec::new();
+        sock.read_to_end(&mut buf).await.unwrap();
+        let raw = String::from_utf8(buf).unwrap();
+        let (head, body) = raw.split_once("\r\n\r\n").expect("headers then body");
+        (head.to_string(), serde_json::from_str(body).expect("body is JSON"))
+    }
+
+    #[test]
+    fn subscription_validation_accepts_well_formed_and_rejects_bad_requests() {
+        // Happy path → initial_event + derived bearer.
+        let sr: SubscriptionRequest = serde_json::from_value(sub_request(
+            "http://127.0.0.1:9/cb",
+            true,
+            Some(json!({ "credentialType": "ACCESSTOKEN", "accessToken": "tok", "accessTokenType": "bearer" })),
+        ))
+        .unwrap();
+        let ok = validate_subscription(sr, &None).expect("valid subscription");
+        assert_eq!(ok.sink, "http://127.0.0.1:9/cb");
+        assert!(ok.initial_event);
+        assert_eq!(ok.auth.as_deref(), Some("Bearer tok"));
+
+        // https sink accepted (delivered as a no-op cut); initialEvent defaults false.
+        let sr: SubscriptionRequest =
+            serde_json::from_value(json!({ "sink": "https://x.test/cb", "protocol": "HTTP", "types": [EVENT_TYPE], "config": { "subscriptionDetail": {} } })).unwrap();
+        let ok = validate_subscription(sr, &None).expect("https accepted");
+        assert!(!ok.initial_event);
+        assert!(ok.auth.is_none());
+
+        // Each malformed shape → Err.
+        for bad in [
+            json!({ "protocol": "HTTP", "types": [EVENT_TYPE], "config": { "subscriptionDetail": {} } }), // no sink
+            json!({ "sink": "ftp://x/cb", "protocol": "HTTP", "types": [EVENT_TYPE], "config": { "subscriptionDetail": {} } }), // bad sink scheme
+            json!({ "sink": "http://x/cb", "types": [EVENT_TYPE], "config": { "subscriptionDetail": {} } }), // no protocol
+            json!({ "sink": "http://x/cb", "protocol": "MQTT5", "types": [EVENT_TYPE], "config": { "subscriptionDetail": {} } }), // unsupported protocol
+            json!({ "sink": "http://x/cb", "protocol": "HTTP", "config": { "subscriptionDetail": {} } }), // no types
+            json!({ "sink": "http://x/cb", "protocol": "HTTP", "types": ["org.example.other"], "config": { "subscriptionDetail": {} } }), // wrong type
+            json!({ "sink": "http://x/cb", "protocol": "HTTP", "types": [EVENT_TYPE, EVENT_TYPE], "config": { "subscriptionDetail": {} } }), // too many types
+            json!({ "sink": "http://x/cb", "protocol": "HTTP", "types": [EVENT_TYPE] }), // no config
+            json!({ "sink": "http://x/cb", "protocol": "HTTP", "types": [EVENT_TYPE], "config": {} }), // no subscriptionDetail
+        ] {
+            let sr: SubscriptionRequest = serde_json::from_value(bad.clone()).unwrap();
+            assert!(validate_subscription(sr, &None).is_err(), "should reject: {bad}");
+        }
+    }
+
+    #[test]
+    fn sink_validation_accepts_http_and_https_only() {
+        assert!(is_valid_sink("http://127.0.0.1:8080/cb"));
+        assert!(is_valid_sink("https://endpoint.example.com/sink"));
+        assert!(!is_valid_sink("ftp://x/cb"));
+        assert!(!is_valid_sink("http://"));
+        assert!(!is_valid_sink("nonsense"));
+    }
+
+    #[tokio::test]
+    async fn create_with_initial_event_fires_a_traffic_influence_change_cloudevent() {
+        use tokio::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let sink = format!("http://{addr}/ti-notify");
+
+        let body = create_body_sub(APP_ACTIVE, sub_request(&sink, true, None));
+        let (status, _, created) = post(Some(&token().await), None, body).await;
+        assert_eq!(status, StatusCode::CREATED);
+        let id = created["trafficInfluenceID"].as_str().unwrap().to_string();
+        // The subscription/credential is never echoed in the resource.
+        assert!(created.get("subscriptionRequest").is_none());
+
+        let (head, event) = read_one_event(&listener).await;
+        assert!(head.starts_with("POST /ti-notify HTTP/1.1\r\n"), "request line: {head}");
+        assert!(head.contains("Content-Type: application/cloudevents+json"));
+        assert!(!head.contains("Authorization:"), "unauthenticated: {head}");
+        assert_eq!(event["type"], EVENT_TYPE);
+        assert_eq!(event["specversion"], "1.0");
+        assert!(event["id"].is_string() && event["time"].is_string());
+        // data is the created resource.
+        assert_eq!(event["data"]["trafficInfluenceID"], json!(id));
+        assert_eq!(event["data"]["appId"], APP_ACTIVE);
+        assert_eq!(event["data"]["state"], "active");
+    }
+
+    #[tokio::test]
+    async fn the_initial_event_callback_carries_the_sink_credential_bearer() {
+        use tokio::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let sink = format!("http://{addr}/ti-auth");
+
+        let cred = json!({
+            "credentialType": "ACCESSTOKEN",
+            "accessToken": "ti-sink-secret",
+            "accessTokenType": "bearer",
+        });
+        let body = create_body_sub(APP_ACTIVE, sub_request(&sink, true, Some(cred)));
+        let (status, _, created) = post(Some(&token().await), None, body).await;
+        assert_eq!(status, StatusCode::CREATED);
+        // The secret is never echoed.
+        assert!(created.get("sinkCredential").is_none());
+
+        let (head, _) = read_one_event(&listener).await;
+        assert!(
+            head.contains("Authorization: Bearer ti-sink-secret\r\n"),
+            "authorization header present: {head}"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_without_initial_event_fires_no_event() {
+        use tokio::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let sink = format!("http://{addr}/ti-silent");
+
+        // A valid subscription but initialEvent:false → the subscription is created
+        // (accepted) but no create-time event fires (ongoing stream is a cut).
+        let body = create_body_sub(APP_ACTIVE, sub_request(&sink, false, None));
+        let (status, _, _) = post(Some(&token().await), None, body).await;
+        assert_eq!(status, StatusCode::CREATED);
+
+        let accepted = tokio::time::timeout(
+            std::time::Duration::from_millis(400),
+            listener.accept(),
+        )
+        .await;
+        assert!(accepted.is_err(), "initialEvent:false must not notify the sink");
+    }
+
+    #[tokio::test]
+    async fn an_https_sink_initial_event_still_returns_201_and_is_not_delivered() {
+        // https sink is accepted at validation but never delivered to (no TLS
+        // client — a documented no-op cut). The create still succeeds and does not
+        // hang on the missing TLS delivery.
+        let body = create_body_sub(APP_ACTIVE, sub_request("https://sink.example.test/cb", true, None));
+        let (status, _, _) = post(Some(&token().await), None, body).await;
+        assert_eq!(status, StatusCode::CREATED);
+    }
+
+    #[tokio::test]
+    async fn a_malformed_subscription_request_is_invalid_argument() {
+        let t = token().await;
+        for bad in [
+            json!({ "protocol": "HTTP", "types": [EVENT_TYPE], "config": { "subscriptionDetail": {} } }), // no sink
+            json!({ "sink": "http://x/cb", "protocol": "MQTT5", "types": [EVENT_TYPE], "config": { "subscriptionDetail": {} } }), // unsupported protocol
+            json!({ "sink": "http://x/cb", "protocol": "HTTP", "types": ["org.example.other"], "config": { "subscriptionDetail": {} } }), // wrong type
+            json!({ "sink": "http://x/cb", "protocol": "HTTP", "types": [EVENT_TYPE], "config": {} }), // no subscriptionDetail
+        ] {
+            let (status, _, _) = post(Some(&t), None, create_body_sub(APP_ACTIVE, bad.clone())).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "should reject: {bad}");
+        }
     }
 }

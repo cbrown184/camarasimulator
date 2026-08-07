@@ -14,9 +14,7 @@
 #
 # Divergences from the upstream CAMARA source (documented cuts):
 #   - The resource **create** (for "any user"), **per-device create**, **read**,
-#     **update** and **delete** legs are mounted. The upstream also defines
-#     CloudEvents change notifications (`subscriptionRequest`); those are deferred
-#     to a later pass (see PROGRESS.md). `postTrafficInfluence` /
+#     **update** and **delete** legs are mounted. `postTrafficInfluence` /
 #     `postTrafficInfluenceDevice` persist the created resource in an in-memory
 #     store, `getTrafficInfluence` reads it back, `patchTrafficInfluence` updates
 #     it, and `deleteTrafficInfluence` evicts it.
@@ -32,8 +30,17 @@
 #     evicts the resource synchronously; the `deletion in progress` / `deleted`
 #     steady states are therefore not observable (a read after delete → `404`).
 #   - The request's optional `subscriptionRequest` (CloudEvents subscription) is
-#     not modelled this pass — the notifications subsystem is deferred (like QoD's
-#     first pass), so it is omitted from the request schema.
+#     modelled for the **initial event** only (`config.initialEvent: true`): a
+#     single `org.camaraproject.traffic-influence.v1.traffic-influence-change`
+#     CloudEvent is POSTed to the `sink` on create, reflecting the new resource's
+#     `state` (its `data` is the created `TrafficInfluence`). Fire-and-forget over
+#     raw TCP (no HTTP-client dep); `http://` sinks only (an `https://` sink is a
+#     no-op cut — no TLS client), `protocol: HTTP` only, an ACCESSTOKEN
+#     `sinkCredential` bearer applied (PLAIN/REFRESHTOKEN a cut). The ongoing
+#     state-change stream, `subscriptionExpireTime` / `subscriptionMaxEvents`
+#     lifecycle, and TLS (`https://`) delivery are deferred (like QoD's first
+#     pass; see PROGRESS.md). The `TrafficInfluenceNotification` extras
+#     (`selected_appInstanceId` / `deviceResponse`) are omitted (documented cut).
 #   - The created resource `state` is one of `ordered` / `created` / `active` at
 #     create time; the `error` / `deletion in progress` / `deleted` states are
 #     activation/DELETE lifecycle outcomes, not reachable through create.
@@ -222,6 +229,14 @@ paths:
             result: "400 INVALID_ARGUMENT"
           - input: "sourcePort or destinationPort outside 0..=65535"
             result: "400 OUT_OF_RANGE"
+          - input: "a valid subscriptionRequest with config.initialEvent: true and an http:// sink"
+            result: "201, plus a traffic-influence-change CloudEvent POSTed to the sink whose data is the created resource (fire-and-forget)"
+          - input: "a valid subscriptionRequest with an ACCESSTOKEN sinkCredential"
+            result: "the initial-event callback carries Authorization: Bearer <token> (the secret is never echoed)"
+          - input: "config.initialEvent absent/false, or an https:// sink"
+            result: "201 with no delivered event (initial event only; https is a no-op TLS cut)"
+          - input: "subscriptionRequest missing sink/protocol/types/config or config.subscriptionDetail, protocol not HTTP, or types not the single change event"
+            result: "400 INVALID_ARGUMENT"
 
   /traffic-influence-devices:
     post:
@@ -727,6 +742,99 @@ components:
           $ref: "#/components/schemas/SourceTrafficFilters"
         destinationTrafficFilters:
           $ref: "#/components/schemas/DestinationTrafficFilters"
+        subscriptionRequest:
+          $ref: "#/components/schemas/SubscriptionRequest"
+
+    SubscriptionRequest:
+      type: object
+      description: >-
+        Optional CAMARA event subscription embedded in the create request. When
+        present and valid, the operator delivers `traffic-influence-change`
+        CloudEvents to the `sink`.
+
+        CamaraSim scope (docs/DESIGN.md §7, §11): only the **initial event**
+        (`config.initialEvent: true`) is modelled — a single CloudEvent fired on
+        create reflecting the new resource's `state`. The ongoing state-change
+        stream, `subscriptionExpireTime` / `subscriptionMaxEvents` lifecycle, and
+        non-`HTTP` `protocol`s are documented cuts. The upstream `sink` pattern is
+        `^https://.+$`; CamaraSim additionally accepts `http://` for loopback
+        receivers and delivers only to `http://` (no TLS client — an `https://`
+        sink is a no-op cut).
+      required:
+        - sink
+        - protocol
+        - config
+        - types
+      properties:
+        sink:
+          type: string
+          format: uri
+          description: The callback URL events are delivered to (`http://` or `https://`).
+          example: "https://endpoint.example.com/sink"
+        protocol:
+          type: string
+          description: Delivery protocol. CamaraSim implements `HTTP` only.
+          enum: [HTTP]
+        types:
+          type: array
+          minItems: 1
+          maxItems: 1
+          description: The event types subscribed to (exactly one, the change event).
+          items:
+            $ref: "#/components/schemas/SubscriptionEventType"
+        sinkCredential:
+          $ref: "#/components/schemas/SinkCredential"
+        config:
+          $ref: "#/components/schemas/SubscriptionConfig"
+
+    SubscriptionEventType:
+      type: string
+      description: Event type eligible for delivery by this subscription.
+      enum:
+        - org.camaraproject.traffic-influence.v1.traffic-influence-change
+
+    SubscriptionConfig:
+      type: object
+      description: >-
+        Subscription configuration. `subscriptionDetail` is required (accepted for
+        shape only); `initialEvent` gates the create-time notification. Other
+        predefined keys (`subscriptionExpireTime`, `subscriptionMaxEvents`) are
+        accepted but not applied (deferred lifecycle — documented cut).
+      required:
+        - subscriptionDetail
+      properties:
+        subscriptionDetail:
+          type: object
+          description: Event-type-specific detail (accepted for shape; unused by CamaraSim).
+        initialEvent:
+          type: boolean
+          description: >-
+            When `true`, an event is delivered as soon as the subscription is
+            created, reflecting the current situation (the new resource `state`).
+          example: true
+
+    SinkCredential:
+      type: object
+      description: >-
+        Credential used to authenticate event delivery to the `sink`. CamaraSim
+        applies an `ACCESSTOKEN` credential's bearer token as
+        `Authorization: Bearer <token>` (RFC 6750); `PLAIN` / `REFRESHTOKEN` are
+        accepted for schema fidelity but not applied (documented cut). The secret
+        is held in memory only and never echoed in the resource.
+      required:
+        - credentialType
+      properties:
+        credentialType:
+          type: string
+          enum: [PLAIN, ACCESSTOKEN, REFRESHTOKEN]
+          description: The type of the credential.
+        accessToken:
+          type: string
+          description: The access token (for `credentialType: ACCESSTOKEN`).
+        accessTokenType:
+          type: string
+          enum: [bearer]
+          description: The access-token type (only `bearer` is permitted).
 
     Device:
       type: object
