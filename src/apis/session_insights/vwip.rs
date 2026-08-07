@@ -178,11 +178,12 @@ struct CreateSession {
     #[serde(rename = "applicationSessionId")]
     application_session_id: Option<String>,
     sink: Option<String>,
-    /// The consumer's callback credential. An `ACCESSTOKEN` credential's bearer
-    /// token is applied to the session's `network-quality-score` callbacks
-    /// (RFC 6750 `Authorization: Bearer`); it is stashed in a credential
-    /// side-store keyed by session id and is **never** echoed in the response (it
-    /// carries a secret). `PLAIN`/`REFRESHTOKEN` are a documented cut.
+    /// The consumer's callback credential, applied to the session's callbacks'
+    /// `Authorization` header: an `ACCESSTOKEN` credential → RFC 6750
+    /// `Bearer <accessToken>`, and a `PLAIN` credential → RFC 7617
+    /// `Basic base64(identifier:secret)`. The derived header is stashed in a
+    /// credential side-store keyed by session id and is **never** echoed in the
+    /// response (it carries a secret). `REFRESHTOKEN` is a documented cut.
     #[serde(rename = "sinkCredential")]
     sink_credential: Option<Value>,
 }
@@ -305,10 +306,10 @@ async fn create_session(claims: Claims, headers: HeaderMap, body: Bytes) -> Resp
         info["expiresAt"] = json!(rfc3339_utc(expires_at));
     }
 
-    // If the session records an ACCESSTOKEN `sinkCredential`, stash the derived
-    // bearer `Authorization` in the credential side-store (keyed by session id) so
-    // the later `network-quality-score` callback authenticates. Kept apart from the
-    // stored `SessionInfo` so `GET` never echoes the secret.
+    // If the session records an ACCESSTOKEN/PLAIN `sinkCredential`, stash the derived
+    // `Authorization` header (Bearer / Basic) in the credential side-store (keyed by
+    // session id) so the later `network-quality-score` callback authenticates. Kept
+    // apart from the stored `SessionInfo` so `GET` never echoes the secret.
     if let Some(auth) = req
         .sink_credential
         .as_ref()
@@ -1425,6 +1426,49 @@ mod tests {
         assert!(
             raw.contains("Authorization: Bearer cb-secret\r\n"),
             "session-ended callback carries the sinkCredential bearer: {raw}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_plain_sink_credential_authenticates_the_callback_as_basic() {
+        use tokio::io::AsyncReadExt;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let sink = format!("http://{addr}/si-notify");
+
+        // Create a session with a PLAIN sinkCredential (identifier/secret)…
+        // base64("cbid:cbsecret") == "Y2JpZDpjYnNlY3JldA==".
+        let create = mint_token(CREATE_SCOPE).await;
+        let body = format!(
+            r#"{{"applicationProfileId":"3fa85f64-5717-4562-b3fc-2c963f66afa6",
+                 "device":{{"phoneNumber":"+123456789012"}},
+                 "applicationServer":{{"ipv4Address":"198.51.100.1"}},
+                 "sink":"{sink}",
+                 "sinkCredential":{{"credentialType":"PLAIN","identifier":"cbid","secret":"cbsecret"}}}}"#
+        );
+        let (status, _, created) = post_session(Some(&create), &body, None).await;
+        assert_eq!(status, StatusCode::CREATED);
+        // The secret is never echoed in the returned representation.
+        assert!(
+            !serde_json::to_string(&created).unwrap().contains("cbsecret"),
+            "sinkCredential secret must never be echoed"
+        );
+        let session_id = created["id"].as_str().unwrap().to_string();
+
+        // …delete it and confirm the callback carries RFC 7617 Basic auth.
+        let del = mint_token(DELETE_SCOPE).await;
+        let (status, _, _) = delete_session_req(Some(&del), &session_id, None).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        let (mut sock, _) = listener.accept().await.unwrap();
+        let mut buf = Vec::new();
+        sock.read_to_end(&mut buf).await.unwrap();
+        let raw = String::from_utf8(buf).unwrap();
+        assert!(
+            raw.contains("Authorization: Basic Y2JpZDpjYnNlY3JldA==\r\n"),
+            "session-ended callback carries the PLAIN sinkCredential as Basic: {raw}"
         );
     }
 

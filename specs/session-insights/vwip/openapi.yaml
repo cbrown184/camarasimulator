@@ -19,9 +19,11 @@
 # identifier — the (simulated) network drops the session early. A time-bounded
 # session likewise fires the terminal `session-ended` leg
 # (`terminationReason: SESSION_EXPIRED`) when it reaches its `expiresAt`
-# (`createSession` schedules the expiry timer). A session's ACCESSTOKEN
-# `sinkCredential` bearer authenticates every callback (`Authorization: Bearer`);
-# only `https://` (TLS) sink delivery remains deferred to a later pass.
+# (`createSession` schedules the expiry timer). A session's `sinkCredential`
+# authenticates every callback — an ACCESSTOKEN credential as `Authorization: Bearer`
+# (RFC 6750) and a PLAIN credential as `Authorization: Basic base64(identifier:secret)`
+# (RFC 7617); only `https://` (TLS) sink delivery and REFRESHTOKEN remain deferred to
+# a later pass.
 openapi: 3.0.3
 info:
   title: Session Insights
@@ -97,8 +99,9 @@ paths:
         `data.terminationReason: NETWORK_TERMINATED`) is delivered to its `sink` —
         fire-and-forget over raw TCP, `http://` sinks only (an `https://` sink is a
         documented no-op cut — no TLS client), so nothing delays the `201`. The
-        session's ACCESSTOKEN `sinkCredential` bearer (stashed here) authenticates
-        the callback and is taken single-use (the event is terminal). A concurrent
+        session's `sinkCredential` (stashed here — ACCESSTOKEN as `Bearer`, PLAIN as
+        `Basic`) authenticates the callback and is taken single-use (the event is
+        terminal). A concurrent
         `deleteSession` that removed the session first makes this a no-op (exactly
         one terminal event fires).
 
@@ -107,7 +110,8 @@ paths:
         then an async expiry timer scheduled here evicts it and delivers the
         **terminal** `session-ended` CloudEvent (`data.terminationReason:
         SESSION_EXPIRED`) to its `sink` — same fire-and-forget transport and
-        ACCESSTOKEN `sinkCredential` bearer as the other legs. The three terminal
+        `sinkCredential` auth (ACCESSTOKEN `Bearer` / PLAIN `Basic`) as the other
+        legs. The three terminal
         transitions (`SESSION_DELETED` / `NETWORK_TERMINATED` / `SESSION_EXPIRED`)
         are mutually exclusive — exactly one fires per session. An **open-ended**
         session (`…000`/no-digits, no `expiresAt`) has no expiry timer.
@@ -237,6 +241,12 @@ paths:
             result: "422 MISSING_IDENTIFIER"
           - input: missing applicationProfileId / applicationServer / sink, or a malformed sink or phoneNumber
             result: "400 INVALID_ARGUMENT"
+          - input: >-
+              a PLAIN sinkCredential (identifier + secret) on the created session
+            result: >-
+              201; every later callback (network-quality-score / session-ended)
+              carries Authorization: Basic base64(identifier:secret) (RFC 7617); the
+              secret is stored apart from the SessionInfo and never echoed
 
   /sessions/{sessionId}:
     get:
@@ -299,9 +309,10 @@ paths:
         `org.camaraproject.session-insights.v0.session-ended`, `data.terminationReason:
         SESSION_DELETED`) to that `sink` — fire-and-forget over raw TCP, `http://`
         sinks only (an `https://` sink is a documented no-op cut — no TLS client), so
-        a slow or unreachable sink never delays the `204`. The session's ACCESSTOKEN
-        `sinkCredential` bearer (stashed at `createSession`) is applied to the
-        callback as `Authorization: Bearer <token>` and taken single-use (the event
+        a slow or unreachable sink never delays the `204`. The session's
+        `sinkCredential` (stashed at `createSession`) is applied to the callback's
+        `Authorization` header — ACCESSTOKEN as `Bearer <token>` (RFC 6750), PLAIN as
+        `Basic base64(identifier:secret)` (RFC 7617) — and taken single-use (the event
         is terminal). The network-initiated (`NETWORK_TERMINATED`) leg of
         `session-ended` is scheduled from `createSession` for a `…001` identifier,
         and the `SESSION_EXPIRED` (expiry) leg from `createSession` for a
@@ -348,6 +359,13 @@ paths:
             result: >-
               the session-ended callback carries Authorization Bearer <token> (the
               secret is never echoed by GET/retrieve; taken single-use)
+          - input: >-
+              a deleted session whose sink recorded a PLAIN sinkCredential
+              (identifier + secret)
+            result: >-
+              the session-ended callback carries Authorization Basic
+              base64(identifier:secret) (RFC 7617; the secret is never echoed by
+              GET/retrieve; taken single-use)
           - input: an unknown or already-deleted sessionId
             result: "404 NOT_FOUND (no notification)"
 
@@ -480,10 +498,12 @@ paths:
         a raw TCP stream (no HTTP-client dependency), so a slow or unreachable
         `sink` never delays the `204`.
 
-        **`sinkCredential` (ACCESSTOKEN) auth.** When the session was created with a
-        `sinkCredential` of `credentialType: ACCESSTOKEN`, its non-empty
-        `accessToken` is applied to the `network-quality-score` callback as an
-        `Authorization: Bearer <token>` header (RFC 6750). The secret is stashed in
+        **`sinkCredential` (ACCESSTOKEN / PLAIN) auth.** When the session was created
+        with a `sinkCredential`, its credential is applied to the
+        `network-quality-score` callback's `Authorization` header: a `credentialType:
+        ACCESSTOKEN` credential's non-empty `accessToken` → `Bearer <token>` (RFC
+        6750), and a `credentialType: PLAIN` credential's `identifier`/`secret` pair →
+        `Basic base64(identifier:secret)` (RFC 7617). The derived header is stashed in
         an in-memory side-store keyed by session id at `createSession` and is
         **never** echoed in a `SessionInfo` (`GET`/`retrieve-sessions` never return
         it); because metrics may be submitted repeatedly, the credential is read
@@ -492,7 +512,7 @@ paths:
         **Documented cuts.** Delivery is to `http://` sinks only — CamaraSim adds no
         TLS client, so an `https://` sink is accepted at `createSession` but its
         callback is a silent no-op (matches QoD / QoS Provisioning). A
-        `PLAIN`/`REFRESHTOKEN` `sinkCredential` (or none) sends the callback
+        `REFRESHTOKEN` `sinkCredential` (or none) sends the callback
         unauthenticated. The `session-ended` CloudEvent legs (delete /
         network-termination / expiry) are delivered on their own transitions, not
         here. The spec's `410 Gone` (metrics for an expired session) is a cut: no
@@ -701,12 +721,39 @@ components:
         sinkCredential:
           type: object
           description: >-
-            Credential the operator presents on the sink callback. A
-            `credentialType: ACCESSTOKEN` credential's non-empty `accessToken` is
-            applied to the `network-quality-score` callback as an
-            `Authorization: Bearer <token>` header (RFC 6750); it is stored apart
-            from the `SessionInfo` and never echoed. `PLAIN`/`REFRESHTOKEN` are a
-            documented cut (the callback is sent unauthenticated).
+            Credential the operator presents on the sink callback, discriminated on
+            `credentialType`. A `credentialType: ACCESSTOKEN` credential's non-empty
+            `accessToken` is applied to the `network-quality-score`/`session-ended`
+            callbacks as an `Authorization: Bearer <token>` header (RFC 6750). A
+            `credentialType: PLAIN` credential's `identifier`/`secret` pair is applied
+            as an `Authorization: Basic base64(identifier:secret)` header (RFC 7617
+            HTTP Basic — the standard application of a plain identifier/secret pair; an
+            empty `secret` is permitted, but an empty/missing `identifier` sends the
+            callback unauthenticated). The derived header is stored apart from the
+            `SessionInfo` and never echoed. `REFRESHTOKEN` is a documented cut (it
+            needs a token-exchange round trip → the callback is sent unauthenticated).
+          properties:
+            credentialType:
+              type: string
+              enum: [PLAIN, ACCESSTOKEN, REFRESHTOKEN]
+              description: The type of credential presented on the callback.
+            accessToken:
+              type: string
+              description: >-
+                The bearer token, for `credentialType: ACCESSTOKEN`.
+            accessTokenType:
+              type: string
+              enum: [bearer]
+              description: The access-token type (only `bearer`).
+            identifier:
+              type: string
+              description: >-
+                The Basic-auth identifier (username), for `credentialType: PLAIN`.
+            secret:
+              type: string
+              description: >-
+                The Basic-auth secret (password), for `credentialType: PLAIN`. May be
+                empty (the schema requires the field, not a value).
 
     RetrieveSessionsInput:
       type: object
