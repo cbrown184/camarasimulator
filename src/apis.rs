@@ -52,6 +52,7 @@
 //! - **Traffic Influence vwip** — `/traffic-influence/vwip/…`.
 //! - **Application Endpoint Discovery vwip** — `/application-endpoint-discovery/vwip/…`.
 //! - **Predictive Connectivity Data vwip** — `/predictive-connectivity-data/vwip/…`.
+//! - **Network Access Devices vwip** — `/network-access-devices/vwip/…`.
 //!
 //! Plus [`openapi`], which serves each mounted API's vendored OpenAPI spec at
 //! `/{api}/v{n}/openapi.yaml` (docs/DESIGN.md §9).
@@ -84,6 +85,7 @@ pub mod location_retrieval;
 pub mod location_verification;
 pub mod media_streaming_rate;
 pub mod most_frequent_location;
+pub mod network_access_devices;
 pub mod network_health_assessment;
 pub mod network_traffic_analysis;
 pub mod number_recycling;
@@ -157,5 +159,6 @@ pub fn routes() -> Router {
         .merge(traffic_influence::routes())
         .merge(application_endpoint_discovery::routes())
         .merge(predictive_connectivity_data::routes())
+        .merge(network_access_devices::routes())
         .merge(openapi::routes())
 }

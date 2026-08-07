@@ -316,6 +316,12 @@ async fn catalog() -> Json<Value> {
                 "version": "vwip",
                 "base_path": "/predictive-connectivity-data/vwip",
                 "spec_url": "/predictive-connectivity-data/vwip/openapi.yaml",
+            },
+            {
+                "name": "network-access-devices",
+                "version": "vwip",
+                "base_path": "/network-access-devices/vwip",
+                "spec_url": "/network-access-devices/vwip/openapi.yaml",
             }
         ],
         "authorization_servers": [{
