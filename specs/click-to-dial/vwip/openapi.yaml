@@ -110,9 +110,16 @@ info:
       exists — the CAMARA precondition that the call session has *completed* is
       not modelled (lifecycle `status` transitions past `initiating` remain a
       deferred slice).
-    - **Notifications deferred.** `sink` / `sinkCredential` are accepted for
-      schema fidelity but not delivered to; the `status-changed` CloudEvents are
-      a later slice.
+    - **Notifications — create-time event only.** A `createCall` that supplies a
+      `sink` delivers one create-time `status-changed` CloudEvent reflecting the
+      call's initial `initiating` state (documented by the `createCall`
+      callback). Delivery is fire-and-forget over raw TCP to `http://` sinks only
+      (no TLS client — an `https://` sink is a no-op cut); an `ACCESSTOKEN`
+      `sinkCredential` bearer is applied to the callback, `PLAIN`/`REFRESHTOKEN`
+      are a cut. The later lifecycle transitions
+      (`connected`/`disconnected`/`failed`, with `reason`/`callDuration`/
+      `recordingResult`) and the `terminateCall` termination signal remain a
+      deferred slice — CamaraSim runs no live call engine.
 
     CamaraSim exposes the full shared reserved-error set here so every reserved
     suffix is reachable; canonical Click to Dial declares a subset.
@@ -135,14 +142,18 @@ paths:
       summary: Create a new Click to Dial call session
       description: |
         Creates a call between `caller` and `callee`. Returns `201` with the new
-        `Call` resource, whose `status` is `initiating` (later transitions arrive
-        via `sink` notifications, a deferred slice) — see the API description for
-        the parameter-driven functional cases (the `callee` identifier selects a
-        reserved error or an availability/recording case; the pair of numbers is
+        `Call` resource, whose `status` is `initiating` — see the API description
+        for the parameter-driven functional cases (the `callee` identifier selects
+        a reserved error or an availability/recording case; the pair of numbers is
         echoed back). The `callId` is deterministic from the pair, so re-creating
         a call that is still live (not yet terminated) for the same
         `caller`/`callee` pair returns `409 ALREADY_EXISTS` (a store-keyed control
         plane) rather than overwriting it.
+
+        When the request supplies a `sink`, a single create-time `status-changed`
+        CloudEvent reflecting the call's initial `initiating` state is delivered
+        to it (see the `statusChanged` callback and the API description's
+        notification cut). Later lifecycle transitions are a deferred slice.
       security:
         - openId:
             - click-to-dial:calls:create
@@ -280,6 +291,23 @@ paths:
           $ref: "../../shared/errors.yaml#/components/responses/Internal"
         "503":
           $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      callbacks:
+        statusChanged:
+          "{$request.body#/sink}":
+            post:
+              summary: >-
+                Call status-changed notification (CloudEvents). CamaraSim delivers
+                one create-time event reflecting the `initiating` state; later
+                transitions are a deferred slice.
+              requestBody:
+                required: true
+                content:
+                  application/cloudevents+json:
+                    schema:
+                      $ref: "#/components/schemas/StatusChangedEvent"
+              responses:
+                "204":
+                  description: The consumer accepted the notification.
       x-camarasim-scenarios:
         description: >-
           Result selected from the `callee` identifier, the `caller` number, and
@@ -293,6 +321,10 @@ paths:
             result: the canonical CAMARA error for that status
           - input: "non-reserved callee, distinct caller, no line ending 000, not already live"
             result: "201 { Call, status = initiating }"
+          - input: "a happy-path create that supplies a `sink` (http://)"
+            result: "201, plus a create-time status-changed CloudEvent delivered to the sink"
+          - input: "a create that supplies an https:// sink, or that errors before 201"
+            result: "201 (https no-op cut) / the error — no CloudEvent is delivered"
           - input: "a re-create of a still-live call for the same caller/callee pair"
             result: "409 ALREADY_EXISTS (store-keyed; not an overwrite)"
           - input: callee number ending 000
@@ -568,9 +600,10 @@ components:
       description: |
         Request to create a Click to Dial call. Both participants are required
         and carried explicitly (two-legged, business-facing — there is no line
-        subject). `recordingEnabled` opts into call recording; `sink` /
-        `sinkCredential` are accepted for schema fidelity but not delivered to in
-        CamaraSim (notifications deferred).
+        subject). `recordingEnabled` opts into call recording; when a `sink` is
+        supplied, a create-time `status-changed` CloudEvent is delivered to it
+        (see the `createCall` callback), authenticated with an `ACCESSTOKEN`
+        `sinkCredential` if one is present.
       required:
         - caller
         - callee
@@ -591,14 +624,16 @@ components:
           type: string
           format: uri
           description: >-
-            Optional callback URL for `status-changed` notifications. Accepted
-            but not delivered to in CamaraSim (deferred).
+            Optional callback URL for `status-changed` notifications. CamaraSim
+            delivers the create-time event to an `http://` sink (an `https://`
+            sink is accepted but a no-op — no TLS client).
           maxLength: 2048
         sinkCredential:
-          type: object
+          allOf:
+            - $ref: "#/components/schemas/SinkCredential"
           description: >-
-            Optional credential the platform would present on callbacks. Accepted
-            for schema fidelity but not applied (deferred with `sink`).
+            Optional credential presented on the `sink` callback. CamaraSim
+            applies an `ACCESSTOKEN` bearer; `PLAIN`/`REFRESHTOKEN` are a cut.
 
     Call:
       type: object
@@ -677,6 +712,105 @@ components:
         - connected
         - disconnected
         - failed
+
+    SinkCredential:
+      type: object
+      description: >-
+        A credential the platform presents on the `sink` callback (CAMARA
+        Commonalities `SinkCredential`). CamaraSim applies only the `ACCESSTOKEN`
+        variant (RFC 6750 bearer); `PLAIN`/`REFRESHTOKEN` are accepted for schema
+        fidelity but not applied.
+      required:
+        - credentialType
+      properties:
+        credentialType:
+          type: string
+          enum:
+            - PLAIN
+            - ACCESSTOKEN
+            - REFRESHTOKEN
+        accessToken:
+          type: string
+          description: The bearer token (for `credentialType: ACCESSTOKEN`).
+        accessTokenExpiresUtc:
+          type: string
+          format: date-time
+        accessTokenType:
+          type: string
+          enum:
+            - bearer
+
+    StatusChangedEvent:
+      type: object
+      description: >-
+        The CloudEvents 1.0 envelope POSTed to a call's `sink` when its status
+        changes (`type: org.camaraproject.click-to-dial.v0.status-changed`).
+        CamaraSim delivers one create-time event reflecting the `initiating`
+        state; `data` carries the fields the simulator can populate at that point
+        (the transition `reason`, `callDuration`, and `recordingResult` become
+        meaningful only once the call has progressed — a deferred slice).
+      required:
+        - id
+        - source
+        - type
+        - specversion
+        - data
+      properties:
+        id:
+          type: string
+          description: Unique event id within `source` (UUID-shaped in CamaraSim).
+        source:
+          type: string
+          format: uri-reference
+        type:
+          type: string
+          enum:
+            - org.camaraproject.click-to-dial.v0.status-changed
+        specversion:
+          type: string
+          enum:
+            - "1.0"
+        datacontenttype:
+          type: string
+          enum:
+            - application/json
+        time:
+          type: string
+          format: date-time
+        data:
+          $ref: "#/components/schemas/CallEventData"
+
+    CallEventData:
+      type: object
+      description: The `data` payload of a `status-changed` CloudEvent.
+      required:
+        - callId
+        - caller
+        - callee
+        - status
+      properties:
+        callId:
+          type: string
+          format: uuid
+        caller:
+          $ref: "#/components/schemas/Party"
+        callee:
+          $ref: "#/components/schemas/Party"
+        status:
+          type: object
+          description: >-
+            The call's status as an object (note the `Call` resource's own
+            `status` is a plain-string `CallStatus`).
+          required:
+            - state
+          properties:
+            state:
+              $ref: "#/components/schemas/CallStatus"
+            reason:
+              type: string
+              description: >-
+                The disconnection reason (only on a terminal state — a deferred
+                slice in CamaraSim).
 
     ClickToDialError:
       description: >-

@@ -17,12 +17,17 @@
 //! - [`vwip`] — mounted at `/click-to-dial/vwip` (CAMARA Click to Dial, `wip` —
 //!   no released version yet, so mounted at its canonical `vwip` base path,
 //!   mirroring Verified Caller / Sponsored Data). Serves `createCall`
-//!   (`POST /calls`) and the stateful `getCall` (`GET /calls/{callId}`); the
-//!   `terminateCall` / `getRecording` operations are a later slice.
+//!   (`POST /calls`), the stateful `getCall` (`GET /calls/{callId}`),
+//!   `terminateCall` (`DELETE /calls/{callId}`), and `getRecording`
+//!   (`GET /calls/{callId}/recording`).
 //!
 //! Reading a created call back makes Click to Dial **stateful**, so a shared
-//! in-memory [`store`] holds created calls keyed by `callId`.
+//! in-memory [`store`] holds created calls keyed by `callId`. When a `createCall`
+//! supplies a `sink`, [`notifications`] delivers a create-time `status-changed`
+//! CloudEvent to it (fire-and-forget, `http://` only — the same dependency-free
+//! delivery path as QoD / Session Insights).
 
+pub mod notifications;
 pub mod store;
 pub mod vwip;
 

@@ -110,9 +110,14 @@
 //!   not real captured audio, and the recording is available as soon as the call
 //!   exists (the CAMARA precondition that the call session has *completed* is not
 //!   modelled — `status` transitions past `initiating` are a deferred slice).
-//! - **Notifications deferred.** `sink` / `sinkCredential` are accepted for
-//!   schema fidelity but not delivered to — the `status-changed` CloudEvents are
-//!   a later slice (like QoD's first create pass).
+//! - **Notifications — create-time event only.** A `createCall` that supplies a
+//!   `sink` now delivers one create-time `status-changed` CloudEvent reflecting
+//!   the call's initial `initiating` state (see [`super::notifications`]);
+//!   `http://` sinks only, ACCESSTOKEN `sinkCredential` bearer applied. The later
+//!   lifecycle transitions (`connected`/`disconnected`/`failed`, with `reason` /
+//!   `callDuration` / `recordingResult`) and the `terminateCall` termination
+//!   signal are a deferred slice — CamaraSim runs no live call engine (like QoD's
+//!   first create pass).
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -128,6 +133,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
+use super::notifications;
 use crate::auth::verify::Claims;
 use crate::errors::CamaraError;
 use crate::scenarios;
@@ -151,6 +157,11 @@ const RECORDING_READ_SCOPE: &str = "click-to-dial:recordings:read";
 /// content is a WAV, so this is fixed to `audio/wav` (the CAMARA enum also allows
 /// `audio/mp3`/`audio/mpeg`/`audio/ogg`).
 const RECORDING_CONTENT_TYPE: &str = "audio/wav";
+
+/// The call's initial lifecycle state at creation (CAMARA `CallStatus`). Shared
+/// by the `201` `Call` body and the create-time `status-changed` notification so
+/// the two never drift.
+const INITIATING_STATE: &str = "initiating";
 
 /// The trailing-three-digit sentinel that marks a line as unreachable
 /// (`caller`/`callee` not available). Not a reserved *error* suffix, so it is
@@ -194,13 +205,14 @@ struct CreateCallRequest {
     callee: Party,
     #[serde(rename = "recordingEnabled")]
     recording_enabled: Option<bool>,
-    /// Accepted for schema fidelity (so `deny_unknown_fields` does not reject a
-    /// request that carries it); notifications are a deferred slice, so it is
-    /// never read.
-    #[allow(dead_code)]
+    /// Optional callback URL. When present, a create-time `status-changed`
+    /// CloudEvent is delivered to it (fire-and-forget, off the request path;
+    /// `http://` only — see [`super::notifications`]).
     sink: Option<String>,
-    /// Accepted for schema fidelity; not applied (deferred with `sink`).
-    #[allow(dead_code)]
+    /// Optional credential the platform presents on the `sink` callback. An
+    /// `ACCESSTOKEN` credential's bearer token is applied to the callback
+    /// (`super::notifications::sink_authorization`); `PLAIN`/`REFRESHTOKEN` are a
+    /// documented cut.
     #[serde(rename = "sinkCredential")]
     sink_credential: Option<Value>,
 }
@@ -295,7 +307,7 @@ async fn create_call(claims: Claims, headers: HeaderMap, body: Bytes) -> Respons
         "callId": id,
         "caller": { "number": req.caller.number },
         "callee": { "number": req.callee.number },
-        "status": "initiating",
+        "status": INITIATING_STATE,
         "createdAt": rfc3339_utc(now_unix_secs()),
         "recordingEnabled": recording_enabled,
     });
@@ -304,9 +316,32 @@ async fn create_call(claims: Claims, headers: HeaderMap, body: Bytes) -> Respons
     // occupies this id — a re-create is a `409 ALREADY_EXISTS`, not an overwrite
     // (the store is the control plane here). The pair becomes creatable again once
     // `terminateCall` evicts the call.
-    if !super::store::insert_new(id, call.clone()) {
+    if !super::store::insert_new(id.clone(), call.clone()) {
         return with_correlator(already_exists().into_response(), &correlator);
     }
+
+    // The call was newly created (its `status` is `initiating`). When the request
+    // supplied a `sink`, deliver a single create-time `status-changed` CloudEvent
+    // to it, reflecting that initial state — fire-and-forget, off the request path;
+    // `http://` only; an ACCESSTOKEN `sinkCredential` bearer applied. Later
+    // lifecycle transitions are a documented cut (no live call engine). See
+    // [`super::notifications`].
+    if let Some(sink) = req.sink.as_deref() {
+        let auth = req
+            .sink_credential
+            .as_ref()
+            .and_then(notifications::sink_authorization);
+        let event = notifications::status_changed_event(
+            notifications::new_event_id(),
+            rfc3339_utc(now_unix_secs()),
+            &id,
+            &req.caller.number,
+            &req.callee.number,
+            INITIATING_STATE,
+        );
+        notifications::spawn_delivery(sink.to_string(), event, auth);
+    }
+
     with_correlator((StatusCode::CREATED, Json(call)).into_response(), &correlator)
 }
 
@@ -1360,5 +1395,124 @@ mod tests {
             headers.get("x-correlator").and_then(|v| v.to_str().ok()),
             Some("corr-r404")
         );
+    }
+
+    // --- status-changed CloudEvents on `sink` (create-time event) ----------
+
+    /// Accept one callback connection on `listener`, read the whole request, and
+    /// return `(raw head, parsed CloudEvent body)`.
+    async fn read_one_event(listener: &tokio::net::TcpListener) -> (String, Value) {
+        use tokio::io::AsyncReadExt;
+        let (mut sock, _) = listener.accept().await.unwrap();
+        let mut buf = Vec::new();
+        sock.read_to_end(&mut buf).await.unwrap();
+        let raw = String::from_utf8(buf).unwrap();
+        let (head, body) = raw.split_once("\r\n\r\n").expect("headers then body");
+        (head.to_string(), serde_json::from_str(body).expect("body is JSON"))
+    }
+
+    #[tokio::test]
+    async fn create_with_a_sink_fires_a_status_changed_cloudevent() {
+        use tokio::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let sink = format!("http://{addr}/ctd-notify");
+
+        let body = format!(
+            r#"{{"caller":{{"number":"+123456789111"}},"callee":{{"number":"+123456789016"}},"sink":"{sink}"}}"#
+        );
+        let (status, _, created) = call_ok(&body).await;
+        assert_eq!(status, StatusCode::CREATED);
+        let id = created["callId"].as_str().unwrap().to_string();
+        // The sink is a request control, never echoed in the created Call.
+        assert!(created.get("sink").is_none());
+
+        let (head, event) = read_one_event(&listener).await;
+        assert!(head.starts_with("POST /ctd-notify HTTP/1.1\r\n"), "request line: {head}");
+        assert!(head.contains("Content-Type: application/cloudevents+json"));
+        assert!(!head.contains("Authorization:"), "unauthenticated: {head}");
+        assert_eq!(event["type"], notifications::EVENT_TYPE);
+        assert_eq!(event["source"], notifications::SOURCE);
+        assert_eq!(event["specversion"], "1.0");
+        assert!(event["id"].is_string() && event["time"].is_string());
+        // The event reflects the created call's initial state.
+        assert_eq!(event["data"]["callId"], json!(id));
+        assert_eq!(event["data"]["caller"]["number"], "+123456789111");
+        assert_eq!(event["data"]["callee"]["number"], "+123456789016");
+        assert_eq!(event["data"]["status"]["state"], "initiating");
+    }
+
+    #[tokio::test]
+    async fn the_status_changed_callback_carries_the_sink_credential_bearer() {
+        use tokio::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let sink = format!("http://{addr}/ctd-auth");
+
+        let body = format!(
+            r#"{{"caller":{{"number":"+123456789111"}},"callee":{{"number":"+123456789017"}},"sink":"{sink}","sinkCredential":{{"credentialType":"ACCESSTOKEN","accessToken":"ctd-sink-secret","accessTokenType":"bearer"}}}}"#
+        );
+        let (status, _, created) = call_ok(&body).await;
+        assert_eq!(status, StatusCode::CREATED);
+        // The secret is never echoed in the created Call.
+        assert!(created.get("sinkCredential").is_none());
+
+        let (head, _) = read_one_event(&listener).await;
+        assert!(
+            head.contains("Authorization: Bearer ctd-sink-secret\r\n"),
+            "authorization header present: {head}"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_without_a_sink_fires_no_event() {
+        // No `sink` in the request → nothing is delivered (the happy 201 stands).
+        // Nothing to assert beyond the 201; there is no receiver to time out on.
+        let (status, _, _) = call_ok(
+            r#"{"caller":{"number":"+123456789111"},"callee":{"number":"+123456789018"}}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+    }
+
+    #[tokio::test]
+    async fn an_https_sink_creates_the_call_but_delivers_nothing() {
+        // No TLS client, so an `https://` sink is a documented no-op cut: the call
+        // is still created (201) but no callback connection is attempted.
+        use tokio::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        // Point an https URL at the live listener; delivery must still not connect.
+        let sink = format!("https://{addr}/ctd-tls");
+
+        let body = format!(
+            r#"{{"caller":{{"number":"+123456789111"}},"callee":{{"number":"+123456789019"}},"sink":"{sink}"}}"#
+        );
+        let (status, _, _) = call_ok(&body).await;
+        assert_eq!(status, StatusCode::CREATED);
+
+        let accepted =
+            tokio::time::timeout(std::time::Duration::from_millis(400), listener.accept()).await;
+        assert!(accepted.is_err(), "https sink must not be delivered to (no TLS client)");
+    }
+
+    #[tokio::test]
+    async fn an_errored_create_with_a_sink_fires_no_event() {
+        // A reserved-suffix callee (…404) fails before the call is created, so no
+        // status-changed event fires even though a sink was supplied.
+        use tokio::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let sink = format!("http://{addr}/ctd-none");
+
+        let body = format!(
+            r#"{{"caller":{{"number":"+123456789111"}},"callee":{{"number":"+123456789404"}},"sink":"{sink}"}}"#
+        );
+        let (status, _, _) = call_ok(&body).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        let accepted =
+            tokio::time::timeout(std::time::Duration::from_millis(400), listener.accept()).await;
+        assert!(accepted.is_err(), "an errored create must not notify the sink");
     }
 }
