@@ -23,14 +23,18 @@
 //!   TLS client, so an `https://` (or otherwise non-`http`) `sink` is parsed and
 //!   **not delivered to** — a deliberate cut for the simulator (test receivers run
 //!   on `http://` loopback). Documented in the served spec.
-//! - **`sinkCredential` (ACCESSTOKEN) auth.** When a payment is created with a
-//!   `sinkCredential` of `credentialType: ACCESSTOKEN`, its bearer token is applied
-//!   to the notification as an `Authorization: Bearer <token>` header
-//!   ([`sink_authorization`]) — matching RFC 6750. The credential is used at
-//!   delivery time and never persisted with the payment (it is a secret). The other
-//!   `credentialType`s (`PLAIN` HTTP Basic, `REFRESHTOKEN`) are accepted for schema
-//!   fidelity but not applied — a documented cut in the served spec.
+//! - **`sinkCredential` (ACCESSTOKEN / PLAIN) auth.** When a payment is created with
+//!   a `sinkCredential`, its credential is applied to the notification's
+//!   `Authorization` header ([`sink_authorization`]): a `credentialType: ACCESSTOKEN`
+//!   → `Bearer <accessToken>` (RFC 6750), and a `credentialType: PLAIN` →
+//!   `Basic <base64(identifier:secret)>` (RFC 7617 HTTP Basic — the standard
+//!   application of a plain identifier/secret pair). The credential is used at
+//!   delivery time and never persisted with the payment (it is a secret).
+//!   `REFRESHTOKEN` is accepted for schema fidelity but not applied (it needs a
+//!   token-exchange round trip) — a documented cut in the served spec.
 
+use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine as _;
 use serde_json::{json, Value};
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
@@ -223,21 +227,38 @@ pub fn payment_denied_event(
 
 /// Derive the `Authorization` header value from a CAMARA `SinkCredential`.
 ///
-/// Returns `Some("Bearer <token>")` for a `credentialType: ACCESSTOKEN` credential
-/// carrying a non-empty `accessToken` (CAMARA's `accessTokenType` enum only permits
-/// `bearer`, so RFC 6750 `Bearer` is always the scheme). Every other shape — a
-/// missing/empty token, or a `PLAIN`/`REFRESHTOKEN` credential — returns `None`, so
+/// - `credentialType: ACCESSTOKEN` with a non-empty `accessToken` →
+///   `Some("Bearer <token>")` (CAMARA's `accessTokenType` enum only permits `bearer`,
+///   so RFC 6750 `Bearer` is always the scheme).
+/// - `credentialType: PLAIN` with a non-empty `identifier` (and a `secret` field, whose
+///   value may be empty — the schema requires the field, not a value) →
+///   `Some("Basic <base64(identifier:secret)>")` (RFC 7617 HTTP Basic — the standard
+///   application of a plain identifier/secret pair).
+///
+/// Every other shape — a missing/empty token, a `PLAIN` missing `identifier`/`secret`
+/// or with an empty `identifier`, or a `REFRESHTOKEN` credential — returns `None`, so
 /// the notification is sent unauthenticated (documented cut). Pure and directly
-/// testable (mirrors `quality_on_demand::notifications::sink_authorization`).
+/// testable (mirrors `geofencing_subscriptions::notifications::sink_authorization`).
 pub fn sink_authorization(cred: &Value) -> Option<String> {
-    if cred.get("credentialType").and_then(Value::as_str) != Some("ACCESSTOKEN") {
-        return None;
+    match cred.get("credentialType").and_then(Value::as_str)? {
+        "ACCESSTOKEN" => {
+            let token = cred.get("accessToken").and_then(Value::as_str)?;
+            if token.is_empty() {
+                return None;
+            }
+            Some(format!("Bearer {token}"))
+        }
+        "PLAIN" => {
+            let identifier = cred.get("identifier").and_then(Value::as_str)?;
+            let secret = cred.get("secret").and_then(Value::as_str)?;
+            if identifier.is_empty() {
+                return None;
+            }
+            let encoded = BASE64.encode(format!("{identifier}:{secret}"));
+            Some(format!("Basic {encoded}"))
+        }
+        _ => None,
     }
-    let token = cred.get("accessToken").and_then(Value::as_str)?;
-    if token.is_empty() {
-        return None;
-    }
-    Some(format!("Bearer {token}"))
 }
 
 /// Fire-and-forget delivery of `event` to `sink`: spawn [`deliver`] onto the
@@ -516,7 +537,7 @@ mod tests {
     }
 
     #[test]
-    fn sink_authorization_derives_a_bearer_header_only_for_accesstoken() {
+    fn sink_authorization_derives_a_bearer_header_for_accesstoken() {
         // ACCESSTOKEN with a token → RFC 6750 Bearer header.
         assert_eq!(
             sink_authorization(&json!({
@@ -532,15 +553,52 @@ mod tests {
             sink_authorization(&json!({ "credentialType": "ACCESSTOKEN", "accessToken": "" })),
             None
         );
-        // Other credential types are a documented cut → None.
+    }
+
+    #[test]
+    fn sink_authorization_derives_a_basic_header_for_plain() {
+        // PLAIN with identifier + secret → RFC 7617 Basic header.
+        // base64("aladdin:opensesame") == "YWxhZGRpbjpvcGVuc2VzYW1l".
         assert_eq!(
             sink_authorization(&json!({
                 "credentialType": "PLAIN",
-                "identifier": "u",
+                "identifier": "aladdin",
+                "secret": "opensesame",
+            })),
+            Some("Basic YWxhZGRpbjpvcGVuc2VzYW1l".to_string())
+        );
+        // An empty secret is permitted (the schema requires the field, not a value):
+        // base64("user:") == "dXNlcjo=".
+        assert_eq!(
+            sink_authorization(&json!({
+                "credentialType": "PLAIN",
+                "identifier": "user",
+                "secret": "",
+            })),
+            Some("Basic dXNlcjo=".to_string())
+        );
+        // A missing identifier/secret field, or an empty identifier, is unusable → None.
+        assert_eq!(
+            sink_authorization(&json!({ "credentialType": "PLAIN", "identifier": "user" })),
+            None
+        );
+        assert_eq!(
+            sink_authorization(&json!({ "credentialType": "PLAIN", "secret": "p" })),
+            None
+        );
+        assert_eq!(
+            sink_authorization(&json!({
+                "credentialType": "PLAIN",
+                "identifier": "",
                 "secret": "p",
             })),
             None
         );
+    }
+
+    #[test]
+    fn sink_authorization_is_none_for_refreshtoken_and_junk() {
+        // REFRESHTOKEN needs a token-exchange round trip → documented cut → None.
         assert_eq!(
             sink_authorization(&json!({ "credentialType": "REFRESHTOKEN", "refreshToken": "r" })),
             None

@@ -174,9 +174,10 @@ info:
     - **Charging notifications.** A successful one-step `createPayment` charge
       now delivers a `payment-completed` CloudEvent to the request's `sink` (see
       the operation's `callbacks`), fire-and-forget over raw TCP to an `http://`
-      sink only (no TLS client), with an `ACCESSTOKEN` `sinkCredential`'s bearer
-      token applied as an `Authorization` header (`PLAIN`/`REFRESHTOKEN` accepted
-      but not applied). The `sink` is used only to notify — it is never persisted
+      sink only (no TLS client), with a `sinkCredential` applied as an
+      `Authorization` header: `ACCESSTOKEN` → `Bearer <accessToken>` (RFC 6750),
+      `PLAIN` → `Basic <base64(identifier:secret)>` (RFC 7617); `REFRESHTOKEN`
+      accepted but not applied. The `sink` is used only to notify — it is never persisted
       with the payment, so a `retrievePayment` response omits it (the `Payment`
       schema's `sink` is optional). A successful two-step `preparePayment`
       **reservation** now likewise delivers a `payment-reserved` CloudEvent to
@@ -342,6 +343,8 @@ paths:
             result: "201; a payment-completed CloudEvent POSTed to the sink"
           - input: successful charge with a `sink` + ACCESSTOKEN `sinkCredential`
             result: "the callback carries Authorization: Bearer <accessToken>"
+          - input: successful charge with a `sink` + PLAIN `sinkCredential`
+            result: "the callback carries Authorization: Basic <base64(identifier:secret)> (RFC 7617)"
       callbacks:
         chargingNotifications:
           "{$request.body#/sink}":
@@ -357,9 +360,10 @@ paths:
                 Delivery is best-effort, fire-and-forget, and only to an
                 `http://` sink (no TLS client). When the payment was created with
                 an `ACCESSTOKEN` `sinkCredential`, the request carries an
-                `Authorization: Bearer <accessToken>` header (RFC 6750); the
-                `PLAIN` and `REFRESHTOKEN` credential types are accepted but not
-                applied (a documented cut).
+                `Authorization: Bearer <accessToken>` header (RFC 6750), and with a
+                `PLAIN` `sinkCredential` an `Authorization: Basic
+                <base64(identifier:secret)>` header (RFC 7617); the `REFRESHTOKEN`
+                credential type is accepted but not applied (a documented cut).
               requestBody:
                 required: true
                 content:
@@ -606,6 +610,8 @@ paths:
             result: "201; a payment-reserved CloudEvent POSTed to the sink"
           - input: successful reservation with a `sink` + ACCESSTOKEN `sinkCredential`
             result: "the callback carries Authorization: Bearer <accessToken>"
+          - input: successful reservation with a `sink` + PLAIN `sinkCredential`
+            result: "the callback carries Authorization: Basic <base64(identifier:secret)> (RFC 7617)"
           - input: >-
               `…888` (pending_validation) reservation with an `http://` `sink`
             result: >-
@@ -637,9 +643,10 @@ paths:
                 Delivery is best-effort, fire-and-forget, and only to an
                 `http://` sink (no TLS client). When the payment was created with
                 an `ACCESSTOKEN` `sinkCredential`, the request carries an
-                `Authorization: Bearer <accessToken>` header (RFC 6750); the
-                `PLAIN` and `REFRESHTOKEN` credential types are accepted but not
-                applied (a documented cut).
+                `Authorization: Bearer <accessToken>` header (RFC 6750), and with a
+                `PLAIN` `sinkCredential` an `Authorization: Basic
+                <base64(identifier:secret)>` header (RFC 7617); the `REFRESHTOKEN`
+                credential type is accepted but not applied (a documented cut).
               requestBody:
                 required: true
                 content:
@@ -679,7 +686,8 @@ paths:
         reservation is denied (so a `…888` reservation still fires exactly one
         terminal event — confirm, cancel, *or* deny). Delivery is best-effort,
         fire-and-forget, over raw TCP to an `http://` sink only (no TLS client),
-        off the request path; `PLAIN`/`REFRESHTOKEN` are accepted but not applied.
+        off the request path; a `PLAIN` `sinkCredential` is applied as HTTP Basic
+        (RFC 7617), `REFRESHTOKEN` accepted but not applied.
       security:
         - openId:
             - carrier-billing:payments:write
@@ -801,9 +809,10 @@ paths:
                 fire-and-forget, and only to an `http://` sink (no TLS client).
                 When the reservation was prepared with an `ACCESSTOKEN`
                 `sinkCredential`, the request carries an
-                `Authorization: Bearer <accessToken>` header (RFC 6750); the
-                `PLAIN` and `REFRESHTOKEN` credential types are accepted but not
-                applied (a documented cut).
+                `Authorization: Bearer <accessToken>` header (RFC 6750), and with a
+                `PLAIN` `sinkCredential` an `Authorization: Basic
+                <base64(identifier:secret)>` header (RFC 7617); the `REFRESHTOKEN`
+                credential type is accepted but not applied (a documented cut).
               requestBody:
                 required: true
                 content:
@@ -837,8 +846,9 @@ paths:
         `ACCESSTOKEN` `sinkCredential` bearer) recorded at `preparePayment`, held
         in an in-memory side-store keyed by `paymentId` and taken single-use when
         the charge goes through. Delivery is best-effort, fire-and-forget, over raw
-        TCP to an `http://` sink only (no TLS client), off the request path; the
-        `PLAIN`/`REFRESHTOKEN` credential types are accepted but not applied.
+        TCP to an `http://` sink only (no TLS client), off the request path; a
+        `PLAIN` `sinkCredential` is applied as HTTP Basic (RFC 7617), `REFRESHTOKEN`
+        accepted but not applied.
       security:
         - openId:
             - carrier-billing:payments:write
@@ -941,9 +951,10 @@ paths:
                 confirm. Delivery is best-effort, fire-and-forget, and only to an
                 `http://` sink (no TLS client). When the reservation was prepared
                 with an `ACCESSTOKEN` `sinkCredential`, the request carries an
-                `Authorization: Bearer <accessToken>` header (RFC 6750); the
-                `PLAIN` and `REFRESHTOKEN` credential types are accepted but not
-                applied (a documented cut).
+                `Authorization: Bearer <accessToken>` header (RFC 6750), and with a
+                `PLAIN` `sinkCredential` an `Authorization: Basic
+                <base64(identifier:secret)>` header (RFC 7617); the `REFRESHTOKEN`
+                credential type is accepted but not applied (a documented cut).
               requestBody:
                 required: true
                 content:
@@ -978,8 +989,8 @@ paths:
         held in an in-memory side-store keyed by `paymentId` and taken single-use
         (so a reservation fires exactly one terminal event — confirm *or* cancel).
         Delivery is best-effort, fire-and-forget, over raw TCP to an `http://`
-        sink only (no TLS client), off the request path; the `PLAIN`/`REFRESHTOKEN`
-        credential types are accepted but not applied.
+        sink only (no TLS client), off the request path; a `PLAIN` `sinkCredential`
+        is applied as HTTP Basic (RFC 7617), `REFRESHTOKEN` accepted but not applied.
       security:
         - openId:
             - carrier-billing:payments:write
@@ -1082,9 +1093,10 @@ paths:
                 Delivery is best-effort, fire-and-forget, and only to an `http://`
                 sink (no TLS client). When the reservation was prepared with an
                 `ACCESSTOKEN` `sinkCredential`, the request carries an
-                `Authorization: Bearer <accessToken>` header (RFC 6750); the
-                `PLAIN` and `REFRESHTOKEN` credential types are accepted but not
-                applied (a documented cut).
+                `Authorization: Bearer <accessToken>` header (RFC 6750), and with a
+                `PLAIN` `sinkCredential` an `Authorization: Basic
+                <base64(identifier:secret)>` header (RFC 7617); the `REFRESHTOKEN`
+                credential type is accepted but not applied (a documented cut).
               requestBody:
                 required: true
                 content:
@@ -1343,10 +1355,15 @@ components:
     SinkCredential:
       type: object
       description: >-
-        Credential for the callback `sink`. An `ACCESSTOKEN` credential's
-        `accessToken` is applied to the charging notification as an
-        `Authorization: Bearer` header (RFC 6750); `PLAIN` / `REFRESHTOKEN` are
-        accepted for schema fidelity but not applied (a documented cut).
+        Credential for the callback `sink`. Kept in memory only and never echoed
+        back in a `Payment` (it carries a secret). CamaraSim applies an
+        `ACCESSTOKEN` credential (its `accessToken` is sent on the charging
+        notification as `Authorization: Bearer <accessToken>`, RFC 6750) and a
+        `PLAIN` credential (its `identifier` + `secret` are sent as
+        `Authorization: Basic <base64(identifier:secret)>`, RFC 7617 — the standard
+        application of a plain identifier/secret pair). The `REFRESHTOKEN`
+        credential type is accepted for schema fidelity but not applied (a
+        documented cut — it needs a token-exchange round trip).
       required:
         - credentialType
       properties:
@@ -1356,14 +1373,30 @@ components:
             - PLAIN
             - ACCESSTOKEN
             - REFRESHTOKEN
+          description: >-
+            The type of credential. CamaraSim applies `ACCESSTOKEN` and `PLAIN`.
         accessToken:
           type: string
           description: >-
-            The bearer token applied to the callback (`credentialType: ACCESSTOKEN`).
+            The access token, sent as `Authorization: Bearer <accessToken>` when
+            `credentialType` is `ACCESSTOKEN`.
         accessTokenType:
           type: string
           enum:
             - bearer
+          description: The access-token type; only `bearer` is defined.
+        identifier:
+          type: string
+          description: >-
+            The identifier (account or username) half of a `PLAIN` credential; sent
+            as the username in the callback's HTTP Basic `Authorization` header when
+            `credentialType` is `PLAIN`.
+        secret:
+          type: string
+          description: >-
+            The secret (password or passphrase) half of a `PLAIN` credential; sent
+            as the password in the callback's HTTP Basic `Authorization` header when
+            `credentialType` is `PLAIN`.
 
     CloudEvent:
       type: object
@@ -1676,7 +1709,9 @@ components:
         Request to **reserve** a payment (`preparePayment`), the first step of the
         two-step flow. Structurally identical to `CreatePayment` in CamaraSim:
         the same `amountTransaction` (what to reserve and, for a two-legged / CIBA
-        token, to whom), plus the accepted-not-applied `sink` / `sinkCredential`.
+        token, to whom), plus the `sink` / `sinkCredential` used for the
+        `payment-reserved` / `payment-pending-validation` (and later terminal)
+        charging notifications (see the operation's `callbacks`).
       required:
         - amountTransaction
       properties:
@@ -1687,8 +1722,13 @@ components:
           format: uri
           pattern: '^https://.+$'
           description: >-
-            Optional HTTPS callback for charging notifications. Accepted for
-            schema fidelity but not acted on in this slice.
+            Optional callback URL for charging notifications. On a successful
+            reservation CamaraSim delivers a `payment-reserved` (or, for a `…888`
+            tail, `payment-pending-validation`) CloudEvent here, and later the
+            terminal `payment-completed` / `payment-cancelled` / `payment-denied`
+            event (see the operation's `callbacks`). CAMARA specifies `https://`;
+            CamaraSim only delivers to an `http://` sink (no TLS client — a
+            documented cut).
         sinkCredential:
           $ref: "#/components/schemas/SinkCredential"
 

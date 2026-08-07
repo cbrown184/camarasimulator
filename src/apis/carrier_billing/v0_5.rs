@@ -83,11 +83,14 @@
 //!   per client (every stored payment is a pagination candidate); the spec
 //!   defines no `paymentCreationDate`/`paymentStatus`/`merchantIdentifier`
 //!   filters, so none are modelled.
-//! - `sink` / `sinkCredential` are accepted for schema fidelity but not acted on
-//!   (Carrier Billing charging notifications are a later slice). Because they are
-//!   never applied, the persisted payment carries no `sink` — the CAMARA
-//!   `Payment` schema's `sink` is optional, so a `retrievePayment` response
-//!   simply omits it.
+//! - `sink` is honoured for charging notifications (a `payment-completed` /
+//!   `payment-reserved` / `payment-pending-validation` / terminal CloudEvent is
+//!   delivered off the request path — see [`notifications`]), and a `sinkCredential`
+//!   authenticates that callback: `ACCESSTOKEN` → `Authorization: Bearer`, `PLAIN` →
+//!   `Authorization: Basic` (RFC 7617), `REFRESHTOKEN` a documented cut. The
+//!   credential is a secret — it is used at delivery time and never echoed, so the
+//!   persisted payment carries neither `sink` nor `sinkCredential` (both optional in
+//!   the CAMARA `Payment` schema, so a `retrievePayment` response omits them).
 
 use axum::body::Bytes;
 use axum::extract::{Path, RawQuery};
@@ -218,9 +221,11 @@ struct CreatePayment {
     /// accepts it for schema fidelity but does not yet act on it (later slice).
     sink: Option<String>,
     /// Optional credential for the callback `sink`. An `ACCESSTOKEN` credential's
-    /// bearer token is applied to the `payment-completed` callback as an
-    /// `Authorization: Bearer` header ([`notifications::sink_authorization`]);
-    /// `PLAIN`/`REFRESHTOKEN` are accepted but not applied (documented cut).
+    /// bearer token is applied to the callback as an `Authorization: Bearer` header,
+    /// and a `PLAIN` credential's `identifier`/`secret` as an `Authorization: Basic
+    /// base64(identifier:secret)` header (RFC 7617), via
+    /// [`notifications::sink_authorization`]; `REFRESHTOKEN` is accepted but not
+    /// applied (documented cut — it needs a token-exchange round trip).
     #[serde(rename = "sinkCredential")]
     sink_credential: Option<Value>,
 }
@@ -2744,6 +2749,40 @@ mod tests {
         assert!(
             head.contains("Authorization: Bearer cb-notify-secret\r\n"),
             "authorization header present: {head}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_plain_sink_credential_authenticates_the_charging_notification_as_basic() {
+        use tokio::io::AsyncReadExt;
+        use tokio::net::TcpListener;
+
+        // A loopback receiver stands in for the merchant's `sink`.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let sink = format!("http://{addr}/cb-plain");
+
+        // A successful charge carrying a sink AND a PLAIN sinkCredential.
+        let token = mint_token(CREATE_SCOPE).await;
+        let body = format!(
+            r#"{{"amountTransaction":{{"phoneNumber":"+123456789012","paymentAmount":{{"chargingInformation":{{"amount":1.0,"currency":"EUR","description":"x"}}}},"referenceCode":"ref-001"}},"sink":"{sink}","sinkCredential":{{"credentialType":"PLAIN","identifier":"cbid","secret":"cbsecret"}}}}"#
+        );
+        let (status, _, created) = post_payment(Some(&token), &body, None).await;
+        assert_eq!(status, StatusCode::CREATED);
+        // The credential is a secret: it must never appear in the created payment.
+        assert!(created.get("sinkCredential").is_none(), "secret not echoed");
+        assert!(!created.to_string().contains("cbsecret"));
+
+        // Read the notification: it carries the RFC 7617 Basic header.
+        // base64("cbid:cbsecret") == "Y2JpZDpjYnNlY3JldA==".
+        let (mut sock, _) = listener.accept().await.unwrap();
+        let mut buf = Vec::new();
+        sock.read_to_end(&mut buf).await.unwrap();
+        let raw = String::from_utf8(buf).unwrap();
+        let (head, _) = raw.split_once("\r\n\r\n").expect("headers then body");
+        assert!(
+            head.contains("Authorization: Basic Y2JpZDpjYnNlY3JldA==\r\n"),
+            "basic authorization header present: {head}"
         );
     }
 
