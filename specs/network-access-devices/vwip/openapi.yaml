@@ -13,9 +13,11 @@
 # `GET /network-access-devices/{networkAccessDeviceId}` (read one of those devices
 # by id). CamaraSim's device set is deterministic from the token subject, so the
 # by-id read regenerates the set and looks the id up — it needs no store (a
-# simplification of CAMARA's stateful resource read). The reboot-request resource
-# lifecycle (`POST/GET/PATCH/DELETE /reboot-requests…`) is stateful and remains
-# deferred to a later pass (documented cut).
+# simplification of CAMARA's stateful resource read). It also serves
+# `POST /reboot-requests` (create a **stateful** reboot request for the
+# subscriber's devices, persisted in an in-memory store); the read/patch/delete
+# legs of that lifecycle (`GET/PATCH/DELETE /reboot-requests…`) remain deferred to
+# a later pass (documented cut).
 openapi: 3.0.3
 info:
   title: Network Access Devices
@@ -83,9 +85,16 @@ info:
       belonging to another subscriber, or malformed — is a `404 NOT_FOUND` (there
       is no store to tell those cases apart). This is a documented simplification
       of CAMARA's stateful resource read.
-    - The **reboot-request** resource lifecycle
-      (`POST/GET/PATCH/DELETE /reboot-requests…`) is stateful and not yet
-      implemented.
+    - The **reboot-request** resource lifecycle is **stateful**. `POST
+      /reboot-requests` is implemented: it creates a reboot request for one or
+      more of the subscriber's devices and persists it in an in-memory store, so
+      the created representation reads back in later slices. Its target devices
+      are matched against the subscriber's deterministic device set (an explicit
+      `devices` list must hold UUIDs the subscriber owns; an omitted/empty list
+      reboots all of them). The **audit** fields `createdBy`/`modifiedBy`
+      (`format: uuid`) are omitted — the simulator's subject is not a UUID — and
+      the read/patch/delete legs (`GET/PATCH/DELETE /reboot-requests…`) are not
+      yet implemented (documented cuts).
   version: "wip"
   license:
     name: Apache-2.0
@@ -277,6 +286,115 @@ paths:
           - input: an unknown / another subscriber's / malformed id
             result: "404 NOT_FOUND"
 
+  /reboot-requests:
+    post:
+      operationId: createRebootRequest
+      summary: Create a reboot request for the subscriber's Network Access Devices
+      description: |
+        Creates a **reboot request** targeting one or more of the subscriber's
+        Network Access Devices. This is a stateful resource: the created
+        `RebootRequest` is persisted (in CamaraSim, in an in-memory store) and
+        addressed in later operations by its minted `id`.
+
+        The request body (`RebootRequestCreate`) is entirely optional:
+
+        - `devices` — the target device ids. Omit (or send an empty array) to
+          reboot **all** of the subscriber's devices; the schema requires
+          `devices` on the created resource, so the inferred set is materialised.
+        - `atTime` — schedule the reboot (RFC 3339); omit for an immediate reboot.
+        - `message` — a free-text note (≤ 255 characters).
+
+        Two control planes (docs/DESIGN.md §7):
+
+        - **Reserved error suffix (subject).** As for the listing / by-id read, a
+          subject whose trailing three digits name a reserved CAMARA status
+          answers that canonical error before anything is created.
+        - **`devices` vs the subject's set.** An explicit `devices` list must hold
+          well-formed UUIDs (else `400 INVALID_ARGUMENT`), each belonging to the
+          subscriber's deterministic device set (else `404 NOT_FOUND`).
+      security:
+        - openId:
+            - network-access-devices:reboot
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RebootRequestCreate"
+            examples:
+              rebootAll:
+                summary: Immediate reboot of all the subscriber's devices
+                value: {}
+              scheduledTargeted:
+                summary: A scheduled reboot of two specific devices
+                value:
+                  devices:
+                    - 3fa85f64-5717-4562-b3fc-2c963f66afa6
+                    - 123e4567-e89b-12d3-a456-426614174000
+                  atTime: "2024-06-01T02:00:00Z"
+                  message: nightly maintenance window
+      responses:
+        "201":
+          description: Reboot request created successfully.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+            Location:
+              description: The URL of the created reboot request.
+              required: false
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RebootRequest"
+              examples:
+                created:
+                  summary: A reboot request targeting all the subscriber's devices
+                  value:
+                    id: 8f14e45f-ceea-467d-9a3e-2c9f2b0f0a01
+                    devices:
+                      - 3fa85f64-5717-4562-b3fc-2c963f66afa6
+                    createdAt: "2024-06-01T14:27:08Z"
+                    modifiedAt: "2024-06-01T14:27:08Z"
+        "400":
+          $ref: "../../shared/errors.yaml#/components/responses/InvalidArgument"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "409":
+          $ref: "../../shared/errors.yaml#/components/responses/Conflict"
+        "422":
+          $ref: "../../shared/errors.yaml#/components/responses/ServiceNotApplicable"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          Result selected from the token subject and the request body
+          (docs/DESIGN.md §7). A reserved subject suffix answers a canonical
+          CAMARA error (account-level); otherwise the reboot targets are matched
+          against the subject's deterministic device set.
+        cases:
+          - input: subject ending in a reserved error suffix (e.g. …404, …503)
+            result: the canonical CAMARA error for that status (nothing created)
+          - input: "no body / empty `devices`"
+            result: "201 — a reboot request targeting all the subscriber's devices"
+          - input: "`devices` holding an id from the subscriber's set"
+            result: "201 — a reboot request targeting just that device"
+          - input: "`devices` holding a well-formed UUID the subscriber does not own"
+            result: "404 NOT_FOUND"
+          - input: "`devices` holding a value that is not a UUID (or an unknown field / non-JSON body / `message` > 255 chars / malformed `atTime`)"
+            result: "400 INVALID_ARGUMENT"
+
 components:
   securitySchemes:
     openId:
@@ -364,3 +482,92 @@ components:
       maxItems: 100
       items:
         $ref: "#/components/schemas/NetworkAccessDevice"
+
+    RebootRequestCreate:
+      type: object
+      additionalProperties: false
+      description: |
+        The fields accepted when creating a reboot request. All are optional:
+        `devices` names the target devices (omit / empty → reboot all the
+        subscriber's devices), `atTime` schedules the reboot (omit → immediate),
+        and `message` is a free-text note.
+      properties:
+        devices:
+          type: array
+          maxItems: 100
+          description: |
+            The ids of the Network Access Devices to reboot. Each must be a UUID
+            belonging to the subscriber's device set. Omit (or send an empty
+            array) to reboot all of the subscriber's devices.
+          items:
+            type: string
+            format: uuid
+            example: 3fa85f64-5717-4562-b3fc-2c963f66afa6
+        atTime:
+          type: string
+          format: date-time
+          maxLength: 64
+          description: |
+            When to perform the reboot (RFC 3339, with time zone). Omit for an
+            immediate reboot.
+          example: "2024-06-01T02:00:00Z"
+        message:
+          type: string
+          maxLength: 255
+          description: A free-text note associated with the reboot request.
+          example: nightly maintenance window
+
+    RebootRequest:
+      type: object
+      additionalProperties: false
+      description: |
+        A reboot request for one or more of the subscriber's Network Access
+        Devices, addressed by its server-minted `id`. `devices` is always present
+        on the created resource (the target set, resolved from the request).
+
+        CamaraSim omits the optional `createdBy` / `modifiedBy` audit fields
+        (`format: uuid`) — the simulator's subject is not a UUID — a documented,
+        schema-valid cut.
+      required:
+        - id
+        - devices
+      properties:
+        id:
+          type: string
+          format: uuid
+          readOnly: true
+          description: The unique identifier of the reboot request (UUID).
+          example: 8f14e45f-ceea-467d-9a3e-2c9f2b0f0a01
+        devices:
+          type: array
+          maxItems: 100
+          description: The ids of the Network Access Devices this request reboots.
+          items:
+            type: string
+            format: uuid
+            example: 3fa85f64-5717-4562-b3fc-2c963f66afa6
+        atTime:
+          type: string
+          format: date-time
+          maxLength: 64
+          description: When the reboot is scheduled (RFC 3339). Absent for an immediate reboot.
+          example: "2024-06-01T02:00:00Z"
+        message:
+          type: string
+          maxLength: 255
+          description: The free-text note supplied with the request.
+          example: nightly maintenance window
+        createdAt:
+          type: string
+          format: date-time
+          maxLength: 64
+          readOnly: true
+          description: Resource creation date/time (RFC 3339, UTC).
+          example: "2024-06-01T14:27:08Z"
+        modifiedAt:
+          type: string
+          format: date-time
+          maxLength: 64
+          readOnly: true
+          description: Last update date/time (RFC 3339, UTC).
+          example: "2024-06-01T14:27:08Z"

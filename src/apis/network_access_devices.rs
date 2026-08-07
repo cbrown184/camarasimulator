@@ -2,15 +2,19 @@
 //!
 //! Network Access Devices manages network-operator-supplied access equipment
 //! (gateways, routers, access points) — operator-managed infrastructure, not
-//! end-user devices. CamaraSim implements the stateless listing endpoint
-//! `GET /network-access-devices`, which enumerates the equipment associated with
-//! the subscriber the access token authenticated. The reboot-request resource
-//! lifecycle is a stateful later slice (see `PROGRESS.md`).
+//! end-user devices. CamaraSim implements the stateless listing endpoints
+//! (`GET /network-access-devices`, `GET /network-access-devices/{id}`) and has
+//! begun the **stateful reboot-request resource lifecycle**: `POST
+//! /reboot-requests` creates a reboot request for the subscriber's devices and
+//! persists it in an in-memory store ([`store`]). The read/patch/delete legs are
+//! later slices (see `PROGRESS.md`).
 //!
 //! One submodule per major version (docs/DESIGN.md §5, §9). So far:
 //! - [`vwip`] — mounted at `/network-access-devices/vwip` (no released CAMARA
 //!   version yet, so mounted at its canonical `vwip` base path).
+//! - [`store`] — the in-memory reboot-request store shared across versions.
 
+pub mod store;
 pub mod vwip;
 
 use axum::Router;
