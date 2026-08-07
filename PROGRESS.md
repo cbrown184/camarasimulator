@@ -1052,8 +1052,17 @@ persisted by `createRebootRequest`, verbatim. The id is opaque and server-minted
 so store state is the sole control plane (DESIGN §7 — no reserved-identifier
 plane): a stored id → `200`, any other (never created / already deleted) → `404
 NOT_FOUND`. Reboot requests aren't scoped per subscriber, so the `sub`-ownership
-check isn't enforced (documented cut). Only `PATCH`/`DELETE /reboot-requests…`
-remain. `x-correlator` echoed; no new dep.
+check isn't enforced (documented cut). `x-correlator` echoed; no new dep.
+
+The reboot-request lifecycle now also has its **delete** leg:
+`DELETE /network-access-devices/vwip/reboot-requests/{rebootRequestId}`
+(`deleteRebootRequest`, `network-access-devices:reboot`) evicts the stored
+`RebootRequest` from the shared store (`store::remove`, single-use): a stored id →
+`204 No Content`, any other (never created / already deleted) → `404 NOT_FOUND`.
+Store state is the sole control plane (opaque server-minted id — no
+reserved-identifier plane, mirroring QoD `deleteSession`); `sub`-ownership not
+enforced (documented cut, mirroring the read). `x-correlator` echoed on `204` and
+`404`; no new dep. Only `PATCH /reboot-requests…` (update leg) remains.
 
 ## In progress (claimed this pass)
 
@@ -2202,8 +2211,15 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
       `404 NOT_FOUND`. Reboot requests aren't scoped per subscriber, so the
       `sub`-ownership check on the read isn't enforced (documented cut).
       `x-correlator` echoed. No new dep.
-    - [ ] `PATCH`/`DELETE /reboot-requests…` (update/delete legs;
-      PATCH's 409 INCOMPATIBLE_STATE + scheduled-reboot semantics) — later slices.
+    - [x] `DELETE /reboot-requests/{rebootRequestId}` (`deleteRebootRequest`) —
+      evicts the stored `RebootRequest` from the shared store (`store::remove`,
+      single-use): present → `204 No Content`, unknown/already-deleted → `404
+      NOT_FOUND`. Opaque, server-minted id → store state is the sole control plane
+      (no reserved-identifier plane; mirrors QoD `deleteSession` / Traffic
+      Influence `deleteTrafficInfluence`). `sub`-ownership not enforced (documented
+      cut, mirroring the read). `x-correlator` echoed on `204` and `404`. No new dep.
+    - [ ] `PATCH /reboot-requests/{rebootRequestId}` (`updateRebootRequest`, update
+      leg; PATCH's 409 INCOMPATIBLE_STATE + scheduled-reboot semantics) — later slice.
 - [ ] Other CAMARA APIs as capacity allows
 
 ## Cross-cutting (do alongside the item that needs it)
@@ -2230,6 +2246,29 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-07 — network-access-devices: added `DELETE /reboot-requests/{rebootRequestId}`
+  (`deleteRebootRequest`) — the delete leg of the reboot-request lifecycle, the top
+  actionable `[ ]` leaf (respecting phase order: the remaining `[ ]` items above are
+  deferred for concrete reasons — TLS-sink cases conflict with "keep the binary small",
+  AREALIMIT is spatial, and the campaign/intermediate-transition legs need a live
+  call/provisioning engine; PATCH is the natural sibling but delete is the smaller,
+  self-contained increment after last pass's read leg). Confirmed the canonical
+  contract via the authoritative CAMARA NetworkAccessManagement `network-access-devices.yaml`
+  (WebFetch): `deleteRebootRequest` → `204` (no content) + error set `400/401/403/404/500/503`.
+  Reused the existing `store::remove` (already present + tested from the create pass):
+  single-use eviction — stored id → `204 No Content`, unknown/already-deleted → `404
+  NOT_FOUND`. Store state is the sole control plane (opaque server-minted id; no
+  reserved-identifier plane, mirrors QoD `deleteSession` / Traffic Influence
+  `deleteTrafficInfluence`). `sub`-ownership not enforced (documented cut, mirroring the
+  read). `x-correlator` echoed on `204` and `404`. Combined the id route to
+  `get(get_reboot_request).delete(delete_reboot_request)` (MethodRouter chain, no new
+  import). Dropped the now-stale `#![allow(dead_code)]` + note in `store.rs` (all of
+  insert/get/remove/new_id are live). spec: new `delete:` op under
+  `/reboot-requests/{rebootRequestId}` (204 + shared error set + `x-camarasim-scenarios`),
+  top-comment/info-cut prose updated (only PATCH remains deferred). tests: +5 (204-then-gone
+  round-trip, single-use second-delete 404, unknown-id 404, scope 403 / token 401 leave the
+  resource intact, x-correlator on 204+404). cargo test 1654 pass (was 1649);
+  cargo build --release clean; no new dep. — binary: 3,178,488 bytes (~3.03 MiB)
 - 2026-08-07 — network-access-devices: added `GET /reboot-requests/{rebootRequestId}`
   (`getRebootRequest`) — the read leg of the reboot-request lifecycle. Store state is
   the sole control plane (opaque server-minted id): stored → 200 verbatim, else 404.

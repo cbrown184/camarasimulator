@@ -10,7 +10,11 @@
 //! - `POST /network-access-devices/vwip/reboot-requests` — create a **stateful**
 //!   reboot request targeting one or more of the subscriber's devices, persisted
 //!   in the shared in-memory [`super::store`] (operationId `createRebootRequest`).
-//!   The read/patch/delete legs of the lifecycle are later slices.
+//! - `GET /network-access-devices/vwip/reboot-requests/{rebootRequestId}` — read a
+//!   created reboot request back by its opaque id (operationId `getRebootRequest`).
+//! - `DELETE /network-access-devices/vwip/reboot-requests/{rebootRequestId}` —
+//!   cancel/delete a created reboot request, evicting it from the store
+//!   (operationId `deleteRebootRequest`). The `PATCH` (update) leg is a later slice.
 //!
 //! ## What it does
 //!
@@ -87,7 +91,7 @@ pub fn routes() -> Router {
         .route(REBOOT_REQUESTS, post(create_reboot_request))
         .route(
             "/network-access-devices/vwip/reboot-requests/:reboot_request_id",
-            get(get_reboot_request),
+            get(get_reboot_request).delete(delete_reboot_request),
         )
 }
 
@@ -355,6 +359,48 @@ async fn get_reboot_request(
         Some(resource) => {
             with_correlator((StatusCode::OK, Json(resource)).into_response(), &correlator)
         }
+        None => with_correlator(
+            CamaraError::not_found("No reboot request found for the provided id.").into_response(),
+            &correlator,
+        ),
+    }
+}
+
+/// `DELETE /network-access-devices/vwip/reboot-requests/{rebootRequestId}` —
+/// cancel/delete a previously created reboot request (operationId
+/// `deleteRebootRequest`).
+///
+/// This is the delete leg of the **stateful** reboot-request lifecycle: it evicts
+/// the `RebootRequest` persisted by `createRebootRequest` from the shared
+/// in-memory [`super::store`]. Like the read leg, the `rebootRequestId` is
+/// server-minted and opaque, so it is **not** a reserved-error scenario plane; the
+/// **store state** is the sole control plane (docs/DESIGN.md §7, mirroring QoD's
+/// `deleteSession` / Traffic Influence's `deleteTrafficInfluence`):
+///
+/// - **A stored id** → `204 No Content` (single-use eviction — a later
+///   `getRebootRequest`/`deleteRebootRequest` for the same id is a `404`).
+/// - **Any other id** (never created, or already deleted) → `404 NOT_FOUND`.
+///
+/// Reboot requests are not scoped per subscriber, so CAMARA's `sub`-ownership
+/// check on the delete is not enforced (a documented cut, mirroring the read leg).
+/// Requires the `network-access-devices:reboot` scope.
+async fn delete_reboot_request(
+    claims: Claims,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Response {
+    // Optional correlation header, echoed on every response (CAMARA Commonalities).
+    let correlator = headers.get("x-correlator").cloned();
+
+    // Endpoint authorisation: the token must carry this API's scope.
+    if let Err(e) = claims.require_scope(SCOPE) {
+        return with_correlator(e.into_response(), &correlator);
+    }
+
+    // Store state is the only control plane: an atomic single-use remove →
+    // `204` when a request was present, `404` when nothing was there to delete.
+    match store::remove(&id) {
+        Some(_) => with_correlator(StatusCode::NO_CONTENT.into_response(), &correlator),
         None => with_correlator(
             CamaraError::not_found("No reboot request found for the provided id.").into_response(),
             &correlator,
@@ -1161,6 +1207,135 @@ mod tests {
         assert_eq!(
             headers.get("x-correlator").and_then(|v| v.to_str().ok()),
             Some("corr-getrberr")
+        );
+    }
+
+    // --- deleteRebootRequest (DELETE /reboot-requests/{id}) -----------------
+
+    /// DELETE a reboot request by id with an optional Bearer token and `x-correlator`.
+    async fn delete_reboot_request_by_id(
+        token: Option<&str>,
+        id: &str,
+        correlator: Option<&str>,
+    ) -> (StatusCode, HeaderMap, Value) {
+        let mut builder = Request::builder()
+            .method("DELETE")
+            .uri(format!("/network-access-devices/vwip/reboot-requests/{id}"))
+            .header("host", HOST);
+        if let Some(t) = token {
+            builder = builder.header("authorization", format!("Bearer {t}"));
+        }
+        if let Some(c) = correlator {
+            builder = builder.header("x-correlator", c);
+        }
+        let request = builder.body(Body::empty()).unwrap();
+        let response = app().oneshot(request).await.unwrap();
+        let status = response.status();
+        let headers = response.headers().clone();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, headers, json)
+    }
+
+    #[tokio::test]
+    async fn delete_created_reboot_request_is_no_content_then_gone() {
+        let token = mint_token(SCOPE).await;
+        let (status, _, created) = post_reboot_request(Some(&token), Some("{}"), None).await;
+        assert_eq!(status, StatusCode::CREATED);
+        let id = created["id"].as_str().unwrap().to_string();
+
+        // First delete evicts the resource → 204 No Content (empty body).
+        let (status, _, body) = delete_reboot_request_by_id(Some(&token), &id, None).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(body, Value::Null, "204 carries no body");
+        assert!(store::get(&id).is_none(), "gone from the store after delete");
+
+        // The read leg now 404s for the same id.
+        let (status, _, resp) = get_reboot_request_by_id(Some(&token), &id, None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(resp["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn delete_is_single_use_second_delete_is_not_found() {
+        let token = mint_token(SCOPE).await;
+        let (_, _, created) = post_reboot_request(Some(&token), Some("{}"), None).await;
+        let id = created["id"].as_str().unwrap().to_string();
+
+        let (status, _, _) = delete_reboot_request_by_id(Some(&token), &id, None).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        // A second delete of the same id → 404 (store state is the plane).
+        let (status, _, resp) = delete_reboot_request_by_id(Some(&token), &id, None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(resp["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn delete_unknown_reboot_request_is_not_found() {
+        let token = mint_token(SCOPE).await;
+        // A well-formed UUID that was never created → 404.
+        let (status, _, resp) = delete_reboot_request_by_id(
+            Some(&token),
+            "00000000-0000-4000-8000-000000000000",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(resp["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn delete_reboot_request_requires_the_scope_and_a_token() {
+        // First create one to target.
+        let owner = mint_token(SCOPE).await;
+        let (_, _, created) = post_reboot_request(Some(&owner), Some("{}"), None).await;
+        let id = created["id"].as_str().unwrap().to_string();
+
+        // Wrong scope → 403 (and the resource is untouched).
+        let bad = mint_token("some:other-scope").await;
+        let (status, _, resp) = delete_reboot_request_by_id(Some(&bad), &id, None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(resp["code"], "PERMISSION_DENIED");
+
+        // No token → 401 (and the resource is untouched).
+        let (status, _, resp) = delete_reboot_request_by_id(None, &id, None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(resp["code"], "UNAUTHENTICATED");
+
+        // The rejected deletes did not evict it — it still reads back.
+        let (status, _, _) = get_reboot_request_by_id(Some(&owner), &id, None).await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn delete_reboot_request_echoes_x_correlator_on_success_and_error() {
+        let token = mint_token(SCOPE).await;
+        let (_, _, created) = post_reboot_request(Some(&token), Some("{}"), None).await;
+        let id = created["id"].as_str().unwrap().to_string();
+
+        // Success (204) still echoes the correlator.
+        let (status, headers, _) =
+            delete_reboot_request_by_id(Some(&token), &id, Some("corr-delrb")).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-delrb")
+        );
+
+        // Error (unknown id) echoes it too.
+        let (status, headers, _) = delete_reboot_request_by_id(
+            Some(&token),
+            "11111111-1111-4111-8111-111111111111",
+            Some("corr-delrberr"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-delrberr")
         );
     }
 }

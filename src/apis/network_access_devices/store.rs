@@ -19,10 +19,8 @@
 //!   returned verbatim by a later `GET` — the created representation is the source
 //!   of truth for this slice.
 //!
-//! `insert` + `new_reboot_request_id` (create) and `get` (`getRebootRequest`
-//! read) are live; `remove` lands with the delete slice (hence the module-level
-//! `allow(dead_code)`, mirroring the traffic-influence store's first pass).
-#![allow(dead_code)]
+//! `insert` + `new_reboot_request_id` (create), `get` (`getRebootRequest` read),
+//! and `remove` (`deleteRebootRequest`) are all live.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};

@@ -15,10 +15,11 @@
 # by-id read regenerates the set and looks the id up — it needs no store (a
 # simplification of CAMARA's stateful resource read). It also serves
 # `POST /reboot-requests` (create a **stateful** reboot request for the
-# subscriber's devices, persisted in an in-memory store) and
-# `GET /reboot-requests/{rebootRequestId}` (read one back by its minted id); the
-# patch/delete legs of that lifecycle (`PATCH/DELETE /reboot-requests…`) remain
-# deferred to a later pass (documented cut).
+# subscriber's devices, persisted in an in-memory store),
+# `GET /reboot-requests/{rebootRequestId}` (read one back by its minted id), and
+# `DELETE /reboot-requests/{rebootRequestId}` (cancel/delete it, evicting it from
+# the store); the patch (update) leg of that lifecycle
+# (`PATCH /reboot-requests…`) remains deferred to a later pass (documented cut).
 openapi: 3.0.3
 info:
   title: Network Access Devices
@@ -94,12 +95,14 @@ info:
       `devices` list must hold UUIDs the subscriber owns; an omitted/empty list
       reboots all of them). `GET /reboot-requests/{rebootRequestId}` reads a
       created request back by its opaque, server-minted id (store state is the sole
-      control plane — a stored id → `200`, any other → `404`); reboot requests are
-      not scoped per subscriber, so CAMARA's `sub`-ownership check on the read is
-      not enforced. The **audit** fields `createdBy`/`modifiedBy` (`format: uuid`)
-      are omitted — the simulator's subject is not a UUID — and the patch/delete
-      legs (`PATCH/DELETE /reboot-requests…`) are not yet implemented (documented
-      cuts).
+      control plane — a stored id → `200`, any other → `404`), and `DELETE
+      /reboot-requests/{rebootRequestId}` cancels/deletes it by evicting it from the
+      store (single-use — a stored id → `204`, any other → `404`); reboot requests
+      are not scoped per subscriber, so CAMARA's `sub`-ownership check on the
+      read/delete is not enforced. The **audit** fields `createdBy`/`modifiedBy`
+      (`format: uuid`) are omitted — the simulator's subject is not a UUID — and the
+      patch (update) leg (`PATCH /reboot-requests…`) is not yet implemented
+      (documented cuts).
   version: "wip"
   license:
     name: Apache-2.0
@@ -472,6 +475,63 @@ paths:
         cases:
           - input: an id returned by a prior createRebootRequest
             result: "200 — that RebootRequest, verbatim"
+          - input: a well-formed UUID that was never created (or already deleted)
+            result: "404 NOT_FOUND"
+    delete:
+      operationId: deleteRebootRequest
+      summary: Cancel/delete a reboot request by id
+      description: |
+        Cancels/deletes a previously created reboot request, evicting it from the
+        store. This is the delete leg of the stateful reboot-request lifecycle.
+
+        Like the read leg, the `rebootRequestId` is server-minted and opaque, so
+        it is **not** a reserved-error scenario plane. The **store state** is the
+        sole control plane (docs/DESIGN.md §7):
+
+        - A stored id → `204 No Content` (single-use eviction — a later
+          `getRebootRequest`/`deleteRebootRequest` for the same id is a `404`).
+        - Any other id (never created, or already deleted) → `404 NOT_FOUND`.
+
+        Reboot requests are not scoped per subscriber, so CAMARA's `sub`-ownership
+        check on the delete is not enforced (a documented cut).
+      security:
+        - openId:
+            - network-access-devices:reboot
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+        - name: rebootRequestId
+          in: path
+          required: true
+          description: The unique identifier (UUID) of the reboot request.
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "204":
+          description: Reboot request deleted successfully (no content).
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+        "400":
+          $ref: "../../shared/errors.yaml#/components/responses/InvalidArgument"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          Result selected from the store state (docs/DESIGN.md §7). The
+          `rebootRequestId` is opaque and server-minted, so it is not a
+          reserved-error plane. Deletion is single-use.
+        cases:
+          - input: an id returned by a prior createRebootRequest
+            result: "204 No Content — evicted; a later GET/DELETE for it is 404"
           - input: a well-formed UUID that was never created (or already deleted)
             result: "404 NOT_FOUND"
 
