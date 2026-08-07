@@ -22,7 +22,9 @@
 # `area-left` CloudEvent reporting the device's current in/out state at
 # subscription time, POSTed to the `sink`. When the subscription carries an
 # ACCESSTOKEN `sinkCredential`, that bearer token is applied to the callback as an
-# `Authorization: Bearer` header (RFC 6750). Subscription **expiry** is enforced
+# `Authorization: Bearer` header (RFC 6750); a PLAIN `sinkCredential` (an
+# `identifier` + `secret` pair) is applied as an `Authorization: Basic` header
+# (RFC 7617). Subscription **expiry** is enforced
 # too: when `config.subscriptionExpireTime` (UTC `…Z`) is reached, the subscription
 # is evicted and a `subscription-ended` (`SUBSCRIPTION_EXPIRED`) CloudEvent is
 # POSTed to the `sink`. **Movement-triggered** `area-entered` / `area-left` events
@@ -253,7 +255,9 @@ paths:
           the device's current position — even → inside → `area-entered`, odd →
           outside → `area-left` — filtered to the subscribed `types`. An ACCESSTOKEN
           `sinkCredential` is applied to that callback as an `Authorization: Bearer`
-          header (RFC 6750); the secret is never echoed. When the caller sets
+          header (RFC 6750), and a PLAIN `sinkCredential` (an `identifier` + `secret`
+          pair) as an `Authorization: Basic <base64(identifier:secret)>` header
+          (RFC 7617); the secret is never echoed. When the caller sets
           `config.subscriptionExpireTime` (UTC `…Z` form), a fire-and-forget timer
           ends the subscription at that instant — evicting it and POSTing a
           `subscription-ended` CloudEvent (`terminationReason: SUBSCRIPTION_EXPIRED`)
@@ -266,7 +270,7 @@ paths:
           events delivered: the event that reaches the maximum is delivered, then the
           subscription is evicted and a `subscription-ended` (`MAX_EVENTS_REACHED`)
           CloudEvent is POSTed after it (unbounded when unset). Documented cuts: only
-          `protocol: HTTP` is supported; PLAIN/REFRESHTOKEN `sinkCredential` types are
+          `protocol: HTTP` is supported; the REFRESHTOKEN `sinkCredential` type is
           accepted but not applied (unauthenticated); only `http://` sinks are delivered
           to (no TLS client); a non-`Z` expire time arms no timer; DELETE emits no
           `subscription-ended` event. 409/500 are CamaraSim extensions of the shared
@@ -284,6 +288,8 @@ paths:
             result: "201; area-left CloudEvent POSTed to the sink"
           - input: initialEvent delivered with an ACCESSTOKEN `sinkCredential`
             result: "callback carries `Authorization: Bearer <accessToken>` (RFC 6750)"
+          - input: initialEvent delivered with a PLAIN `sinkCredential` (identifier + secret)
+            result: "callback carries `Authorization: Basic <base64(identifier:secret)>` (RFC 7617)"
           - input: ACTIVE subscription, identifier tail …001, area-entered subscribed
             result: "201; area-entered movement CloudEvent POSTed to the sink after a short grace"
           - input: ACTIVE subscription, identifier tail …002, area-left subscribed
@@ -334,8 +340,10 @@ paths:
                 best-effort, fire-and-forget, and only to an `http://` sink (no TLS
                 client). When the subscription carries an ACCESSTOKEN `sinkCredential`,
                 each callback is authenticated with an `Authorization: Bearer
-                <accessToken>` header (RFC 6750); PLAIN/REFRESHTOKEN credential types
-                are accepted but not applied (a documented cut).
+                <accessToken>` header (RFC 6750), and with a PLAIN `sinkCredential`
+                (an `identifier` + `secret` pair) with an `Authorization: Basic
+                <base64(identifier:secret)>` header (RFC 7617); the REFRESHTOKEN
+                credential type is accepted but not applied (a documented cut).
               requestBody:
                 required: true
                 content:
@@ -587,11 +595,42 @@ components:
         sinkCredential:
           type: object
           description: >-
-            Credential the network presents to the `sink`. An ACCESSTOKEN
-            credential's bearer token is applied to the initial-event callback as an
-            `Authorization: Bearer` header (RFC 6750); PLAIN/REFRESHTOKEN types are
-            accepted for schema fidelity but not applied (a documented cut). Never
-            echoed in the response (it carries a secret).
+            Credential the network presents to the `sink`. Kept in memory only and
+            never echoed back in a `SubscriptionInfo` (it carries a secret).
+            CamaraSim applies a `credentialType: ACCESSTOKEN` credential (its
+            `accessToken` is sent on every callback as
+            `Authorization: Bearer <accessToken>`, RFC 6750) and a
+            `credentialType: PLAIN` credential (its `identifier` + `secret` are sent
+            as `Authorization: Basic <base64(identifier:secret)>`, RFC 7617). The
+            `REFRESHTOKEN` credential type is accepted for schema fidelity but not
+            applied (a documented cut).
+          properties:
+            credentialType:
+              type: string
+              enum: [PLAIN, ACCESSTOKEN, REFRESHTOKEN]
+              description: >-
+                The type of credential. CamaraSim applies `ACCESSTOKEN` and `PLAIN`.
+            accessToken:
+              type: string
+              description: >-
+                The access token, sent as `Authorization: Bearer <accessToken>` when
+                `credentialType` is `ACCESSTOKEN`.
+            accessTokenType:
+              type: string
+              enum: [bearer]
+              description: The access-token type; only `bearer` is defined.
+            identifier:
+              type: string
+              description: >-
+                The identifier (account or username) half of a `PLAIN` credential;
+                sent as the username in the callback's HTTP Basic `Authorization`
+                header when `credentialType` is `PLAIN`.
+            secret:
+              type: string
+              description: >-
+                The secret (password or passphrase) half of a `PLAIN` credential;
+                sent as the password in the callback's HTTP Basic `Authorization`
+                header when `credentialType` is `PLAIN`.
         types:
           type: array
           description: The geofencing event types to subscribe to. Must be non-empty.

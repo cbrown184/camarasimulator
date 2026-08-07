@@ -126,9 +126,10 @@ struct CreateSubscription {
     protocol: Option<String>,
     sink: Option<String>,
     // Carries a secret, so it is never echoed. An ACCESSTOKEN credential is applied
-    // to the initial-event callback as an RFC 6750 `Authorization: Bearer` header
-    // (see [`notifications::sink_authorization`]); PLAIN/REFRESHTOKEN are accepted
-    // but not applied — a documented cut.
+    // to every callback as an RFC 6750 `Authorization: Bearer` header, and a PLAIN
+    // credential as an RFC 7617 `Authorization: Basic` header (see
+    // [`notifications::sink_authorization`]); REFRESHTOKEN is accepted but not
+    // applied — a documented cut.
     #[serde(rename = "sinkCredential")]
     sink_credential: Option<Value>,
     types: Option<Vec<String>>,
@@ -353,7 +354,7 @@ async fn create_subscription(claims: Claims, headers: HeaderMap, body: Bytes) ->
     // `area-entered`/`area-left` CloudEvent to the sink (fire-and-forget, off the
     // request path). The event type is chosen from the identifier's trailing three
     // digits and filtered to the subscribed `types` (see notifications module). An
-    // ACCESSTOKEN `sinkCredential` is applied to the callback as a bearer token.
+    // ACCESSTOKEN/PLAIN `sinkCredential` is applied to the callback (bearer/basic).
     if let Some(event_type) = notifications::initial_event_type(
         config.initial_event,
         status,
@@ -387,8 +388,8 @@ async fn create_subscription(claims: Claims, headers: HeaderMap, body: Bytes) ->
     // delivered off the request path by a short fire-and-forget timer (mirroring
     // QoD's `…001` NETWORK_TERMINATED). The subscription stays ACTIVE unless the
     // movement event exhausts its `subscriptionMaxEvents` budget, in which case it
-    // ends (see `deliver_counted`). An ACCESSTOKEN `sinkCredential` is applied to
-    // the callback.
+    // ends (see `deliver_counted`). An ACCESSTOKEN/PLAIN `sinkCredential` is applied
+    // to the callback (bearer/basic).
     if let Some(event_type) = notifications::movement_event_type(
         status,
         scenarios::trailing_three_digits(&identifier),
@@ -419,7 +420,7 @@ async fn create_subscription(claims: Claims, headers: HeaderMap, body: Bytes) ->
     // `subscription-ended` CloudEvent (terminationReason: SUBSCRIPTION_EXPIRED) —
     // off the request path. Only the RFC 3339 UTC (`…Z`) form drives the timer (a
     // documented cut); an unparseable value is still echoed but arms no timer. An
-    // ACCESSTOKEN `sinkCredential` is applied to the callback (captured here).
+    // ACCESSTOKEN/PLAIN `sinkCredential` is applied to the callback (captured here).
     if let Some(expires) = config
         .subscription_expire_time
         .as_deref()
@@ -449,7 +450,8 @@ async fn create_subscription(claims: Claims, headers: HeaderMap, body: Bytes) ->
 /// no "extend" operation, so — unlike QoD — the expiry instant is fixed and the
 /// timer sleeps just once. The sleep is async, so the (single-node, in-memory)
 /// runtime is never blocked. `auth`, when present, applies the subscription's
-/// ACCESSTOKEN `sinkCredential` as an `Authorization: Bearer` header (RFC 6750).
+/// `sinkCredential` as an `Authorization` header (ACCESSTOKEN → `Bearer`, RFC 6750;
+/// PLAIN → `Basic`, RFC 7617; see [`notifications::sink_authorization`]).
 fn spawn_expiry(subscription_id: String, sink: String, expires_at: i64, auth: Option<String>) {
     tokio::spawn(async move {
         let now = now_unix_secs();
@@ -481,8 +483,9 @@ fn spawn_expiry(subscription_id: String, sink: String, expires_at: i64, auth: Op
 /// a no-op (the `store::get` check is `None`), so a movement event is never
 /// delivered for a subscription that has already ended. The sleep is async, so the
 /// (single-node, in-memory) runtime is never blocked. `auth`, when present, applies
-/// the subscription's ACCESSTOKEN `sinkCredential` as an `Authorization: Bearer`
-/// header (RFC 6750).
+/// the subscription's `sinkCredential` as an `Authorization` header (ACCESSTOKEN →
+/// `Bearer`, RFC 6750; PLAIN → `Basic`, RFC 7617; see
+/// [`notifications::sink_authorization`]).
 fn spawn_movement(
     subscription_id: String,
     sink: String,
@@ -524,8 +527,8 @@ fn spawn_movement(
 /// The eviction is synchronous (done before this returns), so a still-pending
 /// movement/expiry timer for the same subscription then sees it gone and becomes a
 /// no-op — exactly one terminal outcome fires. Only the network I/O is spawned, never
-/// on the request path (DESIGN §11). An ACCESSTOKEN `sinkCredential` (`auth`) is
-/// applied to every callback, including the terminal `subscription-ended` event.
+/// on the request path (DESIGN §11). An ACCESSTOKEN/PLAIN `sinkCredential` (`auth`)
+/// is applied to every callback, including the terminal `subscription-ended` event.
 fn deliver_counted(subscription_id: &str, sink: String, event: Value, auth: Option<String>) {
     match store::consume_event(subscription_id) {
         store::EventBudget::Unbounded | store::EventBudget::Allowed => {
@@ -1588,6 +1591,61 @@ mod tests {
         assert!(
             head.contains("Authorization: Bearer sink-secret-token\r\n"),
             "authorization header present: {head}"
+        );
+        let event: Value = serde_json::from_str(event_body).expect("body is JSON");
+        assert_eq!(event["type"], TYPE_ENTERED);
+    }
+
+    #[tokio::test]
+    async fn initial_event_applies_the_plain_sink_credential_as_basic() {
+        use tokio::io::AsyncReadExt;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let sink = format!("http://{addr}/geo-plain");
+
+        // A create body with a PLAIN sinkCredential (identifier + secret) and
+        // initialEvent: true. base64("aladdin:opensesame") == "YWxhZGRpbjpvcGVuc2VzYW1l".
+        let body = json!({
+            "protocol": "HTTP",
+            "sink": sink,
+            "sinkCredential": {
+                "credentialType": "PLAIN",
+                "identifier": "aladdin",
+                "secret": "opensesame",
+            },
+            "types": [TYPE_ENTERED, TYPE_LEFT],
+            "config": {
+                "subscriptionDetail": {
+                    "device": { "phoneNumber": "+123456789012" },
+                    "area": {
+                        "areaType": "CIRCLE",
+                        "center": { "latitude": 51.5, "longitude": -0.12 },
+                        "radius": 5000,
+                    },
+                },
+                "initialEvent": true,
+            },
+        })
+        .to_string();
+
+        let token = mint_token(CREATE_SCOPE).await;
+        let (status, _, created) = post_subscriptions(Some(&token), &body, None).await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(created["status"], "ACTIVE");
+        // The secret is never echoed back.
+        assert!(created.get("sinkCredential").is_none());
+
+        // The fire-and-forget callback carries the RFC 7617 HTTP Basic header.
+        let (mut sock, _) = listener.accept().await.unwrap();
+        let mut buf = Vec::new();
+        sock.read_to_end(&mut buf).await.unwrap();
+        let raw = String::from_utf8(buf).unwrap();
+        let (head, event_body) = raw.split_once("\r\n\r\n").expect("headers then body");
+        assert!(
+            head.contains("Authorization: Basic YWxhZGRpbjpvcGVuc2VzYW1l\r\n"),
+            "basic authorization header present: {head}"
         );
         let event: Value = serde_json::from_str(event_body).expect("body is JSON");
         assert_eq!(event["type"], TYPE_ENTERED);
