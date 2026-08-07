@@ -1045,6 +1045,16 @@ identifier fields are omitted for operator devices (schema-valid cut — only `i
 is required); the reboot-request resource lifecycle is a stateful later slice.
 `x-correlator` echoed.
 
+The Network Access Devices reboot-request lifecycle now has its **read** leg
+alongside create: `GET /network-access-devices/vwip/reboot-requests/{rebootRequestId}`
+(`getRebootRequest`, `network-access-devices:reboot`) returns the `RebootRequest`
+persisted by `createRebootRequest`, verbatim. The id is opaque and server-minted,
+so store state is the sole control plane (DESIGN §7 — no reserved-identifier
+plane): a stored id → `200`, any other (never created / already deleted) → `404
+NOT_FOUND`. Reboot requests aren't scoped per subscriber, so the `sub`-ownership
+check isn't enforced (documented cut). Only `PATCH`/`DELETE /reboot-requests…`
+remain. `x-correlator` echoed; no new dep.
+
 ## In progress (claimed this pass)
 
 _None._  <!-- agent: put the claimed item + run timestamp here, clear it when done -->
@@ -2184,7 +2194,15 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
       is materialised). `message` ≤255 / `atTime` RFC 3339 validated + echoed;
       malformed body/field → 400. Audit `createdBy`/`modifiedBy` (uuid) omitted
       (subject isn't a UUID — documented cut). `x-correlator` echoed.
-    - [ ] `GET`/`PATCH`/`DELETE /reboot-requests…` (read/update/delete legs;
+    - [x] `GET /reboot-requests/{rebootRequestId}` (`getRebootRequest`) — reads a
+      created request back from the store by its opaque, server-minted id. Store
+      state is the sole control plane (DESIGN §7; the id is opaque, so no
+      reserved-identifier plane): a stored id → `200` with the persisted
+      `RebootRequest` verbatim, any other id (never created / already deleted) →
+      `404 NOT_FOUND`. Reboot requests aren't scoped per subscriber, so the
+      `sub`-ownership check on the read isn't enforced (documented cut).
+      `x-correlator` echoed. No new dep.
+    - [ ] `PATCH`/`DELETE /reboot-requests…` (update/delete legs;
       PATCH's 409 INCOMPATIBLE_STATE + scheduled-reboot semantics) — later slices.
 - [ ] Other CAMARA APIs as capacity allows
 
@@ -2211,6 +2229,13 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 ## Scan journal
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
+
+- 2026-08-07 — network-access-devices: added `GET /reboot-requests/{rebootRequestId}`
+  (`getRebootRequest`) — the read leg of the reboot-request lifecycle. Store state is
+  the sole control plane (opaque server-minted id): stored → 200 verbatim, else 404.
+  Reused existing `store::get`; spec: new `/reboot-requests/{rebootRequestId}` GET path
+  + x-camarasim-scenarios, top-comment/cuts updated. tests: +4 (read-back / 404 / scope
+  gating / x-correlator). 1649 tests green; no new dep. — binary: 3.1M (3172656 B)
 
 2026-08-07 17:05Z — network-access-devices: begin the **stateful Reboot Requests lifecycle** — add `POST /reboot-requests` (`createRebootRequest`, scope `network-access-devices:reboot`), the top actionable `[ ]` leaf across the backlog. Chosen respecting phase order (stateless & non-spatial preferred, then stateful non-spatial before spatial/TLS): every item above it is done or deferred for a concrete reason — the rustls TLS-sink cases conflict with "keep the binary small", the AREALIMIT query is spatial, and the sponsored-data campaign / Click-to-Dial & Traffic-Influence intermediate-transition legs need a live call/provisioning engine. Reboot Requests is stateful **non-spatial** — the natural next slice after the last two passes built this API's list + by-id read. Fetched the authoritative CAMARA NetworkAccessManagement contract via `raw.githubusercontent.com` (main `network-access-devices.yaml` + the `RebootRequests`/`NAM_Common` modules): POST → `201 RebootRequest`; `RebootRequestCreate` = optional `devices`(uuid[], maxItems 100) / `atTime`(RFC 3339) / `message`(≤255); `RebootRequest` = ResourceIdentifier(`id`) + those + ResourceAudit(`createdAt`/`modifiedAt`/`createdBy`/`modifiedBy`), `required: [id, devices]` — **no `status` field**. New `src/apis/network_access_devices/store.rs` (`Mutex<HashMap>`, lock never across await, opaque UUID-v4-shaped id from counter+clock, no uuid/rand/new dep, `#![allow(dead_code)]` until the read/delete legs land — mirrors the traffic-influence store's first pass). Handler: two control planes (DESIGN §7) — reserved subject suffix → canonical CAMARA error (account-level, mirroring list/read); and `devices` matched against the subject's deterministic device set (`device_list`) — an explicit list must hold UUID-shaped ids (else 400) the subscriber owns (else 404), an omitted/empty list reboots **all** of them (materialising the schema-required `devices`). `message`/`atTime` validated (self-contained RFC 3339 parser + civil-date formatter, no dep) + echoed; malformed body/unknown field/non-JSON → 400. `createdBy`/`modifiedBy` (uuid) omitted (subject isn't a UUID — documented cut). `201` + `Location`, persisted so later GET/PATCH/DELETE read it back. Renamed the module's `LIST_SCOPE` → `SCOPE` (all three ops share `network-access-devices:reboot`). Spec: `specs/network-access-devices/vwip/openapi.yaml` — new `/reboot-requests` POST path (201 + full shared error set + `x-camarasim-scenarios`), `RebootRequestCreate`/`RebootRequest` schemas, refreshed header + Documented-cuts prose (create now live; GET/PATCH/DELETE + createdBy/modifiedBy the remaining cuts). Tests: +12 (store: id shape/uniqueness, insert/get/remove single-use; vwip: uuid+rfc3339 unit, reboot-all default + Location + audit fields, store round-trip, explicit valid target echo, message/atTime echo, unknown-UUID 404, malformed-inputs 400 matrix (non-UUID device / bad atTime / >255 message / unknown field / non-JSON), reserved subject 503, scope 403 / token 401, x-correlator on 201+400), net +12. cargo test 1645 pass (was 1633); cargo build --release clean, no new dep. — binary: 3,165,944 bytes (~3.02 MiB, +22,232 B)
 2026-08-07 16:05Z — network-access-devices: add `GET /network-access-devices/{networkAccessDeviceId}` (`getNetworkAccessDevice`, scope `network-access-devices:reboot`) — the per-device read, the top actionable `[ ]` leaf across the whole backlog. Chosen respecting phase order (stateless & non-spatial preferred): every item above it is done or deferred for a concrete reason — the rustls TLS-sink cases conflict with "keep the binary small", and the AREALIMIT spatial query / sponsored-data campaign management / Click-to-Dial & Traffic-Influence intermediate-transition legs need a live call/provisioning engine. The list endpoint is fully deterministic from the token subject, so — contrary to the backlog note's "stateful; needs a store" — the read is implemented **statelessly**: it regenerates the subject's device set ([`device_list`]) and returns the device whose `id` matches the path param. Two control planes (DESIGN §7): the subject's reserved-error suffix → canonical CAMARA error (account-level, mirroring the list, so a `…503` subject → 503 regardless of id); else the id vs the subject's set — a matching id → `200` with that `NetworkAccessDevice`, any other id (unknown / another subscriber's / malformed) → `404 NOT_FOUND` (no store to tell them apart — a documented simplification of CAMARA's stateful resource read). `x-correlator` echoed on success and error. No new dep (reuses `sha2`/`errors`/`scenarios`). Spec: `specs/network-access-devices/vwip/openapi.yaml` — new `/network-access-devices/{networkAccessDeviceId}` path (get op, `format: uuid` path param, 200 `NetworkAccessDevice` example, shared errors.yaml `$ref`s, `x-camarasim-scenarios`), plus refreshed header/cut prose (the per-device read is no longer a cut; only the reboot-request lifecycle remains deferred). Code: 2nd route + `get_device` handler + refreshed module doc in `vwip.rs`. Tests: +6 router integration (id round-trips from the subject's set incl. multi-device …002; unknown & malformed id → 404; another subscriber's id → 404; reserved-suffix subject → 503; missing-scope 403 / missing-token 401; x-correlator echo on 200 + 404), net +6. cargo test 1633 pass (was 1627); cargo build --release clean. — binary: 3,143,712 bytes (~3.00 MiB, +8,264 B)

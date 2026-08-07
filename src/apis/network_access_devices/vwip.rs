@@ -85,6 +85,10 @@ pub fn routes() -> Router {
             get(get_device),
         )
         .route(REBOOT_REQUESTS, post(create_reboot_request))
+        .route(
+            "/network-access-devices/vwip/reboot-requests/:reboot_request_id",
+            get(get_reboot_request),
+        )
 }
 
 /// `GET /network-access-devices/vwip/network-access-devices`.
@@ -314,6 +318,48 @@ async fn create_reboot_request(claims: Claims, headers: HeaderMap, body: Bytes) 
             .insert(HeaderName::from_static("location"), value);
     }
     with_correlator(response, &correlator)
+}
+
+/// `GET /network-access-devices/vwip/reboot-requests/{rebootRequestId}` — read a
+/// previously created reboot request by its id (operationId `getRebootRequest`).
+///
+/// This is the read leg of the **stateful** reboot-request lifecycle: it returns
+/// the `RebootRequest` persisted by `createRebootRequest` under the minted `id`,
+/// verbatim. The `rebootRequestId` is server-minted and opaque to the caller, so
+/// — unlike the subject-keyed device operations — it is **not** a reserved-error
+/// scenario plane; the **store state** is the sole control plane (docs/DESIGN.md
+/// §7, mirroring QoS Provisioning's `getQosAssignmentById`):
+///
+/// - **A stored id** → `200` with that `RebootRequest`.
+/// - **Any other id** (never created, or already deleted) → `404 NOT_FOUND`.
+///
+/// Reboot requests are not scoped per subscriber, so CAMARA's `sub`-ownership
+/// check on the read is not enforced (a documented cut, mirroring Blockchain
+/// Public Address). Requires the `network-access-devices:reboot` scope.
+async fn get_reboot_request(
+    claims: Claims,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Response {
+    // Optional correlation header, echoed on every response (CAMARA Commonalities).
+    let correlator = headers.get("x-correlator").cloned();
+
+    // Endpoint authorisation: the token must carry this API's scope.
+    if let Err(e) = claims.require_scope(SCOPE) {
+        return with_correlator(e.into_response(), &correlator);
+    }
+
+    // Store state is the only control plane: a stored id reads back, anything
+    // else (never created / already deleted) is a 404.
+    match store::get(&id) {
+        Some(resource) => {
+            with_correlator((StatusCode::OK, Json(resource)).into_response(), &correlator)
+        }
+        None => with_correlator(
+            CamaraError::not_found("No reboot request found for the provided id.").into_response(),
+            &correlator,
+        ),
+    }
 }
 
 /// The subscriber's device list, deterministic from the token subject.
@@ -1011,6 +1057,110 @@ mod tests {
         assert_eq!(
             headers.get("x-correlator").and_then(|v| v.to_str().ok()),
             Some("corr-rberr")
+        );
+    }
+
+    // --- getRebootRequest (GET /reboot-requests/{id}) ----------------------
+
+    /// GET a reboot request by id with an optional Bearer token and `x-correlator`.
+    async fn get_reboot_request_by_id(
+        token: Option<&str>,
+        id: &str,
+        correlator: Option<&str>,
+    ) -> (StatusCode, HeaderMap, Value) {
+        let mut builder = Request::builder()
+            .method("GET")
+            .uri(format!("/network-access-devices/vwip/reboot-requests/{id}"))
+            .header("host", HOST);
+        if let Some(t) = token {
+            builder = builder.header("authorization", format!("Bearer {t}"));
+        }
+        if let Some(c) = correlator {
+            builder = builder.header("x-correlator", c);
+        }
+        let request = builder.body(Body::empty()).unwrap();
+        let response = app().oneshot(request).await.unwrap();
+        let status = response.status();
+        let headers = response.headers().clone();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, headers, json)
+    }
+
+    #[tokio::test]
+    async fn created_reboot_request_reads_back_verbatim() {
+        let token = mint_token(SCOPE).await;
+        let (status, _, created) = post_reboot_request(Some(&token), Some("{}"), None).await;
+        assert_eq!(status, StatusCode::CREATED);
+        let id = created["id"].as_str().unwrap().to_string();
+
+        // The read leg returns the persisted resource verbatim.
+        let (status, _, read) = get_reboot_request_by_id(Some(&token), &id, None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(read, created);
+    }
+
+    #[tokio::test]
+    async fn get_unknown_reboot_request_is_not_found() {
+        let token = mint_token(SCOPE).await;
+        // A well-formed UUID that was never created → 404 (store state is the plane).
+        let (status, _, resp) = get_reboot_request_by_id(
+            Some(&token),
+            "00000000-0000-4000-8000-000000000000",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(resp["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn get_reboot_request_requires_the_scope_and_a_token() {
+        // First create one to read.
+        let owner = mint_token(SCOPE).await;
+        let (_, _, created) = post_reboot_request(Some(&owner), Some("{}"), None).await;
+        let id = created["id"].as_str().unwrap().to_string();
+
+        // Wrong scope → 403.
+        let bad = mint_token("some:other-scope").await;
+        let (status, _, resp) = get_reboot_request_by_id(Some(&bad), &id, None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(resp["code"], "PERMISSION_DENIED");
+
+        // No token → 401.
+        let (status, _, resp) = get_reboot_request_by_id(None, &id, None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(resp["code"], "UNAUTHENTICATED");
+    }
+
+    #[tokio::test]
+    async fn get_reboot_request_echoes_x_correlator_on_success_and_error() {
+        let token = mint_token(SCOPE).await;
+        let (_, _, created) = post_reboot_request(Some(&token), Some("{}"), None).await;
+        let id = created["id"].as_str().unwrap().to_string();
+
+        // Success.
+        let (status, headers, _) =
+            get_reboot_request_by_id(Some(&token), &id, Some("corr-getrb")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-getrb")
+        );
+
+        // Error (unknown id).
+        let (status, headers, _) = get_reboot_request_by_id(
+            Some(&token),
+            "11111111-1111-4111-8111-111111111111",
+            Some("corr-getrberr"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-getrberr")
         );
     }
 }
