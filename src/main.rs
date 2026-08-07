@@ -312,6 +312,12 @@ async fn catalog() -> Json<Value> {
                 "spec_url": "/application-endpoint-discovery/vwip/openapi.yaml",
             },
             {
+                "name": "application-endpoint-registration",
+                "version": "vwip",
+                "base_path": "/application-endpoint-registration/vwip",
+                "spec_url": "/application-endpoint-registration/vwip/openapi.yaml",
+            },
+            {
                 "name": "predictive-connectivity-data",
                 "version": "vwip",
                 "base_path": "/predictive-connectivity-data/vwip",

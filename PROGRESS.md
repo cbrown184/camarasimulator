@@ -2231,6 +2231,31 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
       fired" modelled by the missing `atTime` (documented cuts — no reboot engine).
       New atomic `store::update_with` (get-modify-write, decline-aware; no new dep).
       **Completes the Reboot Requests lifecycle and Network Access Devices vwip.**
+- [~] Application Endpoint Registration vwip (`/application-endpoint-registration/vwip`;
+  CAMARA ApplicationEndpointRegistration, wip — no released version yet, mounted at its
+  canonical `vwip` base path like Application Endpoint Discovery / Application Profiles;
+  stateful, resource-oriented, **non-spatial** — the *registration* counterpart of
+  Application Endpoint Discovery; `edgeCloudZone` is a placement identifier, not a
+  coordinate):
+  - [x] `POST /application-endpoint-lists` (`registerApplicationEndpoints`, scope
+    `application-endpoint-registration:application-endpoints:write`) — registers a set of
+    application endpoints (FQDN/IPv4/IPv6 + `port`, each with an optional `edgeCloudZone`),
+    mints an opaque UUID-shaped `applicationEndpointListId`
+    (`src/apis/application_endpoint_registration/store.rs`; `Mutex<HashMap>`, no uuid/rand
+    dep, mirroring Application Profiles), persists the rendered registration, and returns
+    `200` with the id (CAMARA `ApplicationEndpointListId`, a bare string). No device
+    identifier → the request body is the control plane (DESIGN §7): body validation → 400
+    (`applicationEndpoints` 1..=20, per-endpoint `anyOf` one address / `port` 1..=65535 →
+    `OUT_OF_RANGE`, malformed IPv4/IPv6/`edgeCloudZoneId`, multi-line/over-length
+    provider/description, non-UUID `applicationProfileId`, unknown field/type); the
+    `applicationProfileId` reserved-error suffix → canonical CAMARA error (UUIDs carry
+    digits, mirroring Network Health Assessment's `networkId`); and the nil UUID
+    (`00000000-0000-0000-0000-000000000000`) → 422 `UNIDENTIFIABLE_APPLICATION_PROFILE`.
+    `x-correlator` echoed.
+  - [ ] `GET /application-endpoint-lists` (`getAllRegisteredApplicationEndpoints`) — list.
+  - [ ] `GET /application-endpoint-lists/{id}` (`getApplicationEndpointsById`) — read-back.
+  - [ ] `PUT /application-endpoint-lists/{id}` (`updateApplicationEndpoint`) — full replace.
+  - [ ] `DELETE /application-endpoint-lists/{id}` (`deregisterApplicationEndpoint`) — deregister.
 - [ ] Other CAMARA APIs as capacity allows
 
 ## Cross-cutting (do alongside the item that needs it)
@@ -2257,6 +2282,43 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-07 — application-endpoint-registration: added a **new API**,
+  `POST /application-endpoint-lists` (`registerApplicationEndpoints`) at
+  `/application-endpoint-registration/vwip` (CAMARA ApplicationEndpointRegistration, wip).
+  Chosen because the backlog's remaining `[ ]` leaves are all deferred for concrete reasons
+  (TLS-sink cases need a rustls stack vs "keep the binary small"; IoT AREALIMIT is spatial;
+  the campaign / intermediate-transition / ongoing-stream legs need a live call/provisioning
+  engine), so the top *safe* unit is a new API under "Other CAMARA APIs as capacity allows".
+  Diffed the ~49 implemented modules against the authoritative CAMARA org repo list
+  (GitHub search): most public APIs are done; several candidates were rejected (Scam Signal
+  spec is private; VoiceVerificationCode/VoiceNotification are empty placeholders; QoSBooking
+  is spatial — required `serviceArea`/Area). ApplicationEndpointRegistration is the strongest
+  fit: **stateful, resource-oriented, non-spatial** (its `edgeCloudZone` is a placement id,
+  not a coordinate — the same treatment as the already-mounted Application Endpoint Discovery
+  / Optimal Edge Discovery), and it mirrors Application Profiles' store pattern almost
+  exactly. Scoped to the single **register** endpoint this pass; read/list/update/deregister
+  legs recorded as remaining sub-steps. Contract confirmed from the authoritative upstream
+  `application-endpoint-registration.yaml` (WebFetch): `200` returns a bare
+  `ApplicationEndpointListId` (UUID string); errors 400/401/403/404/422/429. Control planes
+  (DESIGN §7): no device identifier → the request body drives 400s (`applicationEndpoints`
+  1..=20, per-endpoint `anyOf` one of domainName/ipv4/ipv6 + `port` 1..=65535 → OUT_OF_RANGE,
+  malformed IPv4/IPv6 via `std::net`, non-UUID `edgeCloudZoneId`, multi-line/over-length
+  provider/description, non-UUID `applicationProfileId`, unknown field/type); the
+  `applicationProfileId` reserved-error suffix → canonical CAMARA error (UUIDs carry digits,
+  mirroring Network Health Assessment); the nil UUID → 422 UNIDENTIFIABLE_APPLICATION_PROFILE.
+  Opaque UUID-shaped `applicationEndpointListId` minted via SHA-256(counter‖now) (no
+  uuid/rand dep, mirroring Application Profiles / QoD stores); the rendered registration is
+  persisted for the later read leg. New `src/apis/application_endpoint_registration/{,store,
+  vwip}.rs`; wired into `apis::routes`, the openapi `SPECS` table, and the `/` catalog.
+  spec: new vendored `specs/application-endpoint-registration/vwip/openapi.yaml`
+  (POST op + ApplicationEndpointsInfo/ApplicationEndpoint/EdgeCloudZone/ApplicationEndpointListId
+  + error schema + `x-camarasim-scenarios`, shared-error `$ref`s). tests: +18 (store: id
+  uniqueness/shape, insert/get round-trip; vwip pure units uuid-shape + single-line; and
+  integration 200-with-uuid, domain+ipv6 accepted, empty-array 400, no-address 400, port
+  OUT_OF_RANGE, malformed IPv4 400, non-UUID edgeCloudZoneId 400, unknown-field 400,
+  non-UUID profile 400, reserved …404→404, reserved …422→SERVICE_NOT_APPLICABLE, nil→422
+  UNIDENTIFIABLE_APPLICATION_PROFILE, scope 403, missing-token 401). cargo test 1683 pass
+  (was 1665); cargo build --release clean; no new dep. — binary: 3,233,488 bytes (~3.08 MiB)
 - 2026-08-07 17:55Z — network-access-devices: added `PATCH /reboot-requests/{rebootRequestId}`
   (`updateRebootRequest`) — the **update leg**, the last `[ ]` leaf of the reboot-request
   lifecycle. **This completes the Reboot Requests lifecycle and Network Access Devices vwip**
