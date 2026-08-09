@@ -16,8 +16,15 @@
 //!   scope `qos-booking:device-qos-bookings:retrieve-by-device`) — lists a device's
 //!   bookings as an array of `BookingInfo` (`200`, empty array when none).
 //!
-//! CloudEvents notifications on `sink` are a later pass; a supplied
-//! `sink`/`sinkCredential` is validated and echoed but not yet acted on (a
+//! CloudEvents notifications on `sink` (see [`super::notifications`]):
+//! - **`DELETE_REQUESTED`** — deleting a booking that recorded a `sink` delivers a
+//!   `status-changed` CloudEvent (`bookingStatus: TERMINATED`, `statusInfo:
+//!   DELETE_REQUESTED`) to it, fire-and-forget off the request path, with the
+//!   `sinkCredential` (ACCESSTOKEN → Bearer / PLAIN → Basic) applied. Still `204`.
+//!
+//! The remaining status transitions (`SCHEDULED`/`ACTIVATED` on booking, expiry,
+//! `NETWORK_TERMINATED`) and TLS (`https://` sink) delivery are later passes; a
+//! supplied `sink`/`sinkCredential` is otherwise validated and echoed only (a
 //! documented cut).
 //!
 //! ## Identifier resolution (two-legged vs three-legged)
@@ -68,7 +75,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use super::store;
+use super::{notifications, store};
 use crate::auth::verify::Claims;
 use crate::errors::CamaraError;
 use crate::scenarios;
@@ -121,10 +128,10 @@ struct CreateBooking {
     #[serde(rename = "serviceArea")]
     service_area: Option<Value>,
     sink: Option<String>,
-    // Accepted for schema fidelity and never echoed (it carries a secret).
-    // Notifications on `sink` are a later slice, so it is not yet applied.
+    // Never echoed (it carries a secret). When the booking records a `sink`, this
+    // credential is applied to status-change callbacks' `Authorization` header (via
+    // `notifications::sink_authorization`): ACCESSTOKEN → Bearer, PLAIN → Basic.
     #[serde(rename = "sinkCredential")]
-    #[allow(dead_code)]
     sink_credential: Option<Value>,
     // Accepted for schema fidelity and echoed back verbatim when present.
     #[serde(rename = "applicationServer")]
@@ -288,6 +295,20 @@ async fn create_booking(claims: Claims, headers: HeaderMap, body: Bytes) -> Resp
         req.application_server_ports,
         &resolved.id,
     );
+    // If the booking records a `sink` and a `sinkCredential`, stash the derived
+    // `Authorization` (ACCESSTOKEN → Bearer, PLAIN → Basic) so a later status-change
+    // callback (e.g. `DELETE_REQUESTED` on delete) can authenticate. Kept apart from
+    // the `BookingInfo` so the secret is never echoed (mirrors QoS Provisioning).
+    if info.get("sink").is_some() {
+        if let Some(auth) = req
+            .sink_credential
+            .as_ref()
+            .and_then(notifications::sink_authorization)
+        {
+            store::insert_credential(booking_id.clone(), auth);
+        }
+    }
+
     store::insert(booking_id, info.clone());
 
     with_correlator((StatusCode::CREATED, Json(info)).into_response(), &correlator)
@@ -327,9 +348,15 @@ async fn get_booking(
 /// opaque, so there is no reserved-identifier control plane): an existing booking
 /// is evicted → `204 No Content` (single-use); an unknown or already-deleted id →
 /// `404 NOT_FOUND`. CAMARA's asynchronous `202 Accepted` (returning `BookingInfo`)
-/// form is deferred with `sink` notifications — CamaraSim answers the synchronous
-/// `204` (mirrors QoS Provisioning's `revokeQosAssignment` / QoD's `deleteSession`).
-/// `x-correlator` echoed on both outcomes.
+/// form is deferred — CamaraSim answers the synchronous `204` (mirrors QoS
+/// Provisioning's `revokeQosAssignment` / QoD's `deleteSession`).
+///
+/// When the deleted booking recorded a `sink`, a `status-changed` CloudEvent
+/// (`bookingStatus: TERMINATED`, `statusInfo: DELETE_REQUESTED`) is delivered to it
+/// fire-and-forget, off the request path (see [`super::notifications`]), so a slow or
+/// unreachable sink never delays the `204`. The ACCESSTOKEN/PLAIN `sinkCredential`
+/// (if any) authenticates the callback and is taken single-use. `x-correlator`
+/// echoed on both outcomes.
 async fn delete_booking(
     claims: Claims,
     headers: HeaderMap,
@@ -342,7 +369,25 @@ async fn delete_booking(
     }
 
     match store::remove(&booking_id) {
-        Some(_) => with_correlator(StatusCode::NO_CONTENT.into_response(), &correlator),
+        Some(info) => {
+            // Notify a recorded `sink` that the booking is now TERMINATED with
+            // `statusInfo: DELETE_REQUESTED`.
+            if let Some(sink) = info.get("sink").and_then(Value::as_str) {
+                let event = notifications::status_changed_event(
+                    store::new_event_id(),
+                    rfc3339_utc(now_unix_secs()),
+                    &booking_id,
+                    "TERMINATED",
+                    Some("DELETE_REQUESTED"),
+                );
+                notifications::spawn_delivery(
+                    sink.to_string(),
+                    event,
+                    store::take_credential(&booking_id),
+                );
+            }
+            with_correlator(StatusCode::NO_CONTENT.into_response(), &correlator)
+        }
         None => with_correlator(
             CamaraError::not_found("No booking found for the provided bookingId.").into_response(),
             &correlator,
@@ -1412,6 +1457,157 @@ mod tests {
         let read = mint_token(READ_SCOPE).await;
         let (status, _, _) = delete_booking_req(Some(&read), &id, None).await;
         assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    // --- CloudEvents notifications on `sink` (DELETE_REQUESTED) ------------
+
+    #[tokio::test]
+    async fn deleting_a_booking_with_a_sink_fires_a_delete_requested_cloudevent() {
+        use tokio::io::AsyncReadExt;
+        use tokio::net::TcpListener;
+
+        // A loopback receiver stands in for the consumer's `sink`.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let sink = format!("http://{addr}/qosbook-notify");
+
+        // Create a booking that records the sink.
+        let create = mint_token(CREATE_SCOPE).await;
+        let body = json!({
+            "device": { "phoneNumber": "+123456789012" },
+            "qosProfile": "QOS_E",
+            "startTime": "2024-06-01T12:00:00Z",
+            "duration": 3600,
+            "serviceArea": valid_area(),
+            "sink": sink,
+        })
+        .to_string();
+        let (status, _, created) = post_booking(Some(&create), &body, None).await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(created["sink"], sink);
+        let booking_id = created["bookingId"].as_str().unwrap().to_string();
+
+        // …then delete it: 204 to the caller, and a CloudEvent to the sink.
+        let del = mint_token(DELETE_SCOPE).await;
+        let (status, _, _) = delete_booking_req(Some(&del), &booking_id, None).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        // Receive the fire-and-forget notification the handler spawned.
+        let (mut sock, _) = listener.accept().await.unwrap();
+        let mut buf = Vec::new();
+        sock.read_to_end(&mut buf).await.unwrap();
+        let raw = String::from_utf8(buf).unwrap();
+        let (head, event_body) = raw.split_once("\r\n\r\n").expect("headers then body");
+        assert!(
+            head.starts_with("POST /qosbook-notify HTTP/1.1\r\n"),
+            "request line: {head}"
+        );
+        assert!(head.contains("Content-Type: application/cloudevents+json"));
+        // No sinkCredential → unauthenticated.
+        assert!(!head.contains("Authorization:"), "unauthenticated: {head}");
+
+        let event: Value = serde_json::from_str(event_body).expect("body is JSON");
+        assert_eq!(event["type"], "org.camaraproject.qos-booking.v0.status-changed");
+        assert_eq!(event["specversion"], "1.0");
+        assert_eq!(event["datacontenttype"], "application/json");
+        assert!(event["id"].is_string() && event["time"].is_string());
+        assert_eq!(event["data"]["bookingId"], json!(booking_id));
+        assert_eq!(event["data"]["bookingStatus"], "TERMINATED");
+        assert_eq!(event["data"]["statusInfo"], "DELETE_REQUESTED");
+    }
+
+    #[tokio::test]
+    async fn a_sink_credential_authenticates_the_callback_and_is_never_echoed() {
+        use tokio::io::AsyncReadExt;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let sink = format!("http://{addr}/qosbook-auth");
+
+        // Create with a sink AND an ACCESSTOKEN sinkCredential.
+        let create = mint_token(CREATE_SCOPE).await;
+        let body = json!({
+            "device": { "phoneNumber": "+123456789012" },
+            "qosProfile": "QOS_E",
+            "startTime": "2024-06-01T12:00:00Z",
+            "duration": 3600,
+            "serviceArea": valid_area(),
+            "sink": sink,
+            "sinkCredential": {
+                "credentialType": "ACCESSTOKEN",
+                "accessToken": "sink-secret-123",
+                "accessTokenType": "bearer",
+            },
+        })
+        .to_string();
+        let (status, _, created) = post_booking(Some(&create), &body, None).await;
+        assert_eq!(status, StatusCode::CREATED);
+        // The secret is never echoed in the BookingInfo.
+        assert!(created.get("sinkCredential").is_none());
+        let booking_id = created["bookingId"].as_str().unwrap().to_string();
+
+        // Delete → the DELETE_REQUESTED callback carries the bearer.
+        let del = mint_token(DELETE_SCOPE).await;
+        let (status, _, _) = delete_booking_req(Some(&del), &booking_id, None).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        let (mut sock, _) = listener.accept().await.unwrap();
+        let mut buf = Vec::new();
+        sock.read_to_end(&mut buf).await.unwrap();
+        let raw = String::from_utf8(buf).unwrap();
+        let (head, _) = raw.split_once("\r\n\r\n").expect("headers then body");
+        assert!(
+            head.contains("Authorization: Bearer sink-secret-123\r\n"),
+            "authorization header present: {head}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_plain_sink_credential_authenticates_the_callback_as_basic() {
+        use tokio::io::AsyncReadExt;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let sink = format!("http://{addr}/qosbook-plain");
+
+        // Create with a sink AND a PLAIN sinkCredential.
+        let create = mint_token(CREATE_SCOPE).await;
+        let body = json!({
+            "device": { "phoneNumber": "+123456789012" },
+            "qosProfile": "QOS_E",
+            "startTime": "2024-06-01T12:00:00Z",
+            "duration": 3600,
+            "serviceArea": valid_area(),
+            "sink": sink,
+            "sinkCredential": {
+                "credentialType": "PLAIN",
+                "identifier": "cbid",
+                "secret": "cbsecret",
+            },
+        })
+        .to_string();
+        let (status, _, created) = post_booking(Some(&create), &body, None).await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert!(created.get("sinkCredential").is_none());
+        let booking_id = created["bookingId"].as_str().unwrap().to_string();
+
+        // Delete → the DELETE_REQUESTED callback carries a Basic header.
+        let del = mint_token(DELETE_SCOPE).await;
+        let (status, _, _) = delete_booking_req(Some(&del), &booking_id, None).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        let (mut sock, _) = listener.accept().await.unwrap();
+        let mut buf = Vec::new();
+        sock.read_to_end(&mut buf).await.unwrap();
+        let raw = String::from_utf8(buf).unwrap();
+        let (head, _) = raw.split_once("\r\n\r\n").expect("headers then body");
+        // base64("cbid:cbsecret") == "Y2JpZDpjYnNlY3JldA==".
+        assert!(
+            head.contains("Authorization: Basic Y2JpZDpjYnNlY3JldA==\r\n"),
+            "basic authorization header present: {head}"
+        );
     }
 
     // --- Retrieve-by-device: POST /retrieve-device-qos-bookings ------------

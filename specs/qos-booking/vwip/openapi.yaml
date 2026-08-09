@@ -15,10 +15,17 @@
 # Serves `POST /device-qos-bookings` (create), `GET
 # /device-qos-bookings/{bookingId}` (read-back), `DELETE
 # /device-qos-bookings/{bookingId}` (delete — synchronous `204`; the async `202`
-# form and `sink` notifications are deferred), and `POST
-# /retrieve-device-qos-bookings` (retrieve-by-device — an array of `BookingInfo`).
-# CloudEvents notifications on `sink` are a later pass; a supplied `sink` /
-# `sinkCredential` is validated and echoed but not yet acted on (a documented cut).
+# form is deferred), and `POST /retrieve-device-qos-bookings` (retrieve-by-device —
+# an array of `BookingInfo`).
+#
+# CloudEvents notifications on `sink`: deleting a booking that recorded a `sink`
+# delivers a `status-changed` CloudEvent (`bookingStatus: TERMINATED`, `statusInfo:
+# DELETE_REQUESTED`) to it, fire-and-forget over a raw TCP `http://` POST (no
+# HTTP-client dependency), with the `sinkCredential` (ACCESSTOKEN → Bearer, PLAIN →
+# Basic) applied. The remaining status transitions (SCHEDULED/ACTIVATED on booking,
+# expiry, NETWORK_TERMINATED) and TLS (`https://` sink) delivery are later passes —
+# a supplied `sink`/`sinkCredential` is otherwise validated and echoed only (a
+# documented cut). See the `QosBookingEvent` schema for the CloudEvent shape.
 openapi: 3.0.3
 info:
   title: QoS Booking
@@ -440,10 +447,19 @@ paths:
         (never created, or already deleted) → `404 NOT_FOUND`.
 
         CAMARA also defines an asynchronous `202 Accepted` form (returning the
-        `BookingInfo` while the network tears the booking down and notifies `sink`).
-        CamaraSim deletes synchronously and answers `204`; the async `202` form is
-        deferred together with `sink` notifications (a documented cut, mirroring QoS
-        Provisioning's `revokeQosAssignment` and Quality on Demand's `deleteSession`).
+        `BookingInfo` while the network tears the booking down). CamaraSim deletes
+        synchronously and answers `204`; the async `202` form is a documented cut
+        (mirroring QoS Provisioning's `revokeQosAssignment` and Quality on Demand's
+        `deleteSession`).
+
+        **Notification.** When the deleted booking recorded a `sink`, a
+        `status-changed` CloudEvent (`bookingStatus: TERMINATED`, `statusInfo:
+        DELETE_REQUESTED`; see the `QosBookingEvent` schema) is delivered to it
+        fire-and-forget over a raw TCP `http://` POST, off the request path, so a slow
+        or unreachable sink never delays the `204`. The booking's `sinkCredential`
+        (ACCESSTOKEN → `Authorization: Bearer`, PLAIN → `Authorization: Basic`) is
+        applied and consumed single-use. An `https://` sink is not delivered to (no
+        TLS client — a documented cut).
       security:
         - openId:
             - qos-booking:device-qos-bookings:delete
@@ -485,6 +501,14 @@ paths:
         cases:
           - input: a bookingId of a booking that is currently stored
             result: "204 — the booking is evicted (single-use)"
+          - input: a stored booking that recorded an `http://` sink
+            result: >-
+              204 — plus a fire-and-forget status-changed CloudEvent
+              (bookingStatus TERMINATED, statusInfo DELETE_REQUESTED) POSTed to the
+              sink, with the sinkCredential applied (ACCESSTOKEN → Bearer, PLAIN →
+              Basic)
+          - input: a stored booking whose sink is `https://…`
+            result: "204 — event not delivered (no TLS client, a documented cut)"
           - input: an unknown / never-created / already-deleted bookingId
             result: "404 NOT_FOUND"
 
@@ -676,9 +700,11 @@ components:
           description: >-
             A callback URL for asynchronous CloudEvents notifications. CAMARA's
             schema requires `https://`; CamaraSim also accepts `http://` so a
-            loopback receiver can observe callbacks once delivery lands (a later
-            slice). This slice validates and echoes the `sink` but does not deliver
-            to it (a documented cut).
+            loopback receiver can observe callbacks. On `deleteBooking`, a recorded
+            `http://` sink receives a `status-changed` CloudEvent (`TERMINATED` /
+            `DELETE_REQUESTED`; see `QosBookingEvent`). An `https://` sink is echoed
+            but not delivered to (no TLS client — a documented cut); the remaining
+            status transitions are later passes.
           pattern: '^https?:\/\/.+$'
           example: "https://application-server.example.com/notifications"
         sinkCredential:
@@ -860,8 +886,11 @@ components:
       type: object
       description: >-
         A credential the callback authenticates with. Kept in memory only and never
-        echoed back (it carries a secret). Accepted for schema fidelity this slice
-        but not applied (notifications on `sink` are a later slice — a documented cut).
+        echoed back (it carries a secret). Applied to the `deleteBooking`
+        `status-changed` callback's `Authorization` header: `ACCESSTOKEN` → `Bearer
+        <accessToken>` (RFC 6750), `PLAIN` → `Basic base64(identifier:secret)` (RFC
+        7617). `REFRESHTOKEN` is accepted but not applied (it needs a token-exchange
+        round trip — a documented cut).
       required:
         - credentialType
       properties:
@@ -939,3 +968,70 @@ components:
           format: uri
           description: The callback URL supplied on creation, if any.
           example: "https://application-server.example.com/notifications"
+
+    QosBookingEvent:
+      type: object
+      description: >-
+        The CloudEvents 1.0 envelope delivered to a booking's `sink` on a
+        `status-changed` transition. CamaraSim delivers this on `deleteBooking` for a
+        booking that recorded a `sink`: `data.bookingStatus` is `TERMINATED` and
+        `data.statusInfo` is `DELETE_REQUESTED`. Per the CAMARA schema `statusInfo`
+        applies when a deletion is requested or `bookingStatus` is `TERMINATED`.
+        (The `SCHEDULED`/`ACTIVATED` transitions and the other `statusInfo` reasons
+        — `DURATION_EXPIRED`, `NETWORK_TERMINATED`, `BOOKING_DECLINED`,
+        `BOOKING_REVOKED` — are defined by CAMARA but not yet emitted by CamaraSim.)
+      required:
+        - id
+        - source
+        - type
+        - specversion
+        - time
+        - data
+      properties:
+        id:
+          type: string
+          description: Unique CloudEvent id within `source` (UUID-shaped).
+          example: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+        source:
+          type: string
+          example: "//camarasimulator/qos-booking"
+        type:
+          type: string
+          enum: ["org.camaraproject.qos-booking.v0.status-changed"]
+        specversion:
+          type: string
+          enum: ["1.0"]
+        datacontenttype:
+          type: string
+          enum: ["application/json"]
+        time:
+          type: string
+          format: date-time
+          example: "2024-06-01T13:27:08Z"
+        data:
+          type: object
+          required:
+            - bookingId
+            - bookingStatus
+          properties:
+            bookingId:
+              type: string
+              format: uuid
+              example: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+            bookingStatus:
+              type: string
+              description: The new booking status reported by the event.
+              enum: [SCHEDULED, ACTIVATED, TERMINATED]
+              example: TERMINATED
+            statusInfo:
+              type: string
+              description: >-
+                Reason for the new `bookingStatus`; applicable when a deletion is
+                requested or `bookingStatus` is `TERMINATED`.
+              enum:
+                - DURATION_EXPIRED
+                - NETWORK_TERMINATED
+                - DELETE_REQUESTED
+                - BOOKING_DECLINED
+                - BOOKING_REVOKED
+              example: DELETE_REQUESTED

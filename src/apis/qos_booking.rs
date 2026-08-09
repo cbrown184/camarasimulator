@@ -16,6 +16,7 @@
 //!   other work-in-progress APIs, DESIGN §9). First slice: `POST /device-qos-bookings`
 //!   (`createBooking`).
 
+pub mod notifications;
 pub mod store;
 pub mod vwip;
 

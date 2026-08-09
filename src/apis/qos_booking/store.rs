@@ -86,6 +86,42 @@ pub fn new_booking_id() -> String {
     mint_uuid()
 }
 
+/// Mint a fresh, opaque, UUID-shaped CloudEvent `id`. CloudEvents requires the
+/// `id` to be unique within a `source`; reusing [`mint_uuid`] gives that without a
+/// `uuid`/`rand` dependency (mirrors QoS Provisioning's `new_event_id`).
+pub fn new_event_id() -> String {
+    mint_uuid()
+}
+
+/// The process-global **sink-credential side-store**: `bookingId` → the derived
+/// `Authorization` header value (e.g. `"Bearer <token>"`). Kept apart from the
+/// `BookingInfo` map so the secret is never echoed by `GET`/retrieve-by-device
+/// (mirrors QoS Provisioning's credential side-store). In-memory only (single node,
+/// DESIGN §4).
+fn credentials() -> &'static Mutex<HashMap<String, String>> {
+    static CREDS: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+    CREDS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Remember the `Authorization` header value a notification callback for `id`
+/// should carry (derived from the booking's `sinkCredential` at creation).
+pub fn insert_credential(id: String, auth: String) {
+    credentials()
+        .lock()
+        .expect("qos-booking credential store not poisoned")
+        .insert(id, auth);
+}
+
+/// Take (single-use) the stored `Authorization` header value for `id`, removing it
+/// so the secret drops from memory once the notification has been sent. `None` when
+/// the booking carried no applicable `sinkCredential`.
+pub fn take_credential(id: &str) -> Option<String> {
+    credentials()
+        .lock()
+        .expect("qos-booking credential store not poisoned")
+        .remove(id)
+}
+
 /// Mint a fresh, opaque, UUID-v4-shaped identifier.
 ///
 /// The 16 bytes come from `SHA-256(counter ‖ now)` — the monotonic counter alone
@@ -160,6 +196,24 @@ mod tests {
         assert!(get(&id).is_none(), "booking is gone after remove");
         // Removing an id that was never stored is None.
         assert!(remove("no-such-booking").is_none());
+    }
+
+    #[test]
+    fn event_ids_are_unique_and_uuid_shaped() {
+        let a = new_event_id();
+        let b = new_event_id();
+        assert_ne!(a, b, "each event id must be unique");
+        assert_eq!(a.split('-').count(), 5);
+    }
+
+    #[test]
+    fn credential_side_store_is_single_use() {
+        let id = new_booking_id();
+        assert!(take_credential(&id).is_none(), "not stored yet → None");
+        insert_credential(id.clone(), "Bearer sekret".to_string());
+        // First take returns it; a second finds nothing (dropped from memory).
+        assert_eq!(take_credential(&id), Some("Bearer sekret".to_string()));
+        assert!(take_credential(&id).is_none(), "single-use → gone");
     }
 
     #[test]

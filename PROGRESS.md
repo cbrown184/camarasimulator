@@ -1630,8 +1630,20 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     scanned by each booking's echoed `device` (new `store::find_by_device`,
     mirroring QoD's `retrieveSessionsByDevice`). Not scoped per client
     (documented cut). `x-correlator` echoed. No new dep.
-  - [ ] CloudEvents notifications on `sink` (status transitions) — later pass;
-    `sink`/`sinkCredential` currently validated+echoed but not delivered to (cut)
+  - [~] CloudEvents notifications on `sink` (status transitions)
+    (`src/apis/qos_booking/notifications.rs`; event type
+    `org.camaraproject.qos-booking.v0.status-changed`, mirroring QoS Provisioning):
+    - [x] `DELETE_REQUESTED` `status-changed` on `deleteBooking` — a deleted
+      booking that recorded a `sink` receives a `bookingStatus: TERMINATED` /
+      `statusInfo: DELETE_REQUESTED` CloudEvent, fire-and-forget over raw TCP (no
+      HTTP-client dep), still `204`. `sinkCredential` applied to the callback's
+      `Authorization` header — ACCESSTOKEN → `Bearer <token>` (RFC 6750), PLAIN →
+      `Basic base64(identifier:secret)` (RFC 7617) — via the single-use side-store
+      `store::insert_credential`/`take_credential`; REFRESHTOKEN a documented cut;
+      the secret is never echoed. `https://` sink not delivered to (no TLS client).
+    - [ ] `SCHEDULED`/`ACTIVATED`-on-booking + `NETWORK_TERMINATED` / expiry
+      transitions — later pass
+    - [ ] TLS (`https://` sink) delivery (needs a rustls TLS client)
 - [x] Device Data Volume vwip (`/device-data-volume/vwip`; CAMARA
   device-data-volume, wip — no released version yet, mounted at its canonical
   `vwip` base path; stateless, non-spatial, device-keyed data-usage query):
@@ -2373,6 +2385,24 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-09 — qos-booking: began `sink` CloudEvents notifications — the
+  `DELETE_REQUESTED` slice. Deleting a booking that recorded a `sink` now delivers a
+  `status-changed` CloudEvent (`type: org.camaraproject.qos-booking.v0.status-changed`,
+  `data.bookingStatus: TERMINATED`, `data.statusInfo: DELETE_REQUESTED`) fire-and-forget
+  over a raw TCP `http://` POST, off the request path (still `204`); an `https://` sink
+  is a no-op (no TLS client — documented cut). New `src/apis/qos_booking/notifications.rs`
+  (mirrors QoS Provisioning: `status_changed_event`/`sink_authorization`/`spawn_delivery`/
+  `deliver`/`parse_http_sink`), and a credential side-store in `store.rs`
+  (`new_event_id`/`insert_credential`/`take_credential`) so the `sinkCredential`
+  (ACCESSTOKEN → Bearer, PLAIN → Basic; REFRESHTOKEN cut) authenticates the callback
+  single-use and is never echoed. Confirmed the canonical CAMARA event shape against the
+  camaraproject/QoSBooking spec (BookingStatusChanged / BookingStatusInfo enums). Spec:
+  documented the notification on the delete op + `sink`/`sinkCredential` schemas, added
+  the `QosBookingEvent` CloudEvent schema, updated the header note. Tests: 3 handler
+  (delete-with-sink fires the CloudEvent; ACCESSTOKEN Bearer + PLAIN Basic callbacks,
+  secret never echoed) + 9 module/store units. No new dep. `cargo test` (1766) +
+  `cargo build --release` green. binary: 3.3M (3,355,072 bytes). Remaining for QoS
+  Booking vwip: the SCHEDULED/ACTIVATED/NETWORK_TERMINATED/expiry transitions + TLS sink.
 - 2026-08-09 — qos-booking: added the retrieve-by-device leg `POST
   /qos-booking/vwip/retrieve-device-qos-bookings` (`retrieveBookingByDevice`,
   scope `qos-booking:device-qos-bookings:retrieve-by-device`). Lists a device's
