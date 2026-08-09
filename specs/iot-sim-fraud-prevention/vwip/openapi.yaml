@@ -24,24 +24,27 @@ info:
     The upstream CAMARA API exposes three endpoints: `POST /bind`, `POST /unbind`,
     and `POST /query`.
 
-    # CamaraSim scope (documented cut)
-    This simulator mounts the full **`IMEIBIND`** round-trip — `POST /bind`
-    (`bindDeviceImei`), `POST /query` (`query`), and `POST /unbind`
-    (`unBindDeviceImei`) — over a shared in-memory binding store: a bind records
-    the device's SIM↔IMEI association, `query` reports it (a stored binding wins
-    over the stateless default), and an unbind removes it.
+    # CamaraSim scope
+    This simulator mounts the full round-trip for **both** CAMARA facets over a
+    shared in-memory store, across `POST /bind` (`bindDeviceImei`), `POST /query`
+    (`query`), and `POST /unbind` (`unBindDeviceImei`).
 
-    `POST /query` additionally supports the spatial **`AREALIMIT`** query type: it
-    reports a device's area-restriction status (`areaLimit`), derived statelessly
-    from the identifier's trailing three digits (odd → `RESTRICTED` with a
-    deterministic `Circle` `limitArea`; otherwise → `UNRESTRICTED`). The
-    **`AREALIMIT` bind/unbind** pair — which would *set* and *clear* a stored
-    restriction with a caller-supplied `Circle` — remains **deferred** (spatial,
-    lower priority than the non-spatial IMEIBIND slice; see `PROGRESS.md`).
-    Accordingly the `BindType`/`UnBindType` enums stay trimmed to `[IMEIBIND]`: an
-    `AREALIMIT` bind/unbind is rejected `400 INVALID_ARGUMENT`, while the
-    `QueryType` enum carries both values. The simulator never drifts from the
-    operations it actually implements.
+    The non-spatial **`IMEIBIND`** facet records the device's SIM↔IMEI
+    association, `query` reports it (a stored binding wins over the stateless
+    default), and an unbind removes it.
+
+    The spatial **`AREALIMIT`** facet — the same three operations with
+    `bindType`/`unBindType`/`queryType: AREALIMIT` — marks a device's SIM as
+    restricted to its **network-provisioned** area: a bind sets the restriction,
+    `query` reports the device's area-restriction status (`areaLimit`) — a stored
+    restriction wins (`RESTRICTED`), otherwise the stateless default applies (odd
+    trailing three digits → `RESTRICTED`; otherwise → `UNRESTRICTED`) — and an
+    unbind clears it. When restricted, `query` returns a deterministic `Circle`
+    `limitArea` derived from the identifier. The upstream `AREALIMIT` bind carries
+    **no** geometry in the request body (the allowed area is provisioned by the
+    network), so the `BindType`/`UnBindType`/`QueryType` enums all carry both
+    `IMEIBIND` and `AREALIMIT`; any other value is rejected `400 INVALID_ARGUMENT`.
+    The simulator never drifts from the operations it actually implements.
 
     # Authorization and authentication
     The "Camara Security and Interoperability Profile" provides details of how an API consumer requests an access token. Please refer to Identity and Consent Management (https://github.com/camaraproject/IdentityAndConsentManagement/) for the released version of the profile.
@@ -121,10 +124,11 @@ paths:
         ### `queryType: AREALIMIT` — area restriction
 
         The same identifier resolution, two-/three-legged rule, and reserved
-        error-suffix plane apply. Absent an `AREALIMIT` binding (that bind/unbind
-        pair is a deferred spatial slice), the area-restriction status is a
-        stateless default keyed off the identifier's trailing-digit parity,
-        mirroring `IMEIBIND`:
+        error-suffix plane apply. An explicit `AREALIMIT` binding (set by
+        `POST /bind`, cleared by `POST /unbind`) wins — the device is
+        `RESTRICTED`. Absent one, the area-restriction status is a stateless
+        default keyed off the identifier's trailing-digit parity, mirroring
+        `IMEIBIND`:
 
         - **odd trailing digits** — the device is **restricted** to an area:
           `areaLimit: { areaLimitStatus: "RESTRICTED", limitArea: <Circle> }`. The
@@ -254,8 +258,9 @@ paths:
         - Bind card fraud prevention
       summary: IoT SIM Fraud Prevention Bind
       description: |
-        Bind a device's SIM card to the device IMEI (operationId
-        `bindDeviceImei`).
+        Bind a device's SIM card, either to the device IMEI
+        (`bindType: IMEIBIND`) or to its network-provisioned area
+        (`bindType: AREALIMIT`) (operationId `bindDeviceImei`).
 
         The device is identified either by a `device` object in the request body
         (two-legged / CIBA) or — when `device` is omitted — by the identity a
@@ -267,15 +272,25 @@ paths:
 
         After the shared reserved-error-suffix plane (trailing three digits naming
         a reserved CAMARA status → that canonical error), a bind records the
-        SIM↔IMEI association in the in-memory store and answers
-        `{ "bound": true }`. The bound IMEI is deterministic from the identifier
-        (a fixed TAC `35209900`, a 6-digit serial equal to the identifier's
-        zero-padded trailing digits, and a GSMA Luhn check digit). Binding is
-        idempotent — re-binding the same device answers `{ "bound": true }` again.
-        A subsequent `POST /query` reports the device as `BOUND` with that IMEI.
+        binding in the in-memory store and answers `{ "bound": true }`. Both bind
+        types are idempotent — re-binding the same device answers
+        `{ "bound": true }` again.
 
-        Examples: `+123456789012` → `{ "bound": true }` (and thereafter query
-        BOUND); `+123456789404` → `404 NOT_FOUND`.
+        - **`IMEIBIND`** — records the SIM↔IMEI association; a subsequent
+          `POST /query` reports the device `BOUND` with that IMEI. The bound IMEI
+          is deterministic from the identifier (a fixed TAC `35209900`, a 6-digit
+          serial equal to the identifier's zero-padded trailing digits, and a GSMA
+          Luhn check digit).
+        - **`AREALIMIT`** — marks the SIM restricted to its network-provisioned
+          area; a subsequent `POST /query` (`queryType: AREALIMIT`) reports the
+          device `RESTRICTED` with the deterministic `Circle` `limitArea`. The
+          upstream request carries no geometry — the area is provisioned by the
+          network — so the bind body is just `{ device?, bindType }`.
+
+        Examples: `{ +123456789012, IMEIBIND }` → `{ "bound": true }` (and
+        thereafter query BOUND); `{ +123456789012, AREALIMIT }` → `{ "bound":
+        true }` (and thereafter AREALIMIT query RESTRICTED); `+123456789404` →
+        `404 NOT_FOUND`.
       operationId: bindDeviceImei
       parameters:
         - $ref: "#/components/parameters/x-correlator"
@@ -292,6 +307,12 @@ paths:
                   device:
                     phoneNumber: "+123456789012"
                   bindType: "IMEIBIND"
+              INPUT_AREALIMIT:
+                summary: bind One Device's area restriction
+                value:
+                  device:
+                    phoneNumber: "+123456789012"
+                  bindType: "AREALIMIT"
               INPUT_THREE_LEGGED:
                 summary: bind One Device By 3 Legged Token
                 value:
@@ -333,20 +354,27 @@ paths:
         - Bind card fraud prevention
       summary: IoT SIM Fraud Prevention Unbind
       description: |
-        Remove a device's SIM↔IMEI binding (operationId `unBindDeviceImei`).
+        Remove a device's binding — its SIM↔IMEI binding
+        (`unBindType: IMEIBIND`) or its area restriction
+        (`unBindType: AREALIMIT`) (operationId `unBindDeviceImei`).
 
         The device is identified exactly as for `POST /bind`. After the shared
         reserved-error-suffix plane, the operation is keyed on the in-memory
-        store:
-        - a device with an existing binding → `200 { "unbound": true }` (the
-          binding is removed; a subsequent `POST /query` returns to its stateless
-          default);
-        - a device with no binding → `422 UNNECESSARY_UNBIND_IMEI` (there is
+        store, per the `unBindType`:
+        - a device with an existing binding of that type → `200 { "unbound":
+          true }` (the binding is removed; a subsequent `POST /query` returns to
+          its stateless default);
+        - a device with no binding of that type → `422` — `UNNECESSARY_UNBIND_IMEI`
+          for `IMEIBIND`, `UNNECESSARY_UNBIND_AREALIMIT` for `AREALIMIT` (there is
           nothing to unbind).
 
-        Examples: unbinding a previously-bound `+123456789012` → `{ "unbound":
-        true }`; unbinding a never-bound device → `422 UNNECESSARY_UNBIND_IMEI`;
-        `+123456789404` → `404 NOT_FOUND`.
+        The two bindings are independent: an `IMEIBIND` unbind leaves any
+        `AREALIMIT` restriction in force, and vice versa.
+
+        Examples: unbinding a previously-bound `{ +123456789012, IMEIBIND }` →
+        `{ "unbound": true }`; unbinding a never-bound device →
+        `422 UNNECESSARY_UNBIND_IMEI` (or `UNNECESSARY_UNBIND_AREALIMIT` for an
+        `AREALIMIT` unbind); `+123456789404` → `404 NOT_FOUND`.
       operationId: unBindDeviceImei
       parameters:
         - $ref: "#/components/parameters/x-correlator"
@@ -363,6 +391,12 @@ paths:
                   device:
                     phoneNumber: "+123456789012"
                   unBindType: "IMEIBIND"
+              INPUT_AREALIMIT:
+                summary: unbind One Device's area restriction
+                value:
+                  device:
+                    phoneNumber: "+123456789012"
+                  unBindType: "AREALIMIT"
               INPUT_THREE_LEGGED:
                 summary: unbind One Device By 3 Legged Token
                 value:
@@ -632,12 +666,12 @@ components:
     BindType:
       type: string
       description: |
-        The type of bind operation. The upstream CAMARA API also defines
-        `AREALIMIT` (a geographic area restriction); this simulator implements the
-        non-spatial `IMEIBIND` bind only, so the enum is trimmed accordingly
-        (documented cut — see the API description).
+        The type of bind operation: `IMEIBIND` (bind the SIM to the device IMEI)
+        or `AREALIMIT` (restrict the SIM to its network-provisioned geographic
+        area). Both are implemented by `POST /bind`.
       enum:
         - IMEIBIND
+        - AREALIMIT
 
     BindDeviceImeiRequest:
       description: Request to bind a device's SIM card to its IMEI.
@@ -662,10 +696,12 @@ components:
     UnBindType:
       type: string
       description: |
-        The type of unbind operation. As with `BindType`, the `AREALIMIT` case is
-        a deferred (spatial) cut, so the enum is trimmed to `[IMEIBIND]`.
+        The type of unbind operation: `IMEIBIND` (clear the SIM↔IMEI binding) or
+        `AREALIMIT` (clear the SIM's area restriction). Both are implemented by
+        `POST /unbind`.
       enum:
         - IMEIBIND
+        - AREALIMIT
 
     UnBindDeviceImeiRequest:
       description: Request to remove a device's SIM↔IMEI binding.
@@ -887,7 +923,7 @@ components:
               value:
                 status: 400
                 code: INVALID_ARGUMENT
-                message: "The value of bindType can only be IMEIBIND"
+                message: "The value of bindType can only be IMEIBIND or AREALIMIT"
             Missing BindType:
               value:
                 status: 400
@@ -918,7 +954,7 @@ components:
               value:
                 status: 400
                 code: INVALID_ARGUMENT
-                message: "The value of unBindType can only be IMEIBIND"
+                message: "The value of unBindType can only be IMEIBIND or AREALIMIT"
 
     Unbind422:
       description: Unprocessable Content
@@ -941,6 +977,7 @@ components:
                       - UNSUPPORTED_IDENTIFIER
                       - UNNECESSARY_IDENTIFIER
                       - UNNECESSARY_UNBIND_IMEI
+                      - UNNECESSARY_UNBIND_AREALIMIT
           examples:
             Unnecessary Unbind Imei:
               description: The device has no IMEI binding to remove
@@ -948,6 +985,12 @@ components:
                 status: 422
                 code: UNNECESSARY_UNBIND_IMEI
                 message: The device has no IMEI binding to remove.
+            Unnecessary Unbind Arealimit:
+              description: The device has no area restriction to remove
+              value:
+                status: 422
+                code: UNNECESSARY_UNBIND_AREALIMIT
+                message: The device has no area restriction to remove.
             Missing Identifier:
               value:
                 status: 422

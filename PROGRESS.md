@@ -2016,9 +2016,9 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     Cuts (documented): single grouped `statusInfo` entry, stateful
     `CAPTURE_FREQUENCY_EXCEEDED`, async `callbackUrl` delivery. No new dep.
     **Completes Consent Info vwip.**
-- [~] IoT SIM Fraud Prevention vwip (`/iot-sim-fraud-prevention/vwip`; CAMARA
-  IoTSIMFraudPrevention `wip`; device-identifier-keyed; the `IMEIBIND` flow is
-  **stateful** over a shared in-memory binding store):
+- [x] IoT SIM Fraud Prevention vwip (`/iot-sim-fraud-prevention/vwip`; CAMARA
+  IoTSIMFraudPrevention `wip`; device-identifier-keyed; both the `IMEIBIND` and
+  `AREALIMIT` flows are **stateful** over a shared in-memory store):
   - [x] `POST /query` (`query`, `iot-sim-fraud-prevention:query`) for
     `queryType: IMEIBIND` — `{ imeiBind: { bindStatus, bindImei? } }`. Device
     (phoneNumber/nai/ipv4/ipv6) or three-legged-token identifier with the CAMARA
@@ -2052,9 +2052,19 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     INVALID_ARGUMENT. Spec: `QueryType`/`QueryFraudPreventionResponse` +
     `AreaLimit`/`AreaLimitStatus`/`Area`/`AreaType`/`Circle`/`Point` schemas +
     functional cases/examples. No new dep.
-  - [ ] `bindType: AREALIMIT` / `unBindType: AREALIMIT` — the spatial *set*/*clear*
-    of a stored area restriction (Circle geometry) — deferred (spatial); the
-    `BindType`/`UnBindType` enums stay trimmed to `[IMEIBIND]`.
+  - [x] `bindType: AREALIMIT` / `unBindType: AREALIMIT` — the *set*/*clear* of a
+    device's area restriction over a second in-memory set in the shared store.
+    The upstream bind carries **no** geometry (the allowed area is
+    network-provisioned), so the store only records membership; the `Circle`
+    `limitArea` is synthesised deterministically from the identifier at query
+    time (shared `synth_circle`). A stored restriction wins on an `AREALIMIT`
+    query (`RESTRICTED`, even for an even-tail device that defaults
+    `UNRESTRICTED`), mirroring IMEIBIND's "stored binding wins"; an `AREALIMIT`
+    unbind clears it → `200 { unbound: true }`, or `422
+    UNNECESSARY_UNBIND_AREALIMIT` when none is in force. The two facets are
+    independent (an IMEIBIND unbind leaves an AREALIMIT restriction in force).
+    `BindType`/`UnBindType`/`QueryType` enums now all carry both `IMEIBIND` and
+    `AREALIMIT`. **Completes the IoT SIM Fraud Prevention API.**
 - [~] Sponsored Data vwip (`/sponsored-data/vwip`; CAMARA SponsoredData `wip`;
   phone-number-keyed sponsorship lifecycle):
   - [x] `POST /sponsorship` (`startSponsorship`, `sponsored-data:sponsorship:create`)
@@ -2495,6 +2505,25 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-09 — iot-sim-fraud-prevention: added `bindType: AREALIMIT` /
+  `unBindType: AREALIMIT`, completing the API's stateful round-trip for both
+  facets. A second in-memory set in the shared store records which devices are
+  area-restricted; the upstream bind carries no geometry (network-provisioned
+  area), so only membership is stored and the `Circle` `limitArea` is synthesised
+  deterministically from the identifier at query time (extracted shared
+  `synth_circle`). An `AREALIMIT` query now lets a **stored restriction win**
+  (`RESTRICTED` even for an even-tail default-`UNRESTRICTED` device), mirroring
+  IMEIBIND's "stored binding wins"; an `AREALIMIT` unbind clears it (`200 {
+  unbound: true }`) or `422 UNNECESSARY_UNBIND_AREALIMIT` when none is in force.
+  The `BindType`/`UnBindType` enums gained `AREALIMIT` (both facets are
+  independent: an IMEIBIND unbind leaves an AREALIMIT restriction in force). Spec:
+  BindType/UnBindType enums + descriptions, bind/unbind operation cases +
+  examples, `UNNECESSARY_UNBIND_AREALIMIT` in Unbind422, updated 400 messages, and
+  the AreaLimit-query "stored wins" note. Tests: replaced the 2 obsolete
+  "AREALIMIT-bind/unbind→400" tests with 7 new ones (round-trip, idempotent,
+  unnecessary-unbind, facet-independence, reserved-suffix, unknown bind/unbind
+  type). `cargo test` 1829 green, `cargo build --release` green. No new dep. —
+  binary: 3.3M (3,443,800 B)
 - 2026-08-09 — capabilities-and-restrictions: added Capabilities and Restrictions
   vwip (CAMARA CapabilitiesAndRuntimeRestrictions `wip`), a new stateless,
   non-spatial consumer-context capability-discovery API. `POST

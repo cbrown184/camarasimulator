@@ -229,33 +229,46 @@ fn imei_bind(identifier: &str) -> serde_json::Value {
 
 /// The **area-restriction** status of `identifier` (the `AREALIMIT` query facet).
 ///
-/// The upstream CAMARA restriction is set by an `AREALIMIT` bind carrying a
-/// `Circle`; that bind/unbind pair is a deferred (spatial) slice, so this query
-/// reports the **stateless default** driven by the identifier's trailing three
-/// digits (docs/DESIGN.md §7), mirroring [`imei_bind`]'s odd → active pattern:
-/// odd trailing digits → `RESTRICTED`, with a deterministic `limitArea` `Circle`
-/// derived from those digits (so the same device always reports the same allowed
-/// area); anything else (even, `…000`, or no trailing digits) → `UNRESTRICTED`
-/// with no `limitArea`. The `Circle` always satisfies the CAMARA schema bounds
-/// (`latitude` ∈ [-90, 90], `longitude` ∈ [-180, 180], `radius` ∈ [1, 200000]).
+/// An **explicit restriction** in the shared [`store`] (set by an `AREALIMIT`
+/// `POST /bind`, cleared by an `AREALIMIT` `POST /unbind`) takes precedence: the
+/// device is `RESTRICTED`. Absent one, the status falls back to the stateless
+/// default driven by the identifier's trailing three digits (docs/DESIGN.md §7),
+/// mirroring [`imei_bind`]'s odd → active pattern: odd trailing digits →
+/// `RESTRICTED`; anything else (even, `…000`, or no trailing digits) →
+/// `UNRESTRICTED`. So an `AREALIMIT` bind flips an otherwise-`UNRESTRICTED`
+/// device to `RESTRICTED`, and an unbind restores the default.
+///
+/// When restricted, the response carries a deterministic `limitArea` `Circle`
+/// derived from the identifier's trailing digits (the network-provisioned
+/// allowed area — the upstream bind supplies no geometry — so the same device
+/// always reports the same area). The `Circle` always satisfies the CAMARA
+/// schema bounds (see [`synth_circle`]).
 fn area_limit(identifier: &str) -> serde_json::Value {
-    match scenarios::trailing_three_digits(identifier) {
-        Some(d) if d % 2 == 1 => {
-            // `d` ∈ 1..=999, so every derived value lands inside the schema range.
-            let latitude = f64::from(d % 180) - 90.0; // [-89, 89]
-            let longitude = f64::from(d % 360) - 180.0; // [-180, 179]
-            let radius = i64::from(d).clamp(1, 200_000); // [1, 999]
-            json!({
-                "areaLimitStatus": "RESTRICTED",
-                "limitArea": {
-                    "areaType": "CIRCLE",
-                    "center": { "latitude": latitude, "longitude": longitude },
-                    "radius": radius,
-                },
-            })
-        }
-        _ => json!({ "areaLimitStatus": "UNRESTRICTED" }),
+    let tail = scenarios::trailing_three_digits(identifier);
+    let restricted = store::area_limited(identifier) || matches!(tail, Some(d) if d % 2 == 1);
+    if restricted {
+        json!({
+            "areaLimitStatus": "RESTRICTED",
+            "limitArea": synth_circle(tail.unwrap_or(0)),
+        })
+    } else {
+        json!({ "areaLimitStatus": "UNRESTRICTED" })
     }
+}
+
+/// A deterministic, schema-valid `Circle` for a device whose trailing three
+/// digits are `d` (0..=999). Every derived value lands inside the CAMARA schema
+/// range: `latitude` ∈ [-90, 90], `longitude` ∈ [-180, 180], `radius` ∈
+/// [1, 200000]. The same `d` always yields the same circle.
+fn synth_circle(d: u16) -> serde_json::Value {
+    let latitude = f64::from(d % 180) - 90.0; // [-90, 89]
+    let longitude = f64::from(d % 360) - 180.0; // [-180, 179]
+    let radius = i64::from(d).clamp(1, 200_000); // [1, 999]
+    json!({
+        "areaType": "CIRCLE",
+        "center": { "latitude": latitude, "longitude": longitude },
+        "radius": radius,
+    })
 }
 
 /// `POST /bind` request body (CAMARA `BindDeviceImeiRequest`). `bindType` is
@@ -269,22 +282,29 @@ struct BindRequest {
     bind_type: BindType,
 }
 
-/// CamaraSim implements the non-spatial `IMEIBIND` bind only; `AREALIMIT` is a
-/// deferred (spatial) case, so it is not a value this deployment accepts — an
-/// `AREALIMIT` bind fails to deserialise and is rejected `400 INVALID_ARGUMENT`.
+/// CamaraSim implements **both** CAMARA bind types: the non-spatial `IMEIBIND`
+/// (bind the SIM to its device IMEI) and the spatial `AREALIMIT` (restrict the
+/// SIM to its network-provisioned geographic area). Any other value fails to
+/// deserialise and is rejected `400 INVALID_ARGUMENT`.
 #[derive(Debug, Deserialize, PartialEq)]
 enum BindType {
     #[serde(rename = "IMEIBIND")]
     ImeiBind,
+    #[serde(rename = "AREALIMIT")]
+    AreaLimit,
 }
 
-/// `POST /iot-sim-fraud-prevention/vwip/bind` — bind a device's SIM to its IMEI
+/// `POST /iot-sim-fraud-prevention/vwip/bind` — bind a device's SIM
 /// (operationId `bindDeviceImei`, scope `iot-sim-fraud-prevention:bind`).
 ///
-/// The SIM is bound to the IMEI the network observes for the device — in the
-/// simulator, the deterministic [`synth_imei`] of the resolved identifier — and
-/// the binding is remembered in the shared [`store`] so a later `query` reports
-/// it and an `unbind` can clear it. Binding is idempotent → `200 { bound: true }`.
+/// For `bindType: IMEIBIND` the SIM is bound to the IMEI the network observes for
+/// the device — in the simulator, the deterministic [`synth_imei`] of the
+/// resolved identifier. For `bindType: AREALIMIT` the SIM is marked restricted to
+/// its network-provisioned area (the request carries no geometry upstream; the
+/// allowed `Circle` is deterministic from the identifier and surfaced by the
+/// `AREALIMIT` query). Either binding is remembered in the shared [`store`] so a
+/// later `query` reports it and an `unbind` can clear it. Both are idempotent →
+/// `200 { bound: true }`.
 async fn bind(claims: Claims, headers: HeaderMap, body: Bytes) -> Response {
     let correlator = headers.get("x-correlator").cloned();
 
@@ -292,18 +312,18 @@ async fn bind(claims: Claims, headers: HeaderMap, body: Bytes) -> Response {
         return with_correlator(e.into_response(), &correlator);
     }
 
-    // `bindType` is required; an unknown value (e.g. the deferred `AREALIMIT`)
-    // fails to deserialise → 400 INVALID_ARGUMENT.
+    // `bindType` is required; an unknown value (neither `IMEIBIND` nor
+    // `AREALIMIT`) fails to deserialise → 400 INVALID_ARGUMENT.
     let req: BindRequest = match serde_json::from_slice(&body) {
         Ok(req) => req,
         Err(_) => {
             return invalid_argument(
-                "Request body is not a valid BindDeviceImeiRequest (bindType must be \"IMEIBIND\").",
+                "Request body is not a valid BindDeviceImeiRequest (bindType must be \"IMEIBIND\" or \"AREALIMIT\").",
                 &correlator,
             )
         }
     };
-    let BindType::ImeiBind = req.bind_type;
+    let bind_type = req.bind_type;
 
     let identifier = match resolve_identifier(req.device, &claims, &correlator) {
         Ok(id) => id,
@@ -314,9 +334,17 @@ async fn bind(claims: Claims, headers: HeaderMap, body: Bytes) -> Response {
         return with_correlator(err.into_response(), &correlator);
     }
 
-    // Bind the SIM to the IMEI the network would observe for this device.
-    let imei = synth_imei(scenarios::trailing_three_digits(&identifier).unwrap_or(0));
-    store::bind(identifier, imei);
+    match bind_type {
+        BindType::ImeiBind => {
+            // Bind the SIM to the IMEI the network would observe for this device.
+            let imei = synth_imei(scenarios::trailing_three_digits(&identifier).unwrap_or(0));
+            store::bind(identifier, imei);
+        }
+        BindType::AreaLimit => {
+            // Mark the SIM restricted to its network-provisioned area.
+            store::set_area_limit(identifier);
+        }
+    }
 
     with_correlator(
         (StatusCode::OK, Json(json!({ "bound": true }))).into_response(),
@@ -334,21 +362,25 @@ struct UnbindRequest {
     unbind_type: UnbindType,
 }
 
-/// CamaraSim implements the non-spatial `IMEIBIND` unbind only; `AREALIMIT` is a
-/// deferred (spatial) case → an `AREALIMIT` unbind fails to deserialise and is
-/// rejected `400 INVALID_ARGUMENT`.
+/// CamaraSim implements **both** CAMARA unbind types: `IMEIBIND` (clear the
+/// SIM↔IMEI binding) and `AREALIMIT` (clear the SIM's area restriction). Any
+/// other value fails to deserialise and is rejected `400 INVALID_ARGUMENT`.
 #[derive(Debug, Deserialize, PartialEq)]
 enum UnbindType {
     #[serde(rename = "IMEIBIND")]
     ImeiBind,
+    #[serde(rename = "AREALIMIT")]
+    AreaLimit,
 }
 
-/// `POST /iot-sim-fraud-prevention/vwip/unbind` — remove a device's IMEI binding
+/// `POST /iot-sim-fraud-prevention/vwip/unbind` — remove a device's binding
 /// (operationId `unBindDeviceImei`, scope `iot-sim-fraud-prevention:unbind`).
 ///
-/// Keyed on the shared [`store`] (after the identifier / reserved-error planes):
-/// an existing binding is removed → `200 { unbound: true }`; a device with no
-/// binding → `422 UNNECESSARY_UNBIND_IMEI` (there is nothing to unbind).
+/// Keyed on the shared [`store`] (after the identifier / reserved-error planes).
+/// For `unBindType: IMEIBIND`: an existing IMEI binding is removed →
+/// `200 { unbound: true }`; a device with none → `422 UNNECESSARY_UNBIND_IMEI`.
+/// For `unBindType: AREALIMIT`: an existing area restriction is cleared →
+/// `200 { unbound: true }`; a device with none → `422 UNNECESSARY_UNBIND_AREALIMIT`.
 async fn unbind(claims: Claims, headers: HeaderMap, body: Bytes) -> Response {
     let correlator = headers.get("x-correlator").cloned();
 
@@ -360,12 +392,12 @@ async fn unbind(claims: Claims, headers: HeaderMap, body: Bytes) -> Response {
         Ok(req) => req,
         Err(_) => {
             return invalid_argument(
-                "Request body is not a valid UnBindDeviceImeiRequest (unBindType must be \"IMEIBIND\").",
+                "Request body is not a valid UnBindDeviceImeiRequest (unBindType must be \"IMEIBIND\" or \"AREALIMIT\").",
                 &correlator,
             )
         }
     };
-    let UnbindType::ImeiBind = req.unbind_type;
+    let unbind_type = req.unbind_type;
 
     let identifier = match resolve_identifier(req.device, &claims, &correlator) {
         Ok(id) => id,
@@ -376,14 +408,27 @@ async fn unbind(claims: Claims, headers: HeaderMap, body: Bytes) -> Response {
         return with_correlator(err.into_response(), &correlator);
     }
 
-    match store::unbind(&identifier) {
-        Some(_) => with_correlator(
+    let removed = match unbind_type {
+        UnbindType::ImeiBind => store::unbind(&identifier).is_some(),
+        UnbindType::AreaLimit => store::clear_area_limit(&identifier),
+    };
+
+    if removed {
+        return with_correlator(
             (StatusCode::OK, Json(json!({ "unbound": true }))).into_response(),
             &correlator,
-        ),
-        None => unprocessable(
+        );
+    }
+
+    match unbind_type {
+        UnbindType::ImeiBind => unprocessable(
             "UNNECESSARY_UNBIND_IMEI",
             "The device has no IMEI binding to remove.",
+            &correlator,
+        ),
+        UnbindType::AreaLimit => unprocessable(
+            "UNNECESSARY_UNBIND_AREALIMIT",
+            "The device has no area restriction to remove.",
             &correlator,
         ),
     }
@@ -752,6 +797,17 @@ mod tests {
         body["imeiBind"].clone()
     }
 
+    /// The `AREALIMIT` query facet for `phone` (helper for the AREALIMIT
+    /// round-trip tests; uses numbers disjoint from the other tests).
+    async fn query_area(phone: &str) -> Value {
+        let (status, _, body) = query_ok_token(&format!(
+            r#"{{"device":{{"phoneNumber":"{phone}"}},"queryType":"AREALIMIT"}}"#
+        ))
+        .await;
+        assert_eq!(status, StatusCode::OK, "AREALIMIT query for {phone} should be 200");
+        body["areaLimit"].clone()
+    }
+
     #[tokio::test]
     async fn odd_tail_is_bound_with_a_synthesised_imei() {
         let (status, _, body) =
@@ -1090,17 +1146,95 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bind_arealimit_type_is_rejected_as_invalid_argument() {
+    async fn arealimit_bind_query_unbind_round_trip() {
+        // An even-tail device defaults to UNRESTRICTED; an AREALIMIT bind flips
+        // it to RESTRICTED (with a Circle), and an AREALIMIT unbind restores the
+        // default.
+        assert_eq!(query_area("+19990000302").await["areaLimitStatus"], "UNRESTRICTED");
+
         let (status, _, body) =
-            bind_ok(r#"{"device":{"phoneNumber":"+19990000142"},"bindType":"AREALIMIT"}"#).await;
+            bind_ok(r#"{"device":{"phoneNumber":"+19990000302"},"bindType":"AREALIMIT"}"#).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["bound"], true);
+
+        let restricted = query_area("+19990000302").await;
+        assert_eq!(restricted["areaLimitStatus"], "RESTRICTED");
+        assert_eq!(restricted["limitArea"]["areaType"], "CIRCLE");
+        assert!(restricted["limitArea"]["radius"].is_number());
+
+        let (status, _, body) =
+            unbind_ok(r#"{"device":{"phoneNumber":"+19990000302"},"unBindType":"AREALIMIT"}"#).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["unbound"], true);
+
+        assert_eq!(query_area("+19990000302").await["areaLimitStatus"], "UNRESTRICTED");
+    }
+
+    #[tokio::test]
+    async fn arealimit_bind_is_idempotent() {
+        let dev = r#"{"device":{"phoneNumber":"+19990000312"},"bindType":"AREALIMIT"}"#;
+        for _ in 0..2 {
+            let (status, _, body) = bind_ok(dev).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(body["bound"], true);
+        }
+        assert_eq!(query_area("+19990000312").await["areaLimitStatus"], "RESTRICTED");
+    }
+
+    #[tokio::test]
+    async fn arealimit_unbind_without_a_restriction_is_unnecessary_unbind_arealimit() {
+        let (status, _, body) =
+            unbind_ok(r#"{"device":{"phoneNumber":"+19990000322"},"unBindType":"AREALIMIT"}"#).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["code"], "UNNECESSARY_UNBIND_AREALIMIT");
+    }
+
+    #[tokio::test]
+    async fn arealimit_and_imeibind_bindings_are_independent() {
+        // An IMEIBIND bind does not restrict the area, and an AREALIMIT bind does
+        // not bind the IMEI — the two facets use disjoint state.
+        let phone = "+19990000342"; // even tail → both facets default to inactive
+        bind_ok(&format!(
+            r#"{{"device":{{"phoneNumber":"{phone}"}},"bindType":"IMEIBIND"}}"#
+        ))
+        .await;
+        assert_eq!(query_number(phone).await["bindStatus"], "BOUND");
+        assert_eq!(query_area(phone).await["areaLimitStatus"], "UNRESTRICTED");
+
+        bind_ok(&format!(
+            r#"{{"device":{{"phoneNumber":"{phone}"}},"bindType":"AREALIMIT"}}"#
+        ))
+        .await;
+        assert_eq!(query_area(phone).await["areaLimitStatus"], "RESTRICTED");
+        // IMEIBIND unbind leaves the area restriction in force.
+        unbind_ok(&format!(
+            r#"{{"device":{{"phoneNumber":"{phone}"}},"unBindType":"IMEIBIND"}}"#
+        ))
+        .await;
+        assert_eq!(query_number(phone).await["bindStatus"], "UNBOUND");
+        assert_eq!(query_area(phone).await["areaLimitStatus"], "RESTRICTED");
+    }
+
+    #[tokio::test]
+    async fn arealimit_bind_reserved_suffix_selects_a_canonical_camara_error() {
+        let (status, _, body) =
+            bind_ok(r#"{"device":{"phoneNumber":"+19990000404"},"bindType":"AREALIMIT"}"#).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn unknown_bind_type_is_rejected_as_invalid_argument() {
+        let (status, _, body) =
+            bind_ok(r#"{"device":{"phoneNumber":"+19990000352"},"bindType":"NOPE"}"#).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(body["code"], "INVALID_ARGUMENT");
     }
 
     #[tokio::test]
-    async fn unbind_arealimit_type_is_rejected_as_invalid_argument() {
+    async fn unknown_unbind_type_is_rejected_as_invalid_argument() {
         let (status, _, body) =
-            unbind_ok(r#"{"device":{"phoneNumber":"+19990000152"},"unBindType":"AREALIMIT"}"#).await;
+            unbind_ok(r#"{"device":{"phoneNumber":"+19990000362"},"unBindType":"NOPE"}"#).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(body["code"], "INVALID_ARGUMENT");
     }

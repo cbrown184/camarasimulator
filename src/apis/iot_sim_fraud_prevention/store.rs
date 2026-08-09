@@ -8,6 +8,15 @@
 //! `phoneNumber`/NAI/IP or three-legged subject) maps to the IMEI bound to its
 //! SIM. It mirrors the other stores under `src/apis/**/store.rs`.
 //!
+//! The parallel `AREALIMIT` flow is stateful in the same shape: `POST /bind`
+//! marks a device's SIM as restricted to a network-provisioned geographic area,
+//! `POST /query` reports the restriction (and the allowed `Circle`), and
+//! `POST /unbind` clears it. The upstream bind request carries no geometry — the
+//! allowed area is provisioned by the network — so CamaraSim only needs to
+//! remember *whether* a device is area-restricted; the `Circle` is synthesised
+//! deterministically from the identifier at query time (see [`super::vwip`]).
+//! That set of restricted identifiers is a second, disjoint map here.
+//!
 //! ## Simulator constraints
 //!
 //! - **In-memory, single node** (docs/DESIGN.md §4): a process-global map guarded
@@ -18,7 +27,7 @@
 //!   [`super::vwip`]). Storing the IMEI (rather than a bare flag) lets `query`
 //!   report the same `bindImei` the network would have observed at bind time.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, OnceLock};
 
 /// The process-global IMEI-binding store: device identifier → bound IMEI.
@@ -26,6 +35,15 @@ use std::sync::{Mutex, OnceLock};
 fn store() -> &'static Mutex<HashMap<String, String>> {
     static STORE: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
     STORE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// The process-global **area-restriction** store: the set of device identifiers
+/// whose SIM is bound to a network area limit (`AREALIMIT`). In-memory only
+/// (single node, per DESIGN §4). The allowed area itself is deterministic from
+/// the identifier, so only membership is recorded here.
+fn area_store() -> &'static Mutex<HashSet<String>> {
+    static STORE: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    STORE.get_or_init(|| Mutex::new(HashSet::new()))
 }
 
 /// Bind `identifier`'s SIM to `imei`, replacing any existing binding. Binding is
@@ -57,5 +75,36 @@ pub fn unbind(identifier: &str) -> Option<String> {
     store()
         .lock()
         .expect("iot-sim bind store not poisoned")
+        .remove(identifier)
+}
+
+/// Mark `identifier`'s SIM as restricted to its network-provisioned area
+/// (`AREALIMIT` bind). Idempotent — re-binding a restricted device is a no-op —
+/// so `bindDeviceImei` always answers `{ "bound": true }`.
+pub fn set_area_limit(identifier: String) {
+    area_store()
+        .lock()
+        .expect("iot-sim area store not poisoned")
+        .insert(identifier);
+}
+
+/// Whether `identifier` has an explicit area restriction in force (set by an
+/// `AREALIMIT` bind). `query` uses this to report a stored `RESTRICTED` status
+/// ahead of the identifier's stateless default.
+pub fn area_limited(identifier: &str) -> bool {
+    area_store()
+        .lock()
+        .expect("iot-sim area store not poisoned")
+        .contains(identifier)
+}
+
+/// Clear `identifier`'s area restriction, returning `true` if one was present.
+/// `unBindDeviceImei` uses the distinction to answer `200 { "unbound": true }`
+/// (a restriction was removed) vs `422 UNNECESSARY_UNBIND_AREALIMIT` (nothing
+/// was restricted).
+pub fn clear_area_limit(identifier: &str) -> bool {
+    area_store()
+        .lock()
+        .expect("iot-sim area store not poisoned")
         .remove(identifier)
 }
