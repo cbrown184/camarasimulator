@@ -1083,6 +1083,23 @@ delivery-notification subscription surface is out of scope. (Adding this entry
 grew the `/` catalog `json!` literal past the default macro recursion limit, so a
 crate-level `#![recursion_limit = "256"]` was added to `src/main.rs`.)
 
+**Capabilities and Restrictions vwip** is now live at
+`/capabilities-and-restrictions/vwip/retrieve` (`postServiceCapability`, scope
+`camara-capability:read`) — a new stateless, non-spatial consumer-context
+capability-discovery API (CAMARA CapabilitiesAndRuntimeRestrictions `wip`). A
+consumer submits `queries` (each with a required `overlayExtends` list and
+optional `resourceScopes`); the operator answers `201 CapabilityInfo` with one
+`CapabilityDetail` per query — a fixed 3-entry `bitmapCapabilities` catalogue of
+overlay `SchemaRestrictionsSet`s plus a context-derived `camaraCapabilitiesBitmap`
+whose bits mark the active restrictions. Two control planes (DESIGN §7): the
+first query's first `resourceScopes.phoneNumber` reserved-error suffix →
+canonical CAMARA error (`…404` = no capability API found); and the active bitmap
+derives from that phoneNumber's trailing three digits (else an FNV hash of
+`overlayExtends`) `% 8`, so the active set is a genuine second plane. The
+`subscriptionRequest` change-notification callback, the `CapabilitySetFootprint`
+branch, ETag/`If-None-Match`/304 caching, and overlay resolution are documented
+cuts.
+
 ## In progress (claimed this pass)
 
 _None._  <!-- agent: put the claimed item + run timestamp here, clear it when done -->
@@ -2429,6 +2446,29 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     `from`/recipient / empty `message` / unknown `category`/field / bad body → 400
     INVALID_ARGUMENT. `x-correlator` echoed. Upstream delivery-notification
     subscription surface out of scope. **Completes Short Message Service v0alpha1.**
+- [~] Capabilities and Restrictions vwip (`/capabilities-and-restrictions/vwip`;
+  CAMARA CapabilitiesAndRuntimeRestrictions `wip` — no released version, mounted
+  at its canonical `vwip` base path; stateless, non-spatial, consumer-context
+  capability discovery):
+  - [x] `POST /retrieve` (`postServiceCapability`, `camara-capability:read`) —
+    query the tailored service capabilities (and their active/inactive state) for
+    a context. Request `CamaraCapabilityQueryRequest`: `queries` (1..=100), each
+    with a required `overlayExtends` (1..=20 definition URIs) and optional
+    `resourceScopes`. Returns `201 CapabilityInfo` with one `CapabilityDetail`
+    (the `CapabilitySetBitmap`+`CapabilityBitmap` branch) per query — a fixed
+    3-entry `bitmapCapabilities` catalogue (each a `SchemaRestrictionsSet` of
+    `CamaraOverlay` restrictions) plus a `camaraCapabilitiesBitmap` marking the
+    active bits. Two control planes (DESIGN §7): the first query's first
+    `resourceScopes` `phoneNumber` reserved-error suffix → canonical CAMARA error
+    (`…404` = no capability API found); and the active bitmap is derived from the
+    queried context (that phoneNumber's trailing three digits, else a stable FNV
+    hash of `overlayExtends`, `% 8`), so the active set is a genuine second plane.
+    Validation: malformed body / empty-absent `overlayExtends` / non-URI overlay /
+    non-E.164 scope `phoneNumber` → 400 INVALID_ARGUMENT; >100 queries or >20
+    overlays → 400 OUT_OF_RANGE. `x-correlator` echoed. No new dep. Documented
+    cuts: `subscriptionRequest` change-notification callback (accepted-not-
+    applied), the `CapabilitySetFootprint` branch, ETag/If-None-Match/304 caching,
+    and resolving `overlayExtends` against real API definitions.
 - [ ] Other CAMARA APIs as capacity allows
 
 ## Cross-cutting (do alongside the item that needs it)
@@ -2455,6 +2495,22 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-09 — capabilities-and-restrictions: added Capabilities and Restrictions
+  vwip (CAMARA CapabilitiesAndRuntimeRestrictions `wip`), a new stateless,
+  non-spatial consumer-context capability-discovery API. `POST
+  /capabilities-and-restrictions/vwip/retrieve` (`postServiceCapability`, scope
+  `camara-capability:read`) → `201 CapabilityInfo` with one `CapabilityDetail`
+  (bitmap branch) per query: a fixed 3-entry `bitmapCapabilities` catalogue +
+  a context-derived `camaraCapabilitiesBitmap`. Control planes (DESIGN §7): the
+  first query's first `resourceScopes.phoneNumber` reserved suffix → canonical
+  CAMARA error; active bitmap derived from that phoneNumber's trailing digits
+  (else an FNV hash of `overlayExtends`) `% 8`. Validation → 400 INVALID_ARGUMENT
+  / OUT_OF_RANGE (>100 queries / >20 overlays). Vendored self-contained
+  `specs/capabilities-and-restrictions/vwip/openapi.yaml` (faithful schema shapes;
+  documented cuts: subscriptionRequest callback, CapabilitySetFootprint branch,
+  ETag/304 caching, overlay resolution), wired into apis/openapi/catalog. 23 new
+  tests; full suite 1824 green, `cargo build --release` green. No new dep (reused
+  sha2-free FNV + serde_json). — binary: 3.3M (3439672 B)
 - 2026-08-09 — sms: added Short Message Service v0alpha1 (CAMARA
   ShortMessageService 0.1.0-alpha.1), a new stateless, non-spatial, two-legged
   send-SMS API. `POST /sms/v0alpha1/short-message` (`send-sms`, scope

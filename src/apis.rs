@@ -55,6 +55,7 @@
 //! - **Predictive Connectivity Data vwip** — `/predictive-connectivity-data/vwip/…`.
 //! - **Network Access Devices vwip** — `/network-access-devices/vwip/…`.
 //! - **Short Message Service v0alpha1** — `/sms/v0alpha1/…`.
+//! - **Capabilities and Restrictions vwip** — `/capabilities-and-restrictions/vwip/…`.
 //!
 //! Plus [`openapi`], which serves each mounted API's vendored OpenAPI spec at
 //! `/{api}/v{n}/openapi.yaml` (docs/DESIGN.md §9).
@@ -64,6 +65,7 @@ pub mod application_endpoint_registration;
 pub mod application_profiles;
 pub mod blockchain_public_address;
 pub mod call_forwarding_signal;
+pub mod capabilities_and_restrictions;
 pub mod carrier_billing;
 pub mod click_to_dial;
 pub mod connected_network_type;
@@ -168,5 +170,6 @@ pub fn routes() -> Router {
         .merge(predictive_connectivity_data::routes())
         .merge(network_access_devices::routes())
         .merge(short_message_service::routes())
+        .merge(capabilities_and_restrictions::routes())
         .merge(openapi::routes())
 }

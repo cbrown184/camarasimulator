@@ -344,6 +344,12 @@ async fn catalog() -> Json<Value> {
                 "version": "v0alpha1",
                 "base_path": "/sms/v0alpha1",
                 "spec_url": "/sms/v0alpha1/openapi.yaml",
+            },
+            {
+                "name": "capabilities-and-restrictions",
+                "version": "vwip",
+                "base_path": "/capabilities-and-restrictions/vwip",
+                "spec_url": "/capabilities-and-restrictions/vwip/openapi.yaml",
             }
         ],
         "authorization_servers": [{
