@@ -9,10 +9,13 @@
 # `src/apis/application_endpoint_registration/vwip.rs`; spec and code must not drift.
 #
 # This slice serves the register endpoint `POST /application-endpoint-lists`
-# (`registerApplicationEndpoints`) and the read-back leg
+# (`registerApplicationEndpoints`), the read-back leg
 # `GET /application-endpoint-lists/{applicationEndpointListId}`
-# (`getApplicationEndpointsById`). The update (`PUT`) and deregister (`DELETE`)
-# legs land in later passes.
+# (`getApplicationEndpointsById`), and the list leg
+# `GET /application-endpoint-lists` (`getAllRegisteredApplicationEndpoints`). Both
+# GETs return the canonical `ApplicationEndpointList` shape
+# (`applicationEndpointListId` + a nested `applicationEndpointsInfo`). The update
+# (`PUT`) and deregister (`DELETE`) legs land in later passes.
 openapi: 3.0.3
 info:
   title: Application Endpoints Registration
@@ -201,6 +204,60 @@ paths:
             result: "400 INVALID_ARGUMENT"
           - input: over-length or multi-line applicationProviderName / applicationDescription, unknown field
             result: "400 INVALID_ARGUMENT"
+    get:
+      operationId: getAllRegisteredApplicationEndpoints
+      summary: Retrieve all registered application-endpoint lists
+      description: |
+        Returns every application-endpoint list previously registered by
+        `registerApplicationEndpoints`, as an array of `ApplicationEndpointList`
+        (each carrying its `applicationEndpointListId` and the nested
+        `applicationEndpointsInfo`).
+
+        There is no request body and no device identifier, so the store state is
+        the only control plane (docs/DESIGN.md §7): the array is empty when
+        nothing is registered — a list never `404`s. CamaraSim does not scope
+        registrations per client (a documented simplification, mirroring the
+        Carrier Billing / Geofencing lists); the results are ordered by
+        `applicationEndpointListId` for a deterministic response.
+      security:
+        - openId:
+            - application-endpoint-registration:application-endpoints:read
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+      responses:
+        "200":
+          description: The registered application-endpoint lists (possibly empty).
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                type: array
+                maxItems: 20
+                description: Array of registered application-endpoint lists.
+                items:
+                  $ref: "#/components/schemas/ApplicationEndpointList"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          A read-only list keyed only on the in-memory store state (docs/DESIGN.md
+          §7). No request body, no device identifier, no reserved-identifier plane;
+          registrations are not scoped per client.
+        cases:
+          - input: any read-scoped token (one or more registrations exist)
+            result: "200 — an array of ApplicationEndpointList, ordered by applicationEndpointListId"
+          - input: any read-scoped token with nothing registered
+            result: "200 — an empty array (a list never 404s)"
 
   /application-endpoint-lists/{applicationEndpointListId}:
     parameters:
@@ -232,7 +289,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/ApplicationEndpointsInfoResponse"
+                $ref: "#/components/schemas/ApplicationEndpointList"
         "400":
           description: |
             400 — invalid request. CamaraSim returns `INVALID_ARGUMENT` when the
@@ -430,21 +487,24 @@ components:
       description: The opaque id of a registered application-endpoint list.
       example: "98765432-e89b-12d3-a456-426614174999"
 
-    ApplicationEndpointsInfoResponse:
+    ApplicationEndpointList:
+      type: object
+      additionalProperties: false
       description: >-
-        A registered application-endpoint list read back by id: the submitted
-        `ApplicationEndpointsInfo` plus the server-minted
-        `applicationEndpointListId`. This is the shape CamaraSim stores at
-        registration time and returns verbatim from
-        `getApplicationEndpointsById`.
-      allOf:
-        - $ref: "#/components/schemas/ApplicationEndpointsInfo"
-        - type: object
-          required:
-            - applicationEndpointListId
-          properties:
-            applicationEndpointListId:
-              $ref: "#/components/schemas/ApplicationEndpointListId"
+        A registered application-endpoint list: the server-minted
+        `applicationEndpointListId` plus the submitted `ApplicationEndpointsInfo`
+        nested under `applicationEndpointsInfo`. This is the canonical CAMARA shape
+        CamaraSim stores at registration time and returns verbatim from
+        `getApplicationEndpointsById` (one) and
+        `getAllRegisteredApplicationEndpoints` (each array element).
+      required:
+        - applicationEndpointListId
+        - applicationEndpointsInfo
+      properties:
+        applicationEndpointListId:
+          $ref: "#/components/schemas/ApplicationEndpointListId"
+        applicationEndpointsInfo:
+          $ref: "#/components/schemas/ApplicationEndpointsInfo"
 
     ApplicationEndpointRegistrationError:
       description: >-

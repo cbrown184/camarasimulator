@@ -17,14 +17,16 @@
 //! - **Opaque ids**: [`new_list_id`] mints a UUID-shaped `applicationEndpointListId`
 //!   (CAMARA `ApplicationEndpointListId` is `format: uuid`) from a monotonic
 //!   counter and the clock, so ids are unique without a `uuid`/`rand` dependency.
-//! - The stored value is the registration's rendered JSON, returned verbatim by
-//!   the read leg (a later pass) — the created representation is the source of
-//!   truth.
+//! - The stored value is the registration's rendered JSON in the canonical CAMARA
+//!   `ApplicationEndpointList` shape (`applicationEndpointListId` +
+//!   `applicationEndpointsInfo`), returned verbatim by the read leg — the created
+//!   representation is the source of truth.
 //!
-//! The read leg (`getApplicationEndpointsById`) now calls [`get`]; the update /
-//! delete legs land in later passes, so the module stays `dead_code`-allowed
-//! until they wire in their store operations (mirroring the first slices of the
-//! QoS Provisioning / Session Insights stores).
+//! The read leg (`getApplicationEndpointsById`) calls [`get`] and the list leg
+//! (`getAllRegisteredApplicationEndpoints`) calls [`all`]; the update / delete
+//! legs land in later passes, so the module stays `dead_code`-allowed until they
+//! wire in their store operations (mirroring the first slices of the QoS
+//! Provisioning / Session Insights stores).
 
 #![allow(dead_code)]
 
@@ -60,6 +62,34 @@ pub fn get(id: &str) -> Option<Value> {
         .expect("application-endpoint-registration store not poisoned")
         .get(id)
         .cloned()
+}
+
+/// Return every stored registration (the rendered `ApplicationEndpointList`
+/// values), used by the list leg (`getAllRegisteredApplicationEndpoints`) →
+/// `200` with an array (empty when nothing is registered — a list never 404s).
+///
+/// The `HashMap` iteration order is unspecified, so the results are sorted by
+/// `applicationEndpointListId` to give a deterministic response (mirroring the
+/// Carrier Billing payment list). The lock is held only for the clone-and-sort,
+/// never across an `.await`.
+pub fn all() -> Vec<Value> {
+    let mut lists: Vec<Value> = store()
+        .lock()
+        .expect("application-endpoint-registration store not poisoned")
+        .values()
+        .cloned()
+        .collect();
+    lists.sort_by(|a, b| {
+        a.get("applicationEndpointListId")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .cmp(
+                b.get("applicationEndpointListId")
+                    .and_then(Value::as_str)
+                    .unwrap_or(""),
+            )
+    });
+    lists
 }
 
 /// Mint a fresh, opaque, UUID-shaped `applicationEndpointListId`. See [`mint_uuid`].
@@ -128,5 +158,24 @@ mod tests {
         insert(id.clone(), reg.clone());
         assert_eq!(get(&id), Some(reg));
         assert!(get("no-such-list").is_none());
+    }
+
+    #[test]
+    fn all_includes_inserted_lists_and_is_sorted_by_id() {
+        // The store is process-global (shared across the test binary), so assert
+        // containment rather than an exact count: a freshly inserted id appears
+        // in `all()`, and the results are sorted by applicationEndpointListId.
+        let id = new_list_id();
+        let reg = json!({ "applicationEndpointListId": id, "applicationEndpointsInfo": {} });
+        insert(id.clone(), reg.clone());
+        let lists = all();
+        assert!(lists.contains(&reg), "all() must include the inserted list");
+        let ids: Vec<&str> = lists
+            .iter()
+            .filter_map(|v| v.get("applicationEndpointListId").and_then(Value::as_str))
+            .collect();
+        let mut sorted = ids.clone();
+        sorted.sort_unstable();
+        assert_eq!(ids, sorted, "all() must be sorted by applicationEndpointListId");
     }
 }

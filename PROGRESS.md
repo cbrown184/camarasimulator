@@ -2252,16 +2252,29 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     digits, mirroring Network Health Assessment's `networkId`); and the nil UUID
     (`00000000-0000-0000-0000-000000000000`) → 422 `UNIDENTIFIABLE_APPLICATION_PROFILE`.
     `x-correlator` echoed.
-  - [ ] `GET /application-endpoint-lists` (`getAllRegisteredApplicationEndpoints`) — list.
+  - [x] `GET /application-endpoint-lists` (`getAllRegisteredApplicationEndpoints`,
+    scope `application-endpoint-registration:application-endpoints:read`) — list.
+    Returns every registered list as an array of the canonical
+    `ApplicationEndpointList` (`200`; empty array when none — a list never 404s),
+    ordered by `applicationEndpointListId` for a deterministic response (new
+    `store::all()`). Store state is the only control plane (no request body, no
+    device identifier); registrations aren't scoped per client (documented
+    simplification, mirroring the Carrier Billing / Geofencing lists).
+    `x-correlator` echoed. No new dep. Same pass corrected the stored/returned
+    shape to canonical **nested** `ApplicationEndpointList`
+    (`applicationEndpointListId` + `applicationEndpointsInfo`) so the read-back and
+    list legs agree with CAMARA (the earlier flat `ApplicationEndpointsInfoResponse`
+    is replaced).
   - [x] `GET /application-endpoint-lists/{id}` (`getApplicationEndpointsById`,
     scope `application-endpoint-registration:application-endpoints:read`) —
     read-back. Returns the registration stored at `registerApplicationEndpoints`
-    (the submitted `ApplicationEndpointsInfo` + minted `applicationEndpointListId`)
-    verbatim (`200`) or `404 NOT_FOUND` for an unknown id; a non-UUID path value →
-    `400 INVALID_ARGUMENT` (mirrors Application Profiles' `getApplicationProfile`).
-    The opaque server-minted id is the only control plane (no reserved-identifier
-    suffix — it was never caller-chosen). `x-correlator` echoed. Reuses the
-    existing `store::get`; no new dep.
+    as the canonical **nested** `ApplicationEndpointList` (the submitted
+    `ApplicationEndpointsInfo` under `applicationEndpointsInfo` + minted
+    `applicationEndpointListId`) verbatim (`200`) or `404 NOT_FOUND` for an
+    unknown id; a non-UUID path value → `400 INVALID_ARGUMENT` (mirrors
+    Application Profiles' `getApplicationProfile`). The opaque server-minted id is
+    the only control plane (no reserved-identifier suffix — it was never
+    caller-chosen). `x-correlator` echoed. Reuses `store::get`; no new dep.
   - [ ] `PUT /application-endpoint-lists/{id}` (`updateApplicationEndpoint`) — full replace.
   - [ ] `DELETE /application-endpoint-lists/{id}` (`deregisterApplicationEndpoint`) — deregister.
 - [ ] Other CAMARA APIs as capacity allows
@@ -2290,6 +2303,22 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-09 — application-endpoint-registration: added the list leg
+  `GET /application-endpoint-lists` (`getAllRegisteredApplicationEndpoints`,
+  scope `…:application-endpoints:read`) — a `200` array of `ApplicationEndpointList`
+  (empty when none — a list never 404s), ordered by `applicationEndpointListId`
+  (new `store::all()`); store state the only control plane, no per-client scoping
+  (documented cut). Same pass corrected the stored/returned shape to canonical
+  **nested** `ApplicationEndpointList` (`applicationEndpointListId` +
+  `applicationEndpointsInfo`) — verified against the upstream CAMARA spec — so the
+  read-back and list legs agree with CAMARA (replacing the earlier flat
+  `ApplicationEndpointsInfoResponse`; read-back `store::get` returns nested now).
+  Spec: added the GET list path (array, maxItems 20, of `ApplicationEndpointList`)
+  + `getAllRegisteredApplicationEndpoints` scenarios; added the
+  `ApplicationEndpointList` schema and repointed `getApplicationEndpointsById`'s
+  `200` to it. Tests: 5 net new (store `all()`; list containment/nested-shape,
+  sorted-by-id, read-scope→403, missing-token→401) + read-back happy-path updated
+  to the nested shape. cargo test 1693 passed; release builds. — binary: 3251320 bytes (3.2M)
 - 2026-08-07 19:50Z — application-endpoint-registration: added the read-back leg
   `GET /application-endpoint-lists/{applicationEndpointListId}`
   (`getApplicationEndpointsById`, scope `…:application-endpoints:read`) — returns

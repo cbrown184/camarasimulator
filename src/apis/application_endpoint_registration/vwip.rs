@@ -16,6 +16,17 @@
 //!   malformed path value is a `400 INVALID_ARGUMENT`; the opaque id is the only
 //!   control plane (it was never caller-chosen, so there is no reserved-identifier
 //!   suffix on it).
+//! - `GET /application-endpoint-lists` (operationId
+//!   `getAllRegisteredApplicationEndpoints`, scope
+//!   `application-endpoint-registration:application-endpoints:read`) — the
+//!   **list** leg: returns every registered list as an array of
+//!   `ApplicationEndpointList` (`200`, an empty array when none — a list never
+//!   `404`s). The store state is the only control plane; registrations are not
+//!   scoped per client (a documented simplification).
+//!
+//! Both GETs return the canonical CAMARA `ApplicationEndpointList` shape
+//! (`applicationEndpointListId` + a nested `applicationEndpointsInfo`), which is
+//! also how a registration is stored, so the read-back and list legs agree.
 //!
 //! The update (`PUT`) and deregister (`DELETE`) legs by
 //! `{applicationEndpointListId}` land in later passes.
@@ -92,7 +103,7 @@ pub fn routes() -> Router {
     Router::new()
         .route(
             "/application-endpoint-registration/vwip/application-endpoint-lists",
-            post(register_application_endpoints),
+            post(register_application_endpoints).get(get_all_registered_application_endpoints),
         )
         .route(
             "/application-endpoint-registration/vwip/application-endpoint-lists/:application_endpoint_list_id",
@@ -227,12 +238,17 @@ async fn register_application_endpoints(
         );
     }
 
-    // Mint the id, remember the rendered registration (so the later read leg can
-    // return it), and return 200 with the id (CAMARA `ApplicationEndpointListId`,
+    // Mint the id, remember the rendered registration in the canonical CAMARA
+    // `ApplicationEndpointList` shape (`applicationEndpointListId` +
+    // `applicationEndpointsInfo`), so the read-back and list legs return it
+    // verbatim, and return 200 with the id (CAMARA `ApplicationEndpointListId`,
     // a bare string).
     let list_id = store::new_list_id();
-    let mut rendered = serde_json::to_value(&req).unwrap_or_else(|_| json!({}));
-    rendered["applicationEndpointListId"] = json!(list_id);
+    let info = serde_json::to_value(&req).unwrap_or_else(|_| json!({}));
+    let rendered = json!({
+        "applicationEndpointListId": list_id,
+        "applicationEndpointsInfo": info,
+    });
     store::insert(list_id.clone(), rendered);
 
     with_correlator(
@@ -281,6 +297,32 @@ async fn get_application_endpoints_by_id(
             &correlator,
         ),
     }
+}
+
+/// `GET /application-endpoint-registration/vwip/application-endpoint-lists`.
+///
+/// The **list** leg (operationId `getAllRegisteredApplicationEndpoints`): returns
+/// every registered application-endpoint list as an array of the canonical CAMARA
+/// `ApplicationEndpointList` (`applicationEndpointListId` +
+/// `applicationEndpointsInfo`), the same shape the read-back leg returns for one
+/// id. The store state is the only control plane — there is no request body and no
+/// device identifier — so a list never `404`s: with nothing registered the body is
+/// an empty array (`200`). CamaraSim does not scope registrations per client (a
+/// documented simplification, mirroring the Carrier Billing / Geofencing lists).
+/// `x-correlator` is echoed.
+async fn get_all_registered_application_endpoints(claims: Claims, headers: HeaderMap) -> Response {
+    // Optional correlation header, echoed on every response (CAMARA Commonalities).
+    let correlator = headers.get("x-correlator").cloned();
+
+    // Endpoint authorisation: the token must carry the read scope.
+    if let Err(e) = claims.require_scope(READ_SCOPE) {
+        return with_correlator(e.into_response(), &correlator);
+    }
+
+    with_correlator(
+        (StatusCode::OK, Json(json!(store::all()))).into_response(),
+        &correlator,
+    )
 }
 
 /// Validate an `ApplicationEndpointsInfo` body (everything except the
@@ -766,12 +808,15 @@ mod tests {
         let (status, headers, body) = get_list(Some(&read), &id, Some("corr-read")).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(headers.get("x-correlator").unwrap(), "corr-read");
-        // The stored registration echoes the minted id and the submitted fields.
+        // The stored registration is the canonical nested `ApplicationEndpointList`:
+        // the minted id at top level and the submitted fields under
+        // `applicationEndpointsInfo`.
         assert_eq!(body["applicationEndpointListId"], id);
-        assert_eq!(body["applicationProviderName"], "Acme Corp");
-        assert_eq!(body["applicationProfileId"], OK_PROFILE);
-        assert_eq!(body["applicationEndpoints"][0]["ipv4Address"], "192.0.2.10");
-        assert_eq!(body["applicationEndpoints"][0]["port"], 443);
+        let info = &body["applicationEndpointsInfo"];
+        assert_eq!(info["applicationProviderName"], "Acme Corp");
+        assert_eq!(info["applicationProfileId"], OK_PROFILE);
+        assert_eq!(info["applicationEndpoints"][0]["ipv4Address"], "192.0.2.10");
+        assert_eq!(info["applicationEndpoints"][0]["port"], 443);
     }
 
     #[tokio::test]
@@ -807,6 +852,107 @@ mod tests {
     #[tokio::test]
     async fn read_back_missing_token_is_401() {
         let (status, _, _) = get_list(None, OK_PROFILE, None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    // --- List: GET /application-endpoint-lists (getAllRegisteredApplicationEndpoints) ---
+
+    /// `GET /application-endpoint-lists` (no path id) → the whole list.
+    async fn get_all(
+        token: Option<&str>,
+        correlator: Option<&str>,
+    ) -> (StatusCode, HeaderMap, Value) {
+        let mut builder = Request::builder()
+            .method("GET")
+            .uri(LISTS)
+            .header("host", HOST);
+        if let Some(t) = token {
+            builder = builder.header("authorization", format!("Bearer {t}"));
+        }
+        if let Some(c) = correlator {
+            builder = builder.header("x-correlator", c);
+        }
+        let request = builder.body(Body::empty()).unwrap();
+        let response = app().oneshot(request).await.unwrap();
+        let status = response.status();
+        let headers = response.headers().clone();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, headers, json)
+    }
+
+    #[tokio::test]
+    async fn list_returns_200_array_containing_registered_lists_in_nested_shape() {
+        let write = mint_token(WRITE_SCOPE).await;
+        // Register a list with a distinctive provider name so we can find it
+        // among the process-global store's other entries.
+        let body = json!({
+            "applicationEndpoints": [ { "ipv4Address": "192.0.2.55", "port": 8080 } ],
+            "applicationProviderName": "ListProbe Ltd",
+            "applicationProfileId": OK_PROFILE
+        })
+        .to_string();
+        let id = register_and_get_id(&write, &body).await;
+
+        let read = mint_token(READ_SCOPE).await;
+        let (status, headers, out) = get_all(Some(&read), Some("corr-list")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(headers.get("x-correlator").unwrap(), "corr-list");
+
+        let arr = out.as_array().expect("list body is a JSON array");
+        // The store is process-global, so assert containment (not an exact count):
+        // our freshly registered id must be present, in the nested
+        // `ApplicationEndpointList` shape.
+        let mine = arr
+            .iter()
+            .find(|v| v["applicationEndpointListId"] == json!(id))
+            .expect("the registered list id must appear in the list");
+        assert_eq!(
+            mine["applicationEndpointsInfo"]["applicationProviderName"],
+            "ListProbe Ltd"
+        );
+        assert_eq!(
+            mine["applicationEndpointsInfo"]["applicationEndpoints"][0]["port"],
+            8080
+        );
+    }
+
+    #[tokio::test]
+    async fn list_is_sorted_by_id() {
+        // Register a couple of lists, then confirm the whole response is sorted by
+        // applicationEndpointListId (deterministic ordering, per store::all).
+        let write = mint_token(WRITE_SCOPE).await;
+        register_and_get_id(&write, &valid_body(OK_PROFILE)).await;
+        register_and_get_id(&write, &valid_body(OK_PROFILE)).await;
+
+        let read = mint_token(READ_SCOPE).await;
+        let (status, _, out) = get_all(Some(&read), None).await;
+        assert_eq!(status, StatusCode::OK);
+        let ids: Vec<&str> = out
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|v| v["applicationEndpointListId"].as_str())
+            .collect();
+        let mut sorted = ids.clone();
+        sorted.sort_unstable();
+        assert_eq!(ids, sorted);
+    }
+
+    #[tokio::test]
+    async fn list_requires_the_read_scope() {
+        // A token with only the write scope may not list → 403.
+        let write = mint_token(WRITE_SCOPE).await;
+        let (status, _, err) = get_all(Some(&write), None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(err["code"], "PERMISSION_DENIED");
+    }
+
+    #[tokio::test]
+    async fn list_missing_token_is_401() {
+        let (status, _, _) = get_all(None, None).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
     }
 }
