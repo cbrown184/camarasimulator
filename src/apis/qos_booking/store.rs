@@ -55,6 +55,17 @@ pub fn get(id: &str) -> Option<Value> {
         .cloned()
 }
 
+/// Remove the booking stored under `id`, returning its `BookingInfo` if one was
+/// present, or `None` if no such booking existed. `deleteBooking` uses the
+/// distinction to answer `204` (a booking was deleted) vs `404` (unknown /
+/// already-deleted id). Mirrors [`crate::apis::qos_provisioning::store::remove`].
+pub fn remove(id: &str) -> Option<Value> {
+    store()
+        .lock()
+        .expect("qos-booking store not poisoned")
+        .remove(id)
+}
+
 /// Mint a fresh, opaque, UUID-shaped `bookingId`. See [`mint_uuid`] for the shape.
 pub fn new_booking_id() -> String {
     mint_uuid()
@@ -121,5 +132,18 @@ mod tests {
         insert(id.clone(), info.clone());
         assert_eq!(get(&id), Some(info));
         assert!(get("no-such-booking").is_none());
+    }
+
+    #[test]
+    fn remove_evicts_the_booking_and_is_single_use() {
+        let id = new_booking_id();
+        let info = json!({ "bookingId": id, "bookingStatus": "ACTIVATED" });
+        insert(id.clone(), info.clone());
+        // First remove returns the stored booking; a second returns None.
+        assert_eq!(remove(&id), Some(info));
+        assert!(remove(&id).is_none(), "single-use: already removed");
+        assert!(get(&id).is_none(), "booking is gone after remove");
+        // Removing an id that was never stored is None.
+        assert!(remove("no-such-booking").is_none());
     }
 }

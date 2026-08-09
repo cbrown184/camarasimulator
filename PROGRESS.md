@@ -1610,7 +1610,18 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     verbatim / `404 NOT_FOUND`. Store state the only control plane (opaque id → no
     reserved-identifier plane; mirrors QoS Provisioning `getQosAssignmentById` / QoD
     `getSession`). `x-correlator` echoed. No new dep.
-  - [ ] list (`GET /device-qos-bookings`) + `DELETE /device-qos-bookings/{bookingId}` (later passes)
+  - [x] `DELETE /device-qos-bookings/{bookingId}` (`deleteBooking`,
+    `qos-booking:device-qos-bookings:delete`) — deletes a stored booking, evicting
+    it from the in-memory store (`store::remove`): present → `204 No Content`
+    (single-use), unknown/already-deleted → `404 NOT_FOUND`. Keyed only on store
+    state (opaque `bookingId`, no reserved-identifier plane). CAMARA's async `202
+    Accepted` (returning `BookingInfo`) form is deferred with `sink` notifications —
+    synchronous `204` only (mirrors QoS Provisioning `revokeQosAssignment` / QoD
+    `deleteSession`). `x-correlator` echoed. No new dep.
+  - [ ] `POST /retrieve-device-qos-bookings` (`retrieveBookingByDevice`,
+    `qos-booking:device-qos-bookings:retrieve-by-device`) — the canonical
+    collection query (an earlier note called this a plain `GET` list; the real
+    CAMARA op is a device-keyed POST returning an array). Later pass.
   - [ ] CloudEvents notifications on `sink` (status transitions) — later pass;
     `sink`/`sinkCredential` currently validated+echoed but not delivered to (cut)
 - [x] Device Data Volume vwip (`/device-data-volume/vwip`; CAMARA
@@ -2354,6 +2365,22 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-09 — qos-booking: added the delete leg `DELETE
+  /qos-booking/vwip/device-qos-bookings/{bookingId}` (`deleteBooking`, scope
+  `qos-booking:device-qos-bookings:delete`). Deletes a stored booking, evicting it
+  from the in-memory store (new `store::remove`): present → `204 No Content`
+  (single-use), unknown/already-deleted → `404 NOT_FOUND`; store state the only
+  control plane (opaque id → no reserved-identifier plane; mirrors QoS Provisioning
+  `revokeQosAssignment` / QoD `deleteSession`). CAMARA's async `202 Accepted`
+  form deferred with `sink` notifications (documented cut); `x-correlator` echoed on
+  `204` and `404`. Verified the canonical op set against the CAMARA `QoSBooking`
+  repo: the collection query is `POST /retrieve-device-qos-bookings`
+  (`retrieveBookingByDevice`), NOT a plain `GET` list — corrected the backlog note.
+  Spec: added the DELETE operation (deleteBooking, 204 + error set,
+  x-camarasim-scenarios) + updated the header note. Tests: 4 handler (204+get→404,
+  single-use, unknown→404, auth+scope) + 1 store (`remove`). No new dep. `cargo
+  test` (1743) + `cargo build --release` green. binary: 3.2M (3,331,960 bytes).
+  Retrieve-by-device + `sink` notifications remain for later passes.
 - 2026-08-09 — qos-booking: added the read-back leg `GET
   /qos-booking/vwip/device-qos-bookings/{bookingId}` (`getBooking`, scope
   `qos-booking:device-qos-bookings:read`). Reads a created booking back from the

@@ -73,6 +73,9 @@ const CREATE_SCOPE: &str = "qos-booking:device-qos-bookings:create";
 /// Scope required to read a booking back (CAMARA qos-booking wip).
 const READ_SCOPE: &str = "qos-booking:device-qos-bookings:read";
 
+/// Scope required to delete a booking (CAMARA qos-booking wip).
+const DELETE_SCOPE: &str = "qos-booking:device-qos-bookings:delete";
+
 /// The maximum `duration` (seconds) a booking can span — the CAMARA
 /// `BookingInfo.duration` ceiling, `31_622_400` = 366 days.
 const MAX_DURATION_SECS: i64 = 31_622_400;
@@ -86,7 +89,7 @@ pub fn routes() -> Router {
         )
         .route(
             "/qos-booking/vwip/device-qos-bookings/:booking_id",
-            get(get_booking),
+            get(get_booking).delete(delete_booking),
         )
 }
 
@@ -298,6 +301,35 @@ async fn get_booking(
 
     match store::get(&booking_id) {
         Some(info) => with_correlator((StatusCode::OK, Json(info)).into_response(), &correlator),
+        None => with_correlator(
+            CamaraError::not_found("No booking found for the provided bookingId.").into_response(),
+            &correlator,
+        ),
+    }
+}
+
+/// `DELETE /qos-booking/vwip/device-qos-bookings/{bookingId}` (`deleteBooking`).
+///
+/// Deletes a stored booking. Keyed only on the store state (the `bookingId` is
+/// opaque, so there is no reserved-identifier control plane): an existing booking
+/// is evicted → `204 No Content` (single-use); an unknown or already-deleted id →
+/// `404 NOT_FOUND`. CAMARA's asynchronous `202 Accepted` (returning `BookingInfo`)
+/// form is deferred with `sink` notifications — CamaraSim answers the synchronous
+/// `204` (mirrors QoS Provisioning's `revokeQosAssignment` / QoD's `deleteSession`).
+/// `x-correlator` echoed on both outcomes.
+async fn delete_booking(
+    claims: Claims,
+    headers: HeaderMap,
+    Path(booking_id): Path<String>,
+) -> Response {
+    let correlator = headers.get("x-correlator").cloned();
+
+    if let Err(e) = claims.require_scope(DELETE_SCOPE) {
+        return with_correlator(e.into_response(), &correlator);
+    }
+
+    match store::remove(&booking_id) {
+        Some(_) => with_correlator(StatusCode::NO_CONTENT.into_response(), &correlator),
         None => with_correlator(
             CamaraError::not_found("No booking found for the provided bookingId.").into_response(),
             &correlator,
@@ -1202,6 +1234,103 @@ mod tests {
 
         // The create scope is not the read scope → 403.
         let (status, _, _) = get_booking_req(Some(&create), &id, None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    // --- Delete: DELETE /device-qos-bookings/{bookingId} -------------------
+
+    async fn delete_booking_req(
+        token: Option<&str>,
+        booking_id: &str,
+        correlator: Option<&str>,
+    ) -> (StatusCode, HeaderMap, Value) {
+        let mut builder = Request::builder()
+            .method("DELETE")
+            .uri(format!("{BOOKINGS}/{booking_id}"))
+            .header("host", HOST);
+        if let Some(t) = token {
+            builder = builder.header("authorization", format!("Bearer {t}"));
+        }
+        if let Some(c) = correlator {
+            builder = builder.header("x-correlator", c);
+        }
+        let request = builder.body(Body::empty()).unwrap();
+        let response = app().oneshot(request).await.unwrap();
+        let status = response.status();
+        let headers = response.headers().clone();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, headers, json)
+    }
+
+    #[tokio::test]
+    async fn delete_evicts_the_booking_204_then_get_is_404() {
+        let create = mint_token(CREATE_SCOPE).await;
+        let (status, _, created) =
+            post_booking(Some(&create), &create_body("+123456789012", "QOS_E"), None).await;
+        assert_eq!(status, StatusCode::CREATED);
+        let id = created["bookingId"].as_str().unwrap().to_string();
+
+        // Delete → 204 No Content (no body), x-correlator echoed.
+        let del = mint_token(DELETE_SCOPE).await;
+        let (status, headers, body) = delete_booking_req(Some(&del), &id, Some("corr-del")).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(body, Value::Null, "204 carries no body");
+        assert_eq!(headers.get("x-correlator").unwrap(), "corr-del");
+
+        // The booking is gone: a subsequent read is 404.
+        let read = mint_token(READ_SCOPE).await;
+        let (status, _, _) = get_booking_req(Some(&read), &id, None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn delete_is_single_use_second_delete_is_404() {
+        let create = mint_token(CREATE_SCOPE).await;
+        let (_, _, created) =
+            post_booking(Some(&create), &create_body("+123456789012", "QOS_E"), None).await;
+        let id = created["bookingId"].as_str().unwrap().to_string();
+
+        let del = mint_token(DELETE_SCOPE).await;
+        let (status, _, _) = delete_booking_req(Some(&del), &id, None).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        // A second delete of the same id is 404 NOT_FOUND.
+        let (status, _, body) = delete_booking_req(Some(&del), &id, None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn delete_unknown_booking_is_404_not_found() {
+        let del = mint_token(DELETE_SCOPE).await;
+        let (status, headers, body) = delete_booking_req(
+            Some(&del),
+            "00000000-0000-4000-8000-000000000000",
+            Some("corr-404"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["code"], "NOT_FOUND");
+        assert_eq!(headers.get("x-correlator").unwrap(), "corr-404");
+    }
+
+    #[tokio::test]
+    async fn delete_requires_auth_and_the_delete_scope() {
+        // Create a booking to have a real id to target.
+        let create = mint_token(CREATE_SCOPE).await;
+        let (_, _, created) =
+            post_booking(Some(&create), &create_body("+123456789012", "QOS_E"), None).await;
+        let id = created["bookingId"].as_str().unwrap().to_string();
+
+        // No token → 401.
+        let (status, _, _) = delete_booking_req(None, &id, None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+        // The read scope is not the delete scope → 403 (booking still present).
+        let read = mint_token(READ_SCOPE).await;
+        let (status, _, _) = delete_booking_req(Some(&read), &id, None).await;
         assert_eq!(status, StatusCode::FORBIDDEN);
     }
 }
