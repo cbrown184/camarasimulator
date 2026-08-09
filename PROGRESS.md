@@ -1580,6 +1580,33 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
       (`store::peek_credential`) on the non-terminal AVAILABLE event so a later
       terminal event still authenticates, *taken* single-use on the terminal one.
     - [ ] TLS (`https://` sink) delivery (needs a rustls TLS client)
+- [~] QoS Booking vwip (`/qos-booking/vwip`; CAMARA qos-booking, wip — part of the
+  ConnectivityQualityManagement subproject; the *time-boxed booking* sibling of
+  Quality on Demand (immediate sessions) and QoS Provisioning (open-ended); stateful,
+  resource-oriented, in-memory booking store):
+  - [x] `POST /device-qos-bookings` (`qos-booking:device-qos-bookings:create`,
+    `createBooking`) — books a `qosProfile` for a device over a `startTime` /
+    `duration` window in a `serviceArea`, mints an opaque UUID-shaped `bookingId`
+    (`src/apis/qos_booking/store.rs`; `Mutex<HashMap>`, no uuid/rand dep, mirroring
+    QoS Provisioning), persists the rendered `BookingInfo`, `201`. Device-object
+    identifier resolution + the two-legged/three-legged rule (device on a line token
+    → 422 `UNNECESSARY_IDENTIFIER`; no device + non-line subject → 422
+    `MISSING_IDENTIFIER`; empty `device` → 400 INVALID_ARGUMENT). Control planes
+    (DESIGN §7): identifier reserved-error suffix → canonical CAMARA error (`…409` →
+    409 CONFLICT); else the trailing three digits fix `bookingStatus` — `…000`/no
+    digits → `REQUESTED` (no `startedAt`), odd tail → `SCHEDULED` (no `startedAt`),
+    other tail → `ACTIVATED` (`startedAt`=now); `duration` (`<1` → 400 OUT_OF_RANGE,
+    `>31622400` → 400 `QOS_BOOKING.DURATION_OUT_OF_RANGE`); `serviceArea` — CamaraSim
+    manages `CIRCLE` (center out of range → 400 OUT_OF_RANGE, radius `<1` → 422
+    `QOS_BOOKING.INVALID_AREA`) + `AREANAME` (`uncovered` → 422
+    `QOS_BOOKING.AREA_NOT_COVERED`), `POLYGON` → 422 `QOS_BOOKING.NOT_MANAGED_AREA_TYPE`
+    (documented cut), unknown/missing areaType → 400 INVALID_ARGUMENT; `qosProfile`
+    name containing `unavailable` → 422 `QOS_BOOKING.QOS_PROFILE_NOT_APPLICABLE`;
+    `sink` must be http(s) → else 400 `INVALID_SINK`. `startTime` validated for shape
+    (RFC 3339) but not used to compute status (documented cut). `x-correlator` echoed.
+  - [ ] `GET /device-qos-bookings/{bookingId}` (read-back) + list + `DELETE` (later passes)
+  - [ ] CloudEvents notifications on `sink` (status transitions) — later pass;
+    `sink`/`sinkCredential` currently validated+echoed but not delivered to (cut)
 - [x] Device Data Volume vwip (`/device-data-volume/vwip`; CAMARA
   device-data-volume, wip — no released version yet, mounted at its canonical
   `vwip` base path; stateless, non-spatial, device-keyed data-usage query):
@@ -2321,6 +2348,27 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-09 — qos-booking: NEW CAMARA API. Added the create leg `POST
+  /qos-booking/vwip/device-qos-bookings` (`createBooking`, scope
+  `qos-booking:device-qos-bookings:create`) — the time-boxed booking sibling of
+  QualityOnDemand / QoS Provisioning (ConnectivityQualityManagement subproject,
+  mounted at its canonical `vwip`, verified real & un-implemented against the CAMARA
+  GitHub org). Books a `qosProfile` for a device over a `startTime`/`duration` window
+  in a `serviceArea`, mints a UUID-shaped `bookingId`, persists the `BookingInfo`
+  (new `src/apis/qos_booking/store.rs`, no uuid/rand dep — reuses sha2), `201`.
+  Control planes (DESIGN §7): identifier reserved-error suffix (`…409`→409 CONFLICT);
+  trailing digits → `bookingStatus` (`…000`/none→REQUESTED, odd→SCHEDULED,
+  else→ACTIVATED+startedAt); `duration` (<1→400 OUT_OF_RANGE, >31622400→400
+  QOS_BOOKING.DURATION_OUT_OF_RANGE); `serviceArea` (CIRCLE + AREANAME managed —
+  center range→400, radius<1→422 INVALID_AREA, uncovered areaName→422 AREA_NOT_COVERED;
+  POLYGON→422 NOT_MANAGED_AREA_TYPE; unknown→400); `qosProfile` unavailable→422
+  QOS_PROFILE_NOT_APPLICABLE; `sink` non-http(s)→400 INVALID_SINK; two/three-legged
+  identifier rule (422 UNNECESSARY/MISSING_IDENTIFIER). Read-back/list/delete +
+  `sink` notifications deferred to later passes (sink validated+echoed, not delivered
+  to — documented cut); `startTime` shape-validated, not used for status (cut). Spec:
+  new `specs/qos-booking/vwip/openapi.yaml` (createBooking + full schemas + scenarios),
+  wired into openapi SPECS + `/` catalog. Tests: 26 new (all cases above). No new dep.
+  `cargo test` (1735) + `cargo build --release` green. binary: 3.2M (3,319,560 bytes).
 - 2026-08-09 — application-endpoint-registration: added the full-replace update leg
   `PUT /application-endpoint-lists/{applicationEndpointListId}`
   (`updateApplicationEndpoint`, scope `…:application-endpoints:update`) — replaces

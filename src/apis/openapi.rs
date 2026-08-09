@@ -167,6 +167,10 @@ const SPECS: &[(&str, &str)] = &[
         include_str!("../../specs/qos-provisioning/v0.3/openapi.yaml"),
     ),
     (
+        "/qos-booking/vwip/openapi.yaml",
+        include_str!("../../specs/qos-booking/vwip/openapi.yaml"),
+    ),
+    (
         "/media-streaming-rate/vwip/openapi.yaml",
         include_str!("../../specs/media-streaming-rate/vwip/openapi.yaml"),
     ),

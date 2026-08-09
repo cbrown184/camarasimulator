@@ -97,6 +97,7 @@ pub mod openapi;
 pub mod optimal_edge_discovery;
 pub mod population_density_data;
 pub mod predictive_connectivity_data;
+pub mod qos_booking;
 pub mod qos_profiles;
 pub mod qos_provisioning;
 pub mod quality_on_demand;
@@ -144,6 +145,7 @@ pub fn routes() -> Router {
         .merge(device_visit_location::routes())
         .merge(population_density_data::routes())
         .merge(qos_provisioning::routes())
+        .merge(qos_booking::routes())
         .merge(media_streaming_rate::routes())
         .merge(most_frequent_location::routes())
         .merge(network_health_assessment::routes())

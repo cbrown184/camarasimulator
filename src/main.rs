@@ -210,6 +210,12 @@ async fn catalog() -> Json<Value> {
                 "spec_url": "/qos-provisioning/v0.3/openapi.yaml",
             },
             {
+                "name": "qos-booking",
+                "version": "vwip",
+                "base_path": "/qos-booking/vwip",
+                "spec_url": "/qos-booking/vwip/openapi.yaml",
+            },
+            {
                 "name": "device-data-volume",
                 "version": "vwip",
                 "base_path": "/device-data-volume/vwip",
