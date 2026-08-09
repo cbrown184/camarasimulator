@@ -394,6 +394,130 @@ paths:
           - input: "sessionId of an already-revoked session (single-use)"
             result: "404 NOT_FOUND"
 
+  /campaign/{sponsorId}/{campaignId}/campaign-status:
+    get:
+      operationId: getCampaignStatus
+      summary: Campaign Status Inquiry [active, paused, completed], data volume balance.
+      description: |
+        Report the operational state of a whole **campaign** (distinct from a
+        single sponsorship session): whether it is `active`, `paused` or
+        `completed`, its window, its prepaid/postpaid billing type, and its
+        data-volume balance.
+
+        Campaign lifecycle management (`manageCampaign`) is not modelled, so
+        CamaraSim keeps **no campaign store**: the status is derived
+        **statelessly** from the `campaignId`'s embedded UUID (see the operation's
+        `x-camarasim-scenarios`). A reserved trailing-digit suffix on that UUID
+        selects a canonical CAMARA error; otherwise the trailing three digits fix
+        the campaign's type and status. Malformed path identifiers yield
+        `400 INVALID_ARGUMENT`.
+      security:
+        - openId:
+            - sponsored-data:campaign:read
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+        - name: sponsorId
+          in: path
+          required: true
+          description: The sponsoring company (`local@domain.tld`).
+          schema:
+            $ref: "#/components/schemas/SponsorId"
+        - name: campaignId
+          in: path
+          required: true
+          description: The campaign (`UUID@domain.tld`); its embedded UUID is the control plane.
+          schema:
+            $ref: "#/components/schemas/CampaignId"
+      responses:
+        "200":
+          description: Successful operation. The campaign's current status.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CampaignStatus"
+              examples:
+                activePrepaid:
+                  summary: An active prepaid campaign with its full allotment remaining
+                  value:
+                    sponsorId: acme@sponsor.example.com
+                    campaignId: 123e4567-e89b-12d3-a456-426614174000@sponsor.example.com
+                    status: active
+                    startTime: "2024-05-31T00:00:00Z"
+                    endTime: "2024-06-02T00:00:00Z"
+                    campaignType: prepaid
+                    contractedDataVolume: 1000
+                    usedDataVolume: 0
+                    remainingDataVolume: 1000
+                    completionReason: not_available
+                completedExhausted:
+                  summary: A completed prepaid campaign that used up its contracted data
+                  value:
+                    sponsorId: acme@sponsor.example.com
+                    campaignId: 123e4567-e89b-12d3-a456-426614174010@sponsor.example.com
+                    status: completed
+                    startTime: "2024-05-31T00:00:00Z"
+                    endTime: "2024-05-31T23:00:00Z"
+                    campaignType: prepaid
+                    contractedDataVolume: 1000
+                    usedDataVolume: 1000
+                    remainingDataVolume: 0
+                    completionReason: data_exhausted
+                pausedPostpaid:
+                  summary: A paused postpaid campaign (no contracted ceiling)
+                  value:
+                    sponsorId: acme@sponsor.example.com
+                    campaignId: 123e4567-e89b-12d3-a456-426614174003@sponsor.example.com
+                    status: paused
+                    startTime: "2024-05-31T00:00:00Z"
+                    endTime: "2024-06-02T00:00:00Z"
+                    campaignType: postpaid
+                    usedDataVolume: 3
+                    completionReason: not_available
+        "400":
+          $ref: "../../shared/errors.yaml#/components/responses/InvalidArgument"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "409":
+          $ref: "../../shared/errors.yaml#/components/responses/Conflict"
+        "422":
+          $ref: "../../shared/errors.yaml#/components/responses/ServiceNotApplicable"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          Result derived statelessly from the campaignId's embedded UUID
+          (docs/DESIGN.md §7). Let d be the UUID's trailing three digits (0 when
+          none). A reserved suffix on d selects a canonical CAMARA error; else d
+          drives the campaign's type and status.
+        cases:
+          - input: "sponsorId not local@domain, or campaignId not UUID@domain"
+            result: "400 INVALID_ARGUMENT"
+          - input: "campaignId UUID trailing three digits d in {400,401,403,404,409,422,429,500,503}"
+            result: "the matching canonical CAMARA error (e.g. …404 -> 404 NOT_FOUND, campaign not found)"
+          - input: "d even"
+            result: 'campaignType "prepaid" (contractedDataVolume/remainingDataVolume present)'
+          - input: "d odd"
+            result: 'campaignType "postpaid" (usedDataVolume only)'
+          - input: "(d / 2) mod 3 = 0 / 1 / 2"
+            result: 'status "active" / "paused" / "completed"'
+          - input: 'status "completed", (d / 6) even'
+            result: 'completionReason "time_expired" (usedDataVolume = d MB)'
+          - input: 'status "completed", (d / 6) odd'
+            result: 'completionReason "data_exhausted" (usedDataVolume = contractedDataVolume; remaining 0)'
+          - input: 'status "active" or "paused"'
+            result: 'completionReason "not_available"; endTime in the future'
+
 components:
   securitySchemes:
     openId:
@@ -625,6 +749,81 @@ components:
           enum:
             - successful_revocation
           example: successful_revocation
+
+    CampaignStatus:
+      type: object
+      additionalProperties: false
+      description: >-
+        The operational state of a campaign — its status, window, billing type
+        and data-volume balance. `contractedDataVolume` and `remainingDataVolume`
+        are present only for `prepaid` campaigns.
+      required:
+        - sponsorId
+        - campaignId
+        - status
+        - startTime
+        - endTime
+        - campaignType
+        - usedDataVolume
+        - completionReason
+      properties:
+        sponsorId:
+          $ref: "#/components/schemas/SponsorId"
+        campaignId:
+          $ref: "#/components/schemas/CampaignId"
+        status:
+          type: string
+          description: Current operational state of the campaign.
+          enum:
+            - active
+            - paused
+            - completed
+            - not_available
+          example: active
+        startTime:
+          allOf:
+            - $ref: "#/components/schemas/Time"
+          description: When the campaign started.
+        endTime:
+          allOf:
+            - $ref: "#/components/schemas/Time"
+          description: When the campaign ends (future while ongoing; past once completed).
+        campaignType:
+          type: string
+          description: Whether the campaign is prepaid (has a contracted allotment) or postpaid.
+          enum:
+            - prepaid
+            - postpaid
+          example: prepaid
+        contractedDataVolume:
+          type: integer
+          minimum: 0
+          description: >-
+            Total data volume (MB) contracted for the campaign. Present only for
+            `prepaid` campaigns.
+          example: 1000
+        usedDataVolume:
+          type: integer
+          minimum: 0
+          description: Total data volume (MB) consumed by the campaign's sponsorships.
+          example: 0
+        remainingDataVolume:
+          type: integer
+          minimum: 0
+          description: >-
+            Remaining data volume (MB) available for the campaign. Present only
+            for `prepaid` campaigns.
+          example: 1000
+        completionReason:
+          type: string
+          description: >-
+            Why the campaign completed. `not_available` while it is still `active`
+            or `paused`; `time_expired` / `data_exhausted` once `completed`.
+          enum:
+            - time_expired
+            - data_exhausted
+            - not_available
+          example: not_available
 
     SponsoredDataError:
       description: >-

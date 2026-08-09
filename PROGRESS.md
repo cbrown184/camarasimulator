@@ -2098,7 +2098,21 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     `404`. Because revoke evicts, `getSessionStatus`'s `endReason` `session_revoked`
     stays documented-but-unreached. The end-of-session `webhookUrl` callback is
     still deferred. New `store::remove_matching` (atomic check-and-remove).
-  - [ ] campaign-management operations (`/campaign/…`) — deferred.
+  - [~] campaign operations (`/campaign/…`):
+    - [x] `GET /campaign/{sponsorId}/{campaignId}/campaign-status`
+      (`getCampaignStatus`, `sponsored-data:campaign:read`) — reports a whole
+      campaign's operational state, distinct from a single session. No campaign
+      store (the upstream `manageCampaign` CRUD is unmodelled), so the status is
+      derived **statelessly** from the `campaignId`'s embedded UUID (DESIGN §7):
+      malformed `sponsorId`/`campaignId` path → 400 INVALID_ARGUMENT; the UUID's
+      trailing three digits `d` — reserved suffix → canonical CAMARA error
+      (`…404` → 404 campaign-not-found); else `d` even → `prepaid` (carries
+      `contractedDataVolume`/`remainingDataVolume`) / odd → `postpaid`
+      (`usedDataVolume` only), and `(d/2)%3` → `status` active/paused/completed
+      with the matching `completionReason` (`completed` + `(d/6)` odd →
+      `data_exhausted` spending the whole allotment, else `time_expired`). Window
+      anchored to now. `x-correlator` echoed. No new dep.
+    - [ ] `getActiveSponsorships` / `configureAlerts` / `manageCampaign` — deferred.
 - [~] Click to Dial vwip (`/click-to-dial/vwip`; CAMARA ClickToDial `wip`;
   two-legged, business-facing call origination):
   - [x] `POST /calls` (`createCall`, `click-to-dial:calls:create`) — create a
@@ -2505,6 +2519,28 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-09 — sponsored-data: added `GET /campaign/{sponsorId}/{campaignId}/
+  campaign-status` (`getCampaignStatus`, scope `sponsored-data:campaign:read`) —
+  the first of the Sponsored Data *campaign* operations. Reports a whole
+  campaign's operational state (distinct from a single session): `active`/
+  `paused`/`completed`, its window, prepaid/postpaid billing type, and its
+  data-volume balance. Campaign lifecycle CRUD (`manageCampaign`) is unmodelled,
+  so there is no campaign store — the status is derived **statelessly** from the
+  `campaignId`'s embedded UUID (DESIGN §7, matching how Network Health
+  Assessment keys off a UUID `networkId`): malformed path ids → 400
+  INVALID_ARGUMENT; the UUID's trailing three digits `d` — reserved suffix →
+  canonical CAMARA error (`…404` → 404 campaign-not-found); else `d` even →
+  `prepaid` (carries `contractedDataVolume`/`remainingDataVolume`) / odd →
+  `postpaid` (`usedDataVolume` only), and `(d/2)%3` → status active/paused/
+  completed with the matching `completionReason` (`completed` + `(d/6)` odd →
+  `data_exhausted` spending the whole 1000 MB allotment, else `time_expired`).
+  Window anchored to now (started 24 h ago; ongoing ends 24 h out, completed 1 h
+  past). `x-correlator` echoed. Spec: added the `campaign-status` path (params,
+  200 `CampaignStatus` schema, three examples, functional cases) + the
+  `CampaignStatus` schema to `specs/sponsored-data/vwip/openapi.yaml`. Tests: 7
+  new (pure builder facet-derivation across 5 control digits + router happy/
+  type-status/reserved-suffix/malformed-id/auth/correlator). `cargo test` 1836
+  green, `cargo build --release` green. No new dep. — binary: 3.3M (3,459,504 B)
 - 2026-08-09 — iot-sim-fraud-prevention: added `bindType: AREALIMIT` /
   `unBindType: AREALIMIT`, completing the API's stateful round-trip for both
   facets. A second in-memory set in the shared store records which devices are

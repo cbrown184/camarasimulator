@@ -1,12 +1,15 @@
 //! Sponsored Data **vwip** (CAMARA Sponsored Data, work-in-progress).
 //!
-//! Three endpoints:
+//! Four endpoints:
 //! - `POST /sponsored-data/vwip/sponsorship` — start a data-sponsorship session
 //!   for a subscriber in a campaign (operationId `startSponsorship`).
 //! - `GET /sponsored-data/vwip/sponsorship/{sponsorId}/{campaignId}/{sessionId}/session-status`
 //!   — read a started session's live status (operationId `getSessionStatus`).
 //! - `DELETE /sponsored-data/vwip/sponsorship/{sponsorId}/{campaignId}/{sessionId}/revoke`
 //!   — revoke (evict) a started session (operationId `revokeSponsorship`).
+//! - `GET /sponsored-data/vwip/campaign/{sponsorId}/{campaignId}/campaign-status`
+//!   — report a campaign's operational state and data balance (operationId
+//!   `getCampaignStatus`), derived statelessly from the campaignId.
 //!
 //! ## What it does
 //!
@@ -85,8 +88,22 @@
 //! Because revoke evicts the session, the `getSessionStatus` `endReason` value
 //! `session_revoked` remains unreachable through a subsequent status read (a
 //! revoked session is gone, so its status `404`s); it and `not_available` stay
-//! documented-but-unreached. The end-of-session `webhookUrl` callback and
-//! campaign-management operations are still deferred to later passes.
+//! documented-but-unreached. The end-of-session `webhookUrl` callback is still
+//! deferred to a later pass.
+//!
+//! ## Campaign status (`getCampaignStatus`)
+//!
+//! `GET …/campaign/{sponsorId}/{campaignId}/campaign-status` reports a whole
+//! campaign's operational state — distinct from a single session. There is no
+//! campaign store (the upstream `manageCampaign` CRUD is not modelled), so the
+//! status is derived **statelessly** from the `campaignId`'s embedded UUID
+//! (docs/DESIGN.md §7): a reserved trailing-digit suffix selects a canonical
+//! CAMARA error (`…404` → 404 campaign-not-found), else the trailing three
+//! digits `d` fix `campaignType` (`d` even → prepaid, odd → postpaid) and
+//! `status` (`(d/2) mod 3` → active / paused / completed) with the matching
+//! `completionReason` and data-volume balance (see [`campaign_status_body`]). The
+//! remaining campaign operations (`getActiveSponsorships`, `configureAlerts`,
+//! `manageCampaign`) stay deferred to later passes.
 
 use axum::body::Bytes;
 use axum::extract::Path;
@@ -115,6 +132,9 @@ const READ_SCOPE: &str = "sponsored-data:sponsorship:read";
 /// Scope required to revoke a sponsorship session (CamaraSim-assigned; the
 /// upstream `wip` contract declares no `securitySchemes`).
 const DELETE_SCOPE: &str = "sponsored-data:sponsorship:delete";
+/// Scope required to read a campaign's status (CamaraSim-assigned; the upstream
+/// `wip` contract declares no `securitySchemes`).
+const CAMPAIGN_READ_SCOPE: &str = "sponsored-data:campaign:read";
 
 /// The sponsored data volume (MB) granted when the request omits `dataVolume` —
 /// the campaign's onboarding default (the spec's `50 MB` example).
@@ -132,6 +152,16 @@ const DEFAULT_DURATION_MIN: i64 = 10;
 const MIN_DURATION_MIN: i64 = 1;
 const MAX_DURATION_MIN: i64 = 1440;
 
+/// The contracted data allotment (MB) reported for a **prepaid** campaign — a
+/// fixed onboarding figure the used/remaining balance is computed against.
+const CAMPAIGN_CONTRACTED_MB: i64 = 1000;
+/// How long ago a campaign is reported to have started (before `now`).
+const CAMPAIGN_STARTED_AGO_SECS: i64 = 24 * 3600;
+/// How far in the future an ongoing (`active`/`paused`) campaign's `endTime` sits.
+const CAMPAIGN_ENDS_IN_SECS: i64 = 24 * 3600;
+/// How far in the past a `completed` campaign's `endTime` sits.
+const CAMPAIGN_ENDED_AGO_SECS: i64 = 3600;
+
 /// Routes for Sponsored Data vwip, mounted at their canonical URLs.
 pub fn routes() -> Router {
     Router::new()
@@ -143,6 +173,10 @@ pub fn routes() -> Router {
         .route(
             "/sponsored-data/vwip/sponsorship/:sponsor_id/:campaign_id/:session_id/revoke",
             delete(revoke_sponsorship),
+        )
+        .route(
+            "/sponsored-data/vwip/campaign/:sponsor_id/:campaign_id/campaign-status",
+            get(get_campaign_status),
         )
 }
 
@@ -448,6 +482,125 @@ fn revoke_response(session_id: &str, record: &SponsorshipRecord) -> Value {
         "endTime": rfc3339_utc(record.end_time),
         "requestResult": "successful_revocation",
     })
+}
+
+/// `GET /sponsored-data/vwip/campaign/{sponsorId}/{campaignId}/campaign-status`
+/// (operationId `getCampaignStatus`).
+///
+/// Reports the operational state of a **campaign** (not a single session):
+/// whether it is `active`, `paused` or `completed`, its window, its
+/// prepaid/postpaid billing type, and its data-volume balance. Requires a token
+/// carrying [`CAMPAIGN_READ_SCOPE`].
+///
+/// Campaign lifecycle management (the upstream `manageCampaign` operation) is not
+/// modelled, so there is no campaign store; the status is derived **statelessly**
+/// from the `campaignId`'s embedded UUID (docs/DESIGN.md §7). Two control planes:
+/// a reserved trailing-digit suffix on that UUID selects a canonical CAMARA error
+/// (e.g. `…404` → `404 NOT_FOUND`, campaign not found); otherwise its trailing
+/// three digits derive the campaign state (see [`campaign_status_body`]).
+/// Malformed path identifiers → `400 INVALID_ARGUMENT`. `x-correlator` is echoed
+/// on every response.
+async fn get_campaign_status(
+    claims: Claims,
+    headers: HeaderMap,
+    Path((sponsor_id, campaign_id)): Path<(String, String)>,
+) -> Response {
+    // Optional correlation header, echoed on every response (CAMARA Commonalities).
+    let correlator = headers.get("x-correlator").cloned();
+
+    // Endpoint authorisation: the token must carry the campaign read scope.
+    if let Err(e) = claims.require_scope(CAMPAIGN_READ_SCOPE) {
+        return with_correlator(e.into_response(), &correlator);
+    }
+
+    // The path identifiers are the request's only input; both must be well-formed.
+    if !is_sponsor_id(&sponsor_id) {
+        return invalid_argument(
+            "`sponsorId` must be `local@domain.tld` (e.g. acme@sponsor.example.com).",
+            &correlator,
+        );
+    }
+    if !is_campaign_id(&campaign_id) {
+        return invalid_argument("`campaignId` must be `UUID@domain.tld`.", &correlator);
+    }
+
+    // The campaignId's embedded UUID (its `local` part) is the identifier and
+    // control plane (docs/DESIGN.md §7): a reserved trailing-digit suffix selects
+    // a canonical CAMARA error; otherwise its trailing three digits derive the
+    // campaign state. The UUID part is used (not the whole string) so a sponsor
+    // domain that happens to carry digits never perturbs the case.
+    let uuid_part = campaign_id.split('@').next().unwrap_or(campaign_id.as_str());
+    if let Some(err) = scenarios::reserved_error(uuid_part) {
+        return with_correlator(err.into_response(), &correlator);
+    }
+    let d = scenarios::trailing_three_digits(uuid_part).unwrap_or(0) as i64;
+
+    let body = campaign_status_body(&sponsor_id, &campaign_id, d, unix_now());
+    with_correlator((StatusCode::OK, Json(body)).into_response(), &correlator)
+}
+
+/// Render a campaign's `campaign-status` view. Pure over its inputs (the clock is
+/// passed as `now`, the control digit as `d`) so every derived figure is exactly
+/// unit-testable.
+///
+/// The campaignId's trailing three digits `d` drive two facets (docs/DESIGN.md
+/// §7):
+/// - **`campaignType`** — `d` even → `prepaid`, odd → `postpaid`.
+/// - **`status`** — `(d / 2) mod 3` → `active` / `paused` / `completed`.
+///
+/// A `completed` campaign carries a `completionReason` (`time_expired`, or
+/// `data_exhausted` when `(d / 6)` is odd); an `active`/`paused` one reports
+/// `not_available`. Data volumes are in MB: a **prepaid** campaign has a fixed
+/// `contractedDataVolume`, an `usedDataVolume`, and the `remainingDataVolume`
+/// balance; a **postpaid** campaign reports only `usedDataVolume` (no contracted
+/// ceiling). A `data_exhausted` completion has consumed the whole contracted
+/// allotment; otherwise `d` MB have been used. The window is anchored to `now`:
+/// the campaign started a day ago and — while ongoing — ends a day out, while a
+/// `completed` campaign's `endTime` sits an hour in the past.
+fn campaign_status_body(sponsor_id: &str, campaign_id: &str, d: i64, now: i64) -> Value {
+    let prepaid = d % 2 == 0;
+    let status = ["active", "paused", "completed"][((d / 2) % 3) as usize];
+    let completion_reason = if status == "completed" {
+        if (d / 6) % 2 == 0 {
+            "time_expired"
+        } else {
+            "data_exhausted"
+        }
+    } else {
+        "not_available"
+    };
+
+    // A data_exhausted completion has spent the whole contracted allotment;
+    // otherwise `d` MB (0..=999, never a reserved suffix) have been used.
+    let used = if status == "completed" && completion_reason == "data_exhausted" {
+        CAMPAIGN_CONTRACTED_MB
+    } else {
+        d
+    };
+
+    let start = now - CAMPAIGN_STARTED_AGO_SECS;
+    let end = if status == "completed" {
+        now - CAMPAIGN_ENDED_AGO_SECS
+    } else {
+        now + CAMPAIGN_ENDS_IN_SECS
+    };
+
+    let mut body = json!({
+        "sponsorId": sponsor_id,
+        "campaignId": campaign_id,
+        "status": status,
+        "startTime": rfc3339_utc(start),
+        "endTime": rfc3339_utc(end),
+        "campaignType": if prepaid { "prepaid" } else { "postpaid" },
+        "usedDataVolume": used,
+        "completionReason": completion_reason,
+    });
+    // `contractedDataVolume`/`remainingDataVolume` are required only for prepaid.
+    if prepaid {
+        body["contractedDataVolume"] = json!(CAMPAIGN_CONTRACTED_MB);
+        body["remainingDataVolume"] = json!(CAMPAIGN_CONTRACTED_MB - used);
+    }
+    body
 }
 
 /// A 400 `INVALID_ARGUMENT` CAMARA error, with the correlator echoed.
@@ -1281,6 +1434,206 @@ mod tests {
         assert_eq!(
             headers.get("x-correlator").and_then(|v| v.to_str().ok()),
             Some("corr-rev-err")
+        );
+    }
+
+    // --- getCampaignStatus -------------------------------------------------
+
+    /// A `campaignId` whose embedded UUID ends in the three (hex) digits `tail`,
+    /// so the campaign-status control plane resolves to `tail`. The base is the
+    /// shared `CAMPAIGN` UUID `123e4567-…-426614174000`.
+    fn campaign_tail(tail: &str) -> String {
+        format!("123e4567-e89b-12d3-a456-426614174{tail}@sponsor.example.com")
+    }
+
+    /// Build the `campaign-status` URL, percent-encoding the `@` in the
+    /// sponsor/campaign path segments (mirrors `status_url`).
+    fn campaign_status_url(sponsor: &str, campaign: &str) -> String {
+        format!(
+            "/sponsored-data/vwip/campaign/{}/{}/campaign-status",
+            sponsor.replace('@', "%40"),
+            campaign.replace('@', "%40"),
+        )
+    }
+
+    #[test]
+    fn campaign_status_body_derives_facets_from_the_control_digit() {
+        // 2024-06-01T00:00:00Z; started 24 h earlier, ongoing ends 24 h later.
+        let now = 1_717_200_000;
+        let start = "2024-05-31T00:00:00Z";
+        let ongoing_end = "2024-06-02T00:00:00Z";
+        let completed_end = "2024-05-31T23:00:00Z"; // now - 1 h
+
+        // d = 0: default — an active, prepaid campaign, nothing used.
+        let b = campaign_status_body(SPONSOR, CAMPAIGN, 0, now);
+        assert_eq!(b["sponsorId"], SPONSOR);
+        assert_eq!(b["campaignId"], CAMPAIGN);
+        assert_eq!(b["status"], "active");
+        assert_eq!(b["campaignType"], "prepaid");
+        assert_eq!(b["completionReason"], "not_available");
+        assert_eq!(b["usedDataVolume"], 0);
+        assert_eq!(b["contractedDataVolume"], 1000);
+        assert_eq!(b["remainingDataVolume"], 1000);
+        assert_eq!(b["startTime"], start);
+        assert_eq!(b["endTime"], ongoing_end);
+
+        // d = 2: prepaid, (2/2)%3 = 1 → paused; 2 MB used, 998 remaining.
+        let b = campaign_status_body(SPONSOR, CAMPAIGN, 2, now);
+        assert_eq!(b["status"], "paused");
+        assert_eq!(b["campaignType"], "prepaid");
+        assert_eq!(b["completionReason"], "not_available");
+        assert_eq!(b["usedDataVolume"], 2);
+        assert_eq!(b["remainingDataVolume"], 998);
+        assert_eq!(b["endTime"], ongoing_end);
+
+        // d = 4: prepaid, completed, (4/6) even → time_expired; partial usage.
+        let b = campaign_status_body(SPONSOR, CAMPAIGN, 4, now);
+        assert_eq!(b["status"], "completed");
+        assert_eq!(b["completionReason"], "time_expired");
+        assert_eq!(b["usedDataVolume"], 4);
+        assert_eq!(b["remainingDataVolume"], 996);
+        assert_eq!(b["endTime"], completed_end);
+
+        // d = 10: prepaid, completed, (10/6) odd → data_exhausted; grant spent.
+        let b = campaign_status_body(SPONSOR, CAMPAIGN, 10, now);
+        assert_eq!(b["status"], "completed");
+        assert_eq!(b["completionReason"], "data_exhausted");
+        assert_eq!(b["usedDataVolume"], 1000);
+        assert_eq!(b["remainingDataVolume"], 0);
+
+        // d = 3: postpaid (odd) — no contracted/remaining fields, only used.
+        let b = campaign_status_body(SPONSOR, CAMPAIGN, 3, now);
+        assert_eq!(b["status"], "paused");
+        assert_eq!(b["campaignType"], "postpaid");
+        assert_eq!(b["usedDataVolume"], 3);
+        assert!(b.get("contractedDataVolume").is_none());
+        assert!(b.get("remainingDataVolume").is_none());
+    }
+
+    #[tokio::test]
+    async fn campaign_status_default_is_active_prepaid() {
+        let token = mint_token(CAMPAIGN_READ_SCOPE).await;
+        let (status, _, body) =
+            get_status(Some(&token), &campaign_status_url(SPONSOR, CAMPAIGN), None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["sponsorId"], SPONSOR);
+        assert_eq!(body["campaignId"], CAMPAIGN);
+        assert_eq!(body["status"], "active");
+        assert_eq!(body["campaignType"], "prepaid");
+        assert_eq!(body["remainingDataVolume"], 1000);
+        assert!(body["startTime"].as_str().unwrap().ends_with('Z'));
+        assert!(body["endTime"].as_str().unwrap().ends_with('Z'));
+    }
+
+    #[tokio::test]
+    async fn campaign_status_type_and_status_are_controllable() {
+        let token = mint_token(CAMPAIGN_READ_SCOPE).await;
+
+        // …002 → paused, prepaid.
+        let (status, _, body) =
+            get_status(Some(&token), &campaign_status_url(SPONSOR, &campaign_tail("002")), None)
+                .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["status"], "paused");
+        assert_eq!(body["campaignType"], "prepaid");
+
+        // …010 → completed, data_exhausted, remaining 0.
+        let (status, _, body) =
+            get_status(Some(&token), &campaign_status_url(SPONSOR, &campaign_tail("010")), None)
+                .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["status"], "completed");
+        assert_eq!(body["completionReason"], "data_exhausted");
+        assert_eq!(body["usedDataVolume"], 1000);
+        assert_eq!(body["remainingDataVolume"], 0);
+
+        // …003 → postpaid: no contracted ceiling reported.
+        let (status, _, body) =
+            get_status(Some(&token), &campaign_status_url(SPONSOR, &campaign_tail("003")), None)
+                .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["campaignType"], "postpaid");
+        assert!(body.get("contractedDataVolume").is_none());
+    }
+
+    #[tokio::test]
+    async fn campaign_status_reserved_suffix_selects_a_canonical_camara_error() {
+        let token = mint_token(CAMPAIGN_READ_SCOPE).await;
+        for (tail, code, http) in [
+            ("404", "NOT_FOUND", StatusCode::NOT_FOUND),
+            ("409", "CONFLICT", StatusCode::CONFLICT),
+            ("422", "SERVICE_NOT_APPLICABLE", StatusCode::UNPROCESSABLE_ENTITY),
+        ] {
+            let (status, _, body) = get_status(
+                Some(&token),
+                &campaign_status_url(SPONSOR, &campaign_tail(tail)),
+                None,
+            )
+            .await;
+            assert_eq!(status, http, "tail {tail}");
+            assert_eq!(body["code"], code, "tail {tail}");
+        }
+    }
+
+    #[tokio::test]
+    async fn campaign_status_malformed_ids_are_400() {
+        let token = mint_token(CAMPAIGN_READ_SCOPE).await;
+
+        // A malformed sponsorId (no domain) → 400.
+        let (status, _, body) =
+            get_status(Some(&token), &campaign_status_url("not-an-id", CAMPAIGN), None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "INVALID_ARGUMENT");
+
+        // A malformed campaignId (not UUID@domain) → 400.
+        let bad_campaign = "not-a-uuid@sponsor.example.com";
+        let (status, _, body) =
+            get_status(Some(&token), &campaign_status_url(SPONSOR, bad_campaign), None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "INVALID_ARGUMENT");
+    }
+
+    #[tokio::test]
+    async fn campaign_status_auth_is_enforced() {
+        // No token → 401.
+        let (status, _, _) =
+            get_status(None, &campaign_status_url(SPONSOR, CAMPAIGN), None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+        // A sponsorship-read token does not carry the campaign scope → 403.
+        let read = mint_token(READ_SCOPE).await;
+        let (status, _, _) =
+            get_status(Some(&read), &campaign_status_url(SPONSOR, CAMPAIGN), None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn campaign_status_echoes_x_correlator() {
+        let token = mint_token(CAMPAIGN_READ_SCOPE).await;
+        // Success path echoes.
+        let (status, headers, _) = get_status(
+            Some(&token),
+            &campaign_status_url(SPONSOR, CAMPAIGN),
+            Some("corr-camp-ok"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-camp-ok")
+        );
+
+        // Error (404) path echoes too.
+        let (status, headers, _) = get_status(
+            Some(&token),
+            &campaign_status_url(SPONSOR, &campaign_tail("404")),
+            Some("corr-camp-err"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-camp-err")
         );
     }
 }
