@@ -12,10 +12,10 @@
 # provisioning): it reserves a QoS profile for a device over a `startTime` /
 # `duration` window in a service area, ahead of time.
 #
-# This first slice serves `POST /device-qos-bookings` (create). Read-back / list /
-# delete legs and CloudEvents notifications on `sink` are later passes; a supplied
-# `sink` / `sinkCredential` is validated and echoed but not yet acted on (a
-# documented cut).
+# Serves `POST /device-qos-bookings` (create) and `GET
+# /device-qos-bookings/{bookingId}` (read-back). List / delete legs and CloudEvents
+# notifications on `sink` are later passes; a supplied `sink` / `sinkCredential` is
+# validated and echoed but not yet acted on (a documented cut).
 openapi: 3.0.3
 info:
   title: QoS Booking
@@ -350,6 +350,81 @@ paths:
             result: "422 UNNECESSARY_IDENTIFIER"
           - input: no `device` and a non-line token subject
             result: "422 MISSING_IDENTIFIER"
+
+  /device-qos-bookings/{bookingId}:
+    get:
+      operationId: getBooking
+      summary: Read a QoS booking back by its bookingId
+      description: |
+        Returns the `BookingInfo` created by `createBooking`, addressed by its
+        opaque, server-minted `bookingId`.
+
+        The `bookingId` is opaque (server-minted, never caller-chosen), so there is
+        **no** reserved-identifier control plane here — the store state is the sole
+        control plane (docs/DESIGN.md §7): a stored id → `200` with the persisted
+        `BookingInfo` verbatim; any other id (never created, or already deleted once
+        the delete leg lands) → `404 NOT_FOUND`.
+      security:
+        - openId:
+            - qos-booking:device-qos-bookings:read
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+        - name: bookingId
+          in: path
+          required: true
+          description: The id of the booking to read, as minted by `createBooking`.
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: The QoS booking was found and is returned.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BookingInfo"
+              examples:
+                activated:
+                  summary: A stored ACTIVATED booking
+                  value:
+                    bookingId: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+                    bookingStatus: ACTIVATED
+                    qosProfile: QOS_E
+                    startTime: "2024-06-01T12:00:00Z"
+                    duration: 3600
+                    startedAt: "2024-06-01T12:00:00Z"
+                    serviceArea:
+                      areaType: CIRCLE
+                      center: { latitude: 51.5, longitude: -0.12 }
+                      radius: 2000
+                    device:
+                      phoneNumber: "+123456789012"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          The read is keyed only on the store state — the `bookingId` is opaque
+          (server-minted), so there is no reserved-identifier control plane
+          (docs/DESIGN.md §7). A stored id returns the persisted `BookingInfo`
+          verbatim; any other id is a 404.
+        cases:
+          - input: a bookingId minted by a prior createBooking
+            result: "200 — the persisted BookingInfo, returned verbatim"
+          - input: an unknown / never-created / already-deleted bookingId
+            result: "404 NOT_FOUND"
 
 components:
   securitySchemes:

@@ -1,15 +1,18 @@
 //! QoS Booking **vwip** (CAMARA qos-booking, work-in-progress), mounted at
 //! `/qos-booking/vwip`.
 //!
-//! This first slice implements the create leg:
+//! Implemented so far:
 //! - `POST /device-qos-bookings` (operationId `createBooking`, scope
 //!   `qos-booking:device-qos-bookings:create`) — books a QoS profile for a device
 //!   over a bounded time window in a service area, mints an opaque `bookingId`
 //!   ([`super::store`]), remembers the rendered `BookingInfo`, and returns `201`.
+//! - `GET /device-qos-bookings/{bookingId}` (operationId `getBooking`, scope
+//!   `qos-booking:device-qos-bookings:read`) — reads a created booking back from the
+//!   store by its opaque, server-minted id → `200` `BookingInfo` / `404 NOT_FOUND`.
 //!
-//! Read-back / list / delete legs and CloudEvents notifications on `sink` are later
-//! passes; a supplied `sink`/`sinkCredential` is validated and echoed but not yet
-//! acted on (a documented cut).
+//! List / delete legs and CloudEvents notifications on `sink` are later passes; a
+//! supplied `sink`/`sinkCredential` is validated and echoed but not yet acted on (a
+//! documented cut).
 //!
 //! ## Identifier resolution (two-legged vs three-legged)
 //!
@@ -50,9 +53,10 @@
 //!   `400 INVALID_SINK`.
 
 use axum::body::Bytes;
+use axum::extract::Path;
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::post;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -66,13 +70,24 @@ use crate::scenarios;
 /// Scope required to create a booking (CAMARA qos-booking wip).
 const CREATE_SCOPE: &str = "qos-booking:device-qos-bookings:create";
 
+/// Scope required to read a booking back (CAMARA qos-booking wip).
+const READ_SCOPE: &str = "qos-booking:device-qos-bookings:read";
+
 /// The maximum `duration` (seconds) a booking can span — the CAMARA
 /// `BookingInfo.duration` ceiling, `31_622_400` = 366 days.
 const MAX_DURATION_SECS: i64 = 31_622_400;
 
 /// Routes for QoS Booking vwip, mounted at their canonical URLs.
 pub fn routes() -> Router {
-    Router::new().route("/qos-booking/vwip/device-qos-bookings", post(create_booking))
+    Router::new()
+        .route(
+            "/qos-booking/vwip/device-qos-bookings",
+            post(create_booking),
+        )
+        .route(
+            "/qos-booking/vwip/device-qos-bookings/:booking_id",
+            get(get_booking),
+        )
 }
 
 /// `CreateBooking` request body (CAMARA qos-booking wip). `qosProfile`,
@@ -260,6 +275,34 @@ async fn create_booking(claims: Claims, headers: HeaderMap, body: Bytes) -> Resp
     store::insert(booking_id, info.clone());
 
     with_correlator((StatusCode::CREATED, Json(info)).into_response(), &correlator)
+}
+
+/// `GET /qos-booking/vwip/device-qos-bookings/{bookingId}` (operationId `getBooking`).
+///
+/// Reads a created booking back from the store by its opaque, server-minted
+/// `bookingId`. Store state is the sole control plane (the id is opaque, so there is
+/// no reserved-identifier plane; mirrors QoS Provisioning's `getQosAssignmentById`
+/// and QoD's `getSession`): a stored id → `200` with the persisted `BookingInfo`
+/// verbatim, any other id (never created / already deleted) → `404 NOT_FOUND`.
+/// `x-correlator` echoed on both.
+async fn get_booking(
+    claims: Claims,
+    headers: HeaderMap,
+    Path(booking_id): Path<String>,
+) -> Response {
+    let correlator = headers.get("x-correlator").cloned();
+
+    if let Err(e) = claims.require_scope(READ_SCOPE) {
+        return with_correlator(e.into_response(), &correlator);
+    }
+
+    match store::get(&booking_id) {
+        Some(info) => with_correlator((StatusCode::OK, Json(info)).into_response(), &correlator),
+        None => with_correlator(
+            CamaraError::not_found("No booking found for the provided bookingId.").into_response(),
+            &correlator,
+        ),
+    }
 }
 
 /// Render the `BookingInfo` for a created booking.
@@ -1084,6 +1127,81 @@ mod tests {
         let token = mint_token("qos-booking:something-else").await;
         let (status, _, _) =
             post_booking(Some(&token), &create_body("+123456789012", "QOS_E"), None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    // --- Read-back: GET /device-qos-bookings/{bookingId} -------------------
+
+    async fn get_booking_req(
+        token: Option<&str>,
+        booking_id: &str,
+        correlator: Option<&str>,
+    ) -> (StatusCode, HeaderMap, Value) {
+        let mut builder = Request::builder()
+            .method("GET")
+            .uri(format!("{BOOKINGS}/{booking_id}"))
+            .header("host", HOST);
+        if let Some(t) = token {
+            builder = builder.header("authorization", format!("Bearer {t}"));
+        }
+        if let Some(c) = correlator {
+            builder = builder.header("x-correlator", c);
+        }
+        let request = builder.body(Body::empty()).unwrap();
+        let response = app().oneshot(request).await.unwrap();
+        let status = response.status();
+        let headers = response.headers().clone();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, headers, json)
+    }
+
+    #[tokio::test]
+    async fn get_reads_a_created_booking_back_verbatim() {
+        let create = mint_token(CREATE_SCOPE).await;
+        let (status, _, created) =
+            post_booking(Some(&create), &create_body("+123456789012", "QOS_E"), None).await;
+        assert_eq!(status, StatusCode::CREATED);
+        let id = created["bookingId"].as_str().unwrap().to_string();
+
+        let read = mint_token(READ_SCOPE).await;
+        let (status, headers, body) = get_booking_req(Some(&read), &id, Some("corr-get")).await;
+        assert_eq!(status, StatusCode::OK);
+        // The read-back is the created representation, byte for byte.
+        assert_eq!(body, created);
+        assert_eq!(headers.get("x-correlator").unwrap(), "corr-get");
+    }
+
+    #[tokio::test]
+    async fn get_unknown_booking_is_404_not_found() {
+        let read = mint_token(READ_SCOPE).await;
+        let (status, headers, body) = get_booking_req(
+            Some(&read),
+            "00000000-0000-4000-8000-000000000000",
+            Some("corr-404"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["code"], "NOT_FOUND");
+        assert_eq!(headers.get("x-correlator").unwrap(), "corr-404");
+    }
+
+    #[tokio::test]
+    async fn get_requires_auth_and_the_read_scope() {
+        // Create a booking to have a real id to target.
+        let create = mint_token(CREATE_SCOPE).await;
+        let (_, _, created) =
+            post_booking(Some(&create), &create_body("+123456789012", "QOS_E"), None).await;
+        let id = created["bookingId"].as_str().unwrap().to_string();
+
+        // No token → 401.
+        let (status, _, _) = get_booking_req(None, &id, None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+        // The create scope is not the read scope → 403.
+        let (status, _, _) = get_booking_req(Some(&create), &id, None).await;
         assert_eq!(status, StatusCode::FORBIDDEN);
     }
 }

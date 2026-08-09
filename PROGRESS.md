@@ -1604,7 +1604,13 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     name containing `unavailable` → 422 `QOS_BOOKING.QOS_PROFILE_NOT_APPLICABLE`;
     `sink` must be http(s) → else 400 `INVALID_SINK`. `startTime` validated for shape
     (RFC 3339) but not used to compute status (documented cut). `x-correlator` echoed.
-  - [ ] `GET /device-qos-bookings/{bookingId}` (read-back) + list + `DELETE` (later passes)
+  - [x] `GET /device-qos-bookings/{bookingId}` (`getBooking`,
+    `qos-booking:device-qos-bookings:read`) — reads a created booking back from the
+    in-memory store by its opaque, server-minted `bookingId` → `200` `BookingInfo`
+    verbatim / `404 NOT_FOUND`. Store state the only control plane (opaque id → no
+    reserved-identifier plane; mirrors QoS Provisioning `getQosAssignmentById` / QoD
+    `getSession`). `x-correlator` echoed. No new dep.
+  - [ ] list (`GET /device-qos-bookings`) + `DELETE /device-qos-bookings/{bookingId}` (later passes)
   - [ ] CloudEvents notifications on `sink` (status transitions) — later pass;
     `sink`/`sinkCredential` currently validated+echoed but not delivered to (cut)
 - [x] Device Data Volume vwip (`/device-data-volume/vwip`; CAMARA
@@ -2348,6 +2354,18 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-09 — qos-booking: added the read-back leg `GET
+  /qos-booking/vwip/device-qos-bookings/{bookingId}` (`getBooking`, scope
+  `qos-booking:device-qos-bookings:read`). Reads a created booking back from the
+  in-memory store by its opaque, server-minted `bookingId` → `200` `BookingInfo`
+  verbatim / `404 NOT_FOUND`; store state the only control plane (opaque id → no
+  reserved-identifier plane; mirrors QoS Provisioning `getQosAssignmentById` / QoD
+  `getSession`). `store::get` promoted from test-only to a live handler dependency.
+  `x-correlator` echoed on `200` and `404`. Spec: added the GET path (getBooking,
+  bookingId path param, 200 `BookingInfo`, error set, x-camarasim-scenarios) +
+  updated the header note. Tests: 3 new (read-back verbatim, unknown→404, auth+scope).
+  No new dep. `cargo test` (1738) + `cargo build --release` green. binary: 3.2M
+  (3,325,952 bytes). List + DELETE legs and `sink` notifications remain for later passes.
 - 2026-08-09 — qos-booking: NEW CAMARA API. Added the create leg `POST
   /qos-booking/vwip/device-qos-bookings` (`createBooking`, scope
   `qos-booking:device-qos-bookings:create`) — the time-boxed booking sibling of

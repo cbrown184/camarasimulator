@@ -45,10 +45,8 @@ pub fn insert(id: String, booking: Value) {
 }
 
 /// Fetch the `BookingInfo` stored under `id`, or `None` if no such booking exists
-/// (never created, or created in a different process). Reserved for the read-back
-/// leg (`getBooking`, a later pass) — kept alongside [`insert`] so the store's
-/// round-trip is testable now.
-#[cfg_attr(not(test), allow(dead_code))]
+/// (never created, or created in a different process). Backs the read-back leg
+/// (`getBooking`, `GET /device-qos-bookings/{bookingId}`).
 pub fn get(id: &str) -> Option<Value> {
     store()
         .lock()
