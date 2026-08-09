@@ -1654,7 +1654,19 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
       `statusInfo: DURATION_EXPIRED` (raw TCP, no HTTP-client dep), single-use
       `sinkCredential` applied. Mutually exclusive with `NETWORK_TERMINATED` (by
       tail), so exactly one terminal event fires. Mirrors QoD's `DURATION_EXPIRED`.
-    - [ ] `SCHEDULED`→`ACTIVATED`-at-window-start transition — later pass
+    - [x] `SCHEDULED`→`ACTIVATED`-at-window-start transition — a `SCHEDULED`
+      (odd-tail), sink-bearing booking arms an async timer (`v0_4::spawn_activation`,
+      off the request path) that sleeps until its window start (`startTime`,
+      already-past → fires at once), flips the stored booking `SCHEDULED`→`ACTIVATED`
+      in place (new atomic `store::activate`, stamping `startedAt`), and delivers a
+      **non-terminal** `status-changed` CloudEvent (`bookingStatus: ACTIVATED`, no
+      `statusInfo`); the credential is *peeked* (`store::peek_credential`), so a later
+      terminal event still authenticates, and the now-`ACTIVATED` booking chains
+      `spawn_window_expiry` → `DURATION_EXPIRED`. A concurrent `deleteBooking` makes
+      activation a no-op (`store::activate` → `None`; exactly-once). Unlike the
+      initial status, this transition keys off `startTime` (self-contained RFC 3339
+      parser `unix_secs_from_rfc3339` + `days_from_civil`, no new dep). A no-`sink`
+      SCHEDULED booking stays SCHEDULED (nothing to notify).
     - [ ] TLS (`https://` sink) delivery (needs a rustls TLS client)
 - [x] Device Data Volume vwip (`/device-data-volume/vwip`; CAMARA
   device-data-volume, wip — no released version yet, mounted at its canonical
@@ -2397,6 +2409,17 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-09 — qos-booking: implemented the `SCHEDULED`→`ACTIVATED`-at-window-start
+  transition. A `SCHEDULED` (odd-tail), sink-bearing booking arms an off-path async
+  timer (`spawn_activation`) that sleeps until `startTime`, flips it to `ACTIVATED`
+  in place (new atomic `store::activate` + `store::peek_credential`), delivers a
+  non-terminal `ACTIVATED` `status-changed` CloudEvent, then chains window expiry →
+  `DURATION_EXPIRED`; concurrent delete is exactly-once. New self-contained RFC 3339
+  parser (`unix_secs_from_rfc3339`/`days_from_civil`), no new dep. Spec updated
+  (header/functional-cases/scenarios/sink/QosBookingEvent). 5 new tests (2 store, 1
+  parser unit, 2 integration incl. peeked-credential-survives-to-delete); `cargo test`
+  1775 green, `cargo build --release` green. Only TLS (`https://` sink) remains for
+  QoS Booking. — binary: 3.3M (3374472 B)
 - 2026-08-09 17:45Z — qos-booking: added the `DURATION_EXPIRED` `status-changed`
   transition (window ran to completion). Any `ACTIVATED`, sink-bearing booking that is
   *not* the `…002` network-drop tail now schedules a fire-and-forget async timer at

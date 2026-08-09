@@ -35,10 +35,21 @@
 //!   applied. Mutually exclusive with `NETWORK_TERMINATED` (by tail), so exactly one
 //!   terminal event fires. Mirrors QoD's `DURATION_EXPIRED` (QoS Booking has no
 //!   `extend`, so the timer needs no re-read loop).
+//! - **`SCHEDULED`→`ACTIVATED`** — a `SCHEDULED` (odd-tail), sink-bearing booking
+//!   transitions to `ACTIVATED` at its window start: an async timer
+//!   ([`spawn_activation`]) sleeps until the request `startTime` (already-past →
+//!   fires at once), flips the stored booking to `ACTIVATED` ([`store::activate`],
+//!   stamping `startedAt`), and delivers a **non-terminal** `status-changed`
+//!   CloudEvent (`bookingStatus: ACTIVATED`, no `statusInfo`) — the credential is
+//!   *peeked*, not taken, so a later terminal event still authenticates. The now
+//!   `ACTIVATED` booking then chains [`spawn_window_expiry`], reaching
+//!   `DURATION_EXPIRED` when its window lapses. A concurrent `deleteBooking` makes the
+//!   activation a no-op ([`store::activate`] → `None`). Unlike the initial status,
+//!   this transition *does* key off `startTime`. A `SCHEDULED` booking with no `sink`
+//!   has nowhere to notify, so it stays `SCHEDULED` (nothing scheduled).
 //!
-//! The remaining status transition (`SCHEDULED`→`ACTIVATED` at the window start) and
-//! TLS (`https://` sink) delivery are later passes; a supplied `sink`/`sinkCredential`
-//! is otherwise validated and echoed only (a documented cut).
+//! TLS (`https://` sink) delivery is a later pass; a supplied `https://`
+//! `sink`/`sinkCredential` is otherwise validated and echoed only (a documented cut).
 //!
 //! ## Identifier resolution (two-legged vs three-legged)
 //!
@@ -61,9 +72,10 @@
 //! - **Booking status** from the identifier's trailing three digits: `…000` / no
 //!   digits → `REQUESTED` (no `startedAt` yet); an odd tail → `SCHEDULED` (a future
 //!   booking, no `startedAt`); any other (even, non-zero) tail → `ACTIVATED`
-//!   (`startedAt` = now). CamaraSim validates `startTime` for shape but keys the
-//!   status off the identifier so every state is reachable from the input alone (a
-//!   documented cut — `startTime` is not used to compute the status). A `…002`
+//!   (`startedAt` = now). CamaraSim validates `startTime` for shape and keys the
+//!   *initial* status off the identifier so every state is reachable from the input
+//!   alone; `startTime` is not used to compute the initial status (a documented cut),
+//!   though it *does* time the `SCHEDULED`→`ACTIVATED` transition above. A `…002`
 //!   `ACTIVATED` booking with a `sink` is the `NETWORK_TERMINATED` sub-case above.
 //! - **`duration`** (seconds, required): `< 1` → `400 OUT_OF_RANGE`;
 //!   `> 31_622_400` (366 days, the `BookingInfo` ceiling) → `400
@@ -360,6 +372,18 @@ async fn create_booking(claims: Claims, headers: HeaderMap, body: Bytes) -> Resp
                 spawn_window_expiry(booking_id, sink.to_string(), duration);
             }
         }
+    } else if info["bookingStatus"] == "SCHEDULED" {
+        // A `SCHEDULED` (future) booking that recorded a `sink` transitions to
+        // `ACTIVATED` at its window start (`startTime`): an async timer
+        // ([`spawn_activation`]) sleeps until then, flips the stored booking to
+        // `ACTIVATED`, and delivers the (non-terminal) `ACTIVATED` `status-changed`
+        // event. Unlike the initial status, this transition *does* key off
+        // `startTime` (the window start). A booking with no `sink` has nowhere to
+        // notify, so it schedules nothing and simply stays `SCHEDULED`.
+        if let Some(sink) = info.get("sink").and_then(Value::as_str) {
+            let start_unix = unix_secs_from_rfc3339(&start_time).unwrap_or_else(now_unix_secs);
+            spawn_activation(booking_id, sink.to_string(), start_unix, duration);
+        }
     }
 
     with_correlator((StatusCode::CREATED, Json(info)).into_response(), &correlator)
@@ -430,6 +454,47 @@ fn spawn_window_expiry(booking_id: String, sink: String, duration: i64) {
                 Some("DURATION_EXPIRED"),
             );
             notifications::spawn_delivery(sink, event, store::take_credential(&booking_id));
+        }
+    });
+}
+
+/// Schedule the `SCHEDULED`→`ACTIVATED` transition for a future, sink-bearing booking.
+///
+/// Spawns a fire-and-forget async timer (never on the request path, DESIGN §11) that
+/// sleeps until the booking's window start (`start_unix`, from the request
+/// `startTime`; already-past → fires at once), then transitions the stored booking
+/// from `SCHEDULED` to `ACTIVATED` in place ([`store::activate`], stamping
+/// `startedAt` = now) and delivers a **non-terminal** `status-changed` CloudEvent
+/// (`bookingStatus: ACTIVATED`, no `statusInfo`) to `sink`. The credential is
+/// *peeked* (not taken), so a later terminal callback still authenticates. Once
+/// active, the booking runs its window like any other `ACTIVATED` booking: the
+/// timer chains [`spawn_window_expiry`] so it eventually reaches `DURATION_EXPIRED`.
+///
+/// A `deleteBooking` that removed the booking first makes this a no-op
+/// ([`store::activate`] is then `None`, so exactly one outcome occurs and no
+/// `ACTIVATED` event is sent after a delete). The sleep is async, so the
+/// (single-node, in-memory) runtime is never blocked. Mirrors the sibling APIs'
+/// timers; the SCHEDULED tail (odd) is disjoint from the `…002` network-drop tail,
+/// so activation never races a `NETWORK_TERMINATED` drop.
+fn spawn_activation(booking_id: String, sink: String, start_unix: i64, duration: i64) {
+    tokio::spawn(async move {
+        let wait = (start_unix - now_unix_secs()).max(0) as u64;
+        tokio::time::sleep(Duration::from_secs(wait)).await;
+        // Flip SCHEDULED → ACTIVATED; if a concurrent delete beat us, `activate` is
+        // None and we send nothing (that delete already notified DELETE_REQUESTED).
+        if store::activate(&booking_id, rfc3339_utc(now_unix_secs())).is_some() {
+            let event = notifications::status_changed_event(
+                store::new_event_id(),
+                rfc3339_utc(now_unix_secs()),
+                &booking_id,
+                "ACTIVATED",
+                None,
+            );
+            // Peek (not take): the booking is now ACTIVATED and a later terminal
+            // event (DURATION_EXPIRED) still needs the credential.
+            notifications::spawn_delivery(sink.clone(), event, store::peek_credential(&booking_id));
+            // The now-ACTIVATED booking runs its window to completion.
+            spawn_window_expiry(booking_id, sink, duration);
         }
     });
 }
@@ -967,6 +1032,60 @@ fn rfc3339_utc(unix_secs: i64) -> String {
     format!("{y:04}-{m:02}-{d:02}T{hh:02}:{mm:02}:{ss:02}Z")
 }
 
+/// Parse an RFC 3339 date-time (already shape-validated by [`is_valid_rfc3339`]) into
+/// a Unix timestamp (seconds, UTC), honouring a trailing `Z`/`z` or `±HH:MM` offset
+/// and ignoring any fractional seconds. Returns `None` if the fixed-width numeric
+/// fields don't parse. Backs the `SCHEDULED`→`ACTIVATED` transition, which needs the
+/// window start as an instant. Self-contained (no date/time dependency).
+fn unix_secs_from_rfc3339(s: &str) -> Option<i64> {
+    if s.len() < 19 {
+        return None;
+    }
+    let y: i64 = s.get(0..4)?.parse().ok()?;
+    let mo: u32 = s.get(5..7)?.parse().ok()?;
+    let d: u32 = s.get(8..10)?.parse().ok()?;
+    let hh: i64 = s.get(11..13)?.parse().ok()?;
+    let mm: i64 = s.get(14..16)?.parse().ok()?;
+    let ss: i64 = s.get(17..19)?.parse().ok()?;
+    let mut secs = days_from_civil(y, mo, d) * 86_400 + hh * 3600 + mm * 60 + ss;
+    // Skip an optional `.fraction`, then apply the zone offset.
+    let mut rest = &s[19..];
+    if let Some(frac) = rest.strip_prefix('.') {
+        let n = frac.bytes().take_while(u8::is_ascii_digit).count();
+        rest = &frac[n..];
+    }
+    if !matches!(rest, "Z" | "z") {
+        // `±HH:MM`: a `+` offset is ahead of UTC (subtract to reach UTC), `-` behind.
+        let ob = rest.as_bytes();
+        if ob.len() != 6 {
+            return None;
+        }
+        let oh: i64 = rest.get(1..3)?.parse().ok()?;
+        let om: i64 = rest.get(4..6)?.parse().ok()?;
+        let off = oh * 3600 + om * 60;
+        match ob[0] {
+            b'+' => secs -= off,
+            b'-' => secs += off,
+            _ => return None,
+        }
+    }
+    Some(secs)
+}
+
+/// Convert a `(year, month, day)` civil date to a count of days since 1970-01-01
+/// (Howard Hinnant's `days_from_civil`, proleptic Gregorian; the inverse of
+/// [`civil_from_days`], valid for any date). Self-contained (no date/time dependency).
+fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = (if y >= 0 { y } else { y - 399 }) / 400;
+    let yoe = y - era * 400; // [0, 399]
+    let m = m as i64;
+    let d = d as i64;
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1; // [0, 365]
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy; // [0, 146096]
+    era * 146_097 + doe - 719_468
+}
+
 /// Convert a count of days since 1970-01-01 to a `(year, month, day)` civil date
 /// (Howard Hinnant's `civil_from_days`, proleptic Gregorian, valid for any date).
 fn civil_from_days(z: i64) -> (i64, u32, u32) {
@@ -1019,6 +1138,22 @@ mod tests {
         assert!(!is_valid_rfc3339("2024-06-01 12:00:00")); // no T
         assert!(!is_valid_rfc3339("2024-06-01T12:00:00")); // no zone
         assert!(!is_valid_rfc3339("not-a-date"));
+    }
+
+    #[test]
+    fn rfc3339_parses_to_unix_seconds_and_round_trips() {
+        // Epoch anchors.
+        assert_eq!(unix_secs_from_rfc3339("1970-01-01T00:00:00Z"), Some(0));
+        assert_eq!(unix_secs_from_rfc3339("2024-06-01T12:00:00Z"), Some(1_717_243_200));
+        // A `+HH:MM` offset is ahead of UTC, a `-HH:MM` behind — both normalise.
+        assert_eq!(unix_secs_from_rfc3339("2024-06-01T13:00:00+01:00"), Some(1_717_243_200));
+        assert_eq!(unix_secs_from_rfc3339("2024-06-01T11:00:00-01:00"), Some(1_717_243_200));
+        // Fractional seconds are ignored.
+        assert_eq!(unix_secs_from_rfc3339("2024-06-01T12:00:00.750Z"), Some(1_717_243_200));
+        // Round-trips against the formatter for a spread of instants.
+        for t in [0_i64, 1_000_000, 1_717_243_200, 4_102_444_800] {
+            assert_eq!(unix_secs_from_rfc3339(&rfc3339_utc(t)), Some(t), "round-trip {t}");
+        }
     }
 
     #[test]
@@ -1931,6 +2066,147 @@ mod tests {
         );
         let event: Value = serde_json::from_str(event_body).expect("body is JSON");
         assert_eq!(event["data"]["statusInfo"], "DURATION_EXPIRED");
+    }
+
+    // --- CloudEvents notifications on `sink` (SCHEDULED → ACTIVATED) --------
+
+    #[tokio::test]
+    async fn a_scheduled_booking_with_a_sink_activates_at_window_start() {
+        use tokio::io::AsyncReadExt;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let sink = format!("http://{addr}/qosbook-activate");
+
+        // A SCHEDULED booking (…013 → odd) with a sink and an already-past
+        // `startTime`: the window has begun, so the activation timer fires at once.
+        // A long `duration` keeps it ACTIVATED (no DURATION_EXPIRED during the test).
+        let create = mint_token(CREATE_SCOPE).await;
+        let body = json!({
+            "device": { "phoneNumber": "+123456789013" },
+            "qosProfile": "QOS_E",
+            "startTime": "2020-01-01T00:00:00Z",
+            "duration": 3600,
+            "serviceArea": valid_area(),
+            "sink": sink,
+        })
+        .to_string();
+        let (status, _, created) = post_booking(Some(&create), &body, None).await;
+        assert_eq!(status, StatusCode::CREATED);
+        // The initial status is SCHEDULED (no startedAt yet).
+        assert_eq!(created["bookingStatus"], "SCHEDULED");
+        assert!(created.get("startedAt").is_none());
+        let booking_id = created["bookingId"].as_str().unwrap().to_string();
+
+        // The window-start timer transitions it to ACTIVATED and POSTs a non-terminal
+        // ACTIVATED status-changed CloudEvent (no statusInfo). Bound the wait.
+        let (mut sock, _) = tokio::time::timeout(Duration::from_secs(10), listener.accept())
+            .await
+            .expect("the sink is notified within the timeout")
+            .unwrap();
+        let mut buf = Vec::new();
+        sock.read_to_end(&mut buf).await.unwrap();
+        let raw = String::from_utf8(buf).unwrap();
+        let (head, event_body) = raw.split_once("\r\n\r\n").expect("headers then body");
+        assert!(
+            head.starts_with("POST /qosbook-activate HTTP/1.1\r\n"),
+            "request line: {head}"
+        );
+        assert!(head.contains("Content-Type: application/cloudevents+json"));
+        // No sinkCredential → unauthenticated.
+        assert!(!head.contains("Authorization:"), "unauthenticated: {head}");
+
+        let event: Value = serde_json::from_str(event_body).expect("body is JSON");
+        assert_eq!(event["type"], "org.camaraproject.qos-booking.v0.status-changed");
+        assert_eq!(event["specversion"], "1.0");
+        assert!(event["id"].is_string() && event["time"].is_string());
+        assert_eq!(event["data"]["bookingId"], json!(booking_id));
+        assert_eq!(event["data"]["bookingStatus"], "ACTIVATED");
+        assert!(
+            event["data"].get("statusInfo").is_none(),
+            "the ACTIVATED transition is non-terminal (no statusInfo)"
+        );
+
+        // The store now reflects the transition: a read shows ACTIVATED + startedAt.
+        let read = mint_token(READ_SCOPE).await;
+        let (status, _, got) = get_booking_req(Some(&read), &booking_id, None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(got["bookingStatus"], "ACTIVATED");
+        assert!(got["startedAt"].is_string());
+    }
+
+    #[tokio::test]
+    async fn the_activation_callback_carries_the_credential_and_a_later_delete_still_authenticates() {
+        use tokio::io::AsyncReadExt;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let sink = format!("http://{addr}/qosbook-activate-auth");
+
+        // A SCHEDULED booking with a sink AND an ACCESSTOKEN sinkCredential.
+        let create = mint_token(CREATE_SCOPE).await;
+        let body = json!({
+            "device": { "phoneNumber": "+123456789013" },
+            "qosProfile": "QOS_E",
+            "startTime": "2020-01-01T00:00:00Z",
+            "duration": 3600,
+            "serviceArea": valid_area(),
+            "sink": sink,
+            "sinkCredential": {
+                "credentialType": "ACCESSTOKEN",
+                "accessToken": "sched-secret",
+                "accessTokenType": "bearer",
+            },
+        })
+        .to_string();
+        let (status, _, created) = post_booking(Some(&create), &body, None).await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert!(created.get("sinkCredential").is_none()); // never echoed
+        let booking_id = created["bookingId"].as_str().unwrap().to_string();
+
+        // The (non-terminal) ACTIVATED callback carries the bearer.
+        let (mut sock, _) = tokio::time::timeout(Duration::from_secs(10), listener.accept())
+            .await
+            .expect("the sink is notified within the timeout")
+            .unwrap();
+        let mut buf = Vec::new();
+        sock.read_to_end(&mut buf).await.unwrap();
+        let raw = String::from_utf8(buf).unwrap();
+        let (head, event_body) = raw.split_once("\r\n\r\n").expect("headers then body");
+        assert!(
+            head.contains("Authorization: Bearer sched-secret\r\n"),
+            "activation authorization header present: {head}"
+        );
+        assert_eq!(
+            serde_json::from_str::<Value>(event_body).unwrap()["data"]["bookingStatus"],
+            "ACTIVATED"
+        );
+
+        // The credential was *peeked*, not consumed: deleting the now-ACTIVATED
+        // booking fires DELETE_REQUESTED, and that terminal callback still carries the
+        // same bearer (and evicts the booking exactly once vs the chained expiry).
+        let del = mint_token(DELETE_SCOPE).await;
+        let (status, _, _) = delete_booking_req(Some(&del), &booking_id, None).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        let (mut sock, _) = tokio::time::timeout(Duration::from_secs(10), listener.accept())
+            .await
+            .expect("the delete callback is delivered")
+            .unwrap();
+        let mut buf = Vec::new();
+        sock.read_to_end(&mut buf).await.unwrap();
+        let raw = String::from_utf8(buf).unwrap();
+        let (head, event_body) = raw.split_once("\r\n\r\n").expect("headers then body");
+        assert!(
+            head.contains("Authorization: Bearer sched-secret\r\n"),
+            "the terminal callback re-uses the peeked credential: {head}"
+        );
+        assert_eq!(
+            serde_json::from_str::<Value>(event_body).unwrap()["data"]["statusInfo"],
+            "DELETE_REQUESTED"
+        );
     }
 
     // --- Retrieve-by-device: POST /retrieve-device-qos-bookings ------------

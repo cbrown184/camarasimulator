@@ -66,6 +66,26 @@ pub fn remove(id: &str) -> Option<Value> {
         .remove(id)
 }
 
+/// Transition the booking stored under `id` to `ACTIVATED` in place, stamping
+/// `started_at`, and return the updated `BookingInfo`; `None` if no such booking
+/// exists (e.g. a concurrent `deleteBooking` evicted it first). Backs the
+/// `SCHEDULED`→`ACTIVATED` at-window-start transition: the update is atomic under the
+/// store lock (never held across an `.await`), so a delete either wins the eviction
+/// (this returns `None` → the transition is a no-op) or loses to it, giving
+/// exactly-once semantics. Only the two mutated fields change; the rest of the
+/// booking (device echo, sink, serviceArea, …) is preserved.
+pub fn activate(id: &str, started_at: String) -> Option<Value> {
+    let mut map = store().lock().expect("qos-booking store not poisoned");
+    match map.get_mut(id) {
+        Some(info) => {
+            info["bookingStatus"] = Value::from("ACTIVATED");
+            info["startedAt"] = Value::from(started_at);
+            Some(info.clone())
+        }
+        None => None,
+    }
+}
+
 /// Return a snapshot of every stored `BookingInfo` whose echoed `device` equals
 /// `device`. `retrieveBookingByDevice` (`POST /retrieve-device-qos-bookings`) uses
 /// this to list a device's bookings. The lock is held only for the scan + clone
@@ -120,6 +140,20 @@ pub fn take_credential(id: &str) -> Option<String> {
         .lock()
         .expect("qos-booking credential store not poisoned")
         .remove(id)
+}
+
+/// Read (without removing) the stored `Authorization` header value for `id`. Used by
+/// a **non-terminal** callback — the `SCHEDULED`→`ACTIVATED` transition's `ACTIVATED`
+/// event — so a later **terminal** callback (`DURATION_EXPIRED` / `NETWORK_TERMINATED`
+/// / `DELETE_REQUESTED`) can still `take_credential` the same secret. `None` when the
+/// booking carried no applicable `sinkCredential` (mirrors QoS Provisioning's
+/// `peek_credential`).
+pub fn peek_credential(id: &str) -> Option<String> {
+    credentials()
+        .lock()
+        .expect("qos-booking credential store not poisoned")
+        .get(id)
+        .cloned()
 }
 
 /// Mint a fresh, opaque, UUID-v4-shaped identifier.
@@ -196,6 +230,40 @@ mod tests {
         assert!(get(&id).is_none(), "booking is gone after remove");
         // Removing an id that was never stored is None.
         assert!(remove("no-such-booking").is_none());
+    }
+
+    #[test]
+    fn activate_transitions_a_scheduled_booking_and_is_none_when_absent() {
+        let id = new_booking_id();
+        // Absent → None (a concurrent delete would have evicted it).
+        assert!(activate(&id, "2024-06-01T12:00:00Z".into()).is_none());
+        // A stored SCHEDULED booking transitions to ACTIVATED with startedAt stamped,
+        // preserving the rest of the BookingInfo.
+        let info = json!({
+            "bookingId": id, "bookingStatus": "SCHEDULED",
+            "device": { "phoneNumber": "+123456789013" }, "duration": 3600,
+        });
+        insert(id.clone(), info);
+        let updated = activate(&id, "2024-06-01T12:00:00Z".into()).expect("present → Some");
+        assert_eq!(updated["bookingStatus"], "ACTIVATED");
+        assert_eq!(updated["startedAt"], "2024-06-01T12:00:00Z");
+        // Unchanged fields are preserved, and the store reflects the transition.
+        assert_eq!(updated["duration"], 3600);
+        assert_eq!(updated["device"]["phoneNumber"], "+123456789013");
+        assert_eq!(get(&id), Some(updated));
+    }
+
+    #[test]
+    fn peek_credential_reads_without_consuming() {
+        let id = new_booking_id();
+        assert!(peek_credential(&id).is_none(), "not stored yet → None");
+        insert_credential(id.clone(), "Bearer peeked".to_string());
+        // Peek is non-destructive: repeated peeks see the same secret, and a later
+        // take still finds it (so a terminal callback can authenticate).
+        assert_eq!(peek_credential(&id), Some("Bearer peeked".to_string()));
+        assert_eq!(peek_credential(&id), Some("Bearer peeked".to_string()));
+        assert_eq!(take_credential(&id), Some("Bearer peeked".to_string()));
+        assert!(peek_credential(&id).is_none(), "gone after take");
     }
 
     #[test]
