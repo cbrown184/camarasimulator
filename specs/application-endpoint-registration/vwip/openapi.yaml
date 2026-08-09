@@ -14,9 +14,13 @@
 # (`getApplicationEndpointsById`), the list leg
 # `GET /application-endpoint-lists` (`getAllRegisteredApplicationEndpoints`), and
 # the deregister leg `DELETE /application-endpoint-lists/{applicationEndpointListId}`
-# (`deregisterApplicationEndpoint`). Both GETs return the canonical
+# (`deregisterApplicationEndpoint`), and the full-replace update leg
+# `PUT /application-endpoint-lists/{applicationEndpointListId}`
+# (`updateApplicationEndpoint`). Both GETs return the canonical
 # `ApplicationEndpointList` shape (`applicationEndpointListId` + a nested
-# `applicationEndpointsInfo`). The update (`PUT`) leg lands in a later pass.
+# `applicationEndpointsInfo`); the update leg replaces the endpoints in place and
+# returns `204`. This completes the Application Endpoint Registration resource
+# lifecycle (register / read / list / update / deregister).
 openapi: 3.0.3
 info:
   title: Application Endpoints Registration
@@ -395,6 +399,125 @@ paths:
             result: "404 NOT_FOUND"
           - input: an applicationEndpointListId that is not a UUID
             result: "400 INVALID_ARGUMENT"
+    put:
+      operationId: updateApplicationEndpoint
+      summary: Update (full replace) a registered application-endpoint list
+      description: |
+        Replaces the set of application endpoints registered under the opaque
+        `applicationEndpointListId` with the `ApplicationEndpointsInfo` in the
+        request body (a full replace, not a merge) and returns `204 No Content`.
+
+        Control planes (docs/DESIGN.md §7). The **request body** is shared with
+        `registerApplicationEndpoints` and is validated first: a malformed body,
+        an unknown field, an empty/over-long `applicationEndpoints` array, an
+        endpoint with no address form, a malformed IPv4/IPv6 address or
+        `edgeCloudZoneId`, a multi-line/over-length provider/description, or a
+        non-UUID `applicationProfileId` → `400 INVALID_ARGUMENT`; a `port` outside
+        `1..=65535` → `400 OUT_OF_RANGE`; a reserved error suffix on
+        `applicationProfileId` (e.g. `…404`, `…422`) → the canonical CAMARA error
+        for that status; the nil UUID `00000000-0000-0000-0000-000000000000` →
+        `422 UNIDENTIFIABLE_APPLICATION_PROFILE`. Then the opaque, server-minted
+        **id's store state**: a malformed (non-UUID) path value → `400
+        INVALID_ARGUMENT`, a well-formed but unknown/never-registered id → `404
+        NOT_FOUND`. The body is validated before the store state, so a body `400`
+        wins over a `404`.
+      security:
+        - openId:
+            - application-endpoint-registration:application-endpoints:update
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ApplicationEndpointsInfo"
+      responses:
+        "204":
+          description: The registration was replaced (no content).
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+        "400":
+          description: |
+            400 — invalid request. CamaraSim returns `INVALID_ARGUMENT` for a
+            malformed body/field or a non-UUID `applicationEndpointListId` path
+            value, and `OUT_OF_RANGE` for a `port` outside `1..=65535`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApplicationEndpointRegistrationError"
+              examples:
+                invalidArgument:
+                  summary: Malformed body / list id
+                  value:
+                    status: 400
+                    code: INVALID_ARGUMENT
+                    message: "`applicationEndpoints` must contain at least one endpoint."
+                outOfRange:
+                  summary: Port out of range
+                  value:
+                    status: 400
+                    code: OUT_OF_RANGE
+                    message: "`applicationEndpoints[0].port` must be in 1..=65535."
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "422":
+          description: |
+            422 — unprocessable. CamaraSim returns
+            `UNIDENTIFIABLE_APPLICATION_PROFILE` when `applicationProfileId` is the
+            reserved nil UUID, or the shared `SERVICE_NOT_APPLICABLE` for the
+            `…422` reserved suffix on `applicationProfileId`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApplicationEndpointRegistrationError"
+              examples:
+                unidentifiableProfile:
+                  summary: The nil-UUID application profile
+                  value:
+                    status: 422
+                    code: UNIDENTIFIABLE_APPLICATION_PROFILE
+                    message: The provided applicationProfileId does not identify a known application profile.
+                serviceNotApplicable:
+                  summary: Reserved `…422` suffix on applicationProfileId
+                  value:
+                    status: 422
+                    code: SERVICE_NOT_APPLICABLE
+                    message: The service is not available for the provided identifier.
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          Full-replace update. The request body (shared with
+          registerApplicationEndpoints) is validated first, then the opaque,
+          server-minted applicationEndpointListId's store state (docs/DESIGN.md
+          §7). No reserved-identifier plane on the id — it was never caller-chosen;
+          reserved error suffixes on applicationProfileId come from the shared
+          convention in errors.yaml. A body 400 wins over a 404.
+        cases:
+          - input: a stored id + valid body, applicationProfileId a normal UUID (e.g. …012)
+            result: "204 — the endpoints are replaced (a later GET reads them back)"
+          - input: a well-formed but unknown/never-registered id + valid body
+            result: "404 NOT_FOUND"
+          - input: an applicationEndpointListId that is not a UUID
+            result: "400 INVALID_ARGUMENT"
+          - input: empty or >20 applicationEndpoints, or an endpoint with no address form
+            result: "400 INVALID_ARGUMENT"
+          - input: an endpoint port outside 1..=65535
+            result: "400 OUT_OF_RANGE"
+          - input: applicationProfileId ending in a reserved error suffix (e.g. …404, …422)
+            result: the canonical CAMARA error for that status
+          - input: "applicationProfileId is the nil UUID 00000000-0000-0000-0000-000000000000"
+            result: "422 UNIDENTIFIABLE_APPLICATION_PROFILE"
 
 components:
   securitySchemes:

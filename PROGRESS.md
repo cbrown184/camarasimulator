@@ -2231,7 +2231,7 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
       fired" modelled by the missing `atTime` (documented cuts — no reboot engine).
       New atomic `store::update_with` (get-modify-write, decline-aware; no new dep).
       **Completes the Reboot Requests lifecycle and Network Access Devices vwip.**
-- [~] Application Endpoint Registration vwip (`/application-endpoint-registration/vwip`;
+- [x] Application Endpoint Registration vwip (`/application-endpoint-registration/vwip`;
   CAMARA ApplicationEndpointRegistration, wip — no released version yet, mounted at its
   canonical `vwip` base path like Application Endpoint Discovery / Application Profiles;
   stateful, resource-oriented, **non-spatial** — the *registration* counterpart of
@@ -2275,9 +2275,19 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     Application Profiles' `getApplicationProfile`). The opaque server-minted id is
     the only control plane (no reserved-identifier suffix — it was never
     caller-chosen). `x-correlator` echoed. Reuses `store::get`; no new dep.
-  - [ ] `PUT /application-endpoint-lists/{id}` (`updateApplicationEndpoint`) — full
-    replace (scope `…:application-endpoints:update`, body `ApplicationEndpointsInfo`,
-    → `204`; verified against the upstream CAMARA spec).
+  - [x] `PUT /application-endpoint-lists/{id}` (`updateApplicationEndpoint`,
+    scope `…:application-endpoints:update`) — full-replace update. Replaces the
+    endpoints registered under an existing id with a fresh `ApplicationEndpointsInfo`
+    body (a full replace, not a merge) → `204 No Content`; a later `GET` reads back
+    the replacement. Shares `register`'s body-validation + `applicationProfileId`
+    control planes (bad body/field → 400 INVALID_ARGUMENT / OUT_OF_RANGE; reserved
+    suffix → canonical CAMARA error; nil UUID → 422 UNIDENTIFIABLE_APPLICATION_PROFILE),
+    then the opaque store-state id (unknown → 404 NOT_FOUND, non-UUID path → 400).
+    Body validated before store state, so a body 400 wins over a 404 (mirrors the
+    Traffic Influence / Network Access Devices PATCH convention). New atomic
+    `store::replace` (existence-check-and-swap under one lock hold, no new dep).
+    **Completes the Application Endpoint Registration vwip resource lifecycle
+    (register / read / list / update / deregister).**
   - [x] `DELETE /application-endpoint-lists/{id}` (`deregisterApplicationEndpoint`,
     scope `…:application-endpoints:delete`) — removes the stored registration →
     `204 No Content` (single-use), `404 NOT_FOUND` for an unknown/already-deregistered
@@ -2311,6 +2321,25 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-09 — application-endpoint-registration: added the full-replace update leg
+  `PUT /application-endpoint-lists/{applicationEndpointListId}`
+  (`updateApplicationEndpoint`, scope `…:application-endpoints:update`) — replaces
+  the endpoints under an existing id with a fresh `ApplicationEndpointsInfo` body
+  → `204 No Content` (a later `GET` reads back the replacement). Shares `register`'s
+  body-validation + `applicationProfileId` control planes (bad body/field → 400
+  INVALID_ARGUMENT / OUT_OF_RANGE; reserved suffix → canonical error; nil UUID → 422
+  UNIDENTIFIABLE_APPLICATION_PROFILE), then the opaque store-state id (unknown → 404,
+  non-UUID path → 400); body validated before store state (body 400 > 404, mirroring
+  the Traffic Influence / Network Access Devices PATCH convention). New atomic
+  `store::replace` (existence-check-and-swap under one lock hold); no new dep. This
+  **completes the Application Endpoint Registration vwip lifecycle** (register / read /
+  list / update / deregister). Spec: added the `put` operation
+  (204/400/401/403/404/422/429/500/503 + scenarios) on the `{applicationEndpointListId}`
+  path; the `…:update` scope resolves through the shared openId scheme; header comment
+  updated. Tests: 10 new (update→204 + read-back replacement, unknown→404,
+  malformed-id→400, invalid-body-wins-over-404, port→OUT_OF_RANGE, reserved-…422→422,
+  nil-UUID→422, update-scope→403, missing-token→401; + `store::replace` unit).
+  cargo test 1709 passed; release builds. — binary: 3267952 bytes (3.2M).
 - 2026-08-09 — application-endpoint-registration: added the deregister leg
   `DELETE /application-endpoint-lists/{applicationEndpointListId}`
   (`deregisterApplicationEndpoint`, scope `…:application-endpoints:delete`) —

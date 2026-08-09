@@ -23,11 +23,9 @@
 //!   representation is the source of truth.
 //!
 //! The read leg (`getApplicationEndpointsById`) calls [`get`], the list leg
-//! (`getAllRegisteredApplicationEndpoints`) calls [`all`], and the deregister leg
-//! (`deregisterApplicationEndpoint`) calls [`remove`]; the update (`PUT`) leg
-//! lands in a later pass, so the module stays `dead_code`-allowed until it wires
-//! in its store operations (mirroring the first slices of the QoS Provisioning /
-//! Session Insights stores).
+//! (`getAllRegisteredApplicationEndpoints`) calls [`all`], the deregister leg
+//! (`deregisterApplicationEndpoint`) calls [`remove`], and the update (`PUT`) leg
+//! (`updateApplicationEndpoint`) calls [`replace`].
 
 #![allow(dead_code)]
 
@@ -74,6 +72,26 @@ pub fn remove(id: &str) -> Option<Value> {
         .lock()
         .expect("application-endpoint-registration store not poisoned")
         .remove(id)
+}
+
+/// Replace the registration stored under `id` with `registration` **only if one
+/// already exists** there, returning `true` when a registration was present (and
+/// replaced) or `false` when no such registration exists. The update leg
+/// (`updateApplicationEndpoint`, a full `PUT` replace) uses the distinction to
+/// answer `204 No Content` vs `404 NOT_FOUND`. Atomic: the existence check and
+/// the replace happen under one lock hold (never across an `.await`), so a
+/// concurrent delete/update can't wedge a phantom entry (mirroring the
+/// check-and-mutate stores elsewhere, e.g. Click to Dial's `insert_new`).
+pub fn replace(id: &str, registration: Value) -> bool {
+    let mut map = store()
+        .lock()
+        .expect("application-endpoint-registration store not poisoned");
+    if map.contains_key(id) {
+        map.insert(id.to_string(), registration);
+        true
+    } else {
+        false
+    }
 }
 
 /// Return every stored registration (the rendered `ApplicationEndpointList`
@@ -170,6 +188,21 @@ mod tests {
         insert(id.clone(), reg.clone());
         assert_eq!(get(&id), Some(reg));
         assert!(get("no-such-list").is_none());
+    }
+
+    #[test]
+    fn replace_updates_only_an_existing_id() {
+        // `replace` on an absent id changes nothing and reports false.
+        let id = new_list_id();
+        let updated =
+            json!({ "applicationEndpointListId": id, "applicationEndpointsInfo": { "n": 1 } });
+        assert!(!replace(&id, updated.clone()), "absent id must not be created");
+        assert!(get(&id).is_none(), "replace must not insert a new entry");
+
+        // Once inserted, `replace` swaps the value in place and reports true.
+        insert(id.clone(), json!({ "applicationEndpointListId": id, "old": true }));
+        assert!(replace(&id, updated.clone()), "present id is replaced");
+        assert_eq!(get(&id), Some(updated));
     }
 
     #[test]

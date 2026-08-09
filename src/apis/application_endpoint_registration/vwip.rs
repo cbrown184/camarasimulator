@@ -29,12 +29,25 @@
 //!   **deregister** leg: removes the stored registration and returns `204 No
 //!   Content` (single-use), or `404 NOT_FOUND` for an unknown/already-deregistered
 //!   id; a malformed (non-UUID) path value is a `400 INVALID_ARGUMENT`.
+//! - `PUT /application-endpoint-lists/{applicationEndpointListId}` (operationId
+//!   `updateApplicationEndpoint`, scope
+//!   `application-endpoint-registration:application-endpoints:update`) — the
+//!   **full-replace update** leg: replaces the endpoints registered under an
+//!   existing id with a fresh `ApplicationEndpointsInfo` body and returns `204 No
+//!   Content`. It shares `register`'s body-validation and `applicationProfileId`
+//!   control planes (a malformed body / field → `400`, a reserved-suffix
+//!   `applicationProfileId` → its canonical CAMARA error, the nil UUID → `422
+//!   UNIDENTIFIABLE_APPLICATION_PROFILE`), then keys on the store state: a
+//!   well-formed but unknown/never-registered id → `404 NOT_FOUND`, a malformed
+//!   (non-UUID) path value → `400 INVALID_ARGUMENT`. As with the sibling `PATCH`
+//!   resources elsewhere in CamaraSim (Traffic Influence, Network Access Devices),
+//!   the **body is validated before the store state**, so a body `400` wins over a
+//!   `404`. A later `GET` reads back the replaced endpoints.
 //!
 //! Both GETs return the canonical CAMARA `ApplicationEndpointList` shape
 //! (`applicationEndpointListId` + a nested `applicationEndpointsInfo`), which is
-//! also how a registration is stored, so the read-back and list legs agree.
-//!
-//! The update (`PUT`) leg by `{applicationEndpointListId}` lands in a later pass.
+//! also how a registration is stored, so the read-back and list legs agree; the
+//! update leg re-renders that same shape in place under the addressed id.
 //!
 //! ## No device identifier — the request body is the control plane (DESIGN §7)
 //!
@@ -102,6 +115,9 @@ const READ_SCOPE: &str = "application-endpoint-registration:application-endpoint
 /// Scope required to deregister a registration (CAMARA ApplicationEndpointRegistration).
 const DELETE_SCOPE: &str = "application-endpoint-registration:application-endpoints:delete";
 
+/// Scope required to update (full-replace) a registration (CAMARA ApplicationEndpointRegistration).
+const UPDATE_SCOPE: &str = "application-endpoint-registration:application-endpoints:update";
+
 /// The nil UUID — the reserved `applicationProfileId` that names an
 /// *unidentifiable* application profile (→ `422 UNIDENTIFIABLE_APPLICATION_PROFILE`).
 const NIL_UUID: &str = "00000000-0000-0000-0000-000000000000";
@@ -116,6 +132,7 @@ pub fn routes() -> Router {
         .route(
             "/application-endpoint-registration/vwip/application-endpoint-lists/:application_endpoint_list_id",
             axum::routing::get(get_application_endpoints_by_id)
+                .put(update_application_endpoint)
                 .delete(deregister_application_endpoint),
         )
 }
@@ -348,6 +365,99 @@ async fn deregister_application_endpoint(
             .into_response(),
             &correlator,
         ),
+    }
+}
+
+/// `PUT /application-endpoint-registration/vwip/application-endpoint-lists/{applicationEndpointListId}`.
+///
+/// The **full-replace update** leg (operationId `updateApplicationEndpoint`):
+/// replaces the endpoints registered under an existing `applicationEndpointListId`
+/// with a fresh `ApplicationEndpointsInfo` body → `204 No Content`. Requires the
+/// `application-endpoint-registration:application-endpoints:update` scope.
+///
+/// Control planes (docs/DESIGN.md §7): the **request body** — shared with
+/// `register` — is validated first (malformed body/field → `400 INVALID_ARGUMENT`,
+/// a port outside `1..=65535` → `400 OUT_OF_RANGE`, a reserved-suffix
+/// `applicationProfileId` → its canonical CAMARA error, the nil UUID → `422
+/// UNIDENTIFIABLE_APPLICATION_PROFILE`); then the opaque, server-minted id's store
+/// state — a well-formed but unknown/never-registered id → `404 NOT_FOUND`, a
+/// malformed (non-UUID) path value → `400 INVALID_ARGUMENT`. The body is validated
+/// before the store state (so a body `400` wins over a `404`), mirroring the
+/// sibling `PATCH` resources (Traffic Influence, Network Access Devices). On
+/// success the canonical `ApplicationEndpointList` shape is re-rendered in place
+/// under the addressed id, so a later `GET` reads back the replaced endpoints.
+/// `x-correlator` is echoed on every response, including the `204`.
+async fn update_application_endpoint(
+    claims: Claims,
+    headers: HeaderMap,
+    Path(application_endpoint_list_id): Path<String>,
+    body: Bytes,
+) -> Response {
+    // Optional correlation header, echoed on every response (CAMARA Commonalities).
+    let correlator = headers.get("x-correlator").cloned();
+
+    // Endpoint authorisation: the token must carry the update scope.
+    if let Err(e) = claims.require_scope(UPDATE_SCOPE) {
+        return with_correlator(e.into_response(), &correlator);
+    }
+
+    // The path parameter is `format: uuid`; a malformed value is a `400` (mirrors
+    // the read-back / deregister legs: bad shape → 400 vs unknown → 404).
+    if !is_uuid_shaped(&application_endpoint_list_id) {
+        return invalid_argument("`applicationEndpointListId` must be a UUID.", &correlator);
+    }
+
+    // Parse strictly (unknown fields / wrong types / missing required → 400).
+    let req: ApplicationEndpointsInfo = match serde_json::from_slice(&body) {
+        Ok(req) => req,
+        Err(_) => {
+            return invalid_argument(
+                "Request body is not a valid ApplicationEndpointsInfo.",
+                &correlator,
+            )
+        }
+    };
+
+    // Validate the body (shared with `register`: endpoint count, per-endpoint
+    // anyOf/port/address forms, provider/description text, applicationProfileId shape).
+    if let Err(resp) = validate(&req, &correlator) {
+        return resp;
+    }
+
+    // `applicationProfileId` control planes (shared with `register`): the reserved
+    // -error suffix first (a canonical CAMARA error), then the nil-UUID sentinel.
+    if let Some(err) = scenarios::reserved_error(&req.application_profile_id) {
+        return with_correlator(err.into_response(), &correlator);
+    }
+    if req.application_profile_id == NIL_UUID {
+        return with_correlator(
+            CamaraError::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "UNIDENTIFIABLE_APPLICATION_PROFILE",
+                "The provided applicationProfileId does not identify a known application profile.",
+            )
+            .into_response(),
+            &correlator,
+        );
+    }
+
+    // Re-render the canonical `ApplicationEndpointList` shape and replace in place,
+    // but only if a registration already exists under the id (else `404`).
+    let info = serde_json::to_value(&req).unwrap_or_else(|_| json!({}));
+    let rendered = json!({
+        "applicationEndpointListId": application_endpoint_list_id,
+        "applicationEndpointsInfo": info,
+    });
+    if store::replace(&application_endpoint_list_id, rendered) {
+        with_correlator(StatusCode::NO_CONTENT.into_response(), &correlator)
+    } else {
+        with_correlator(
+            CamaraError::not_found(
+                "No application-endpoint list found for the provided applicationEndpointListId.",
+            )
+            .into_response(),
+            &correlator,
+        )
     }
 }
 
@@ -1103,6 +1213,172 @@ mod tests {
     #[tokio::test]
     async fn list_missing_token_is_401() {
         let (status, _, _) = get_all(None, None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    // --- Update: PUT /application-endpoint-lists/{applicationEndpointListId} ---
+
+    /// PUT (full replace) a registration by id with an optional token/correlator.
+    async fn put_list(
+        token: Option<&str>,
+        id: &str,
+        body: &str,
+        correlator: Option<&str>,
+    ) -> (StatusCode, HeaderMap, Value) {
+        let mut builder = Request::builder()
+            .method("PUT")
+            .uri(format!("{LISTS}/{id}"))
+            .header("host", HOST)
+            .header("content-type", "application/json");
+        if let Some(t) = token {
+            builder = builder.header("authorization", format!("Bearer {t}"));
+        }
+        if let Some(c) = correlator {
+            builder = builder.header("x-correlator", c);
+        }
+        let request = builder.body(Body::from(body.to_string())).unwrap();
+        let response = app().oneshot(request).await.unwrap();
+        let status = response.status();
+        let headers = response.headers().clone();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, headers, json)
+    }
+
+    /// A second valid body that differs from `valid_body` so a read-back can prove
+    /// the replace took effect (distinct provider name / endpoint).
+    fn replacement_body(profile_id: &str) -> String {
+        json!({
+            "applicationEndpoints": [
+                { "domainName": "new.example.com", "port": 9443 }
+            ],
+            "applicationProviderName": "Replaced Corp",
+            "applicationProfileId": profile_id
+        })
+        .to_string()
+    }
+
+    #[tokio::test]
+    async fn update_returns_204_and_read_back_shows_the_replacement() {
+        let write = mint_token(WRITE_SCOPE).await;
+        let id = register_and_get_id(&write, &valid_body(OK_PROFILE)).await;
+
+        // Full-replace the registration → 204 No Content, empty body, correlator echoed.
+        let update = mint_token(UPDATE_SCOPE).await;
+        let (status, headers, body) =
+            put_list(Some(&update), &id, &replacement_body(OK_PROFILE), Some("corr-put")).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(body, Value::Null);
+        assert_eq!(headers.get("x-correlator").unwrap(), "corr-put");
+
+        // …and a read-back reflects the replacement (new provider + endpoint), and
+        // the id is unchanged.
+        let read = mint_token(READ_SCOPE).await;
+        let (status, _, out) = get_list(Some(&read), &id, None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(out["applicationEndpointListId"], id);
+        let info = &out["applicationEndpointsInfo"];
+        assert_eq!(info["applicationProviderName"], "Replaced Corp");
+        assert_eq!(info["applicationEndpoints"][0]["domainName"], "new.example.com");
+        assert_eq!(info["applicationEndpoints"][0]["port"], 9443);
+        // The old ipv4Address endpoint is gone (a full replace, not a merge).
+        assert!(info["applicationEndpoints"][0].get("ipv4Address").is_none());
+    }
+
+    #[tokio::test]
+    async fn update_unknown_id_is_404_not_found() {
+        let update = mint_token(UPDATE_SCOPE).await;
+        // Well-formed UUID that was never registered.
+        let unknown = "abcdef01-0000-4000-8000-0000000004f4";
+        let (status, headers, err) =
+            put_list(Some(&update), unknown, &replacement_body(OK_PROFILE), Some("corr-404")).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(err["code"], "NOT_FOUND");
+        assert_eq!(headers.get("x-correlator").unwrap(), "corr-404");
+    }
+
+    #[tokio::test]
+    async fn update_malformed_id_is_400_invalid_argument() {
+        let update = mint_token(UPDATE_SCOPE).await;
+        let (status, _, err) =
+            put_list(Some(&update), "not-a-uuid", &replacement_body(OK_PROFILE), None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(err["code"], "INVALID_ARGUMENT");
+    }
+
+    #[tokio::test]
+    async fn update_invalid_body_is_400_and_wins_over_404() {
+        // A malformed body on an *unknown* id is still a 400 (body validated
+        // before the store state), proving the ordering (body 400 > 404).
+        let update = mint_token(UPDATE_SCOPE).await;
+        let unknown = "abcdef01-0000-4000-8000-000000000abc";
+        let bad = json!({
+            "applicationEndpoints": [],
+            "applicationProviderName": "Acme",
+            "applicationProfileId": OK_PROFILE
+        })
+        .to_string();
+        let (status, _, err) = put_list(Some(&update), unknown, &bad, None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(err["code"], "INVALID_ARGUMENT");
+    }
+
+    #[tokio::test]
+    async fn update_port_out_of_range_is_400_out_of_range() {
+        let write = mint_token(WRITE_SCOPE).await;
+        let id = register_and_get_id(&write, &valid_body(OK_PROFILE)).await;
+        let update = mint_token(UPDATE_SCOPE).await;
+        let bad = json!({
+            "applicationEndpoints": [ { "ipv4Address": "192.0.2.1", "port": 70000 } ],
+            "applicationProviderName": "Acme",
+            "applicationProfileId": OK_PROFILE
+        })
+        .to_string();
+        let (status, _, err) = put_list(Some(&update), &id, &bad, None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(err["code"], "OUT_OF_RANGE");
+    }
+
+    #[tokio::test]
+    async fn update_reserved_profile_suffix_422_maps_to_service_not_applicable() {
+        let write = mint_token(WRITE_SCOPE).await;
+        let id = register_and_get_id(&write, &valid_body(OK_PROFILE)).await;
+        let update = mint_token(UPDATE_SCOPE).await;
+        // applicationProfileId trailing digits …422 → canonical 422 SERVICE_NOT_APPLICABLE.
+        let profile = "abcdef01-0000-4000-8000-000000000422";
+        let (status, _, err) = put_list(Some(&update), &id, &replacement_body(profile), None).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(err["code"], "SERVICE_NOT_APPLICABLE");
+    }
+
+    #[tokio::test]
+    async fn update_nil_uuid_profile_is_422_unidentifiable_application_profile() {
+        let write = mint_token(WRITE_SCOPE).await;
+        let id = register_and_get_id(&write, &valid_body(OK_PROFILE)).await;
+        let update = mint_token(UPDATE_SCOPE).await;
+        let (status, _, err) = put_list(Some(&update), &id, &replacement_body(NIL_UUID), None).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(err["code"], "UNIDENTIFIABLE_APPLICATION_PROFILE");
+    }
+
+    #[tokio::test]
+    async fn update_requires_the_update_scope() {
+        // Register with the write scope, then try to update it with the write
+        // scope (not update) → 403: update is a distinct scope.
+        let write = mint_token(WRITE_SCOPE).await;
+        let id = register_and_get_id(&write, &valid_body(OK_PROFILE)).await;
+        let (status, _, err) =
+            put_list(Some(&write), &id, &replacement_body(OK_PROFILE), None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(err["code"], "PERMISSION_DENIED");
+    }
+
+    #[tokio::test]
+    async fn update_missing_token_is_401() {
+        let (status, _, _) =
+            put_list(None, OK_PROFILE, &replacement_body(OK_PROFILE), None).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
     }
 }
