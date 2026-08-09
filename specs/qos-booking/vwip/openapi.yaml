@@ -22,10 +22,14 @@
 # delivers a `status-changed` CloudEvent (`bookingStatus: TERMINATED`, `statusInfo:
 # DELETE_REQUESTED`) to it, fire-and-forget over a raw TCP `http://` POST (no
 # HTTP-client dependency), with the `sinkCredential` (ACCESSTOKEN → Bearer, PLAIN →
-# Basic) applied. The remaining status transitions (SCHEDULED/ACTIVATED on booking,
-# expiry, NETWORK_TERMINATED) and TLS (`https://` sink) delivery are later passes —
-# a supplied `sink`/`sinkCredential` is otherwise validated and echoed only (a
-# documented cut). See the `QosBookingEvent` schema for the CloudEvent shape.
+# Basic) applied. An `ACTIVATED`, sink-bearing booking whose identifier tail is
+# `…002` is additionally dropped early by the simulated network: a short-grace async
+# timer evicts it and delivers a `status-changed` CloudEvent (`bookingStatus:
+# TERMINATED`, `statusInfo: NETWORK_TERMINATED`), likewise fire-and-forget with the
+# `sinkCredential` applied. The remaining transitions (window-expiry,
+# `SCHEDULED`→`ACTIVATED` at the window start) and TLS (`https://` sink) delivery are
+# later passes — a supplied `sink`/`sinkCredential` is otherwise validated and echoed
+# only (a documented cut). See the `QosBookingEvent` schema for the CloudEvent shape.
 openapi: 3.0.3
 info:
   title: QoS Booking
@@ -77,6 +81,13 @@ info:
       is a `400`) but keys the status off the identifier so every state is reachable
       from the input alone — `startTime` is not used to compute the status (a
       documented cut).
+    - **`NETWORK_TERMINATED` (early network drop)** — a `…002` tail is an ordinary
+      `ACTIVATED` case, but when the booking also records a `sink` the simulated
+      network drops the granted booking *early*: after a short grace an async timer
+      evicts the booking (a subsequent `GET` is then `404`) and delivers a
+      `status-changed` CloudEvent (`bookingStatus: TERMINATED`, `statusInfo:
+      NETWORK_TERMINATED`) to the `sink`. Any other `ACTIVATED` tail runs its window
+      (window-expiry is a later pass).
     - **`duration`** (seconds, required) — `< 1` → `400 OUT_OF_RANGE`; `> 31622400`
       (366 days, the `BookingInfo` ceiling) → `400 QOS_BOOKING.DURATION_OUT_OF_RANGE`.
     - **`serviceArea`** (required; CAMARA `Area`) — CamaraSim manages `CIRCLE` and
@@ -89,16 +100,19 @@ info:
     - **`qosProfile`** — a profile whose name contains `unavailable` →
       `422 QOS_BOOKING.QOS_PROFILE_NOT_APPLICABLE`; otherwise it is applied.
     - **`sink`** — optional; when present it must be a well-formed `http://` or
-      `https://` callback URL → else `400 INVALID_SINK`. Notifications on `sink` are
-      a later slice — a supplied `sink` is validated and echoed but not yet delivered
-      to; `sinkCredential` (a secret) is accepted but never echoed (documented cuts).
+      `https://` callback URL → else `400 INVALID_SINK`. A recorded `http://` sink
+      receives the `status-changed` CloudEvents above (`DELETE_REQUESTED` on delete;
+      `NETWORK_TERMINATED` for a `…002` ACTIVATED booking); an `https://` sink is
+      validated and echoed but not delivered to (no TLS client — a documented cut).
+      `sinkCredential` (a secret) authenticates the callbacks but is never echoed.
 
     The response echoes the device back in a single-property `DeviceResponse`
     (the identifier used), and echoes the submitted `serviceArea`, `startTime`,
     `duration`, and any supplied `sink` / `applicationServer` / port fields.
 
     Examples: `+123456789012` → `ACTIVATED`; `+123456789013` → `SCHEDULED`;
-    `+123456789000` → `REQUESTED`; `+123456789409` → `409 CONFLICT`;
+    `+123456789000` → `REQUESTED`; `+123456789002` (with a `sink`) → `ACTIVATED`
+    then an early `NETWORK_TERMINATED` drop; `+123456789409` → `409 CONFLICT`;
     `+123456789404` → `404 NOT_FOUND`.
   version: "wip"
   license:
@@ -320,9 +334,10 @@ paths:
           from the shared convention in errors.yaml. The `serviceArea` and
           `qosProfile` add further planes. CamaraSim manages CIRCLE and AREANAME
           service areas (POLYGON → NOT_MANAGED_AREA_TYPE). `startTime` is validated
-          for shape but does not drive the status (a documented cut); notifications
-          on `sink` are a later slice, so a supplied `sink`/`sinkCredential` is
-          validated/echoed but not delivered to.
+          for shape but does not drive the status (a documented cut). A recorded
+          `http://` `sink` receives the `status-changed` CloudEvents
+          (`DELETE_REQUESTED` on delete; `NETWORK_TERMINATED` for a `…002` ACTIVATED
+          booking); an `https://` sink is validated/echoed but not delivered to.
         cases:
           - input: identifier ending in a reserved error suffix (e.g. …404)
             result: the canonical CAMARA error for that status
@@ -334,6 +349,12 @@ paths:
             result: "201 — bookingStatus SCHEDULED, no startedAt"
           - input: "any other identifier (even, non-zero tail)"
             result: "201 — bookingStatus ACTIVATED, startedAt = now"
+          - input: "identifier ending in …002 with a recorded http:// sink"
+            result: >-
+              201 — bookingStatus ACTIVATED, then dropped early by the network: a
+              fire-and-forget status-changed CloudEvent (bookingStatus TERMINATED,
+              statusInfo NETWORK_TERMINATED) is POSTed to the sink and the booking is
+              evicted (a later GET is 404)
           - input: phoneNumber-keyed request
             result: "201 with the device echoed (`device.phoneNumber`)"
           - input: "`duration` < 1"
@@ -700,11 +721,13 @@ components:
           description: >-
             A callback URL for asynchronous CloudEvents notifications. CAMARA's
             schema requires `https://`; CamaraSim also accepts `http://` so a
-            loopback receiver can observe callbacks. On `deleteBooking`, a recorded
-            `http://` sink receives a `status-changed` CloudEvent (`TERMINATED` /
-            `DELETE_REQUESTED`; see `QosBookingEvent`). An `https://` sink is echoed
-            but not delivered to (no TLS client — a documented cut); the remaining
-            status transitions are later passes.
+            loopback receiver can observe callbacks. A recorded `http://` sink
+            receives a `status-changed` CloudEvent (`TERMINATED`) on `deleteBooking`
+            (`DELETE_REQUESTED`) and — for a `…002` `ACTIVATED` booking — when the
+            simulated network drops it early (`NETWORK_TERMINATED`); see
+            `QosBookingEvent`. An `https://` sink is echoed but not delivered to (no
+            TLS client — a documented cut); the remaining status transitions
+            (window-expiry, `SCHEDULED`→`ACTIVATED`) are later passes.
           pattern: '^https?:\/\/.+$'
           example: "https://application-server.example.com/notifications"
         sinkCredential:
@@ -973,13 +996,16 @@ components:
       type: object
       description: >-
         The CloudEvents 1.0 envelope delivered to a booking's `sink` on a
-        `status-changed` transition. CamaraSim delivers this on `deleteBooking` for a
-        booking that recorded a `sink`: `data.bookingStatus` is `TERMINATED` and
-        `data.statusInfo` is `DELETE_REQUESTED`. Per the CAMARA schema `statusInfo`
-        applies when a deletion is requested or `bookingStatus` is `TERMINATED`.
-        (The `SCHEDULED`/`ACTIVATED` transitions and the other `statusInfo` reasons
-        — `DURATION_EXPIRED`, `NETWORK_TERMINATED`, `BOOKING_DECLINED`,
-        `BOOKING_REVOKED` — are defined by CAMARA but not yet emitted by CamaraSim.)
+        `status-changed` transition. CamaraSim delivers this on two transitions, both
+        with `data.bookingStatus: TERMINATED`: on `deleteBooking` for a booking that
+        recorded a `sink` (`data.statusInfo: DELETE_REQUESTED`), and — for a `…002`
+        `ACTIVATED`, sink-bearing booking — when the simulated network drops it early
+        (`data.statusInfo: NETWORK_TERMINATED`; a short-grace async timer, then
+        eviction). Per the CAMARA schema `statusInfo` applies when a deletion is
+        requested or `bookingStatus` is `TERMINATED`. (The `SCHEDULED`/`ACTIVATED`
+        transitions and the other `statusInfo` reasons — `DURATION_EXPIRED`,
+        `BOOKING_DECLINED`, `BOOKING_REVOKED` — are defined by CAMARA but not yet
+        emitted by CamaraSim.)
       required:
         - id
         - source

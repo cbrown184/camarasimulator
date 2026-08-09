@@ -21,11 +21,16 @@
 //!   `status-changed` CloudEvent (`bookingStatus: TERMINATED`, `statusInfo:
 //!   DELETE_REQUESTED`) to it, fire-and-forget off the request path, with the
 //!   `sinkCredential` (ACCESSTOKEN → Bearer / PLAIN → Basic) applied. Still `204`.
+//! - **`NETWORK_TERMINATED`** — an `ACTIVATED`, sink-bearing booking whose
+//!   identifier tail is `…002` ([`NETWORK_TERMINATION_TAIL`]) is dropped early by
+//!   the simulated network: after a short grace an async timer
+//!   ([`spawn_network_termination`]) evicts it and delivers a `status-changed`
+//!   CloudEvent (`bookingStatus: TERMINATED`, `statusInfo: NETWORK_TERMINATED`),
+//!   fire-and-forget, with the `sinkCredential` applied. Mirrors QoD's `…001` case.
 //!
-//! The remaining status transitions (`SCHEDULED`/`ACTIVATED` on booking, expiry,
-//! `NETWORK_TERMINATED`) and TLS (`https://` sink) delivery are later passes; a
-//! supplied `sink`/`sinkCredential` is otherwise validated and echoed only (a
-//! documented cut).
+//! The remaining status transitions (window-expiry, `SCHEDULED`→`ACTIVATED` at the
+//! window start) and TLS (`https://` sink) delivery are later passes; a supplied
+//! `sink`/`sinkCredential` is otherwise validated and echoed only (a documented cut).
 //!
 //! ## Identifier resolution (two-legged vs three-legged)
 //!
@@ -50,7 +55,8 @@
 //!   booking, no `startedAt`); any other (even, non-zero) tail → `ACTIVATED`
 //!   (`startedAt` = now). CamaraSim validates `startTime` for shape but keys the
 //!   status off the identifier so every state is reachable from the input alone (a
-//!   documented cut — `startTime` is not used to compute the status).
+//!   documented cut — `startTime` is not used to compute the status). A `…002`
+//!   `ACTIVATED` booking with a `sink` is the `NETWORK_TERMINATED` sub-case above.
 //! - **`duration`** (seconds, required): `< 1` → `400 OUT_OF_RANGE`;
 //!   `> 31_622_400` (366 days, the `BookingInfo` ceiling) → `400
 //!   QOS_BOOKING.DURATION_OUT_OF_RANGE`.
@@ -73,7 +79,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use super::{notifications, store};
 use crate::auth::verify::Claims;
@@ -95,6 +101,24 @@ const RETRIEVE_SCOPE: &str = "qos-booking:device-qos-bookings:retrieve-by-device
 /// The maximum `duration` (seconds) a booking can span — the CAMARA
 /// `BookingInfo.duration` ceiling, `31_622_400` = 366 days.
 const MAX_DURATION_SECS: i64 = 31_622_400;
+
+/// Identifier tail that makes the (simulated) network terminate an `ACTIVATED`
+/// booking early (docs/DESIGN.md §7). The trailing three digits `…002` are an
+/// ordinary even, non-zero tail (so the booking is granted `ACTIVATED` as usual),
+/// but instead of running its window the network drops the booking after
+/// [`NETWORK_TERMINATION_GRACE_SECS`], evicting it and delivering a
+/// `status-changed` CloudEvent (`bookingStatus: TERMINATED`, `statusInfo:
+/// NETWORK_TERMINATED`). `…002` stays distinct from `…000` (REQUESTED), the odd
+/// SCHEDULED tails, and the reserved-error suffixes. Mirrors QoD's `…001`
+/// network-termination case.
+const NETWORK_TERMINATION_TAIL: u16 = 2;
+
+/// How long an `ACTIVATED`, network-terminated (`…002`) booking survives before the
+/// simulated network drops it, in seconds. Kept short — and independent of the
+/// (typically much longer) `duration` — so the transition is observably an early
+/// `NETWORK_TERMINATED` drop rather than a window that ran to completion. Mirrors
+/// QoD's `NETWORK_TERMINATION_GRACE_SECS`.
+const NETWORK_TERMINATION_GRACE_SECS: u64 = 1;
 
 /// Routes for QoS Booking vwip, mounted at their canonical URLs.
 pub fn routes() -> Router {
@@ -309,9 +333,58 @@ async fn create_booking(claims: Claims, headers: HeaderMap, body: Bytes) -> Resp
         }
     }
 
-    store::insert(booking_id, info.clone());
+    store::insert(booking_id.clone(), info.clone());
+
+    // Schedule the `NETWORK_TERMINATED` transition for an `ACTIVATED` booking that
+    // recorded a `sink` and whose identifier tail is `…002`
+    // ([`NETWORK_TERMINATION_TAIL`]): the simulated network drops the granted
+    // booking early ([`spawn_network_termination`]). Any other `ACTIVATED` tail runs
+    // its window (window-expiry is a later pass), and a `REQUESTED`/`SCHEDULED`
+    // booking — or one with no `sink` (nowhere to notify) — schedules nothing.
+    // Insert first, so the spawned task always sees the stored booking.
+    if info["bookingStatus"] == "ACTIVATED" {
+        if let Some(sink) = info.get("sink").and_then(Value::as_str) {
+            if scenarios::trailing_three_digits(&resolved.id) == Some(NETWORK_TERMINATION_TAIL) {
+                spawn_network_termination(booking_id, sink.to_string());
+            }
+        }
+    }
 
     with_correlator((StatusCode::CREATED, Json(info)).into_response(), &correlator)
+}
+
+/// Schedule the `NETWORK_TERMINATED` status transition for a `…002` booking.
+///
+/// Spawns a fire-and-forget async timer (never on the request path, DESIGN §11)
+/// that waits [`NETWORK_TERMINATION_GRACE_SECS`] — a short, fixed grace,
+/// independent of the booking's (typically longer) `duration` — then, if the
+/// booking still exists, evicts it and delivers a `status-changed` CloudEvent
+/// (`bookingStatus: TERMINATED`, `statusInfo: NETWORK_TERMINATED`) to `sink`. This
+/// models the network dropping a granted booking *early*, so the transition is
+/// distinct from a booking that ran its window.
+///
+/// A `deleteBooking` that removed the booking first makes this a no-op (the
+/// concurrent delete already fired `DELETE_REQUESTED`; [`store::remove`] is then
+/// `None`, so exactly one event fires). The credential (if any) is taken single-use
+/// so it drops from memory once the notification has been sent. The sleep is async,
+/// so the (single-node, in-memory) runtime is never blocked. Mirrors QoD's
+/// `spawn_network_termination`.
+fn spawn_network_termination(booking_id: String, sink: String) {
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(NETWORK_TERMINATION_GRACE_SECS)).await;
+        // Evict it; if a concurrent delete beat us, `remove` is None and we send
+        // nothing (that delete already notified DELETE_REQUESTED).
+        if store::remove(&booking_id).is_some() {
+            let event = notifications::status_changed_event(
+                store::new_event_id(),
+                rfc3339_utc(now_unix_secs()),
+                &booking_id,
+                "TERMINATED",
+                Some("NETWORK_TERMINATED"),
+            );
+            notifications::spawn_delivery(sink, event, store::take_credential(&booking_id));
+        }
+    });
 }
 
 /// `GET /qos-booking/vwip/device-qos-bookings/{bookingId}` (operationId `getBooking`).
@@ -1608,6 +1681,102 @@ mod tests {
             head.contains("Authorization: Basic Y2JpZDpjYnNlY3JldA==\r\n"),
             "basic authorization header present: {head}"
         );
+    }
+
+    #[tokio::test]
+    async fn a_002_activated_booking_with_a_sink_fires_network_terminated_and_is_evicted() {
+        use tokio::io::AsyncReadExt;
+        use tokio::net::TcpListener;
+
+        // A loopback receiver stands in for the consumer's `sink`.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let sink = format!("http://{addr}/qosbook-netterm");
+
+        // Create an ACTIVATED booking whose identifier tail is `…002` and that
+        // records the sink: the simulated network drops it early.
+        let create = mint_token(CREATE_SCOPE).await;
+        let body = json!({
+            "device": { "phoneNumber": "+123456789002" },
+            "qosProfile": "QOS_E",
+            "startTime": "2024-06-01T12:00:00Z",
+            "duration": 3600,
+            "serviceArea": valid_area(),
+            "sink": sink,
+        })
+        .to_string();
+        let (status, _, created) = post_booking(Some(&create), &body, None).await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(created["bookingStatus"], "ACTIVATED"); // …002 → even, non-zero
+        let booking_id = created["bookingId"].as_str().unwrap().to_string();
+
+        // Receive the fire-and-forget NETWORK_TERMINATED notification the timer spawns.
+        let (mut sock, _) = listener.accept().await.unwrap();
+        let mut buf = Vec::new();
+        sock.read_to_end(&mut buf).await.unwrap();
+        let raw = String::from_utf8(buf).unwrap();
+        let (head, event_body) = raw.split_once("\r\n\r\n").expect("headers then body");
+        assert!(
+            head.starts_with("POST /qosbook-netterm HTTP/1.1\r\n"),
+            "request line: {head}"
+        );
+        assert!(head.contains("Content-Type: application/cloudevents+json"));
+
+        let event: Value = serde_json::from_str(event_body).expect("body is JSON");
+        assert_eq!(event["type"], "org.camaraproject.qos-booking.v0.status-changed");
+        assert_eq!(event["specversion"], "1.0");
+        assert!(event["id"].is_string() && event["time"].is_string());
+        assert_eq!(event["data"]["bookingId"], json!(booking_id));
+        assert_eq!(event["data"]["bookingStatus"], "TERMINATED");
+        assert_eq!(event["data"]["statusInfo"], "NETWORK_TERMINATED");
+
+        // The network drop evicts the booking: a subsequent read is a 404.
+        let read = mint_token(READ_SCOPE).await;
+        let (status, _, _) = get_booking_req(Some(&read), &booking_id, None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn a_002_network_terminated_callback_carries_the_sink_credential() {
+        use tokio::io::AsyncReadExt;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let sink = format!("http://{addr}/qosbook-netterm-auth");
+
+        // A `…002` ACTIVATED booking with a sink AND an ACCESSTOKEN sinkCredential.
+        let create = mint_token(CREATE_SCOPE).await;
+        let body = json!({
+            "device": { "phoneNumber": "+123456789002" },
+            "qosProfile": "QOS_E",
+            "startTime": "2024-06-01T12:00:00Z",
+            "duration": 3600,
+            "serviceArea": valid_area(),
+            "sink": sink,
+            "sinkCredential": {
+                "credentialType": "ACCESSTOKEN",
+                "accessToken": "netterm-secret",
+                "accessTokenType": "bearer",
+            },
+        })
+        .to_string();
+        let (status, _, created) = post_booking(Some(&create), &body, None).await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert!(created.get("sinkCredential").is_none()); // never echoed
+
+        // The NETWORK_TERMINATED callback carries the bearer.
+        let (mut sock, _) = listener.accept().await.unwrap();
+        let mut buf = Vec::new();
+        sock.read_to_end(&mut buf).await.unwrap();
+        let raw = String::from_utf8(buf).unwrap();
+        let (head, event_body) = raw.split_once("\r\n\r\n").expect("headers then body");
+        assert!(
+            head.contains("Authorization: Bearer netterm-secret\r\n"),
+            "authorization header present: {head}"
+        );
+        let event: Value = serde_json::from_str(event_body).expect("body is JSON");
+        assert_eq!(event["data"]["statusInfo"], "NETWORK_TERMINATED");
     }
 
     // --- Retrieve-by-device: POST /retrieve-device-qos-bookings ------------

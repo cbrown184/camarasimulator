@@ -1641,8 +1641,14 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
       `Basic base64(identifier:secret)` (RFC 7617) — via the single-use side-store
       `store::insert_credential`/`take_credential`; REFRESHTOKEN a documented cut;
       the secret is never echoed. `https://` sink not delivered to (no TLS client).
-    - [ ] `SCHEDULED`/`ACTIVATED`-on-booking + `NETWORK_TERMINATED` / expiry
-      transitions — later pass
+    - [x] `NETWORK_TERMINATED` `status-changed` — a `…002` (even, non-zero →
+      `ACTIVATED`) booking that recorded a `sink` is dropped early by the simulated
+      network: a short-grace (`1 s`) fire-and-forget async timer evicts it (a later
+      `GET` is `404`) and delivers a `bookingStatus: TERMINATED` / `statusInfo:
+      NETWORK_TERMINATED` CloudEvent (raw TCP, no HTTP-client dep), with the
+      single-use `sinkCredential` applied. Mirrors QoD's `…001` case.
+    - [ ] window-expiry + `SCHEDULED`→`ACTIVATED`-at-window-start transitions —
+      later pass
     - [ ] TLS (`https://` sink) delivery (needs a rustls TLS client)
 - [x] Device Data Volume vwip (`/device-data-volume/vwip`; CAMARA
   device-data-volume, wip — no released version yet, mounted at its canonical
@@ -2385,6 +2391,17 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-09 16:45Z — qos-booking: added the `NETWORK_TERMINATED` `status-changed`
+  transition. A `…002` (even, non-zero → `ACTIVATED`) booking that records a `sink` is
+  now dropped early by the simulated network — a 1 s fire-and-forget async timer
+  (`spawn_network_termination`, mirroring QoD's `…001` case) evicts it from the store
+  (a later `GET` → `404`) and delivers a CloudEvent (`bookingStatus: TERMINATED`,
+  `statusInfo: NETWORK_TERMINATED`) over raw TCP `http://`, with the single-use
+  `sinkCredential` applied; concurrent-delete safe (`store::remove` gate). No new dep.
+  Spec: documented the `…002` early-drop functional case + refreshed the sink/event
+  prose in `specs/qos-booking/vwip/openapi.yaml` (`statusInfo` enum already carried
+  `NETWORK_TERMINATED`). Tests: +2 (delivery+eviction; credential on the callback).
+  `cargo test` 1768 green. binary (release): 3,359,976 bytes (~3.3M).
 - 2026-08-09 — qos-booking: began `sink` CloudEvents notifications — the
   `DELETE_REQUESTED` slice. Deleting a booking that recorded a `sink` now delivers a
   `status-changed` CloudEvent (`type: org.camaraproject.qos-booking.v0.status-changed`,
