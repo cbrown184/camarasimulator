@@ -2005,8 +2005,20 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     stateless default); no binding → `422 UNNECESSARY_UNBIND_IMEI`. Same
     identifier/reserved-error planes; `unBindType` trimmed to `[IMEIBIND]` →
     `AREALIMIT` unbind → 400 INVALID_ARGUMENT. **Completes the IMEIBIND round-trip.**
-  - [ ] `queryType: AREALIMIT` / `bindType: AREALIMIT` — the spatial
-    area-restriction query and bind/unbind (Circle geometry) — deferred (spatial).
+  - [x] `queryType: AREALIMIT` on `POST /query` — reports the device's
+    area-restriction status `{ areaLimit: { areaLimitStatus:
+    RESTRICTED|UNRESTRICTED, limitArea?: <Circle> } }`. Same identifier
+    resolution / two-/three-legged rule / reserved-error plane as the IMEIBIND
+    query; stateless default keyed off the identifier's trailing-digit parity
+    (odd → RESTRICTED with a deterministic schema-valid `Circle`; else →
+    UNRESTRICTED, no `limitArea`), mirroring IMEIBIND's odd→active pattern. The
+    `QueryType` enum now carries `AREALIMIT`; an unknown value → 400
+    INVALID_ARGUMENT. Spec: `QueryType`/`QueryFraudPreventionResponse` +
+    `AreaLimit`/`AreaLimitStatus`/`Area`/`AreaType`/`Circle`/`Point` schemas +
+    functional cases/examples. No new dep.
+  - [ ] `bindType: AREALIMIT` / `unBindType: AREALIMIT` — the spatial *set*/*clear*
+    of a stored area restriction (Circle geometry) — deferred (spatial); the
+    `BindType`/`UnBindType` enums stay trimmed to `[IMEIBIND]`.
 - [~] Sponsored Data vwip (`/sponsored-data/vwip`; CAMARA SponsoredData `wip`;
   phone-number-keyed sponsorship lifecycle):
   - [x] `POST /sponsorship` (`startSponsorship`, `sponsored-data:sponsorship:create`)
@@ -2409,6 +2421,24 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-09 — iot-sim-fraud-prevention: added `queryType: AREALIMIT` to
+  `POST /query` (the area-restriction facet). The `QueryType` enum now accepts
+  both `IMEIBIND` and `AREALIMIT`; an AREALIMIT query returns
+  `{ areaLimit: { areaLimitStatus: RESTRICTED|UNRESTRICTED, limitArea?: Circle } }`,
+  derived statelessly from the identifier's trailing-digit parity (odd →
+  RESTRICTED with a deterministic schema-valid `Circle` — lat [-90,90]/long
+  [-180,180]/radius [1,200000]; else UNRESTRICTED), reusing the existing
+  identifier resolution / two-/three-legged rule / reserved-error plane.
+  `AREALIMIT` bind/unbind (which would set/clear a stored restriction) stays
+  deferred — the `BindType`/`UnBindType` enums remain trimmed to `[IMEIBIND]`, so
+  an AREALIMIT bind/unbind is still 400 INVALID_ARGUMENT. No new dep. Spec:
+  `QueryType`/`QueryFraudPreventionResponse` updated + new `AreaLimit`/
+  `AreaLimitStatus`/`Area`/`AreaType`/`Circle`/`Point` schemas + functional
+  cases/examples in `specs/iot-sim-fraud-prevention/vwip/openapi.yaml`. Tests: +5
+  (1 `area_limit` unit; 4 integration — odd→RESTRICTED+Circle, even→UNRESTRICTED,
+  reserved suffix, unknown queryType→400; replaced the old
+  "AREALIMIT-query→400" test). `cargo test` 1779 green, `cargo build --release`
+  green. — binary: 3.2M (3,382,224 B)
 - 2026-08-09 — qos-booking: implemented the `SCHEDULED`→`ACTIVATED`-at-window-start
   transition. A `SCHEDULED` (odd-tail), sink-bearing booking arms an off-path async
   timer (`spawn_activation`) that sleeps until `startTime`, flips it to `ACTIVATED`

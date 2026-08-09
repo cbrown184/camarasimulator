@@ -10,10 +10,16 @@
 //!   (operationId `unBindDeviceImei`, scope `iot-sim-fraud-prevention:unbind`).
 //!
 //! The upstream CAMARA API also defines a second bind/query type `AREALIMIT`
-//! (a geographic area restriction). That is **deferred** — it is spatial, lower
-//! priority than this non-spatial slice (docs/DESIGN.md §12) — so the vendored
-//! spec's `*Type` enums are trimmed to `[IMEIBIND]`, and the spec never claims
-//! behaviour the server does not implement.
+//! (a geographic area restriction). `POST /query` now supports it: an
+//! `AREALIMIT` query reports the device's area-restriction status
+//! (`{ "areaLimit": { "areaLimitStatus": "RESTRICTED"|"UNRESTRICTED",
+//! "limitArea"?: <Circle> } }`), derived statelessly from the identifier (see
+//! [`area_limit`]). The **`AREALIMIT` bind/unbind** pair — which would *set* and
+//! *clear* a stored restriction with a caller-supplied `Circle` — is still
+//! **deferred** (spatial, lower priority than the non-spatial IMEIBIND slice;
+//! docs/DESIGN.md §12), so the `bindType`/`unBindType` enums stay trimmed to
+//! `[IMEIBIND]` and an `AREALIMIT` bind/unbind is rejected `400 INVALID_ARGUMENT`.
+//! The spec never claims behaviour the server does not implement.
 //!
 //! ## What it does
 //!
@@ -50,10 +56,15 @@
 //!   `{ bound: true }` (idempotent). The bound IMEI is deterministic: a fixed TAC
 //!   (`35209900`) + the identifier's zero-padded trailing-three-digit serial + a
 //!   GSMA Luhn check digit.
-//! - **`query`** — a stored binding wins: `bindStatus: "BOUND"` with the stored
-//!   `bindImei`. Absent one, the stateless default: **odd trailing digits** →
-//!   BOUND with the synthesised IMEI; **any other input** (even tail, `…000`, or
-//!   no trailing digits) → `bindStatus: "UNBOUND"`, no `bindImei`.
+//! - **`query`** (`queryType: IMEIBIND`) — a stored binding wins:
+//!   `bindStatus: "BOUND"` with the stored `bindImei`. Absent one, the stateless
+//!   default: **odd trailing digits** → BOUND with the synthesised IMEI; **any
+//!   other input** (even tail, `…000`, or no trailing digits) →
+//!   `bindStatus: "UNBOUND"`, no `bindImei`.
+//! - **`query`** (`queryType: AREALIMIT`) — the area-restriction facet, driven by
+//!   the same trailing-digit parity: **odd** → `areaLimitStatus: "RESTRICTED"`
+//!   with a deterministic `limitArea` `Circle`; **any other input** →
+//!   `areaLimitStatus: "UNRESTRICTED"` with no `limitArea` (see [`area_limit`]).
 //! - **`unbind`** — a stored binding is removed → `{ unbound: true }`; a device
 //!   with no binding → `422 UNNECESSARY_UNBIND_IMEI`.
 //!
@@ -106,13 +117,16 @@ struct QueryRequest {
     query_type: QueryType,
 }
 
-/// CamaraSim implements the non-spatial `IMEIBIND` query only; `AREALIMIT` is a
-/// deferred (spatial) case, so it is not a value this deployment accepts — an
-/// `AREALIMIT` request fails to deserialise and is rejected `400 INVALID_ARGUMENT`.
+/// The `query` operation supports **both** CAMARA query types: the non-spatial
+/// `IMEIBIND` (IMEI binding status) and the spatial `AREALIMIT` (geographic area
+/// restriction status). Any other value fails to deserialise and is rejected
+/// `400 INVALID_ARGUMENT`.
 #[derive(Debug, Deserialize, PartialEq)]
 enum QueryType {
     #[serde(rename = "IMEIBIND")]
     ImeiBind,
+    #[serde(rename = "AREALIMIT")]
+    AreaLimit,
 }
 
 /// The CAMARA `Device` object: at least one identifier must be present
@@ -157,18 +171,17 @@ async fn query(claims: Claims, headers: HeaderMap, body: Bytes) -> Response {
     }
 
     // `queryType` is required, so the body must be present and parse. An unknown
-    // `queryType` value (e.g. the deferred `AREALIMIT`) fails to deserialise.
+    // `queryType` value (neither `IMEIBIND` nor `AREALIMIT`) fails to deserialise.
     let req: QueryRequest = match serde_json::from_slice(&body) {
         Ok(req) => req,
         Err(_) => {
             return invalid_argument(
-                "Request body is not a valid QueryRequest (queryType must be \"IMEIBIND\").",
+                "Request body is not a valid QueryRequest (queryType must be \"IMEIBIND\" or \"AREALIMIT\").",
                 &correlator,
             )
         }
     };
-    // Only IMEIBIND exists in the trimmed enum; kept explicit for future types.
-    let QueryType::ImeiBind = req.query_type;
+    let query_type = req.query_type;
 
     // The identifier is the submitted device identifier, else the token subject
     // (three-legged fallback), enforcing the two-/three-legged rule.
@@ -182,12 +195,14 @@ async fn query(claims: Claims, headers: HeaderMap, body: Bytes) -> Response {
         return with_correlator(err.into_response(), &correlator);
     }
 
-    let imei_bind = imei_bind(&identifier);
+    // Answer the requested facet: the IMEI binding status or the area
+    // restriction status (both keyed off the same identifier, DESIGN §7).
+    let result = match query_type {
+        QueryType::ImeiBind => json!({ "imeiBind": imei_bind(&identifier) }),
+        QueryType::AreaLimit => json!({ "areaLimit": area_limit(&identifier) }),
+    };
 
-    with_correlator(
-        (StatusCode::OK, Json(json!({ "imeiBind": imei_bind }))).into_response(),
-        &correlator,
-    )
+    with_correlator((StatusCode::OK, Json(result)).into_response(), &correlator)
 }
 
 /// The IMEI-binding status of `identifier`.
@@ -209,6 +224,37 @@ fn imei_bind(identifier: &str) -> serde_json::Value {
             "bindImei": synth_imei(n),
         }),
         _ => json!({ "bindStatus": "UNBOUND" }),
+    }
+}
+
+/// The **area-restriction** status of `identifier` (the `AREALIMIT` query facet).
+///
+/// The upstream CAMARA restriction is set by an `AREALIMIT` bind carrying a
+/// `Circle`; that bind/unbind pair is a deferred (spatial) slice, so this query
+/// reports the **stateless default** driven by the identifier's trailing three
+/// digits (docs/DESIGN.md §7), mirroring [`imei_bind`]'s odd → active pattern:
+/// odd trailing digits → `RESTRICTED`, with a deterministic `limitArea` `Circle`
+/// derived from those digits (so the same device always reports the same allowed
+/// area); anything else (even, `…000`, or no trailing digits) → `UNRESTRICTED`
+/// with no `limitArea`. The `Circle` always satisfies the CAMARA schema bounds
+/// (`latitude` ∈ [-90, 90], `longitude` ∈ [-180, 180], `radius` ∈ [1, 200000]).
+fn area_limit(identifier: &str) -> serde_json::Value {
+    match scenarios::trailing_three_digits(identifier) {
+        Some(d) if d % 2 == 1 => {
+            // `d` ∈ 1..=999, so every derived value lands inside the schema range.
+            let latitude = f64::from(d % 180) - 90.0; // [-89, 89]
+            let longitude = f64::from(d % 360) - 180.0; // [-180, 179]
+            let radius = i64::from(d).clamp(1, 200_000); // [1, 999]
+            json!({
+                "areaLimitStatus": "RESTRICTED",
+                "limitArea": {
+                    "areaType": "CIRCLE",
+                    "center": { "latitude": latitude, "longitude": longitude },
+                    "radius": radius,
+                },
+            })
+        }
+        _ => json!({ "areaLimitStatus": "UNRESTRICTED" }),
     }
 }
 
@@ -771,10 +817,70 @@ mod tests {
         assert_eq!(body["imeiBind"]["bindStatus"], "UNBOUND");
     }
 
+    #[test]
+    fn area_limit_is_driven_by_the_trailing_digits() {
+        // odd tail → RESTRICTED with a schema-valid Circle limitArea.
+        let restricted = area_limit("+123456789011");
+        assert_eq!(restricted["areaLimitStatus"], "RESTRICTED");
+        let area = &restricted["limitArea"];
+        assert_eq!(area["areaType"], "CIRCLE");
+        let lat = area["center"]["latitude"].as_f64().unwrap();
+        let long = area["center"]["longitude"].as_f64().unwrap();
+        let radius = area["radius"].as_i64().unwrap();
+        assert!((-90.0..=90.0).contains(&lat), "latitude {lat} out of range");
+        assert!((-180.0..=180.0).contains(&long), "longitude {long} out of range");
+        assert!((1..=200_000).contains(&radius), "radius {radius} out of range");
+        // Deterministic: the same identifier always reports the same area.
+        assert_eq!(area_limit("+123456789011"), restricted);
+
+        // even tail → UNRESTRICTED, no limitArea.
+        let unrestricted = area_limit("+123456789012");
+        assert_eq!(unrestricted["areaLimitStatus"], "UNRESTRICTED");
+        assert!(unrestricted.get("limitArea").is_none());
+
+        // …000 tail and no trailing digits → UNRESTRICTED.
+        assert_eq!(area_limit("+123456789000")["areaLimitStatus"], "UNRESTRICTED");
+        assert_eq!(area_limit("camarasim-user")["areaLimitStatus"], "UNRESTRICTED");
+    }
+
     #[tokio::test]
-    async fn arealimit_query_type_is_rejected_as_invalid_argument() {
+    async fn arealimit_query_odd_tail_is_restricted_with_a_circle() {
         let (status, _, body) =
             query_ok_token(r#"{"device":{"phoneNumber":"+123456789011"},"queryType":"AREALIMIT"}"#)
+                .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["areaLimit"]["areaLimitStatus"], "RESTRICTED");
+        assert_eq!(body["areaLimit"]["limitArea"]["areaType"], "CIRCLE");
+        assert!(body["areaLimit"]["limitArea"]["radius"].is_number());
+        // The IMEI facet is not present on an AREALIMIT query.
+        assert!(body.get("imeiBind").is_none());
+    }
+
+    #[tokio::test]
+    async fn arealimit_query_even_tail_is_unrestricted() {
+        let (status, _, body) =
+            query_ok_token(r#"{"device":{"phoneNumber":"+123456789012"},"queryType":"AREALIMIT"}"#)
+                .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["areaLimit"]["areaLimitStatus"], "UNRESTRICTED");
+        assert!(body["areaLimit"].get("limitArea").is_none());
+    }
+
+    #[tokio::test]
+    async fn arealimit_query_reserved_suffix_selects_a_canonical_camara_error() {
+        // The reserved-error plane is shared across both query facets.
+        let (status, _, body) =
+            query_ok_token(r#"{"device":{"phoneNumber":"+123456789404"},"queryType":"AREALIMIT"}"#)
+                .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn unknown_query_type_is_rejected_as_invalid_argument() {
+        // Neither IMEIBIND nor AREALIMIT → 400 INVALID_ARGUMENT.
+        let (status, _, body) =
+            query_ok_token(r#"{"device":{"phoneNumber":"+123456789011"},"queryType":"NOPE"}"#)
                 .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(body["code"], "INVALID_ARGUMENT");

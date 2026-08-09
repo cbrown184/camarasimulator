@@ -29,13 +29,19 @@ info:
     (`bindDeviceImei`), `POST /query` (`query`), and `POST /unbind`
     (`unBindDeviceImei`) — over a shared in-memory binding store: a bind records
     the device's SIM↔IMEI association, `query` reports it (a stored binding wins
-    over the stateless default), and an unbind removes it. Only the **`AREALIMIT`**
-    bind/query type is **deferred** — it is spatial (a geographic `Circle`
-    restriction), lower priority than this non-spatial slice (see `PROGRESS.md`).
-    Accordingly every `*Type` enum below is trimmed to `[IMEIBIND]`: a request
-    naming `AREALIMIT` is rejected with `400 INVALID_ARGUMENT` (it is not a value
-    this deployment accepts). The simulator never drifts from the operations it
-    actually implements.
+    over the stateless default), and an unbind removes it.
+
+    `POST /query` additionally supports the spatial **`AREALIMIT`** query type: it
+    reports a device's area-restriction status (`areaLimit`), derived statelessly
+    from the identifier's trailing three digits (odd → `RESTRICTED` with a
+    deterministic `Circle` `limitArea`; otherwise → `UNRESTRICTED`). The
+    **`AREALIMIT` bind/unbind** pair — which would *set* and *clear* a stored
+    restriction with a caller-supplied `Circle` — remains **deferred** (spatial,
+    lower priority than the non-spatial IMEIBIND slice; see `PROGRESS.md`).
+    Accordingly the `BindType`/`UnBindType` enums stay trimmed to `[IMEIBIND]`: an
+    `AREALIMIT` bind/unbind is rejected `400 INVALID_ARGUMENT`, while the
+    `QueryType` enum carries both values. The simulator never drifts from the
+    operations it actually implements.
 
     # Authorization and authentication
     The "Camara Security and Interoperability Profile" provides details of how an API consumer requests an access token. Please refer to Identity and Consent Management (https://github.com/camaraproject/IdentityAndConsentManagement/) for the released version of the profile.
@@ -75,8 +81,9 @@ paths:
         - Query card fraud prevention
       summary: IoT SIM Fraud Prevention Query
       description: |
-        Retrieve the current IMEI binding status for a device (operationId
-        `query`).
+        Retrieve a device's current fraud-prevention status (operationId
+        `query`) — its IMEI binding (`queryType: IMEIBIND`) **or** its geographic
+        area restriction (`queryType: AREALIMIT`).
 
         The device is identified either by a `device` object in the request body
         (two-legged / CIBA) or — when `device` is omitted — by the identity a
@@ -110,6 +117,27 @@ paths:
 
         Examples: `+123456789011` → `BOUND` with a bound IMEI; `+123456789012`,
         `+123456789000` → `UNBOUND`; `+123456789404` → `404 NOT_FOUND`.
+
+        ### `queryType: AREALIMIT` — area restriction
+
+        The same identifier resolution, two-/three-legged rule, and reserved
+        error-suffix plane apply. Absent an `AREALIMIT` binding (that bind/unbind
+        pair is a deferred spatial slice), the area-restriction status is a
+        stateless default keyed off the identifier's trailing-digit parity,
+        mirroring `IMEIBIND`:
+
+        - **odd trailing digits** — the device is **restricted** to an area:
+          `areaLimit: { areaLimitStatus: "RESTRICTED", limitArea: <Circle> }`. The
+          `limitArea` is a `Circle` deterministic from the identifier (so the same
+          device always reports the same allowed area), always within the schema
+          bounds (`latitude` [-90, 90], `longitude` [-180, 180], `radius`
+          [1, 200000]).
+        - **any other input** (even tail, `…000`, or no trailing digits) — **no
+          restriction**: `areaLimit: { areaLimitStatus: "UNRESTRICTED" }` with no
+          `limitArea`.
+
+        Examples: `+123456789011` → `RESTRICTED` with a `Circle`; `+123456789012`,
+        `+123456789000` → `UNRESTRICTED`; `+123456789404` → `404 NOT_FOUND`.
       operationId: query
       parameters:
         - $ref: "#/components/parameters/x-correlator"
@@ -155,6 +183,13 @@ paths:
                 description: Use a 3 Legged Token for query operations (no device object needed)
                 value:
                   queryType: "IMEIBIND"
+              INPUT_AREALIMIT:
+                summary: query a device's area restriction
+                description: Use AREALIMIT to retrieve the device's geographic area restriction
+                value:
+                  device:
+                    phoneNumber: "+123456789011"
+                  queryType: "AREALIMIT"
       responses:
         "200":
           description: The result of query the device
@@ -179,6 +214,24 @@ paths:
                   value:
                     imeiBind:
                       bindStatus: "UNBOUND"
+                AREA_LIMIT_RESTRICTED:
+                  summary: AREALIMIT RESULT (RESTRICTED)
+                  description: The device is restricted to a specific area
+                  value:
+                    areaLimit:
+                      areaLimitStatus: "RESTRICTED"
+                      limitArea:
+                        areaType: "CIRCLE"
+                        center:
+                          latitude: -79.0
+                          longitude: -169.0
+                        radius: 11
+                AREA_LIMIT_UNRESTRICTED:
+                  summary: AREALIMIT RESULT (UNRESTRICTED)
+                  description: No area restriction is active for the device
+                  value:
+                    areaLimit:
+                      areaLimitStatus: "UNRESTRICTED"
         "400":
           $ref: "#/components/responses/QueryBadRequest400"
         "401":
@@ -446,12 +499,12 @@ components:
     QueryType:
       type: string
       description: |
-        The type of query. The upstream CAMARA API also defines `AREALIMIT`
-        (a geographic area restriction); this simulator implements the
-        non-spatial `IMEIBIND` query only, so the enum is trimmed accordingly
-        (documented cut — see the API description).
+        The type of query: `IMEIBIND` (IMEI binding status) or `AREALIMIT`
+        (geographic area-restriction status). Both are implemented by
+        `POST /query`.
       enum:
         - IMEIBIND
+        - AREALIMIT
 
     QueryRequest:
       description: Request to query the current status.
@@ -465,9 +518,13 @@ components:
         - queryType
 
     QueryFraudPreventionResponse:
-      description: Response containing the requested status.
+      description: |
+        Response containing the requested status. An `IMEIBIND` query returns
+        `imeiBind`; an `AREALIMIT` query returns `areaLimit`.
       type: object
       properties:
+        areaLimit:
+          $ref: "#/components/schemas/AreaLimit"
         imeiBind:
           $ref: "#/components/schemas/ImeiBind"
 
@@ -494,6 +551,82 @@ components:
       enum:
         - BOUND
         - UNBOUND
+
+    # ---------- Area restriction (AREALIMIT query) ----------
+    AreaLimit:
+      description: Area-restriction status and, when restricted, the allowed area.
+      type: object
+      properties:
+        areaLimitStatus:
+          $ref: "#/components/schemas/AreaLimitStatus"
+        limitArea:
+          $ref: "#/components/schemas/Area"
+
+    AreaLimitStatus:
+      description: |
+        Status of the device's geographic area restriction.
+        - `RESTRICTED`: the device is restricted to a specific area (`limitArea`).
+        - `UNRESTRICTED`: no area restriction is active.
+      type: string
+      enum:
+        - RESTRICTED
+        - UNRESTRICTED
+
+    Area:
+      description: |
+        Base schema for a geographic area. The `areaType` discriminates the
+        concrete shape; CamaraSim reports a `CIRCLE`.
+      type: object
+      properties:
+        areaType:
+          $ref: "#/components/schemas/AreaType"
+      required:
+        - areaType
+      discriminator:
+        propertyName: areaType
+        mapping:
+          CIRCLE: "#/components/schemas/Circle"
+
+    AreaType:
+      description: Type of the geographic area. Only `CIRCLE` is used.
+      type: string
+      enum:
+        - CIRCLE
+
+    Circle:
+      description: A circular area, centred on `center` with the given `radius`.
+      allOf:
+        - $ref: "#/components/schemas/Area"
+        - type: object
+          properties:
+            center:
+              $ref: "#/components/schemas/Point"
+            radius:
+              description: Radius of the circle in metres.
+              type: integer
+              minimum: 1
+              maximum: 200000
+          required:
+            - center
+            - radius
+
+    Point:
+      description: A geographic point (WGS84 latitude/longitude, decimal degrees).
+      type: object
+      properties:
+        latitude:
+          type: number
+          format: double
+          minimum: -90
+          maximum: 90
+        longitude:
+          type: number
+          format: double
+          minimum: -180
+          maximum: 180
+      required:
+        - latitude
+        - longitude
 
     # ---------- Bind / Unbind ----------
     BindType:
@@ -615,7 +748,7 @@ components:
               value:
                 status: 400
                 code: INVALID_ARGUMENT
-                message: "The value of queryType can only be IMEIBIND"
+                message: "The value of queryType can only be IMEIBIND or AREALIMIT"
 
     Generic401:
       description: Unauthorized
