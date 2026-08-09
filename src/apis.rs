@@ -54,6 +54,7 @@
 //! - **Application Endpoint Registration vwip** — `/application-endpoint-registration/vwip/…`.
 //! - **Predictive Connectivity Data vwip** — `/predictive-connectivity-data/vwip/…`.
 //! - **Network Access Devices vwip** — `/network-access-devices/vwip/…`.
+//! - **Short Message Service v0alpha1** — `/sms/v0alpha1/…`.
 //!
 //! Plus [`openapi`], which serves each mounted API's vendored OpenAPI spec at
 //! `/{api}/v{n}/openapi.yaml` (docs/DESIGN.md §9).
@@ -103,6 +104,7 @@ pub mod qos_provisioning;
 pub mod quality_on_demand;
 pub mod region_device_count;
 pub mod session_insights;
+pub mod short_message_service;
 pub mod sim_swap;
 pub mod simple_edge_discovery;
 pub mod sponsored_data;
@@ -165,5 +167,6 @@ pub fn routes() -> Router {
         .merge(application_endpoint_registration::routes())
         .merge(predictive_connectivity_data::routes())
         .merge(network_access_devices::routes())
+        .merge(short_message_service::routes())
         .merge(openapi::routes())
 }

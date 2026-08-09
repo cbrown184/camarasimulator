@@ -1064,6 +1064,25 @@ reserved-identifier plane, mirroring QoD `deleteSession`); `sub`-ownership not
 enforced (documented cut, mirroring the read). `x-correlator` echoed on `204` and
 `404`; no new dep. Only `PATCH /reboot-requests…` (update leg) remains.
 
+**Short Message Service v0alpha1** is now live: `POST /sms/v0alpha1/short-message`
+(scope `send-sms:short-message`, operationId `send-sms`) — the first send-SMS
+API. Two-legged / business-facing (like Verified Caller / Click to Dial): the
+`from` sender and the `to` recipients are both in the body, so no
+two-/three-legged dance. Accepts `to` (≥1 E.164 MSISDN), `from` (E.164),
+`message` (non-empty), and an optional `category`
+(`PROMOTION`/`SERVICE`/`TRANSACTION`). Control plane (DESIGN §7): the **first
+recipient** `to[0]`'s reserved error suffix → canonical CAMARA error (`…404` =
+recipient not found, `…503`/`…500` the network-unavailable/internal cases the
+upstream API declares); otherwise `200 { msgId, timestamp }` with a
+deterministic, UUID-shaped `msgId` (SHA-256 of `from` + all `to` + `message`,
+no uuid/rand dep) and a fresh RFC 3339 UTC `timestamp`. A reserved suffix on
+`from` or on a non-first recipient is **not** the plane. Validation: empty `to`,
+non-E.164 `from`/recipient, empty `message`, unknown `category`/field, bad body →
+400 INVALID_ARGUMENT. `x-correlator` echoed. The upstream API's
+delivery-notification subscription surface is out of scope. (Adding this entry
+grew the `/` catalog `json!` literal past the default macro recursion limit, so a
+crate-level `#![recursion_limit = "256"]` was added to `src/main.rs`.)
+
 ## In progress (claimed this pass)
 
 _None._  <!-- agent: put the claimed item + run timestamp here, clear it when done -->
@@ -2395,6 +2414,21 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     control plane (no reserved-identifier suffix — the id is server-minted). New
     `store::remove`; no new dep. Verified scope/response codes against the upstream
     CAMARA spec.
+- [x] Short Message Service v0alpha1 (`/sms/v0alpha1`; CAMARA ShortMessageService
+  0.1.0-alpha.1; stateless, non-spatial, two-legged / business-facing send-SMS):
+  - [x] `POST /short-message` (`send-sms`, scope `send-sms:short-message`) —
+    `{ msgId, timestamp }` for a send from `from` to `to` (≥1 E.164 MSISDN) with a
+    non-empty `message` and optional `category`
+    (`PROMOTION`/`SERVICE`/`TRANSACTION`). Two-legged (both parties in the body,
+    like Verified Caller). One control plane (DESIGN §7): the first recipient
+    `to[0]`'s reserved error suffix → canonical CAMARA error (`…404` = recipient
+    not found; `…503`/`…500` = the network-unavailable/internal cases); else
+    `200` with a deterministic UUID-shaped `msgId` (SHA-256 of from+to+message, no
+    uuid/rand dep) + fresh RFC 3339 UTC `timestamp`. A reserved suffix on `from`
+    or a non-first recipient is not the plane. Empty `to` / non-E.164
+    `from`/recipient / empty `message` / unknown `category`/field / bad body → 400
+    INVALID_ARGUMENT. `x-correlator` echoed. Upstream delivery-notification
+    subscription surface out of scope. **Completes Short Message Service v0alpha1.**
 - [ ] Other CAMARA APIs as capacity allows
 
 ## Cross-cutting (do alongside the item that needs it)
@@ -2421,6 +2455,16 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-09 — sms: added Short Message Service v0alpha1 (CAMARA
+  ShortMessageService 0.1.0-alpha.1), a new stateless, non-spatial, two-legged
+  send-SMS API. `POST /sms/v0alpha1/short-message` (`send-sms`, scope
+  `send-sms:short-message`) → `200 { msgId, timestamp }`; control plane is the
+  first recipient `to[0]`'s reserved error suffix → canonical CAMARA error, else a
+  deterministic UUID-shaped `msgId` (SHA-256 of from+to+message) + RFC 3339 UTC
+  timestamp. Vendored `specs/sms/v0alpha1/openapi.yaml` from the upstream SMS.yaml,
+  wired into apis/openapi/catalog; bumped crate `recursion_limit` to 256 (the `/`
+  catalog `json!` outgrew the 128 default). 22 new tests; full suite 1801 green.
+  No new dep (reused sha2). — binary: 3.3M (3404688 B)
 - 2026-08-09 — iot-sim-fraud-prevention: added `queryType: AREALIMIT` to
   `POST /query` (the area-restriction facet). The `QueryType` enum now accepts
   both `IMEIBIND` and `AREALIMIT`; an AREALIMIT query returns

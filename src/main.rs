@@ -4,6 +4,10 @@
 //! API catalog. CAMARA APIs, auth, and versioning are added incrementally by the
 //! autonomous build agent — see docs/DESIGN.md and PROGRESS.md.
 
+// The `/` catalog is a single large `json!` literal that grows by one entry per
+// mounted API; it has outgrown the default macro recursion limit (128).
+#![recursion_limit = "256"]
+
 mod apis;
 mod auth;
 mod errors;
@@ -334,6 +338,12 @@ async fn catalog() -> Json<Value> {
                 "version": "vwip",
                 "base_path": "/network-access-devices/vwip",
                 "spec_url": "/network-access-devices/vwip/openapi.yaml",
+            },
+            {
+                "name": "sms",
+                "version": "v0alpha1",
+                "base_path": "/sms/v0alpha1",
+                "spec_url": "/sms/v0alpha1/openapi.yaml",
             }
         ],
         "authorization_servers": [{
