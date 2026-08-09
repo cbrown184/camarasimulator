@@ -1647,8 +1647,14 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
       `GET` is `404`) and delivers a `bookingStatus: TERMINATED` / `statusInfo:
       NETWORK_TERMINATED` CloudEvent (raw TCP, no HTTP-client dep), with the
       single-use `sinkCredential` applied. Mirrors QoD's `…001` case.
-    - [ ] window-expiry + `SCHEDULED`→`ACTIVATED`-at-window-start transitions —
-      later pass
+    - [x] window-expiry `DURATION_EXPIRED` — any other `ACTIVATED`, sink-bearing
+      booking (not the `…002` network-drop tail) runs its window to completion: an
+      async timer at creation waits the booking's `duration` (from `startedAt`), then
+      evicts it (a later `GET` is `404`) and delivers `bookingStatus: TERMINATED` /
+      `statusInfo: DURATION_EXPIRED` (raw TCP, no HTTP-client dep), single-use
+      `sinkCredential` applied. Mutually exclusive with `NETWORK_TERMINATED` (by
+      tail), so exactly one terminal event fires. Mirrors QoD's `DURATION_EXPIRED`.
+    - [ ] `SCHEDULED`→`ACTIVATED`-at-window-start transition — later pass
     - [ ] TLS (`https://` sink) delivery (needs a rustls TLS client)
 - [x] Device Data Volume vwip (`/device-data-volume/vwip`; CAMARA
   device-data-volume, wip — no released version yet, mounted at its canonical
@@ -2391,6 +2397,21 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-09 17:45Z — qos-booking: added the `DURATION_EXPIRED` `status-changed`
+  transition (window ran to completion). Any `ACTIVATED`, sink-bearing booking that is
+  *not* the `…002` network-drop tail now schedules a fire-and-forget async timer at
+  creation (`spawn_window_expiry`, mirroring QoD's `spawn_expiry`; no re-read loop —
+  qos-booking has no `extend`) that waits the booking's `duration` (from `startedAt` =
+  creation), then evicts it (`store::remove` gate → a later `GET` is `404`) and delivers
+  a CloudEvent (`bookingStatus: TERMINATED`, `statusInfo: DURATION_EXPIRED`) over raw TCP
+  `http://`, single-use `sinkCredential` applied. Mutually exclusive with
+  `NETWORK_TERMINATED` (by tail), so exactly one terminal event fires; concurrent-delete
+  safe. No new dep. Spec: documented the window-expiry functional case + refreshed the
+  header/sink/`QosBookingEvent` prose in `specs/qos-booking/vwip/openapi.yaml`
+  (`statusInfo` enum already carried `DURATION_EXPIRED`). Tests: +2 (delivery+eviction at
+  window end; ACCESSTOKEN bearer on the callback). `cargo test` 1770 green. binary
+  (release): 3,364,640 bytes (~3.3M). Remaining qos-booking: `SCHEDULED`→`ACTIVATED`
+  at-window-start + TLS (`https://`) sink.
 - 2026-08-09 16:45Z — qos-booking: added the `NETWORK_TERMINATED` `status-changed`
   transition. A `…002` (even, non-zero → `ACTIVATED`) booking that records a `sink` is
   now dropped early by the simulated network — a 1 s fire-and-forget async timer

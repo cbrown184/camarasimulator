@@ -27,10 +27,18 @@
 //!   ([`spawn_network_termination`]) evicts it and delivers a `status-changed`
 //!   CloudEvent (`bookingStatus: TERMINATED`, `statusInfo: NETWORK_TERMINATED`),
 //!   fire-and-forget, with the `sinkCredential` applied. Mirrors QoD's `…001` case.
+//! - **`DURATION_EXPIRED`** — any other `ACTIVATED`, sink-bearing booking runs its
+//!   window to completion: an async timer ([`spawn_window_expiry`]) waits the
+//!   booking's `duration` (from `startedAt` = creation), then evicts it and delivers
+//!   a `status-changed` CloudEvent (`bookingStatus: TERMINATED`, `statusInfo:
+//!   DURATION_EXPIRED`) to the `sink`, fire-and-forget, with the `sinkCredential`
+//!   applied. Mutually exclusive with `NETWORK_TERMINATED` (by tail), so exactly one
+//!   terminal event fires. Mirrors QoD's `DURATION_EXPIRED` (QoS Booking has no
+//!   `extend`, so the timer needs no re-read loop).
 //!
-//! The remaining status transitions (window-expiry, `SCHEDULED`→`ACTIVATED` at the
-//! window start) and TLS (`https://` sink) delivery are later passes; a supplied
-//! `sink`/`sinkCredential` is otherwise validated and echoed only (a documented cut).
+//! The remaining status transition (`SCHEDULED`→`ACTIVATED` at the window start) and
+//! TLS (`https://` sink) delivery are later passes; a supplied `sink`/`sinkCredential`
+//! is otherwise validated and echoed only (a documented cut).
 //!
 //! ## Identifier resolution (two-legged vs three-legged)
 //!
@@ -335,17 +343,21 @@ async fn create_booking(claims: Claims, headers: HeaderMap, body: Bytes) -> Resp
 
     store::insert(booking_id.clone(), info.clone());
 
-    // Schedule the `NETWORK_TERMINATED` transition for an `ACTIVATED` booking that
-    // recorded a `sink` and whose identifier tail is `…002`
-    // ([`NETWORK_TERMINATION_TAIL`]): the simulated network drops the granted
-    // booking early ([`spawn_network_termination`]). Any other `ACTIVATED` tail runs
-    // its window (window-expiry is a later pass), and a `REQUESTED`/`SCHEDULED`
-    // booking — or one with no `sink` (nowhere to notify) — schedules nothing.
-    // Insert first, so the spawned task always sees the stored booking.
+    // Schedule the terminal transition for an `ACTIVATED` booking that recorded a
+    // `sink` (a `REQUESTED`/`SCHEDULED` booking — or one with no `sink`, nowhere to
+    // notify — schedules nothing). A `…002` tail ([`NETWORK_TERMINATION_TAIL`]) is
+    // dropped *early* by the simulated network ([`spawn_network_termination`], a
+    // short fixed grace → `NETWORK_TERMINATED`); any other `ACTIVATED` tail runs its
+    // window to completion and then expires ([`spawn_window_expiry`], after
+    // `duration` seconds → `DURATION_EXPIRED`). The two are mutually exclusive by
+    // tail, so exactly one terminal event fires. Insert first, so the spawned task
+    // always sees the stored booking.
     if info["bookingStatus"] == "ACTIVATED" {
         if let Some(sink) = info.get("sink").and_then(Value::as_str) {
             if scenarios::trailing_three_digits(&resolved.id) == Some(NETWORK_TERMINATION_TAIL) {
                 spawn_network_termination(booking_id, sink.to_string());
+            } else {
+                spawn_window_expiry(booking_id, sink.to_string(), duration);
             }
         }
     }
@@ -381,6 +393,41 @@ fn spawn_network_termination(booking_id: String, sink: String) {
                 &booking_id,
                 "TERMINATED",
                 Some("NETWORK_TERMINATED"),
+            );
+            notifications::spawn_delivery(sink, event, store::take_credential(&booking_id));
+        }
+    });
+}
+
+/// Schedule the `DURATION_EXPIRED` status transition for an `ACTIVATED` booking.
+///
+/// Spawns a fire-and-forget async timer (never on the request path, DESIGN §11)
+/// that waits the booking's `duration` — its window, running from `startedAt` (=
+/// creation) to completion — then, if the booking still exists, evicts it and
+/// delivers a `status-changed` CloudEvent (`bookingStatus: TERMINATED`,
+/// `statusInfo: DURATION_EXPIRED`) to `sink`. This models a booking that ran its
+/// full window, so the transition is distinct from the *early* `NETWORK_TERMINATED`
+/// drop (a `…002` tail); the two are mutually exclusive by tail.
+///
+/// A `deleteBooking` that removed the booking first makes this a no-op (the
+/// concurrent delete already fired `DELETE_REQUESTED`; [`store::remove`] is then
+/// `None`, so exactly one terminal event fires). The credential (if any) is taken
+/// single-use so the secret drops from memory once the notification has been sent.
+/// The sleep is async, so the (single-node, in-memory) runtime is never blocked.
+/// Mirrors QoD's `spawn_expiry` — QoS Booking has no `extend`, so no re-read loop is
+/// needed; `duration` is already validated `>= 1` at create time.
+fn spawn_window_expiry(booking_id: String, sink: String, duration: i64) {
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(duration.max(0) as u64)).await;
+        // Evict it; if a concurrent delete/termination beat us, `remove` is None and
+        // we send nothing (that path already notified its terminal reason).
+        if store::remove(&booking_id).is_some() {
+            let event = notifications::status_changed_event(
+                store::new_event_id(),
+                rfc3339_utc(now_unix_secs()),
+                &booking_id,
+                "TERMINATED",
+                Some("DURATION_EXPIRED"),
             );
             notifications::spawn_delivery(sink, event, store::take_credential(&booking_id));
         }
@@ -1777,6 +1824,113 @@ mod tests {
         );
         let event: Value = serde_json::from_str(event_body).expect("body is JSON");
         assert_eq!(event["data"]["statusInfo"], "NETWORK_TERMINATED");
+    }
+
+    // --- CloudEvents notifications on `sink` (DURATION_EXPIRED) -------------
+
+    #[tokio::test]
+    async fn an_activated_booking_with_a_sink_fires_duration_expired_at_window_end() {
+        use tokio::io::AsyncReadExt;
+        use tokio::net::TcpListener;
+
+        // A loopback receiver stands in for the consumer's `sink`.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let sink = format!("http://{addr}/qosbook-expiry");
+
+        // An ACTIVATED booking (…012 → even, non-zero, not the …002 network-drop
+        // tail) granted for just 1 second, with a sink: its window runs to completion
+        // and then expires (DURATION_EXPIRED), distinct from the early network drop.
+        let create = mint_token(CREATE_SCOPE).await;
+        let body = json!({
+            "device": { "phoneNumber": "+123456789012" },
+            "qosProfile": "QOS_E",
+            "startTime": "2024-06-01T12:00:00Z",
+            "duration": 1,
+            "serviceArea": valid_area(),
+            "sink": sink,
+        })
+        .to_string();
+        let (status, _, created) = post_booking(Some(&create), &body, None).await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(created["bookingStatus"], "ACTIVATED"); // …012 → even, non-zero
+        assert!(created["startedAt"].is_string());
+        let booking_id = created["bookingId"].as_str().unwrap().to_string();
+
+        // The scheduled timer fires a DURATION_EXPIRED CloudEvent once the 1-second
+        // window lapses. Bound the wait so a bug can't hang the suite.
+        let (mut sock, _) = tokio::time::timeout(Duration::from_secs(10), listener.accept())
+            .await
+            .expect("the sink is notified within the timeout")
+            .unwrap();
+        let mut buf = Vec::new();
+        sock.read_to_end(&mut buf).await.unwrap();
+        let raw = String::from_utf8(buf).unwrap();
+        let (head, event_body) = raw.split_once("\r\n\r\n").expect("headers then body");
+        assert!(
+            head.starts_with("POST /qosbook-expiry HTTP/1.1\r\n"),
+            "request line: {head}"
+        );
+        assert!(head.contains("Content-Type: application/cloudevents+json"));
+
+        let event: Value = serde_json::from_str(event_body).expect("body is JSON");
+        assert_eq!(event["type"], "org.camaraproject.qos-booking.v0.status-changed");
+        assert_eq!(event["specversion"], "1.0");
+        assert!(event["id"].is_string() && event["time"].is_string());
+        assert_eq!(event["data"]["bookingId"], json!(booking_id));
+        assert_eq!(event["data"]["bookingStatus"], "TERMINATED");
+        assert_eq!(event["data"]["statusInfo"], "DURATION_EXPIRED");
+
+        // The expired window evicts the booking: a subsequent read is a 404.
+        let read = mint_token(READ_SCOPE).await;
+        let (status, _, _) = get_booking_req(Some(&read), &booking_id, None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn a_duration_expired_callback_carries_the_sink_credential() {
+        use tokio::io::AsyncReadExt;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let sink = format!("http://{addr}/qosbook-expiry-auth");
+
+        // An ACTIVATED booking (…012) with a 1-second window, a sink, AND an
+        // ACCESSTOKEN sinkCredential: the DURATION_EXPIRED callback authenticates.
+        let create = mint_token(CREATE_SCOPE).await;
+        let body = json!({
+            "device": { "phoneNumber": "+123456789012" },
+            "qosProfile": "QOS_E",
+            "startTime": "2024-06-01T12:00:00Z",
+            "duration": 1,
+            "serviceArea": valid_area(),
+            "sink": sink,
+            "sinkCredential": {
+                "credentialType": "ACCESSTOKEN",
+                "accessToken": "expiry-secret",
+                "accessTokenType": "bearer",
+            },
+        })
+        .to_string();
+        let (status, _, created) = post_booking(Some(&create), &body, None).await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert!(created.get("sinkCredential").is_none()); // never echoed
+
+        let (mut sock, _) = tokio::time::timeout(Duration::from_secs(10), listener.accept())
+            .await
+            .expect("the sink is notified within the timeout")
+            .unwrap();
+        let mut buf = Vec::new();
+        sock.read_to_end(&mut buf).await.unwrap();
+        let raw = String::from_utf8(buf).unwrap();
+        let (head, event_body) = raw.split_once("\r\n\r\n").expect("headers then body");
+        assert!(
+            head.contains("Authorization: Bearer expiry-secret\r\n"),
+            "authorization header present: {head}"
+        );
+        let event: Value = serde_json::from_str(event_body).expect("body is JSON");
+        assert_eq!(event["data"]["statusInfo"], "DURATION_EXPIRED");
     }
 
     // --- Retrieve-by-device: POST /retrieve-device-qos-bookings ------------
