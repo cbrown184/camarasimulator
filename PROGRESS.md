@@ -1618,10 +1618,18 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     Accepted` (returning `BookingInfo`) form is deferred with `sink` notifications —
     synchronous `204` only (mirrors QoS Provisioning `revokeQosAssignment` / QoD
     `deleteSession`). `x-correlator` echoed. No new dep.
-  - [ ] `POST /retrieve-device-qos-bookings` (`retrieveBookingByDevice`,
+  - [x] `POST /retrieve-device-qos-bookings` (`retrieveBookingByDevice`,
     `qos-booking:device-qos-bookings:retrieve-by-device`) — the canonical
-    collection query (an earlier note called this a plain `GET` list; the real
-    CAMARA op is a device-keyed POST returning an array). Later pass.
+    device-keyed collection query: lists a device's bookings as an array of
+    `BookingInfo` (`200`, empty array when none — CAMARA never 404s on an empty
+    result). Device is the submitted `device` id, else the token subject
+    (two-legged/three-legged rule: `device` on a line token → 422
+    `UNNECESSARY_IDENTIFIER`; no device + non-line subject → 422
+    `MISSING_IDENTIFIER`). Two control planes (DESIGN §7): identifier
+    reserved-error suffix → canonical CAMARA error; else the in-memory store,
+    scanned by each booking's echoed `device` (new `store::find_by_device`,
+    mirroring QoD's `retrieveSessionsByDevice`). Not scoped per client
+    (documented cut). `x-correlator` echoed. No new dep.
   - [ ] CloudEvents notifications on `sink` (status transitions) — later pass;
     `sink`/`sinkCredential` currently validated+echoed but not delivered to (cut)
 - [x] Device Data Volume vwip (`/device-data-volume/vwip`; CAMARA
@@ -2365,6 +2373,25 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-09 — qos-booking: added the retrieve-by-device leg `POST
+  /qos-booking/vwip/retrieve-device-qos-bookings` (`retrieveBookingByDevice`,
+  scope `qos-booking:device-qos-bookings:retrieve-by-device`). Lists a device's
+  bookings as an array of `BookingInfo` (`200`, empty array when none — CAMARA
+  never 404s on an empty collection). Device is the submitted `device` id, else
+  the token subject (reuses `resolve_identifier`: `device` on a line token → 422
+  `UNNECESSARY_IDENTIFIER`; no device + non-line subject → 422
+  `MISSING_IDENTIFIER`). Two control planes (DESIGN §7): identifier reserved-error
+  suffix → canonical CAMARA error (…404 → 404); else the in-memory store, scanned
+  by each booking's echoed `device` (new `store::find_by_device`, mirroring QoD's
+  `retrieveSessionsByDevice`). Not scoped per client (documented cut);
+  `x-correlator` echoed. Spec: added the `/retrieve-device-qos-bookings` path
+  (retrieveBookingByDevice, 200 array + 422/error set, x-camarasim-scenarios),
+  `RetrieveBookingsInput` schema, updated header note. Tests: 7 handler
+  (per-device filter, empty→[], reserved suffix, three-legged fallback,
+  missing/unnecessary identifier, bad body, auth+scope) + 1 store
+  (`find_by_device`). No new dep. `cargo test` (1752) + `cargo build --release`
+  green. binary: 3.2M (3,343,312 bytes). Only `sink` CloudEvents notifications
+  remain for QoS Booking vwip.
 - 2026-08-09 — qos-booking: added the delete leg `DELETE
   /qos-booking/vwip/device-qos-bookings/{bookingId}` (`deleteBooking`, scope
   `qos-booking:device-qos-bookings:delete`). Deletes a stored booking, evicting it

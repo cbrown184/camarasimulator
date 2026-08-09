@@ -66,6 +66,21 @@ pub fn remove(id: &str) -> Option<Value> {
         .remove(id)
 }
 
+/// Return a snapshot of every stored `BookingInfo` whose echoed `device` equals
+/// `device`. `retrieveBookingByDevice` (`POST /retrieve-device-qos-bookings`) uses
+/// this to list a device's bookings. The lock is held only for the scan + clone
+/// (never across an `.await`), and the returned `Vec` is an independent copy.
+/// Mirrors [`crate::apis::quality_on_demand::store::find_by_device`].
+pub fn find_by_device(device: &Value) -> Vec<Value> {
+    store()
+        .lock()
+        .expect("qos-booking store not poisoned")
+        .values()
+        .filter(|info| info.get("device") == Some(device))
+        .cloned()
+        .collect()
+}
+
 /// Mint a fresh, opaque, UUID-shaped `bookingId`. See [`mint_uuid`] for the shape.
 pub fn new_booking_id() -> String {
     mint_uuid()
@@ -145,5 +160,24 @@ mod tests {
         assert!(get(&id).is_none(), "booking is gone after remove");
         // Removing an id that was never stored is None.
         assert!(remove("no-such-booking").is_none());
+    }
+
+    #[test]
+    fn find_by_device_matches_only_bookings_with_that_device_echo() {
+        // Two bookings for one device, one for another.
+        let dev_a = json!({ "phoneNumber": "+15550000001" });
+        let dev_b = json!({ "phoneNumber": "+15550000002" });
+        let id1 = new_booking_id();
+        let id2 = new_booking_id();
+        let id3 = new_booking_id();
+        insert(id1.clone(), json!({ "bookingId": id1, "device": dev_a }));
+        insert(id2.clone(), json!({ "bookingId": id2, "device": dev_a }));
+        insert(id3.clone(), json!({ "bookingId": id3, "device": dev_b }));
+
+        let found = find_by_device(&dev_a);
+        assert_eq!(found.len(), 2, "both dev_a bookings match");
+        assert!(found.iter().all(|b| b["device"] == dev_a));
+        // A device with no bookings matches nothing (never a 404 at this layer).
+        assert!(find_by_device(&json!({ "phoneNumber": "+15550000099" })).is_empty());
     }
 }

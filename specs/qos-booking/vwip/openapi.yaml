@@ -13,12 +13,12 @@
 # `duration` window in a service area, ahead of time.
 #
 # Serves `POST /device-qos-bookings` (create), `GET
-# /device-qos-bookings/{bookingId}` (read-back), and `DELETE
+# /device-qos-bookings/{bookingId}` (read-back), `DELETE
 # /device-qos-bookings/{bookingId}` (delete — synchronous `204`; the async `202`
-# form and `sink` notifications are deferred). The retrieve-by-device leg
-# (`POST /retrieve-device-qos-bookings`) and CloudEvents notifications on `sink`
-# are later passes; a supplied `sink` / `sinkCredential` is validated and echoed
-# but not yet acted on (a documented cut).
+# form and `sink` notifications are deferred), and `POST
+# /retrieve-device-qos-bookings` (retrieve-by-device — an array of `BookingInfo`).
+# CloudEvents notifications on `sink` are a later pass; a supplied `sink` /
+# `sinkCredential` is validated and echoed but not yet acted on (a documented cut).
 openapi: 3.0.3
 info:
   title: QoS Booking
@@ -488,6 +488,132 @@ paths:
           - input: an unknown / never-created / already-deleted bookingId
             result: "404 NOT_FOUND"
 
+  /retrieve-device-qos-bookings:
+    post:
+      operationId: retrieveBookingByDevice
+      summary: List the QoS bookings for a device
+      description: |
+        Returns the QoS bookings for the identified device as an array of
+        `BookingInfo`. The device is identified by the `device` in the request body
+        (two-legged), else by a three-legged token subject (omit `device`).
+
+        The result is always an array (`200`) — empty when the device has no
+        bookings; CAMARA never returns `404` for an empty collection. The response is
+        not scoped per client (CamaraSim does not associate bookings with a caller —
+        a documented simplification, mirroring Quality on Demand's
+        `retrieveSessionsByDevice`).
+      security:
+        - openId:
+            - qos-booking:device-qos-bookings:retrieve-by-device
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RetrieveBookingsInput"
+      responses:
+        "200":
+          description: The device's QoS bookings (possibly an empty array).
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/BookingInfo"
+              examples:
+                someBookings:
+                  summary: A device with two bookings
+                  value:
+                    - bookingId: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+                      bookingStatus: ACTIVATED
+                      qosProfile: QOS_E
+                      startTime: "2024-06-01T12:00:00Z"
+                      duration: 3600
+                      startedAt: "2024-06-01T12:00:00Z"
+                      serviceArea:
+                        areaType: CIRCLE
+                        center: { latitude: 51.5, longitude: -0.12 }
+                        radius: 2000
+                      device:
+                        phoneNumber: "+123456789012"
+                    - bookingId: "3fa85f64-5717-4562-b3fc-2c963f66afb0"
+                      bookingStatus: SCHEDULED
+                      qosProfile: QOS_E
+                      startTime: "2024-06-02T09:00:00Z"
+                      duration: 1800
+                      serviceArea:
+                        areaType: AREANAME
+                        areaName: Greater London
+                      device:
+                        phoneNumber: "+123456789012"
+                none:
+                  summary: A device with no bookings
+                  value: []
+        "400":
+          $ref: "../../shared/errors.yaml#/components/responses/InvalidArgument"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "422":
+          description: |
+            422 — unprocessable. CamaraSim returns `MISSING_IDENTIFIER` when the
+            device cannot be identified (no `device` and a non-line subject) or
+            `UNNECESSARY_IDENTIFIER` when a `device` is submitted on a three-legged
+            device token.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "../../shared/errors.yaml#/components/schemas/CamaraError"
+              examples:
+                missingIdentifier:
+                  summary: The device cannot be identified
+                  value:
+                    status: 422
+                    code: MISSING_IDENTIFIER
+                    message: The device cannot be identified.
+                unnecessaryIdentifier:
+                  summary: The device is already identified by the token
+                  value:
+                    status: 422
+                    code: UNNECESSARY_IDENTIFIER
+                    message: The device is already identified by the access token.
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          Two control planes (docs/DESIGN.md §7). The identifier (the first present
+          device identifier, else the access token subject) selects a canonical
+          CAMARA error via its reserved suffix (from the shared convention in
+          errors.yaml). On the happy path the in-memory store is the plane: the
+          bookings whose echoed `device` equals the resolved identifier are returned
+          — an empty array when there are none (never a 404).
+        cases:
+          - input: identifier ending in a reserved error suffix (e.g. …404)
+            result: the canonical CAMARA error for that status (…404 → 404 NOT_FOUND)
+          - input: a device with one or more stored bookings
+            result: "200 — an array of that device's BookingInfo"
+          - input: a device with no stored bookings
+            result: "200 — an empty array"
+          - input: "`device` submitted on a three-legged line token"
+            result: "422 UNNECESSARY_IDENTIFIER"
+          - input: no `device` and a non-line token subject
+            result: "422 MISSING_IDENTIFIER"
+
 components:
   securitySchemes:
     openId:
@@ -557,6 +683,15 @@ components:
           example: "https://application-server.example.com/notifications"
         sinkCredential:
           $ref: "#/components/schemas/SinkCredential"
+
+    RetrieveBookingsInput:
+      type: object
+      description: >-
+        Request to list a device's QoS bookings. `device` is optional: omit it to
+        use the device identified by a three-legged access token.
+      properties:
+        device:
+          $ref: "#/components/schemas/Device"
 
     Device:
       type: object

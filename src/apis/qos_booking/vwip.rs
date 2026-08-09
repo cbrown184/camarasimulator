@@ -9,9 +9,15 @@
 //! - `GET /device-qos-bookings/{bookingId}` (operationId `getBooking`, scope
 //!   `qos-booking:device-qos-bookings:read`) — reads a created booking back from the
 //!   store by its opaque, server-minted id → `200` `BookingInfo` / `404 NOT_FOUND`.
+//! - `DELETE /device-qos-bookings/{bookingId}` (operationId `deleteBooking`, scope
+//!   `qos-booking:device-qos-bookings:delete`) — evicts a stored booking → `204` /
+//!   `404 NOT_FOUND`.
+//! - `POST /retrieve-device-qos-bookings` (operationId `retrieveBookingByDevice`,
+//!   scope `qos-booking:device-qos-bookings:retrieve-by-device`) — lists a device's
+//!   bookings as an array of `BookingInfo` (`200`, empty array when none).
 //!
-//! List / delete legs and CloudEvents notifications on `sink` are later passes; a
-//! supplied `sink`/`sinkCredential` is validated and echoed but not yet acted on (a
+//! CloudEvents notifications on `sink` are a later pass; a supplied
+//! `sink`/`sinkCredential` is validated and echoed but not yet acted on (a
 //! documented cut).
 //!
 //! ## Identifier resolution (two-legged vs three-legged)
@@ -76,6 +82,9 @@ const READ_SCOPE: &str = "qos-booking:device-qos-bookings:read";
 /// Scope required to delete a booking (CAMARA qos-booking wip).
 const DELETE_SCOPE: &str = "qos-booking:device-qos-bookings:delete";
 
+/// Scope required to list a device's bookings (CAMARA qos-booking wip).
+const RETRIEVE_SCOPE: &str = "qos-booking:device-qos-bookings:retrieve-by-device";
+
 /// The maximum `duration` (seconds) a booking can span — the CAMARA
 /// `BookingInfo.duration` ceiling, `31_622_400` = 366 days.
 const MAX_DURATION_SECS: i64 = 31_622_400;
@@ -90,6 +99,10 @@ pub fn routes() -> Router {
         .route(
             "/qos-booking/vwip/device-qos-bookings/:booking_id",
             get(get_booking).delete(delete_booking),
+        )
+        .route(
+            "/qos-booking/vwip/retrieve-device-qos-bookings",
+            post(retrieve_bookings),
         )
 }
 
@@ -335,6 +348,73 @@ async fn delete_booking(
             &correlator,
         ),
     }
+}
+
+/// `RetrieveBookingsInput` request body (CAMARA qos-booking wip): an optional
+/// `device`. Omitted entirely for a three-legged token (the device comes from the
+/// subject).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RetrieveBookingsInput {
+    device: Option<Device>,
+}
+
+/// `POST /qos-booking/vwip/retrieve-device-qos-bookings` (operationId
+/// `retrieveBookingByDevice`).
+///
+/// Lists the QoS bookings for a device as an array of `BookingInfo` (`200`; an
+/// empty array when the device has none — CAMARA never 404s on an empty result).
+/// The device is the submitted `device` identifier, else the token subject
+/// (three-legged fallback; neither present → `422 MISSING_IDENTIFIER`). Two control
+/// planes (docs/DESIGN.md §7): the identifier — a reserved error suffix selects a
+/// canonical CAMARA error (so `…404` → `404 NOT_FOUND` for an unknown device) — and,
+/// on the happy path, the in-memory store, matched by each booking's echoed
+/// `device`. A resolved identifier with no `device` echo matches nothing → `200 []`.
+/// `x-correlator` echoed on every response. Mirrors QoD's `retrieveSessionsByDevice`.
+async fn retrieve_bookings(claims: Claims, headers: HeaderMap, body: Bytes) -> Response {
+    let correlator = headers.get("x-correlator").cloned();
+
+    if let Err(e) = claims.require_scope(RETRIEVE_SCOPE) {
+        return with_correlator(e.into_response(), &correlator);
+    }
+
+    // `device` is optional, so an empty body is accepted as `{}` (three-legged:
+    // the device comes from the token subject). A non-empty body must be valid.
+    let req: RetrieveBookingsInput = if body.is_empty() {
+        RetrieveBookingsInput { device: None }
+    } else {
+        match serde_json::from_slice(&body) {
+            Ok(req) => req,
+            Err(_) => {
+                return invalid_argument(
+                    "Request body is not a valid RetrieveBookingsInput.",
+                    &correlator,
+                )
+            }
+        }
+    };
+
+    // Resolve the identifier (submitted device, else token subject), enforcing the
+    // two-legged / three-legged rule.
+    let resolved = match resolve_identifier(req.device, &claims, &correlator) {
+        Ok(r) => r,
+        Err(resp) => return resp,
+    };
+
+    // Reserved error suffix on the identifier selects a canonical CAMARA error
+    // (…404 → 404 NOT_FOUND, the device-identifier-not-found case).
+    if let Some(err) = scenarios::reserved_error(&resolved.id) {
+        return with_correlator(err.into_response(), &correlator);
+    }
+
+    // Match stored bookings by their echoed `device`. A resolved identifier with
+    // no device echo matches nothing.
+    let bookings = match resolved.echo {
+        Some(echo) => store::find_by_device(&echo),
+        None => Vec::new(),
+    };
+
+    with_correlator((StatusCode::OK, Json(bookings)).into_response(), &correlator)
 }
 
 /// Render the `BookingInfo` for a created booking.
@@ -1331,6 +1411,152 @@ mod tests {
         // The read scope is not the delete scope → 403 (booking still present).
         let read = mint_token(READ_SCOPE).await;
         let (status, _, _) = delete_booking_req(Some(&read), &id, None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    // --- Retrieve-by-device: POST /retrieve-device-qos-bookings ------------
+
+    const RETRIEVE_BOOKINGS: &str = "/qos-booking/vwip/retrieve-device-qos-bookings";
+
+    async fn post_retrieve(
+        token: Option<&str>,
+        body: &str,
+        correlator: Option<&str>,
+    ) -> (StatusCode, HeaderMap, Value) {
+        let mut builder = Request::builder()
+            .method("POST")
+            .uri(RETRIEVE_BOOKINGS)
+            .header("host", HOST)
+            .header("content-type", "application/json");
+        if let Some(t) = token {
+            builder = builder.header("authorization", format!("Bearer {t}"));
+        }
+        if let Some(c) = correlator {
+            builder = builder.header("x-correlator", c);
+        }
+        let request = builder.body(Body::from(body.to_string())).unwrap();
+        let response = app().oneshot(request).await.unwrap();
+        let status = response.status();
+        let headers = response.headers().clone();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, headers, json)
+    }
+
+    /// A retrieve-by-device body naming `phone` as the device.
+    fn retrieve_body(phone: &str) -> String {
+        json!({ "device": { "phoneNumber": phone } }).to_string()
+    }
+
+    #[tokio::test]
+    async fn retrieve_returns_only_the_requested_devices_bookings() {
+        // Two bookings for device A, one for device B — each a distinct phone so
+        // this test is isolated from other tests sharing the process-global store.
+        let create = mint_token(CREATE_SCOPE).await;
+        let dev_a = "+199900010012";
+        let dev_b = "+199900020012";
+        for _ in 0..2 {
+            let (status, _, _) =
+                post_booking(Some(&create), &create_body(dev_a, "QOS_E"), None).await;
+            assert_eq!(status, StatusCode::CREATED);
+        }
+        let (status, _, _) = post_booking(Some(&create), &create_body(dev_b, "QOS_E"), None).await;
+        assert_eq!(status, StatusCode::CREATED);
+
+        let retrieve = mint_token(RETRIEVE_SCOPE).await;
+        let (status, headers, body) =
+            post_retrieve(Some(&retrieve), &retrieve_body(dev_a), Some("corr-ret")).await;
+        assert_eq!(status, StatusCode::OK);
+        let arr = body.as_array().expect("a JSON array of BookingInfo");
+        assert_eq!(arr.len(), 2, "only device A's two bookings");
+        assert!(arr.iter().all(|b| b["device"]["phoneNumber"] == dev_a));
+        assert_eq!(headers.get("x-correlator").unwrap(), "corr-ret");
+
+        let (status, _, body) = post_retrieve(Some(&retrieve), &retrieve_body(dev_b), None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body.as_array().unwrap().len(), 1, "only device B's one booking");
+    }
+
+    #[tokio::test]
+    async fn retrieve_for_a_device_with_none_is_empty_array() {
+        let retrieve = mint_token(RETRIEVE_SCOPE).await;
+        let (status, _, body) =
+            post_retrieve(Some(&retrieve), &retrieve_body("+199988870013"), None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, json!([]), "a device with no bookings is 200 []");
+    }
+
+    #[tokio::test]
+    async fn retrieve_reserved_suffix_selects_a_camara_error() {
+        let retrieve = mint_token(RETRIEVE_SCOPE).await;
+        let (status, _, body) =
+            post_retrieve(Some(&retrieve), &retrieve_body("+199988870404"), None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["code"], "NOT_FOUND");
+        let (status, _, body) =
+            post_retrieve(Some(&retrieve), &retrieve_body("+199988870429"), None).await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(body["code"], "TOO_MANY_REQUESTS");
+    }
+
+    #[tokio::test]
+    async fn retrieve_falls_back_to_the_token_subject() {
+        // Three-legged: a booking created on the subject line is listed when the
+        // retrieve omits `device` (the subject identifies the device).
+        let subject = "+199900030012";
+        let create = mint_token_with_client(CREATE_SCOPE, subject).await;
+        let body = json!({
+            "qosProfile": "QOS_E", "startTime": "2024-06-01T12:00:00Z", "duration": 3600,
+            "serviceArea": valid_area(),
+        })
+        .to_string();
+        let (status, _, _) = post_booking(Some(&create), &body, None).await;
+        assert_eq!(status, StatusCode::CREATED);
+
+        let retrieve = mint_token_with_client(RETRIEVE_SCOPE, subject).await;
+        let (status, _, body) = post_retrieve(Some(&retrieve), "{}", None).await;
+        assert_eq!(status, StatusCode::OK);
+        let arr = body.as_array().unwrap();
+        assert!(!arr.is_empty(), "the subject's booking is listed");
+        assert!(arr.iter().all(|b| b["device"]["phoneNumber"] == subject));
+    }
+
+    #[tokio::test]
+    async fn retrieve_no_device_and_non_line_subject_is_422_missing_identifier() {
+        let retrieve = mint_token(RETRIEVE_SCOPE).await; // subject not a line
+        let (status, _, body) = post_retrieve(Some(&retrieve), "{}", None).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["code"], "MISSING_IDENTIFIER");
+    }
+
+    #[tokio::test]
+    async fn retrieve_device_on_a_line_token_is_422_unnecessary_identifier() {
+        let retrieve = mint_token_with_client(RETRIEVE_SCOPE, "+199900030099").await;
+        let (status, _, body) =
+            post_retrieve(Some(&retrieve), &retrieve_body("+199900030098"), None).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["code"], "UNNECESSARY_IDENTIFIER");
+    }
+
+    #[tokio::test]
+    async fn retrieve_rejects_a_bad_body() {
+        let retrieve = mint_token(RETRIEVE_SCOPE).await;
+        let (status, _, body) = post_retrieve(Some(&retrieve), "{ not json", None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "INVALID_ARGUMENT");
+    }
+
+    #[tokio::test]
+    async fn retrieve_requires_auth_and_the_retrieve_scope() {
+        // No token → 401.
+        let (status, _, _) = post_retrieve(None, &retrieve_body("+199988870012"), None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        // The read scope is not the retrieve scope → 403.
+        let read = mint_token(READ_SCOPE).await;
+        let (status, _, _) =
+            post_retrieve(Some(&read), &retrieve_body("+199988870012"), None).await;
         assert_eq!(status, StatusCode::FORBIDDEN);
     }
 }
