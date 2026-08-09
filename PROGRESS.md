@@ -2275,8 +2275,16 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     Application Profiles' `getApplicationProfile`). The opaque server-minted id is
     the only control plane (no reserved-identifier suffix — it was never
     caller-chosen). `x-correlator` echoed. Reuses `store::get`; no new dep.
-  - [ ] `PUT /application-endpoint-lists/{id}` (`updateApplicationEndpoint`) — full replace.
-  - [ ] `DELETE /application-endpoint-lists/{id}` (`deregisterApplicationEndpoint`) — deregister.
+  - [ ] `PUT /application-endpoint-lists/{id}` (`updateApplicationEndpoint`) — full
+    replace (scope `…:application-endpoints:update`, body `ApplicationEndpointsInfo`,
+    → `204`; verified against the upstream CAMARA spec).
+  - [x] `DELETE /application-endpoint-lists/{id}` (`deregisterApplicationEndpoint`,
+    scope `…:application-endpoints:delete`) — removes the stored registration →
+    `204 No Content` (single-use), `404 NOT_FOUND` for an unknown/already-deregistered
+    id, `400 INVALID_ARGUMENT` for a non-UUID path value. Store state the only
+    control plane (no reserved-identifier suffix — the id is server-minted). New
+    `store::remove`; no new dep. Verified scope/response codes against the upstream
+    CAMARA spec.
 - [ ] Other CAMARA APIs as capacity allows
 
 ## Cross-cutting (do alongside the item that needs it)
@@ -2303,6 +2311,23 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-09 — application-endpoint-registration: added the deregister leg
+  `DELETE /application-endpoint-lists/{applicationEndpointListId}`
+  (`deregisterApplicationEndpoint`, scope `…:application-endpoints:delete`) —
+  removes the stored registration → `204 No Content` (single-use), `404 NOT_FOUND`
+  for an unknown/already-deregistered id, `400 INVALID_ARGUMENT` for a non-UUID
+  path value; store state the only control plane (server-minted id → no
+  reserved-identifier suffix). New `store::remove`; no new dep. Scope + response
+  codes verified against the upstream CAMARA spec (deregister → 204). Spec: added
+  the `delete` operation (204/400/401/403/404/429/500/503 + scenarios) on the
+  `{applicationEndpointListId}` path; the `…:delete` scope resolves through the
+  shared openId scheme. Tests: 6 new (deregister→204 + gone, single-use→404,
+  unknown→404, malformed→400, delete-scope→403, missing-token→401). cargo test
+  1699 passed; release builds. — binary: 3257648 bytes (3.2M).
+  Note: the QoD/Geofencing/etc. `https://` sink TLS-delivery items remain parked —
+  they need a rustls TLS client + crypto backend (ring/aws-lc-rs), which conflicts
+  with the project's pure-RustCrypto, small-binary stance (Cargo.toml, DESIGN §11);
+  that dependency decision is left for a human, not an unattended pass.
 - 2026-08-09 — application-endpoint-registration: added the list leg
   `GET /application-endpoint-lists` (`getAllRegisteredApplicationEndpoints`,
   scope `…:application-endpoints:read`) — a `200` array of `ApplicationEndpointList`

@@ -23,13 +23,18 @@
 //!   `ApplicationEndpointList` (`200`, an empty array when none — a list never
 //!   `404`s). The store state is the only control plane; registrations are not
 //!   scoped per client (a documented simplification).
+//! - `DELETE /application-endpoint-lists/{applicationEndpointListId}` (operationId
+//!   `deregisterApplicationEndpoint`, scope
+//!   `application-endpoint-registration:application-endpoints:delete`) — the
+//!   **deregister** leg: removes the stored registration and returns `204 No
+//!   Content` (single-use), or `404 NOT_FOUND` for an unknown/already-deregistered
+//!   id; a malformed (non-UUID) path value is a `400 INVALID_ARGUMENT`.
 //!
 //! Both GETs return the canonical CAMARA `ApplicationEndpointList` shape
 //! (`applicationEndpointListId` + a nested `applicationEndpointsInfo`), which is
 //! also how a registration is stored, so the read-back and list legs agree.
 //!
-//! The update (`PUT`) and deregister (`DELETE`) legs by
-//! `{applicationEndpointListId}` land in later passes.
+//! The update (`PUT`) leg by `{applicationEndpointListId}` lands in a later pass.
 //!
 //! ## No device identifier — the request body is the control plane (DESIGN §7)
 //!
@@ -94,6 +99,9 @@ const WRITE_SCOPE: &str = "application-endpoint-registration:application-endpoin
 /// Scope required to read a registration back (CAMARA ApplicationEndpointRegistration).
 const READ_SCOPE: &str = "application-endpoint-registration:application-endpoints:read";
 
+/// Scope required to deregister a registration (CAMARA ApplicationEndpointRegistration).
+const DELETE_SCOPE: &str = "application-endpoint-registration:application-endpoints:delete";
+
 /// The nil UUID — the reserved `applicationProfileId` that names an
 /// *unidentifiable* application profile (→ `422 UNIDENTIFIABLE_APPLICATION_PROFILE`).
 const NIL_UUID: &str = "00000000-0000-0000-0000-000000000000";
@@ -107,7 +115,8 @@ pub fn routes() -> Router {
         )
         .route(
             "/application-endpoint-registration/vwip/application-endpoint-lists/:application_endpoint_list_id",
-            axum::routing::get(get_application_endpoints_by_id),
+            axum::routing::get(get_application_endpoints_by_id)
+                .delete(deregister_application_endpoint),
         )
 }
 
@@ -289,6 +298,49 @@ async fn get_application_endpoints_by_id(
             (StatusCode::OK, Json(registration)).into_response(),
             &correlator,
         ),
+        None => with_correlator(
+            CamaraError::not_found(
+                "No application-endpoint list found for the provided applicationEndpointListId.",
+            )
+            .into_response(),
+            &correlator,
+        ),
+    }
+}
+
+/// `DELETE /application-endpoint-registration/vwip/application-endpoint-lists/{applicationEndpointListId}`.
+///
+/// The **deregister** leg (operationId `deregisterApplicationEndpoint`): removes
+/// the registration stored under the opaque `applicationEndpointListId` and
+/// returns `204 No Content` (single-use — a second delete of the same id is a
+/// `404`), or `404 NOT_FOUND` for an unknown/already-deregistered id. The id is
+/// server-minted (`format: uuid`), so a malformed path value is a `400
+/// INVALID_ARGUMENT` (mirroring the read-back leg); the store state is the only
+/// control plane — the id was never caller-chosen, so there is no
+/// reserved-identifier suffix on it. Requires the
+/// `application-endpoint-registration:application-endpoints:delete` scope.
+/// `x-correlator` is echoed on every response, including the `204`.
+async fn deregister_application_endpoint(
+    claims: Claims,
+    headers: HeaderMap,
+    Path(application_endpoint_list_id): Path<String>,
+) -> Response {
+    // Optional correlation header, echoed on every response (CAMARA Commonalities).
+    let correlator = headers.get("x-correlator").cloned();
+
+    // Endpoint authorisation: the token must carry the delete scope.
+    if let Err(e) = claims.require_scope(DELETE_SCOPE) {
+        return with_correlator(e.into_response(), &correlator);
+    }
+
+    // The path parameter is `format: uuid`; a malformed value is a `400` (mirrors
+    // the read-back leg: bad shape → 400 vs unknown → 404).
+    if !is_uuid_shaped(&application_endpoint_list_id) {
+        return invalid_argument("`applicationEndpointListId` must be a UUID.", &correlator);
+    }
+
+    match store::remove(&application_endpoint_list_id) {
+        Some(_) => with_correlator(StatusCode::NO_CONTENT.into_response(), &correlator),
         None => with_correlator(
             CamaraError::not_found(
                 "No application-endpoint list found for the provided applicationEndpointListId.",
@@ -852,6 +904,104 @@ mod tests {
     #[tokio::test]
     async fn read_back_missing_token_is_401() {
         let (status, _, _) = get_list(None, OK_PROFILE, None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    // --- Deregister: DELETE /application-endpoint-lists/{applicationEndpointListId} ---
+
+    /// DELETE a registration by id with an optional Bearer token and correlator.
+    async fn delete_list(
+        token: Option<&str>,
+        id: &str,
+        correlator: Option<&str>,
+    ) -> (StatusCode, HeaderMap, Value) {
+        let mut builder = Request::builder()
+            .method("DELETE")
+            .uri(format!("{LISTS}/{id}"))
+            .header("host", HOST);
+        if let Some(t) = token {
+            builder = builder.header("authorization", format!("Bearer {t}"));
+        }
+        if let Some(c) = correlator {
+            builder = builder.header("x-correlator", c);
+        }
+        let request = builder.body(Body::empty()).unwrap();
+        let response = app().oneshot(request).await.unwrap();
+        let status = response.status();
+        let headers = response.headers().clone();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, headers, json)
+    }
+
+    #[tokio::test]
+    async fn deregister_returns_204_and_the_registration_is_gone() {
+        let write = mint_token(WRITE_SCOPE).await;
+        let id = register_and_get_id(&write, &valid_body(OK_PROFILE)).await;
+
+        // Deregister → 204 No Content with an empty body and the correlator echoed.
+        let del = mint_token(DELETE_SCOPE).await;
+        let (status, headers, body) = delete_list(Some(&del), &id, Some("corr-del")).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(body, Value::Null);
+        assert_eq!(headers.get("x-correlator").unwrap(), "corr-del");
+
+        // …and it is gone: a subsequent read-back is 404.
+        let read = mint_token(READ_SCOPE).await;
+        let (status, _, err) = get_list(Some(&read), &id, None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(err["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn deregister_is_single_use() {
+        let write = mint_token(WRITE_SCOPE).await;
+        let id = register_and_get_id(&write, &valid_body(OK_PROFILE)).await;
+
+        let del = mint_token(DELETE_SCOPE).await;
+        let (status, _, _) = delete_list(Some(&del), &id, None).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        // A second delete of the same id finds nothing → 404.
+        let (status, _, err) = delete_list(Some(&del), &id, None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(err["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn deregister_unknown_id_is_404_not_found() {
+        let del = mint_token(DELETE_SCOPE).await;
+        // Well-formed UUID that was never registered.
+        let unknown = "abcdef01-0000-4000-8000-000000000def";
+        let (status, headers, err) = delete_list(Some(&del), unknown, Some("corr-404")).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(err["code"], "NOT_FOUND");
+        assert_eq!(headers.get("x-correlator").unwrap(), "corr-404");
+    }
+
+    #[tokio::test]
+    async fn deregister_malformed_id_is_400_invalid_argument() {
+        let del = mint_token(DELETE_SCOPE).await;
+        let (status, _, err) = delete_list(Some(&del), "not-a-uuid", None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(err["code"], "INVALID_ARGUMENT");
+    }
+
+    #[tokio::test]
+    async fn deregister_requires_the_delete_scope() {
+        // Register with the write scope, then try to delete it with the write
+        // scope (not delete) → 403: delete is a distinct scope.
+        let write = mint_token(WRITE_SCOPE).await;
+        let id = register_and_get_id(&write, &valid_body(OK_PROFILE)).await;
+        let (status, _, err) = delete_list(Some(&write), &id, None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(err["code"], "PERMISSION_DENIED");
+    }
+
+    #[tokio::test]
+    async fn deregister_missing_token_is_401() {
+        let (status, _, _) = delete_list(None, OK_PROFILE, None).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
     }
 

@@ -22,11 +22,12 @@
 //!   `applicationEndpointsInfo`), returned verbatim by the read leg — the created
 //!   representation is the source of truth.
 //!
-//! The read leg (`getApplicationEndpointsById`) calls [`get`] and the list leg
-//! (`getAllRegisteredApplicationEndpoints`) calls [`all`]; the update / delete
-//! legs land in later passes, so the module stays `dead_code`-allowed until they
-//! wire in their store operations (mirroring the first slices of the QoS
-//! Provisioning / Session Insights stores).
+//! The read leg (`getApplicationEndpointsById`) calls [`get`], the list leg
+//! (`getAllRegisteredApplicationEndpoints`) calls [`all`], and the deregister leg
+//! (`deregisterApplicationEndpoint`) calls [`remove`]; the update (`PUT`) leg
+//! lands in a later pass, so the module stays `dead_code`-allowed until it wires
+//! in its store operations (mirroring the first slices of the QoS Provisioning /
+//! Session Insights stores).
 
 #![allow(dead_code)]
 
@@ -62,6 +63,17 @@ pub fn get(id: &str) -> Option<Value> {
         .expect("application-endpoint-registration store not poisoned")
         .get(id)
         .cloned()
+}
+
+/// Remove the registration stored under `id`, returning it if it existed (or
+/// `None` if no such registration exists). The deregister leg
+/// (`deregisterApplicationEndpoint`) uses the distinction to answer `204` vs
+/// `404 NOT_FOUND` (mirroring the QoD session store's `remove`).
+pub fn remove(id: &str) -> Option<Value> {
+    store()
+        .lock()
+        .expect("application-endpoint-registration store not poisoned")
+        .remove(id)
 }
 
 /// Return every stored registration (the rendered `ApplicationEndpointList`
