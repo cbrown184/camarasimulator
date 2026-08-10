@@ -59,6 +59,7 @@
 //! - **Dedicated Network — Network Profiles vwip** — `/dedicated-network-profiles/vwip/…`.
 //! - **Dedicated Network — Networks vwip** — `/dedicated-network/vwip/…`.
 //! - **Dedicated Network — Accesses vwip** — `/dedicated-network-accesses/vwip/…`.
+//! - **Edge Application Management vwip** — `/edge-application-management/vwip/…`.
 //!
 //! Plus [`openapi`], which serves each mounted API's vendored OpenAPI spec at
 //! `/{api}/v{n}/openapi.yaml` (docs/DESIGN.md §9).
@@ -85,6 +86,7 @@ pub mod device_swap;
 pub mod device_visit_location;
 pub mod device_reachability_status;
 pub mod device_roaming_status;
+pub mod edge_application_management;
 pub mod geofencing_subscriptions;
 pub mod home_devices_qod;
 pub mod iot_sim_fraud_prevention;
@@ -180,5 +182,6 @@ pub fn routes() -> Router {
         .merge(dedicated_network_profiles::routes())
         .merge(dedicated_network::routes())
         .merge(dedicated_network_accesses::routes())
+        .merge(edge_application_management::routes())
         .merge(openapi::routes())
 }

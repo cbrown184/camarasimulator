@@ -1,0 +1,211 @@
+# CamaraSim — Edge Application Management, API version vwip
+# (CAMARA EdgeApplicationManagement, `wip`).
+#
+# Vendored from the CAMARA Edge Application Management API
+# (edge-application-management, `wip`) and annotated with CamaraSim's
+# parameter-driven functional cases (docs/DESIGN.md §7, §9). Backed by
+# `src/apis/edge_application_management/vwip.rs`; spec and code must not drift.
+#
+# Edge Application Management is the management counterpart to the EdgeCloud
+# discovery APIs (Simple / Optimal Edge Discovery, Application Endpoint
+# Discovery): discovery *finds* the right edge zone for a device; this API
+# *places workloads* onto those zones (apps, app-instances, deployments).
+#
+# This slice serves the read-only zone-catalog leg:
+#   GET /edge-cloud-zones  (getEdgeCloudZones)
+# The stateful app / app-instance / deployment resources are later passes.
+openapi: 3.0.3
+info:
+  title: Edge Application Management
+  description: |
+    Manage the lifecycle of applications deployed onto an operator's edge cloud.
+    This CamaraSim slice serves the **edge cloud zone catalog** — the zones a
+    provider can deploy onto — as a fixed, in-memory set (there is no upstream
+    orchestrator to query — DESIGN §7). It requires the
+    `edge-application-management:edge-cloud-zones:read` scope.
+
+    ## Functional cases — the input is the control plane (docs/DESIGN.md §7)
+
+    `getEdgeCloudZones` returns the fixed catalog filtered by two query
+    parameters (there is no device identifier, so no reserved-error plane — this
+    is a pure catalog, like QoS Profiles):
+
+    1. **`region`** — return only zones whose `edgeCloudRegion` matches exactly.
+       An unknown region yields an empty array (a *list* never 404s).
+    2. **`status`** — return only zones in that lifecycle state (`active`,
+       `inactive`, `unknown`). An unrecognised value → `400 INVALID_ARGUMENT`.
+
+    Both filters combine (AND). With neither, the whole catalog is returned.
+
+    Examples: no query → the full catalog; `?status=active` → the active zones;
+    `?region=us-east-1` → the single zone in that region; `?region=nowhere` →
+    `[]`; `?status=RETIRED` → `400 INVALID_ARGUMENT`.
+  version: "wip"
+  license:
+    name: Apache-2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0.html
+
+servers:
+  - url: "{apiRoot}/edge-application-management/vwip"
+    variables:
+      apiRoot:
+        default: http://localhost:8080
+        description: API root, e.g. the CamaraSim base URL.
+
+paths:
+  /edge-cloud-zones:
+    get:
+      operationId: getEdgeCloudZones
+      summary: Retrieve the available edge cloud zones
+      description: |
+        Returns the edge cloud zones the operator offers for application
+        placement, as a JSON array. Narrow the result with the optional `region`
+        / `status` filters.
+
+        See the API description for the parameter-driven functional cases.
+      security:
+        - openId:
+            - edge-application-management:edge-cloud-zones:read
+      parameters:
+        - name: region
+          in: query
+          required: false
+          description: >-
+            Filter to zones whose `edgeCloudRegion` matches this value exactly.
+            An unknown region yields an empty array (a list never 404s).
+          schema:
+            type: string
+            maxLength: 64
+          example: us-east-1
+        - name: status
+          in: query
+          required: false
+          description: Filter to zones in this lifecycle state.
+          schema:
+            $ref: "#/components/schemas/EdgeCloudZoneStatus"
+        - $ref: "#/components/parameters/XCorrelator"
+      responses:
+        "200":
+          description: The edge cloud zones matching the criteria (possibly empty).
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/EdgeCloudZone"
+              examples:
+                catalog:
+                  summary: The full zone catalog (no filter)
+                  value:
+                    - edgeCloudZoneId: 6ec0bd7f-11c0-53da-975e-2a8ad9ebae0b
+                      edgeCloudZoneName: camarasim-edge-eu-west-1
+                      edgeCloudZoneStatus: active
+                      edgeCloudProvider: CamaraSim Edge
+                      edgeCloudRegion: eu-west-1
+                empty:
+                  summary: No zone matches the filter
+                  value: []
+        "400":
+          $ref: "../../shared/errors.yaml#/components/responses/InvalidArgument"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          The result is the fixed edge-cloud-zone catalog filtered by
+          `region`/`status` (docs/DESIGN.md §7). There is no device identifier,
+          so no reserved-error plane applies. Canonical EdgeApplicationManagement
+          declares 400/401/403/500/503 here; 429 is a CamaraSim extension from the
+          shared error set. Note: the canonical `EdgeCloudZones` schema declares
+          `minItems: 1`; CamaraSim relaxes it so a filter narrowing to zero returns
+          `[]` (a list never 404s) — a documented deviation.
+        cases:
+          - input: no query parameters
+            result: '200 — the whole zone catalog'
+          - input: '`?region=<known>`'
+            result: '200 — the zones in that region'
+          - input: '`?region=<unknown>`'
+            result: '200 — an empty array (a list never 404s)'
+          - input: '`?status=active|inactive|unknown`'
+            result: '200 — zones in that lifecycle state'
+          - input: '`region` and `status` together'
+            result: '200 — zones matching both (AND)'
+          - input: '`status` not one of the three enum values'
+            result: '400 INVALID_ARGUMENT'
+          - input: an unrecognised query parameter
+            result: '400 INVALID_ARGUMENT'
+
+components:
+  securitySchemes:
+    openId:
+      $ref: "../../auth/openapi.yaml#/components/securitySchemes/camaraOAuth"
+
+  parameters:
+    XCorrelator:
+      name: x-correlator
+      in: header
+      required: false
+      description: Correlation id for the request, echoed back on the response.
+      schema:
+        type: string
+
+  headers:
+    XCorrelator:
+      description: The `x-correlator` from the request, echoed if one was sent.
+      required: false
+      schema:
+        type: string
+
+  schemas:
+    EdgeCloudZoneStatus:
+      type: string
+      description: The lifecycle status of an edge cloud zone.
+      enum:
+        - active
+        - inactive
+        - unknown
+      default: unknown
+
+    EdgeCloudZone:
+      type: object
+      description: An edge cloud zone available for application placement.
+      required:
+        - edgeCloudZoneId
+        - edgeCloudZoneName
+        - edgeCloudProvider
+      properties:
+        edgeCloudZoneId:
+          type: string
+          format: uuid
+          description: Unique identifier of the edge cloud zone.
+          pattern: '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
+          minLength: 36
+          maxLength: 36
+          example: 6ec0bd7f-11c0-53da-975e-2a8ad9ebae0b
+        edgeCloudZoneName:
+          type: string
+          maxLength: 64
+          description: Human-readable name of the edge cloud zone.
+          example: camarasim-edge-eu-west-1
+        edgeCloudZoneStatus:
+          $ref: "#/components/schemas/EdgeCloudZoneStatus"
+        edgeCloudProvider:
+          type: string
+          maxLength: 64
+          description: The provider operating the edge cloud zone.
+          example: CamaraSim Edge
+        edgeCloudRegion:
+          type: string
+          maxLength: 64
+          description: Human-readable name of the geographical edge cloud region.
+          example: eu-west-1

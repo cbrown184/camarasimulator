@@ -2663,7 +2663,26 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
           `/devices…` sub-resources** (`dedicated-network-areas` remains). No new
           dep. `x-correlator` echoed.
     - [ ] `dedicated-network-areas` (spatial) — later.
-- [ ] Other CAMARA APIs as capacity allows
+- [~] Other CAMARA APIs as capacity allows
+  - [~] Edge Application Management vwip (`/edge-application-management/vwip`;
+    CAMARA EdgeApplicationManagement `wip` — no released version, mounted at its
+    canonical `vwip` base path like the other unreleased EdgeCloud APIs; the
+    management counterpart to the EdgeCloud discovery APIs):
+    - [x] `GET /edge-cloud-zones` (`getEdgeCloudZones`,
+      `edge-application-management:edge-cloud-zones:read`) — the read-only
+      zone-catalog leg. Serves a fixed, in-memory 6-entry `EdgeCloudZone` catalog
+      (reusing the EdgeCloud family's zone naming), each a strict RFC 4122 v5
+      `edgeCloudZoneId` (SHA-256 of the zone name, version/variant nibbles forced
+      to satisfy the schema pattern; no new dep). Two control planes (DESIGN §7),
+      both query filters (no device identifier → no reserved-error plane, a pure
+      catalog like QoS Profiles): the exact-match `region` filter (unknown region
+      → empty array, a list never 404s) and the `status` filter (`active`/
+      `inactive`/`unknown`; unknown value → 400 INVALID_ARGUMENT). Both combine
+      (AND); neither → the whole catalog. `x-correlator` echoed. The canonical
+      `EdgeCloudZones` `minItems: 1` is relaxed so a filter narrowing to zero
+      returns `[]` (documented deviation).
+    - [ ] the stateful `apps` / `app-instances` / `deployments` resources +
+      `clusters` — later passes.
 
 ## Cross-cutting (do alongside the item that needs it)
 - [~] `errors.rs`: base CAMARA error model done (`src/errors.rs`, `specs/shared/errors.yaml`); per-version catalogs still TODO (DESIGN §8)
@@ -2689,6 +2708,37 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-10 — edge-application-management: **new API begun** —
+  `GET /edge-application-management/vwip/edge-cloud-zones` (`getEdgeCloudZones`,
+  scope `edge-application-management:edge-cloud-zones:read`). All prior-phase
+  actionable `[ ]` leaves were exhausted (the remaining ones are the deferred
+  `https://` sink-TLS infra, the spatial `dedicated-network-areas`, and the
+  no-live-engine lifecycle streams), so this pass opens a new CAMARA API under
+  "Other CAMARA APIs as capacity allows", respecting phase order with a
+  **stateless, non-spatial** read-only leg. Confirmed the contract from the
+  authoritative upstream `edge-application-management.yaml` (`wip`, WebFetch):
+  `getEdgeCloudZones` → 200 array of `EdgeCloudZone`
+  ({edgeCloudZoneId(uuid), edgeCloudZoneName, edgeCloudZoneStatus(active/
+  inactive/unknown), edgeCloudProvider, edgeCloudRegion}) with optional
+  `region`/`status` query filters, responses 400/401/403/500/503. CamaraSim
+  serves a fixed 6-entry catalog (EdgeCloud-family zone naming; a strict RFC 4122
+  v5 `edgeCloudZoneId` = SHA-256(name) with version/variant nibbles forced, no
+  new dep). Two control planes (DESIGN §7), both query filters (no device →
+  no reserved-error plane, a pure catalog like QoS Profiles): exact-match
+  `region` (unknown → `[]`, a list never 404s) and `status` (unknown value →
+  400 INVALID_ARGUMENT); both combine (AND). Relaxed the canonical
+  `EdgeCloudZones` `minItems: 1` so a filter narrowing to zero returns `[]`
+  (documented deviation). `x-correlator` echoed on 200/400. New module
+  `src/apis/edge_application_management{,.rs}` (+ `vwip.rs`); wired into
+  `apis::routes()`, the `/` catalog (main.rs), and the served-spec table
+  (openapi.rs). spec: authored `specs/edge-application-management/vwip/openapi.yaml`
+  (getEdgeCloudZones + `EdgeCloudZone`/`EdgeCloudZoneStatus` schemas + query
+  params + `x-camarasim-scenarios`). tests: +12 (2 pure: catalog covers every
+  status / ids are valid UUIDs, zone_id stable+distinct; 10 integration:
+  no-filter→full catalog, region filter, unknown-region→`[]`, status filter,
+  region+status AND, unknown-status→400, unknown-query-param→400, wrong-scope→403,
+  no-token→401, x-correlator echoed on success+error). No new dep. `cargo test`
+  1968 pass; `cargo build --release` ok. binary (release): 3,672,072 bytes (~3.6M).
 - 2026-08-10 — dedicated-network-accesses: added the **device-remove leg**,
   `POST /dedicated-network-accesses/vwip/accesses/{accessId}/devices/remove`
   (`removeDevicesFromAccess`, scope `dedicated-network-accesses:devices:remove`) —

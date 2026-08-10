@@ -267,6 +267,10 @@ const SPECS: &[(&str, &str)] = &[
         include_str!("../../specs/dedicated-network-accesses/vwip/openapi.yaml"),
     ),
     (
+        "/edge-application-management/vwip/openapi.yaml",
+        include_str!("../../specs/edge-application-management/vwip/openapi.yaml"),
+    ),
+    (
         "/auth/openapi.yaml",
         include_str!("../../specs/auth/openapi.yaml"),
     ),

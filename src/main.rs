@@ -368,6 +368,12 @@ async fn catalog() -> Json<Value> {
                 "version": "vwip",
                 "base_path": "/dedicated-network-accesses/vwip",
                 "spec_url": "/dedicated-network-accesses/vwip/openapi.yaml",
+            },
+            {
+                "name": "edge-application-management",
+                "version": "vwip",
+                "base_path": "/edge-application-management/vwip",
+                "spec_url": "/edge-application-management/vwip/openapi.yaml",
             }
         ],
         "authorization_servers": [{
