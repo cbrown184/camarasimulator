@@ -2681,7 +2681,7 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
       (AND); neither → the whole catalog. `x-correlator` echoed. The canonical
       `EdgeCloudZones` `minItems: 1` is relaxed so a filter narrowing to zero
       returns `[]` (documented deviation).
-    - [~] the stateful `apps` resource:
+    - [x] the stateful `apps` resource (CRUD complete: submit/get/list/delete):
       - [x] `POST /apps` (`submitApp`,
         `edge-application-management:apps:write`) — the first **stateful** leg.
         Onboards an application from a submitted `AppManifest`, mints a
@@ -2712,7 +2712,15 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
         control plane; mirrors the sibling list legs (`listAccesses`,
         `retrievePayments`) by returning the same shape as `getApp`.
         `x-correlator` echoed.
-      - [ ] `DELETE /apps/{appId}` (`deleteApp`) — later passes.
+      - [x] `DELETE /apps/{appId}` (`deleteApp`,
+        `edge-application-management:apps:delete`) — de-boards an onboarded app,
+        evicting its stored `AppManifest` (new `store::remove`): present → `204
+        No Content` (single-use), unknown/already-deleted/malformed id → `404
+        NOT_FOUND`. Keyed only on store state (opaque minted `appId`, no
+        reserved-suffix plane, mirroring `getApp`/`deleteNetwork`/`deleteAccess`);
+        synchronous `204` (async `202`/`DELETE_REQUESTED` + `sink` notification a
+        documented cut). **Completes the `apps` CRUD** (`app-instances`/
+        `deployments` remain). `x-correlator` echoed. No new dep.
     - [ ] the stateful `app-instances` / `deployments` resources + `clusters`
       — later passes.
 
@@ -2739,6 +2747,28 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 ## Scan journal
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
+
+- 2026-08-10 — edge-application-management: added the **app delete leg**,
+  `DELETE /edge-application-management/vwip/apps/{appId}` (`deleteApp`, scope
+  `edge-application-management:apps:delete`) — the topmost unclaimed actionable
+  `[ ]` leaf (last pass added `getApp`/`getApps`; the remaining earlier `[ ]`
+  leaves stay the deferred `https://` sink-TLS infra, spatial
+  `dedicated-network-areas`, and no-live-engine lifecycle streams). De-boards an
+  onboarded app, evicting its stored `AppManifest`: present → `204 No Content`
+  (single-use), unknown/already-deleted/malformed id → `404 NOT_FOUND`. Keyed
+  only on store state (opaque, simulator-minted `appId`, so **no reserved-error
+  plane** — DESIGN §7), mirroring `getApp`/`deleteNetwork`/`deleteAccess`;
+  synchronous `204` (async `202`/`DELETE_REQUESTED` + `sink` notification a
+  documented cut, as with every CamaraSim delete leg). **Completes the `apps`
+  CRUD** (`app-instances`/`deployments`/`clusters` remain). `x-correlator`
+  echoed. Code: new `store::remove` evict-and-report fn (single lock hold, never
+  across await); `get(get_app).delete(delete_app)` on `/apps/{appId}`. spec:
+  added the `/apps/{appId}` DELETE op (`deleteApp`, 204 + 401/403/404/500/503) +
+  `x-camarasim-scenarios`; updated the header op list. tests: 7 new (removes a
+  submitted app then a read 404s; single-use double-delete; unknown id 404;
+  malformed id folds to 404; 403 without the delete scope + app survives; 401 no
+  token; x-correlator echoed on 204 and 404) — 1998 pass. No new dependency. —
+  binary: 3.6M (3,710,864 bytes)
 
 - 2026-08-10 — edge-application-management: added the **app list leg**,
   `GET /edge-application-management/vwip/apps` (`getApps`, scope

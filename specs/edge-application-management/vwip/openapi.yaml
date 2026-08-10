@@ -12,12 +12,12 @@
 # *places workloads* onto those zones (apps, app-instances, deployments).
 #
 # This slice serves:
-#   GET  /edge-cloud-zones  (getEdgeCloudZones) — read-only zone catalog
-#   POST /apps              (submitApp)         — onboard an application (stateful)
-#   GET  /apps/{appId}      (getApp)            — read back an onboarded app
-#   GET  /apps              (getApps)           — list onboarded apps
-# The remaining app delete, app-instance, deployment and cluster resources are
-# later passes.
+#   GET    /edge-cloud-zones  (getEdgeCloudZones) — read-only zone catalog
+#   POST   /apps              (submitApp)         — onboard an application (stateful)
+#   GET    /apps/{appId}      (getApp)            — read back an onboarded app
+#   GET    /apps              (getApps)           — list onboarded apps
+#   DELETE /apps/{appId}      (deleteApp)         — delete an onboarded app
+# The remaining app-instance, deployment and cluster resources are later passes.
 openapi: 3.0.3
 info:
   title: Edge Application Management
@@ -262,6 +262,59 @@ paths:
         cases:
           - input: an `appId` returned by a prior `submitApp`
             result: '200 — the `AppManifestInfo` (the manifest + `appId`)'
+          - input: a well-formed UUID that was never submitted
+            result: '404 NOT_FOUND'
+          - input: a malformed (non-UUID) `appId`
+            result: '404 NOT_FOUND (the canonical 400 folded into 404)'
+    delete:
+      operationId: deleteApp
+      summary: Delete an onboarded application
+      description: |
+        Deletes (de-boards) an application previously onboarded with `submitApp`,
+        evicting its stored `AppManifest`. On success the application is removed
+        and `204 No Content` is returned.
+
+        See the API description for the parameter-driven functional cases.
+      security:
+        - openId:
+            - edge-application-management:apps:delete
+      parameters:
+        - $ref: "#/components/parameters/AppId"
+        - $ref: "#/components/parameters/XCorrelator"
+      responses:
+        "204":
+          description: The application was deleted.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          `deleteApp` de-boards an application onboarded by `submitApp`
+          (docs/DESIGN.md §7). The `appId` is an opaque, simulator-minted UUID
+          (not caller-chosen), so there is no reserved-error plane — the
+          in-memory store state is the only control plane. A known id evicts its
+          app and returns `204 No Content` (single-use); an unknown,
+          already-deleted, *or malformed* id folds into `404 NOT_FOUND`
+          (mirroring `getApp` and the sibling `deleteNetwork`/`deleteAccess`
+          legs). Deletion is synchronous: CAMARA EdgeApplicationManagement's
+          asynchronous `202 Accepted`/`DELETE_REQUESTED` form and any `sink`
+          notification are a documented cut, mirroring every other CamaraSim
+          delete leg (QoD `deleteSession`, `deleteNetwork`, `deleteAccess`).
+        cases:
+          - input: an `appId` returned by a prior `submitApp`
+            result: '204 — the app is evicted from the store (a later `getApp` 404s)'
+          - input: the same `appId` deleted a second time
+            result: '404 NOT_FOUND (single-use eviction)'
           - input: a well-formed UUID that was never submitted
             result: '404 NOT_FOUND'
           - input: a malformed (non-UUID) `appId`

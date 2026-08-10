@@ -3,8 +3,8 @@
 //!
 //! Edge Application Management becomes **stateful** the moment a provider can
 //! *submit* (onboard) an application: `POST /apps` (`submitApp`) mints an `appId`
-//! and remembers the submitted `AppManifest` so later legs (`getApp` /
-//! `getApps` / `deleteApp`, later passes) can address it. This module is that
+//! and remembers the submitted `AppManifest` so the read/list/delete legs
+//! (`getApp` / `getApps` / `deleteApp`) can address it. This module is that
 //! state. It mirrors [`crate::apis::blockchain_public_address::store`]: a
 //! process-global `HashMap` guarded by a `std::sync::Mutex`, the lock held only
 //! for the map read/write and never across an `.await`, so it never blocks the
@@ -69,4 +69,18 @@ pub fn all() -> Vec<(String, Value)> {
         .iter()
         .map(|(id, manifest)| (id.clone(), manifest.clone()))
         .collect()
+}
+
+/// Evict the app stored under `app_id`, returning its `AppManifest` when one was
+/// present (and `None` when nothing was stored there). Backs the `deleteApp`
+/// leg: a `Some` means the app existed and is now gone → `204 No Content`; a
+/// `None` means an unknown/already-deleted id → `404 NOT_FOUND`. The
+/// remove-and-report runs under a single lock hold (never across an `.await`),
+/// so a `deleteApp` is single-use — two concurrent deletes of the same app
+/// can't both see it present.
+pub fn remove(app_id: &str) -> Option<Value> {
+    store()
+        .lock()
+        .expect("edge-application-management app store not poisoned")
+        .remove(app_id)
 }

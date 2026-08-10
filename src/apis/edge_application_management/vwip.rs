@@ -14,6 +14,9 @@
 //! - `GET /edge-application-management/vwip/apps` — list every onboarded
 //!   application as an array of `AppManifestInfo` (operationId `getApps`, scope
 //!   `edge-application-management:apps:read`). See [`get_apps`].
+//! - `DELETE /edge-application-management/vwip/apps/{appId}` — delete (de-board)
+//!   an onboarded application (operationId `deleteApp`, scope
+//!   `edge-application-management:apps:delete`). See [`delete_app`].
 //!
 //! ## What it does
 //!
@@ -67,6 +70,9 @@ const APPS_WRITE_SCOPE: &str = "edge-application-management:apps:write";
 /// The OAuth2 scope `getApp` requires (CAMARA EdgeApplicationManagement).
 const APPS_READ_SCOPE: &str = "edge-application-management:apps:read";
 
+/// The OAuth2 scope `deleteApp` requires (CAMARA EdgeApplicationManagement).
+const APPS_DELETE_SCOPE: &str = "edge-application-management:apps:delete";
+
 /// The five CAMARA `AppManifest.packageType` values.
 const PACKAGE_TYPES: [&str; 5] = ["QCOW2", "OVA", "CONTAINER", "HELM", "CSAR"];
 
@@ -83,7 +89,7 @@ pub fn routes() -> Router {
         )
         .route(
             "/edge-application-management/vwip/apps/:app_id",
-            get(get_app),
+            get(get_app).delete(delete_app),
         )
 }
 
@@ -269,6 +275,41 @@ async fn get_app(claims: Claims, headers: HeaderMap, Path(app_id): Path<String>)
             (StatusCode::OK, Json(app_manifest_info(app_id, manifest))).into_response(),
             &correlator,
         ),
+        None => with_correlator(
+            CamaraError::not_found("No application found for the provided appId.").into_response(),
+            &correlator,
+        ),
+    }
+}
+
+/// `DELETE /edge-application-management/vwip/apps/{appId}` (`deleteApp`).
+///
+/// Deletes (de-boards) an application previously onboarded with [`submit_app`],
+/// evicting its stored `AppManifest` from the in-memory store. Requires the
+/// delete scope `edge-application-management:apps:delete`.
+///
+/// Keyed only on the **store state** (docs/DESIGN.md §7): the `appId` is an
+/// opaque, simulator-minted UUID (not caller-chosen), so there is no
+/// reserved-error plane. A known id evicts its app and returns `204 No Content`
+/// (single-use); an unknown, already-deleted, *or malformed* id → `404
+/// NOT_FOUND` (the canonical 400 malformed-path case is folded into 404,
+/// mirroring [`get_app`] and the sibling `deleteNetwork`/`deleteAccess` legs).
+///
+/// Deletion is synchronous — CAMARA EdgeApplicationManagement's async
+/// `202 Accepted`/`DELETE_REQUESTED` form and any `sink` notification are a
+/// documented cut, mirroring every other CamaraSim delete leg (QoD
+/// `deleteSession`, `deleteNetwork`, `deleteAccess`). `x-correlator` is echoed on
+/// every response.
+async fn delete_app(claims: Claims, headers: HeaderMap, Path(app_id): Path<String>) -> Response {
+    let correlator = headers.get("x-correlator").cloned();
+
+    // Endpoint authorisation: the token must carry this API's delete scope.
+    if let Err(e) = claims.require_scope(APPS_DELETE_SCOPE) {
+        return with_correlator(e.into_response(), &correlator);
+    }
+
+    match store::remove(&app_id) {
+        Some(_) => with_correlator(StatusCode::NO_CONTENT.into_response(), &correlator),
         None => with_correlator(
             CamaraError::not_found("No application found for the provided appId.").into_response(),
             &correlator,
@@ -1079,6 +1120,132 @@ mod tests {
         assert_eq!(
             headers.get("x-correlator").and_then(|v| v.to_str().ok()),
             Some("corr-get-apps")
+        );
+    }
+
+    // --- deleteApp: integration through the real router -------------------
+
+    async fn delete_app_req(
+        token: Option<&str>,
+        app_id: &str,
+        correlator: Option<&str>,
+    ) -> (StatusCode, HeaderMap, Value) {
+        let mut builder = Request::builder()
+            .method("DELETE")
+            .uri(format!("/edge-application-management/vwip/apps/{app_id}"))
+            .header("host", HOST);
+        if let Some(t) = token {
+            builder = builder.header("authorization", format!("Bearer {t}"));
+        }
+        if let Some(c) = correlator {
+            builder = builder.header("x-correlator", c);
+        }
+        let response = app()
+            .oneshot(builder.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let headers = response.headers().clone();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        // A 204 carries no body; an error carries a CamaraError JSON.
+        let json: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, headers, json)
+    }
+
+    #[tokio::test]
+    async fn delete_app_removes_a_submitted_app() {
+        // Onboard, delete (204), then the app is gone — a later read 404s.
+        let (_, app_id) = submit_and_get_id("deletable_app").await;
+        let del = mint_token(APPS_DELETE_SCOPE).await;
+        let (status, _, body) = delete_app_req(Some(&del), &app_id, None).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(body, Value::Null); // 204 has an empty body
+
+        let read = mint_token(APPS_READ_SCOPE).await;
+        let (status, _, resp) = get_app_req(Some(&read), &app_id, None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(resp["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn delete_app_is_single_use() {
+        // The first delete evicts (204); a second delete of the same id 404s.
+        let (_, app_id) = submit_and_get_id("single_use_delete_app").await;
+        let del = mint_token(APPS_DELETE_SCOPE).await;
+
+        let (status, _, _) = delete_app_req(Some(&del), &app_id, None).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        let (status, _, resp) = delete_app_req(Some(&del), &app_id, None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(resp["code"], "NOT_FOUND");
+        assert_eq!(resp["status"], 404);
+    }
+
+    #[tokio::test]
+    async fn delete_app_unknown_id_is_not_found() {
+        // A well-formed UUID that was never submitted.
+        let del = mint_token(APPS_DELETE_SCOPE).await;
+        let (status, _, resp) =
+            delete_app_req(Some(&del), "00000000-0000-5000-8000-000000000000", None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(resp["code"], "NOT_FOUND");
+        assert_eq!(resp["status"], 404);
+    }
+
+    #[tokio::test]
+    async fn delete_app_malformed_id_is_not_found() {
+        // A non-UUID path segment folds into 404 (not 400), mirroring get_app.
+        let del = mint_token(APPS_DELETE_SCOPE).await;
+        let (status, _, resp) = delete_app_req(Some(&del), "not-a-uuid", None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(resp["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn delete_app_without_the_delete_scope_is_forbidden() {
+        // The read scope reads apps but must not delete them; the app survives.
+        let (_, app_id) = submit_and_get_id("scope_gated_delete_app").await;
+        let read = mint_token(APPS_READ_SCOPE).await;
+        let (status, _, resp) = delete_app_req(Some(&read), &app_id, None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(resp["code"], "PERMISSION_DENIED");
+
+        // The forbidden call did not evict — the app is still readable.
+        let read2 = mint_token(APPS_READ_SCOPE).await;
+        let (status, _, _) = get_app_req(Some(&read2), &app_id, None).await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn delete_app_missing_token_is_unauthenticated() {
+        let (status, _, resp) =
+            delete_app_req(None, "00000000-0000-5000-8000-000000000000", None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(resp["code"], "UNAUTHENTICATED");
+    }
+
+    #[tokio::test]
+    async fn delete_app_echoes_x_correlator_on_success_and_error() {
+        let (_, app_id) = submit_and_get_id("correlated_delete_app").await;
+        let del = mint_token(APPS_DELETE_SCOPE).await;
+
+        // Success (204) echoes x-correlator.
+        let (status, headers, _) = delete_app_req(Some(&del), &app_id, Some("corr-del-ok")).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-del-ok")
+        );
+
+        // Error (404, id now gone) echoes x-correlator too.
+        let (status, headers, _) = delete_app_req(Some(&del), &app_id, Some("corr-del-404")).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-del-404")
         );
     }
 }
