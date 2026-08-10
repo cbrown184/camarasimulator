@@ -57,3 +57,16 @@ pub fn get(app_id: &str) -> Option<Value> {
         .get(app_id)
         .cloned()
 }
+
+/// Snapshot every onboarded app as `(appId, AppManifest)` pairs. Backs the
+/// `getApps` list leg. The lock is held only for the clone (never across an
+/// `.await`); iteration order is unspecified (a `HashMap`), which is fine — the
+/// CAMARA list carries each app's `appId`, so callers key off that, not order.
+pub fn all() -> Vec<(String, Value)> {
+    store()
+        .lock()
+        .expect("edge-application-management app store not poisoned")
+        .iter()
+        .map(|(id, manifest)| (id.clone(), manifest.clone()))
+        .collect()
+}

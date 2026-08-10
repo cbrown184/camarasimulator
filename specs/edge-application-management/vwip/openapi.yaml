@@ -14,8 +14,10 @@
 # This slice serves:
 #   GET  /edge-cloud-zones  (getEdgeCloudZones) — read-only zone catalog
 #   POST /apps              (submitApp)         — onboard an application (stateful)
-# The remaining app read/delete, app-instance, deployment and cluster resources
-# are later passes.
+#   GET  /apps/{appId}      (getApp)            — read back an onboarded app
+#   GET  /apps              (getApps)           — list onboarded apps
+# The remaining app delete, app-instance, deployment and cluster resources are
+# later passes.
 openapi: 3.0.3
 info:
   title: Edge Application Management
@@ -155,6 +157,60 @@ paths:
             result: '400 INVALID_ARGUMENT'
           - input: a body that is not valid JSON
             result: '400 INVALID_ARGUMENT'
+    get:
+      operationId: getApps
+      summary: List onboarded applications
+      description: |
+        Lists every application previously onboarded with `submitApp`, as a JSON
+        array of `AppManifestInfo` (each stored `AppManifest` with its minted
+        `appId`) — the same representation `getApp` returns for a single app.
+
+        See the API description for the parameter-driven functional cases.
+      security:
+        - openId:
+            - edge-application-management:apps:read
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+      responses:
+        "200":
+          description: The onboarded applications (possibly an empty array).
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/AppManifestInfo"
+              examples:
+                empty:
+                  summary: Nothing onboarded yet (a list never 404s)
+                  value: []
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          `getApps` lists every application onboarded by `submitApp`
+          (docs/DESIGN.md §7). The apps are simulator-minted, not caller-chosen,
+          so there is no reserved-error plane — the in-memory store is the only
+          control plane. The response is the current store snapshot as an array
+          of `AppManifestInfo` (each manifest + its `appId`), empty when nothing
+          has been onboarded (a list never 404s). CamaraSim returns
+          `AppManifestInfo` items so every listed app carries its addressable
+          `appId`, mirroring the sibling list legs (`listAccesses`,
+          `retrievePayments`) which return the same shape as their single read.
+        cases:
+          - input: after one or more `submitApp` calls
+            result: '200 — an array of `AppManifestInfo`, one per onboarded app'
+          - input: before anything has been onboarded
+            result: '200 — an empty array (a list never 404s)'
 
   /apps/{appId}:
     get:

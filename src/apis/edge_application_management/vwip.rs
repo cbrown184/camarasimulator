@@ -11,6 +11,9 @@
 //! - `GET /edge-application-management/vwip/apps/{appId}` — read back an
 //!   onboarded application as the CAMARA `AppManifestInfo` (operationId `getApp`,
 //!   scope `edge-application-management:apps:read`). See [`get_app`].
+//! - `GET /edge-application-management/vwip/apps` — list every onboarded
+//!   application as an array of `AppManifestInfo` (operationId `getApps`, scope
+//!   `edge-application-management:apps:read`). See [`get_apps`].
 //!
 //! ## What it does
 //!
@@ -74,7 +77,10 @@ pub fn routes() -> Router {
             "/edge-application-management/vwip/edge-cloud-zones",
             get(get_edge_cloud_zones),
         )
-        .route("/edge-application-management/vwip/apps", post(submit_app))
+        .route(
+            "/edge-application-management/vwip/apps",
+            post(submit_app).get(get_apps),
+        )
         .route(
             "/edge-application-management/vwip/apps/:app_id",
             get(get_app),
@@ -259,18 +265,57 @@ async fn get_app(claims: Claims, headers: HeaderMap, Path(app_id): Path<String>)
     }
 
     match store::get(&app_id) {
-        Some(mut manifest) => {
-            // AppManifestInfo = the stored AppManifest + its assigned `appId`.
-            if let Value::Object(map) = &mut manifest {
-                map.insert("appId".to_string(), Value::String(app_id));
-            }
-            with_correlator((StatusCode::OK, Json(manifest)).into_response(), &correlator)
-        }
+        Some(manifest) => with_correlator(
+            (StatusCode::OK, Json(app_manifest_info(app_id, manifest))).into_response(),
+            &correlator,
+        ),
         None => with_correlator(
             CamaraError::not_found("No application found for the provided appId.").into_response(),
             &correlator,
         ),
     }
+}
+
+/// `GET /edge-application-management/vwip/apps` (`getApps`).
+///
+/// Lists every application onboarded by [`submit_app`], as a JSON array of
+/// CAMARA `AppManifestInfo` (each stored `AppManifest` with its minted `appId`
+/// merged in — the same representation [`get_app`] returns for one app). This
+/// mirrors the sibling CamaraSim list legs (`listAccesses`, `retrievePayments`):
+/// a list returns the same resource shape as its single-item read.
+///
+/// The apps are simulator-minted and not caller-chosen, so there is no
+/// reserved-error plane — the in-memory store is the only control plane
+/// (docs/DESIGN.md §7): the response is the current store snapshot (an empty
+/// array when nothing has been onboarded — a *list* never 404s). `x-correlator`
+/// is echoed on every response.
+async fn get_apps(claims: Claims, headers: HeaderMap) -> Response {
+    let correlator = headers.get("x-correlator").cloned();
+
+    // Endpoint authorisation: the token must carry this API's read scope.
+    if let Err(e) = claims.require_scope(APPS_READ_SCOPE) {
+        return with_correlator(e.into_response(), &correlator);
+    }
+
+    let apps: Vec<Value> = store::all()
+        .into_iter()
+        .map(|(app_id, manifest)| app_manifest_info(app_id, manifest))
+        .collect();
+
+    with_correlator(
+        (StatusCode::OK, Json(Value::Array(apps))).into_response(),
+        &correlator,
+    )
+}
+
+/// Build a CAMARA `AppManifestInfo` — the stored `AppManifest` with its assigned
+/// `appId` merged in (`allOf` `AppManifest` + `appId`). Shared by `getApp` and
+/// `getApps` so both render the onboarded application identically.
+fn app_manifest_info(app_id: String, mut manifest: Value) -> Value {
+    if let Value::Object(map) = &mut manifest {
+        map.insert("appId".to_string(), Value::String(app_id));
+    }
+    manifest
 }
 
 /// The subset of CAMARA `AppManifest` fields CamaraSim validates. All are
@@ -957,6 +1002,83 @@ mod tests {
         assert_eq!(
             headers.get("x-correlator").and_then(|v| v.to_str().ok()),
             Some("corr-get-404")
+        );
+    }
+
+    // --- getApps: integration through the real router ---------------------
+
+    async fn get_apps_req(
+        token: Option<&str>,
+        correlator: Option<&str>,
+    ) -> (StatusCode, HeaderMap, Value) {
+        let mut builder = Request::builder()
+            .method("GET")
+            .uri("/edge-application-management/vwip/apps")
+            .header("host", HOST);
+        if let Some(t) = token {
+            builder = builder.header("authorization", format!("Bearer {t}"));
+        }
+        if let Some(c) = correlator {
+            builder = builder.header("x-correlator", c);
+        }
+        let response = app()
+            .oneshot(builder.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let headers = response.headers().clone();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, headers, json)
+    }
+
+    #[tokio::test]
+    async fn get_apps_lists_a_submitted_app_as_app_manifest_info() {
+        // Onboard an app, then list: the store snapshot must contain it, rendered
+        // as an AppManifestInfo (the manifest + its minted appId).
+        let (body, app_id) = submit_and_get_id("listed_app").await;
+        let read = mint_token(APPS_READ_SCOPE).await;
+        let (status, _, resp) = get_apps_req(Some(&read), None).await;
+        assert_eq!(status, StatusCode::OK);
+        let arr = resp.as_array().expect("array response");
+        // Every item is an AppManifestInfo — carries a UUID `appId`.
+        assert!(arr.iter().all(|a| a["appId"].as_str().is_some_and(is_uuid)));
+        // The app we just submitted appears, with its manifest fields merged.
+        let ours = arr
+            .iter()
+            .find(|a| a["appId"] == json!(app_id))
+            .expect("submitted app is listed");
+        assert_eq!(ours["name"], body["name"]);
+        assert_eq!(ours["version"], body["version"]);
+        assert_eq!(ours["packageType"], body["packageType"]);
+    }
+
+    #[tokio::test]
+    async fn get_apps_without_the_read_scope_is_forbidden() {
+        // The write scope onboards apps but must not list them.
+        let write = mint_token(APPS_WRITE_SCOPE).await;
+        let (status, _, resp) = get_apps_req(Some(&write), None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(resp["code"], "PERMISSION_DENIED");
+    }
+
+    #[tokio::test]
+    async fn get_apps_missing_token_is_unauthenticated() {
+        let (status, _, resp) = get_apps_req(None, None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(resp["code"], "UNAUTHENTICATED");
+    }
+
+    #[tokio::test]
+    async fn get_apps_echoes_x_correlator() {
+        let read = mint_token(APPS_READ_SCOPE).await;
+        let (status, headers, _) = get_apps_req(Some(&read), Some("corr-get-apps")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-get-apps")
         );
     }
 }

@@ -2706,8 +2706,13 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
         reserved-suffix plane): known id → `200 AppManifestInfo`; unknown *or
         malformed* id → `404 NOT_FOUND` (400 malformed-path folded into 404,
         mirroring `readAccess`). `x-correlator` echoed.
-      - [ ] `GET /apps` (`getApps`) · `DELETE /apps/{appId}` (`deleteApp`)
-        — later passes.
+      - [x] `GET /apps` (`getApps`, `edge-application-management:apps:read`) —
+        lists every onboarded app as an array of `AppManifestInfo` (the store
+        snapshot; empty array when none — a list never 404s). Store the only
+        control plane; mirrors the sibling list legs (`listAccesses`,
+        `retrievePayments`) by returning the same shape as `getApp`.
+        `x-correlator` echoed.
+      - [ ] `DELETE /apps/{appId}` (`deleteApp`) — later passes.
     - [ ] the stateful `app-instances` / `deployments` resources + `clusters`
       — later passes.
 
@@ -2735,6 +2740,26 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-10 — edge-application-management: added the **app list leg**,
+  `GET /edge-application-management/vwip/apps` (`getApps`, scope
+  `edge-application-management:apps:read`) — the topmost unclaimed actionable
+  `[ ]` leaf (last pass added `getApp`; the remaining earlier `[ ]` leaves stay
+  the deferred `https://` sink-TLS infra, spatial `dedicated-network-areas`, and
+  no-live-engine lifecycle streams). Scoped to the list op only; the paired
+  `deleteApp` is left `[ ]` for a later pass. Returns the store snapshot as an
+  array of `AppManifestInfo` (each `AppManifest` `submitApp` persisted + its
+  minted `appId`) — the same shape `getApp` returns for one, mirroring the
+  sibling list legs `listAccesses`/`retrievePayments`. Apps are opaque,
+  simulator-minted UUIDs, so — like `getApp` — there is **no reserved-error
+  plane**: the in-memory store is the only control plane (DESIGN §7); empty
+  array when nothing onboarded (a list never 404s). `x-correlator` echoed. Code:
+  new `store::all()` snapshot fn; `post(submit_app).get(get_apps)` on `/apps`;
+  factored a shared `app_manifest_info` helper (getApp now reuses it). spec:
+  added the `/apps` GET op (`getApps`, 200 array of `AppManifestInfo`,
+  401/403/500/503) + `x-camarasim-scenarios`; updated the header op list. tests:
+  4 new (lists a submitted app as AppManifestInfo; 403 without read scope; 401
+  no token; x-correlator echoed) — 1991 pass. No new dependency. — binary: 3.6M
+  (3,705,112 bytes)
 - 2026-08-10 — edge-application-management: added the **app read leg**,
   `GET /edge-application-management/vwip/apps/{appId}` (`getApp`, scope
   `edge-application-management:apps:read`) — the topmost unclaimed actionable
