@@ -8,6 +8,9 @@
 //!   application, minting an `appId` (operationId `submitApp`, scope
 //!   `edge-application-management:apps:write`). The first **stateful** leg — see
 //!   [`submit_app`] and [`crate::apis::edge_application_management::store`].
+//! - `GET /edge-application-management/vwip/apps/{appId}` — read back an
+//!   onboarded application as the CAMARA `AppManifestInfo` (operationId `getApp`,
+//!   scope `edge-application-management:apps:read`). See [`get_app`].
 //!
 //! ## What it does
 //!
@@ -38,7 +41,7 @@
 //! echoed on every response.
 
 use axum::body::Bytes;
-use axum::extract::RawQuery;
+use axum::extract::{Path, RawQuery};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -58,6 +61,9 @@ const ZONES_SCOPE: &str = "edge-application-management:edge-cloud-zones:read";
 /// The OAuth2 scope `submitApp` requires (CAMARA EdgeApplicationManagement).
 const APPS_WRITE_SCOPE: &str = "edge-application-management:apps:write";
 
+/// The OAuth2 scope `getApp` requires (CAMARA EdgeApplicationManagement).
+const APPS_READ_SCOPE: &str = "edge-application-management:apps:read";
+
 /// The five CAMARA `AppManifest.packageType` values.
 const PACKAGE_TYPES: [&str; 5] = ["QCOW2", "OVA", "CONTAINER", "HELM", "CSAR"];
 
@@ -69,6 +75,10 @@ pub fn routes() -> Router {
             get(get_edge_cloud_zones),
         )
         .route("/edge-application-management/vwip/apps", post(submit_app))
+        .route(
+            "/edge-application-management/vwip/apps/:app_id",
+            get(get_app),
+        )
 }
 
 /// The operator's fixed edge cloud zones:
@@ -226,6 +236,41 @@ async fn submit_app(claims: Claims, headers: HeaderMap, body: Bytes) -> Response
         (StatusCode::CREATED, Json(json!({ "appId": app_id }))).into_response(),
         &correlator,
     )
+}
+
+/// `GET /edge-application-management/vwip/apps/{appId}` (`getApp`).
+///
+/// Reads back an application onboarded by [`submit_app`]. On success it returns
+/// the stored `AppManifest` with the minted `appId` merged in — the CAMARA
+/// `AppManifestInfo` (`allOf` `AppManifest` + `appId`) — with a `200`.
+///
+/// The `appId` is an opaque, simulator-minted UUID (there is no reserved-error
+/// plane — the identifier is not caller-chosen), so the **store state is the
+/// only control plane** (docs/DESIGN.md §7): a known id → `200 AppManifestInfo`;
+/// an unknown or malformed id → `404 NOT_FOUND` (the canonical 400 malformed-path
+/// case is folded into 404, mirroring the sibling `readAccess`/`readNetwork`
+/// read legs). `x-correlator` is echoed on every response.
+async fn get_app(claims: Claims, headers: HeaderMap, Path(app_id): Path<String>) -> Response {
+    let correlator = headers.get("x-correlator").cloned();
+
+    // Endpoint authorisation: the token must carry this API's read scope.
+    if let Err(e) = claims.require_scope(APPS_READ_SCOPE) {
+        return with_correlator(e.into_response(), &correlator);
+    }
+
+    match store::get(&app_id) {
+        Some(mut manifest) => {
+            // AppManifestInfo = the stored AppManifest + its assigned `appId`.
+            if let Value::Object(map) = &mut manifest {
+                map.insert("appId".to_string(), Value::String(app_id));
+            }
+            with_correlator((StatusCode::OK, Json(manifest)).into_response(), &correlator)
+        }
+        None => with_correlator(
+            CamaraError::not_found("No application found for the provided appId.").into_response(),
+            &correlator,
+        ),
+    }
 }
 
 /// The subset of CAMARA `AppManifest` fields CamaraSim validates. All are
@@ -796,6 +841,122 @@ mod tests {
         assert_eq!(
             headers.get("x-correlator").and_then(|v| v.to_str().ok()),
             Some("corr-apps")
+        );
+    }
+
+    // --- getApp: integration through the real router ----------------------
+
+    async fn get_app_req(
+        token: Option<&str>,
+        app_id: &str,
+        correlator: Option<&str>,
+    ) -> (StatusCode, HeaderMap, Value) {
+        let mut builder = Request::builder()
+            .method("GET")
+            .uri(format!("/edge-application-management/vwip/apps/{app_id}"))
+            .header("host", HOST);
+        if let Some(t) = token {
+            builder = builder.header("authorization", format!("Bearer {t}"));
+        }
+        if let Some(c) = correlator {
+            builder = builder.header("x-correlator", c);
+        }
+        let response = app()
+            .oneshot(builder.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let headers = response.headers().clone();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, headers, json)
+    }
+
+    /// Submit an app (write scope) and return its minted `appId`.
+    async fn submit_and_get_id(name: &str) -> (Value, String) {
+        let write = mint_token(APPS_WRITE_SCOPE).await;
+        let body = manifest(name);
+        let (status, _, resp) = submit_ok(&write, &body).await;
+        assert_eq!(status, StatusCode::CREATED);
+        (body, resp["appId"].as_str().unwrap().to_string())
+    }
+
+    #[tokio::test]
+    async fn get_app_returns_the_manifest_with_the_app_id_merged_in() {
+        let (body, app_id) = submit_and_get_id("read_back_app").await;
+        let read = mint_token(APPS_READ_SCOPE).await;
+        let (status, _, resp) = get_app_req(Some(&read), &app_id, None).await;
+        assert_eq!(status, StatusCode::OK);
+        // AppManifestInfo = the submitted manifest + the assigned appId.
+        assert_eq!(resp["appId"], json!(app_id));
+        assert_eq!(resp["name"], body["name"]);
+        assert_eq!(resp["version"], body["version"]);
+        assert_eq!(resp["packageType"], body["packageType"]);
+        assert_eq!(resp["appProvider"], body["appProvider"]);
+    }
+
+    #[tokio::test]
+    async fn get_app_unknown_id_is_not_found() {
+        let read = mint_token(APPS_READ_SCOPE).await;
+        // A well-formed UUID that was never submitted.
+        let (status, _, resp) =
+            get_app_req(Some(&read), "00000000-0000-5000-8000-000000000000", None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(resp["code"], "NOT_FOUND");
+        assert_eq!(resp["status"], 404);
+    }
+
+    #[tokio::test]
+    async fn get_app_malformed_id_is_not_found() {
+        // A non-UUID path segment folds into 404 (not 400), mirroring readAccess.
+        let read = mint_token(APPS_READ_SCOPE).await;
+        let (status, _, resp) = get_app_req(Some(&read), "not-a-uuid", None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(resp["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn get_app_without_the_read_scope_is_forbidden() {
+        // The write scope onboards apps but must not read them back.
+        let (_, app_id) = submit_and_get_id("scope_gated_app").await;
+        let write = mint_token(APPS_WRITE_SCOPE).await;
+        let (status, _, resp) = get_app_req(Some(&write), &app_id, None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(resp["code"], "PERMISSION_DENIED");
+    }
+
+    #[tokio::test]
+    async fn get_app_missing_token_is_unauthenticated() {
+        let (status, _, resp) =
+            get_app_req(None, "00000000-0000-5000-8000-000000000000", None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(resp["code"], "UNAUTHENTICATED");
+    }
+
+    #[tokio::test]
+    async fn get_app_echoes_x_correlator_on_success_and_error() {
+        let (_, app_id) = submit_and_get_id("correlated_read_app").await;
+        let read = mint_token(APPS_READ_SCOPE).await;
+
+        let (status, headers, _) = get_app_req(Some(&read), &app_id, Some("corr-get-ok")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-get-ok")
+        );
+
+        let (status, headers, _) = get_app_req(
+            Some(&read),
+            "00000000-0000-5000-8000-000000000000",
+            Some("corr-get-404"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-get-404")
         );
     }
 }

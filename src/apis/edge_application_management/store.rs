@@ -49,8 +49,7 @@ pub fn insert(app_id: String, manifest: Value) -> bool {
 }
 
 /// Fetch the `AppManifest` stored under `app_id`, or `None` if no such app
-/// exists. Used by the tests to assert persistence (and by later `getApp` legs).
-#[cfg_attr(not(test), allow(dead_code))]
+/// exists. Backs the `getApp` read leg (and the tests that assert persistence).
 pub fn get(app_id: &str) -> Option<Value> {
     store()
         .lock()

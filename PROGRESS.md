@@ -2699,8 +2699,15 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
         Nested `requiredResources` `oneOf` / `appRepo` / `componentSpec` item
         shapes validated for presence/non-emptiness only (documented cut).
         `x-correlator` echoed.
-      - [ ] `GET /apps` (`getApps`) · `GET /apps/{appId}` (`getApp`) ·
-        `DELETE /apps/{appId}` (`deleteApp`) — later passes.
+      - [x] `GET /apps/{appId}` (`getApp`,
+        `edge-application-management:apps:read`) — reads an onboarded app back
+        as the CAMARA `AppManifestInfo` (the stored `AppManifest` + the minted
+        `appId`). Keyed only on store state (opaque UUID `appId`, no
+        reserved-suffix plane): known id → `200 AppManifestInfo`; unknown *or
+        malformed* id → `404 NOT_FOUND` (400 malformed-path folded into 404,
+        mirroring `readAccess`). `x-correlator` echoed.
+      - [ ] `GET /apps` (`getApps`) · `DELETE /apps/{appId}` (`deleteApp`)
+        — later passes.
     - [ ] the stateful `app-instances` / `deployments` resources + `clusters`
       — later passes.
 
@@ -2728,6 +2735,32 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-10 — edge-application-management: added the **app read leg**,
+  `GET /edge-application-management/vwip/apps/{appId}` (`getApp`, scope
+  `edge-application-management:apps:read`) — the topmost unclaimed actionable
+  `[ ]` leaf (last pass added `submitApp`; the remaining earlier `[ ]` leaves are
+  the deferred `https://` sink-TLS infra, spatial `dedicated-network-areas`, and
+  no-live-engine lifecycle streams). Confirmed the contract from the
+  authoritative upstream `edge-application-management.yaml` (`main`, WebFetch):
+  `getApp` → scope `apps:read`, `appId` path param = strict UUID, `200`
+  `AppManifestInfo` (`allOf` `AppManifest` + required `appId`), errors
+  400/401/403/404. In CamaraSim it reads the `AppManifest` `submitApp` persisted
+  and merges the minted `appId` in (reuses `store::get`; no new store fn). The
+  `appId` is an opaque, simulator-minted UUID, so — like `readAccess`/
+  `readNetwork` — there is **no reserved-error plane**: the in-memory store state
+  is the only control plane (DESIGN §7): known id → `200 AppManifestInfo`;
+  unknown *or malformed* id → `404 NOT_FOUND` (the canonical 400 malformed-path
+  case folded into 404, a documented deviation mirroring the sibling read legs).
+  `x-correlator` echoed on 200/404. New route + `get_app` handler in `vwip.rs`;
+  dropped the now-stale `#[cfg_attr(not(test), allow(dead_code))]` on
+  `store::get` (it now backs production). spec: added the `/apps/{appId}` GET op
+  (getApp) + reusable `AppId` path parameter + `AppManifestInfo` schema
+  (`allOf` AppManifest + appId) + `x-camarasim-scenarios` to
+  `specs/edge-application-management/vwip/openapi.yaml` (404 → shared `NotFound`).
+  tests: +6 integration (submit→read-back returns manifest+appId, unknown-UUID→404
+  NOT_FOUND, malformed-id→404, write-scope-can't-read→403, no-token→401,
+  x-correlator echoed on 200+404). No new dep. `cargo test` 1987 pass (was 1981);
+  `cargo build --release` ok. binary (release): 3,698,848 bytes (~3.6M; +7,032 B).
 - 2026-08-10 — edge-application-management: added the **first stateful leg**,
   `POST /edge-application-management/vwip/apps` (`submitApp`, scope
   `edge-application-management:apps:write`) — the topmost unclaimed actionable

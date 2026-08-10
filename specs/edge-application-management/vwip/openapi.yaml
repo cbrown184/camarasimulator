@@ -156,6 +156,61 @@ paths:
           - input: a body that is not valid JSON
             result: '400 INVALID_ARGUMENT'
 
+  /apps/{appId}:
+    get:
+      operationId: getApp
+      summary: Retrieve an onboarded application
+      description: |
+        Reads back an application previously onboarded with `submitApp`,
+        returning its stored `AppManifest` together with the minted `appId`
+        (an `AppManifestInfo`).
+
+        See the API description for the parameter-driven functional cases.
+      security:
+        - openId:
+            - edge-application-management:apps:read
+      parameters:
+        - $ref: "#/components/parameters/AppId"
+        - $ref: "#/components/parameters/XCorrelator"
+      responses:
+        "200":
+          description: The onboarded application (its manifest plus the `appId`).
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppManifestInfo"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          `getApp` reads back an application onboarded by `submitApp`
+          (docs/DESIGN.md §7). The `appId` is an opaque, simulator-minted UUID
+          (not caller-chosen), so there is no reserved-error plane — the
+          in-memory store state is the only control plane. A known id returns the
+          stored `AppManifest` with the `appId` merged in (`AppManifestInfo`); an
+          unknown *or malformed* id is folded into `404 NOT_FOUND` (mirroring the
+          other CamaraSim read legs). Canonical EdgeApplicationManagement declares
+          400/401/403/404 here; CamaraSim folds the 400 malformed-path case into
+          404 (documented deviation) and adds 500/503 from the shared error set.
+        cases:
+          - input: an `appId` returned by a prior `submitApp`
+            result: '200 — the `AppManifestInfo` (the manifest + `appId`)'
+          - input: a well-formed UUID that was never submitted
+            result: '404 NOT_FOUND'
+          - input: a malformed (non-UUID) `appId`
+            result: '404 NOT_FOUND (the canonical 400 folded into 404)'
+
   /edge-cloud-zones:
     get:
       operationId: getEdgeCloudZones
@@ -261,6 +316,19 @@ components:
       description: Correlation id for the request, echoed back on the response.
       schema:
         type: string
+
+    AppId:
+      name: appId
+      in: path
+      required: true
+      description: The identifier of an onboarded application (minted by `submitApp`).
+      schema:
+        type: string
+        format: uuid
+        pattern: '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
+        minLength: 36
+        maxLength: 36
+      example: 5e3a8c2f-1b4d-5a6e-8f90-2c1d3e4f5a6b
 
   headers:
     XCorrelator:
@@ -400,3 +468,23 @@ components:
           minLength: 36
           maxLength: 36
           example: 5e3a8c2f-1b4d-5a6e-8f90-2c1d3e4f5a6b
+
+    AppManifestInfo:
+      description: >-
+        An onboarded application as returned by `getApp` — the submitted
+        `AppManifest` together with the `appId` assigned to it (CAMARA
+        `AppManifestInfo`, `allOf` `AppManifest` + `appId`).
+      allOf:
+        - $ref: "#/components/schemas/AppManifest"
+        - type: object
+          required:
+            - appId
+          properties:
+            appId:
+              type: string
+              format: uuid
+              description: The unique identifier of the onboarded application.
+              pattern: '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
+              minLength: 36
+              maxLength: 36
+              example: 5e3a8c2f-1b4d-5a6e-8f90-2c1d3e4f5a6b
