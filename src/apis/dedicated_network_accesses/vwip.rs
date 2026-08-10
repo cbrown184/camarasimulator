@@ -4,6 +4,8 @@
 //! Endpoints:
 //! - `POST /dedicated-network-accesses/vwip/accesses` — create a dedicated
 //!   network access (operationId `createAccess`).
+//! - `GET /dedicated-network-accesses/vwip/accesses/{accessId}` — read a created
+//!   access back by id (operationId `readAccess`).
 //!
 //! ## What it does
 //!
@@ -52,19 +54,31 @@
 //! the CAMARA `207` multi-status form with a `ResultForDevice[]` body — CamaraSim
 //! represents partial denials as data inside the `201 AccessInfo`
 //! (`stats`/`recentAccessDevices`) rather than as a `207` — the `409`/`422`
-//! request-level device conflicts, `sink` notification delivery, the read / list
-//! / delete legs, and the `/accesses/{accessId}/devices…` sub-resources.
+//! request-level device conflicts, `sink` notification delivery, the list /
+//! delete legs, and the `/accesses/{accessId}/devices…` sub-resources.
 //! `x-correlator` is echoed on every response.
+//!
+//! ## `readAccess` — read an access back
+//!
+//! `GET /accesses/{accessId}` returns the `AccessInfo` stored by a prior
+//! `createAccess` (`200`), or `404 NOT_FOUND` when no such access exists. In
+//! CamaraSim the `accessId` is a server-minted opaque UUID, so the only control
+//! plane is the in-memory store state — a valid id from a prior `createAccess`
+//! reads back, anything else (unknown or malformed) is `404` (there is no
+//! reserved-suffix plane on a minted id, mirroring the sibling `readNetwork`).
+//! It requires the `dedicated-network-accesses:accesses:read` scope.
 
 use axum::body::Bytes;
+use axum::extract::Path;
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::post;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::auth::verify::Claims;
+use crate::errors::CamaraError;
 use crate::scenarios;
 
 use super::store;
@@ -73,12 +87,20 @@ use super::store;
 /// Accesses).
 const CREATE_SCOPE: &str = "dedicated-network-accesses:accesses:create";
 
+/// The OAuth2 scope `readAccess` requires (CAMARA Dedicated Network — Accesses).
+const READ_SCOPE: &str = "dedicated-network-accesses:accesses:read";
+
 /// Routes for Dedicated Network — Accesses vwip, mounted at their canonical URLs.
 pub fn routes() -> Router {
-    Router::new().route(
-        "/dedicated-network-accesses/vwip/accesses",
-        post(create_access),
-    )
+    Router::new()
+        .route(
+            "/dedicated-network-accesses/vwip/accesses",
+            post(create_access),
+        )
+        .route(
+            "/dedicated-network-accesses/vwip/accesses/:access_id",
+            get(read_access),
+        )
 }
 
 /// A `CreateAccessRequest` body (CAMARA `BaseAccessInfo` + `devices`). Every
@@ -211,6 +233,29 @@ async fn create_access(claims: Claims, headers: HeaderMap, body: Bytes) -> Respo
     store::insert(id.clone(), info.clone());
 
     with_correlator((StatusCode::CREATED, Json(info)).into_response(), &correlator)
+}
+
+/// `GET /dedicated-network-accesses/vwip/accesses/{accessId}` — read a dedicated
+/// network access back by id (`readAccess`).
+///
+/// Keyed only on the store state (the `accessId` is a server-minted opaque UUID,
+/// so there is no reserved-suffix plane): a known id returns its stored
+/// `AccessInfo` (`200`); an unknown or malformed one → `404 NOT_FOUND`. Mirrors
+/// the sibling `readNetwork`.
+async fn read_access(claims: Claims, headers: HeaderMap, Path(access_id): Path<String>) -> Response {
+    let correlator = headers.get("x-correlator").cloned();
+
+    if let Err(e) = claims.require_scope(READ_SCOPE) {
+        return with_correlator(e.into_response(), &correlator);
+    }
+
+    match store::get(&access_id) {
+        Some(info) => with_correlator((StatusCode::OK, Json(info)).into_response(), &correlator),
+        None => with_correlator(
+            CamaraError::not_found("No access found for the provided accessId.").into_response(),
+            &correlator,
+        ),
+    }
 }
 
 /// The per-device `DeviceStatus` a submitted device maps to: a reserved-suffix
@@ -654,6 +699,100 @@ mod tests {
                     .body(Body::from(
                         serde_json::to_vec(&json!({ "networkId": uuid_ending(12) })).unwrap(),
                     ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    // --- readAccess --------------------------------------------------------
+
+    async fn get_access(token: &str, access_id: &str) -> (StatusCode, HeaderMap, Value) {
+        let response = app()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!(
+                        "/dedicated-network-accesses/vwip/accesses/{access_id}"
+                    ))
+                    .header("host", HOST)
+                    .header("authorization", format!("Bearer {token}"))
+                    .header("x-correlator", "corr-read")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let headers = response.headers().clone();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = if bytes.is_empty() {
+            Value::Null
+        } else {
+            serde_json::from_slice(&bytes).unwrap()
+        };
+        (status, headers, json)
+    }
+
+    #[tokio::test]
+    async fn create_then_read_the_access_back() {
+        // Create an access, then read it back by its minted id.
+        let create = mint_token(CREATE_SCOPE).await;
+        let (status, _h, created) = post_access(
+            &create,
+            json!({
+                "networkId": uuid_ending(12),
+                "devices": [{ "phoneNumber": "+123456789012" }],
+                "defaultQosProfile": "QOS_A"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let id = created["id"].as_str().unwrap();
+
+        let read = mint_token(READ_SCOPE).await;
+        let (status, headers, body) = get_access(&read, id).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(headers.get("x-correlator").unwrap(), "corr-read");
+        // The stored AccessInfo is returned verbatim.
+        assert_eq!(body, created);
+    }
+
+    #[tokio::test]
+    async fn unknown_access_is_not_found() {
+        let read = mint_token(READ_SCOPE).await;
+        let (status, headers, body) = get_access(&read, &uuid_ending(999)).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["status"], 404);
+        assert_eq!(body["code"], "NOT_FOUND");
+        // Correlator echoed on the error path too.
+        assert_eq!(headers.get("x-correlator").unwrap(), "corr-read");
+    }
+
+    #[tokio::test]
+    async fn read_without_the_scope_is_forbidden() {
+        // A create-scoped token cannot read (distinct scope), so `readAccess`
+        // requires its own `…:accesses:read` scope.
+        let token = mint_token(CREATE_SCOPE).await;
+        let (status, _h, _b) = get_access(&token, &uuid_ending(12)).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn read_without_a_token_is_unauthenticated() {
+        let response = app()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!(
+                        "/dedicated-network-accesses/vwip/accesses/{}",
+                        uuid_ending(12)
+                    ))
+                    .header("host", HOST)
+                    .body(Body::empty())
                     .unwrap(),
             )
             .await

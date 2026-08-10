@@ -11,9 +11,10 @@
 //! by a `std::sync::Mutex`, the lock held only for the map read/write and never
 //! across an `.await`, so it never blocks the async runtime.
 //!
-//! The stored value is the access's rendered `AccessInfo` JSON. This create-only
-//! slice writes (`insert`) and mints ids (`new_access_id`); the read/list/delete
-//! and device legs arrive in later passes.
+//! The stored value is the access's rendered `AccessInfo` JSON, returned
+//! verbatim by `GET`. `createAccess` writes (`insert`) and mints ids
+//! (`new_access_id`); the `readAccess` (`get`) leg reads it back. The remaining
+//! list/delete and device legs arrive in later passes.
 
 use serde_json::Value;
 use std::collections::HashMap;
@@ -38,6 +39,19 @@ pub fn insert(id: String, access: Value) {
         .lock()
         .expect("dedicated-network-accesses store not poisoned")
         .insert(id, access);
+}
+
+/// Fetch the `AccessInfo` stored under `id`, or `None` if no such access exists
+/// (never created, or created in a different process). `readAccess` uses the
+/// distinction to answer `200` vs `404`; the list/delete legs (later passes)
+/// will read this store too. The lock is held only for the clone, never across
+/// an `.await`, so it never blocks the async runtime.
+pub fn get(id: &str) -> Option<Value> {
+    store()
+        .lock()
+        .expect("dedicated-network-accesses store not poisoned")
+        .get(id)
+        .cloned()
 }
 
 /// Mint a fresh, opaque, UUID-v4-shaped access `id` (CAMARA `AccessId` is
@@ -93,12 +107,20 @@ mod tests {
     }
 
     #[test]
-    fn stored_access_is_retained_under_its_id() {
+    fn stored_access_is_read_back_under_its_id() {
         let id = new_access_id();
         let info = json!({ "id": id, "networkId": "n-1" });
         insert(id.clone(), info.clone());
-        // A create-only slice: the store retains what was written (read-back
-        // legs arrive later). Re-inserting the same id overwrites.
-        insert(id.clone(), json!({ "id": id, "networkId": "n-2" }));
+        // `readAccess` reads what was written, verbatim.
+        assert_eq!(get(&id), Some(info));
+        // Re-inserting the same id overwrites.
+        let info2 = json!({ "id": id, "networkId": "n-2" });
+        insert(id.clone(), info2.clone());
+        assert_eq!(get(&id), Some(info2));
+    }
+
+    #[test]
+    fn unknown_access_id_reads_back_none() {
+        assert_eq!(get("no-such-access-id"), None);
     }
 }

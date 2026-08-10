@@ -1118,10 +1118,15 @@ identifier (a reserved-suffix identifier → `DENIED`), records the rendered
 `AccessInfo` (with aggregate `stats` + `recentAccessDevices`) in a new in-memory
 store, and returns `201`. The `networkId` reserved suffix is the top-level error
 plane (`…404` → no such network); request validation → 400. `sinkCredential` is
-accepted but never echoed. The `207` multi-status form, the read/list/delete legs
-and the `/accesses/{accessId}/devices…` sub-resources are documented cuts for
-later passes. This picks the non-spatial sibling (`-accesses`) ahead of the
-spatial `-areas`, honouring the phase order.
+accepted but never echoed. This picks the non-spatial sibling (`-accesses`) ahead
+of the spatial `-areas`, honouring the phase order. The read leg
+`GET /accesses/{accessId}` (`readAccess`,
+`dedicated-network-accesses:accesses:read`) is now live too — keyed only on the
+in-memory store state (opaque minted UUID, no reserved-suffix plane) it reads the
+stored `AccessInfo` back (`200`) or `404 NOT_FOUND` for an unknown/malformed id,
+mirroring the sibling `readNetwork`. The `207` multi-status form, the list/delete
+legs and the `/accesses/{accessId}/devices…` sub-resources remain documented cuts
+for later passes.
 
 ## In progress (claimed this pass)
 
@@ -2612,7 +2617,12 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
         `ResultForDevice[]` form (partial denials are data inside the `201`), the
         `409`/`422` request-level cases, `sink` notification, and the read/list/
         delete + `/devices…` legs. `x-correlator` echoed. No new dep.
-      - [ ] read/list/delete legs (`readAccess`, `listAccesses`, `deleteAccess`)
+      - [x] `GET /accesses/{accessId}` (`readAccess`,
+        `dedicated-network-accesses:accesses:read`) — reads the stored
+        `AccessInfo` back (`200`) or `404 NOT_FOUND` for an unknown/malformed id;
+        store state is the only control plane (opaque minted UUID, no
+        reserved-suffix plane), mirroring the sibling `readNetwork`.
+      - [ ] list/delete legs (`listAccesses`, `deleteAccess`)
         + the `/accesses/{accessId}/devices…` sub-resources (`listDevices`,
         `addDevicesToAccess`, `removeDevicesFromAccess`) — later passes.
     - [ ] `dedicated-network-areas` (spatial) — later.
@@ -2642,6 +2652,24 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-10 — dedicated-network-accesses: added the read leg,
+  `GET /dedicated-network-accesses/vwip/accesses/{accessId}` (`readAccess`,
+  scope `dedicated-network-accesses:accesses:read`) — the topmost unclaimed
+  `[ ]` backlog leaf after last pass's createAccess. Confirmed the contract from
+  the authoritative upstream `dedicated-network-accesses.yaml` (`wip`, WebFetch):
+  `GET /accesses/{accessId}`, accessId UUID (maxLength 36), responses
+  200/400/401/403/404, 200 = `AccessInfo`. Mirrors the sibling `readNetwork`:
+  keyed only on the in-memory store state (opaque minted UUID → no
+  reserved-suffix plane) → `200 AccessInfo` (verbatim) or `404 NOT_FOUND` for an
+  unknown/malformed id (the upstream 400 malformed-path case folded into 404, as
+  in `readNetwork`). Added `store::get`; new route + `read_access` handler in
+  `vwip.rs`; `x-correlator` echoed. spec: added the `/accesses/{accessId}` GET op
+  (readAccess) + an `AccessId` path parameter + `x-camarasim-scenarios` to
+  `specs/dedicated-network-accesses/vwip/openapi.yaml`; header comment updated.
+  tests: +6 (2 store-unit: read-back / unknown-id-none; 4 integration:
+  create-then-read-back verbatim, unknown→404, wrong-scope→403, no-token→401).
+  No new dep. `cargo test` 1924 pass; `cargo build --release` ok.
+  binary (release): 3,603,504 bytes (~3.5M).
 - 2026-08-10 — dedicated-network-accesses: mounted the new **Accesses** sibling
   API and its create leg, `POST /dedicated-network-accesses/vwip/accesses`
   (`createAccess`, scope `dedicated-network-accesses:accesses:create`) — the

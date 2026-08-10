@@ -8,8 +8,8 @@
 # cases (docs/DESIGN.md §7, §9). Backed by
 # `src/apis/dedicated_network_accesses/vwip.rs`; spec and code must not drift.
 #
-# This slice serves the create leg `POST /accesses` (`createAccess`). The read
-# leg `GET /accesses/{accessId}` (`readAccess`), the list leg `GET /accesses`
+# This slice serves the create leg `POST /accesses` (`createAccess`) and the read
+# leg `GET /accesses/{accessId}` (`readAccess`). The list leg `GET /accesses`
 # (`listAccesses`), the delete leg `DELETE /accesses/{accessId}`
 # (`deleteAccess`), and the device sub-resources
 # (`/accesses/{accessId}/devices…`) arrive in later passes.
@@ -205,12 +205,81 @@ paths:
           - input: "a valid body; a device whose identifier is not a reserved suffix"
             result: "201 AccessInfo — that device is GRANTED, counted in stats.totalGranted"
 
+  /accesses/{accessId}:
+    get:
+      operationId: readAccess
+      summary: Read a dedicated network access by id
+      description: |
+        Returns the `AccessInfo` of the access previously created under
+        `accessId` (`200`), or `404 NOT_FOUND` when no such access exists. In
+        CamaraSim the `accessId` is a server-minted opaque UUID, so the only
+        control plane is the in-memory store state — a valid id from a prior
+        `createAccess` reads back, anything else (unknown or malformed) is `404`
+        (there is no reserved-suffix plane on a minted id, mirroring the sibling
+        Networks API's `readNetwork`).
+      security:
+        - openId:
+            - dedicated-network-accesses:accesses:read
+      parameters:
+        - $ref: "#/components/parameters/AccessId"
+        - $ref: "#/components/parameters/XCorrelator"
+      responses:
+        "200":
+          description: The dedicated network access was found.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AccessInfo"
+              examples:
+                readBack:
+                  summary: An access read back by id
+                  value:
+                    id: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+                    networkId: "00000000-0000-4000-8000-000000000012"
+                    stats:
+                      totalDevices: 1
+                      totalGranted: 1
+                      totalDenied: 0
+                    recentAccessDevices:
+                      - device:
+                          phoneNumber: "+123456789012"
+                        status: GRANTED
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+      x-camarasim-scenarios:
+        description: >-
+          Result selected only from the in-memory store state, keyed on the
+          server-minted opaque `accessId` (docs/DESIGN.md §7): a known id returns
+          its stored AccessInfo, an unknown one is 404. There is no
+          reserved-suffix plane on a minted id.
+        cases:
+          - input: an accessId returned by a prior createAccess
+            result: "200 AccessInfo (the stored access, verbatim)"
+          - input: any other (unknown / never-created / malformed) accessId
+            result: "404 NOT_FOUND"
+
 components:
   securitySchemes:
     openId:
       $ref: "../../auth/openapi.yaml#/components/securitySchemes/camaraOAuth"
 
   parameters:
+    AccessId:
+      name: accessId
+      in: path
+      required: true
+      description: The identifier of a dedicated network access (a UUID).
+      schema:
+        type: string
+        format: uuid
+        maxLength: 36
     XCorrelator:
       name: x-correlator
       in: header
