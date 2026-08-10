@@ -22,7 +22,8 @@
 #   GET    /app-instances                     (getAppInstances)    — list app instances
 #   DELETE /app-instances/{appInstanceId}     (deleteAppInstance)  — delete an app instance
 #   GET    /clusters                          (getClusters)        — read-only cluster catalog
-# The deployment resource is a later pass.
+#   POST   /deployments                       (createAppDeployment) — deploy an app across zones (stateful)
+# The deployment read/list/delete/patch legs are later passes.
 openapi: 3.0.3
 info:
   title: Edge Application Management
@@ -136,7 +137,33 @@ info:
     demonstrates the schema — there is no live orchestrator to size the pool (a
     documented simplification).
 
-    The deployment resource remains a later pass.
+    ### `createAppDeployment`
+
+    Deploys an onboarded application (`appId`) across one or more edge cloud
+    zones (`edgeCloudZones`) under a caller-chosen `appDeploymentName`, minting an
+    `appDeploymentId` and returning `202 Accepted` (deployment is modelled as
+    asynchronous). Three control planes drive the outcome:
+
+    1. **Request validation** — a missing/blank/invalid `appDeploymentName`, a
+       missing or non-UUID `appId`, a missing/empty/oversized `edgeCloudZones`
+       list or a non-UUID zone / `kubernetesClusterRefs` element → `400
+       INVALID_ARGUMENT`.
+    2. **Cross-reference** — the `appId` must name an app onboarded via
+       `submitApp`, and *every* `edgeCloudZones` entry must name a zone in the
+       fixed catalog; either miss → `404 NOT_FOUND`.
+    3. **Store state** — the `appDeploymentId` is minted deterministically from
+       the `(appId, appDeploymentName, sorted edgeCloudZones)` identity (RFC 4122
+       v5 UUID, SHA-256, no new dependency), so re-deploying the same app under
+       the same name across the same zone *set* (in any order) collides → `409
+       ALREADY_EXISTS`.
+
+    The persisted `AppDeploymentInfo` lists one `appInstances` id per target
+    zone, each derived with the same derivation `createAppInstance` uses, so a
+    deployment's instance ids line up with the app-instance keyspace. The
+    individual `AppInstanceInfo` resources are **not** separately materialised
+    into the app-instance store (a documented cut — the deployment models the
+    aggregate), and the `subscriptionRequest` status-change callback is accepted-
+    not-applied. The deployment read/list/delete/patch legs remain later passes.
   version: "wip"
   license:
     name: Apache-2.0
@@ -883,6 +910,125 @@ paths:
           - input: an unrecognised query parameter
             result: '400 INVALID_ARGUMENT'
 
+  /deployments:
+    post:
+      operationId: createAppDeployment
+      summary: Deploy an application across one or more edge cloud zones
+      description: |
+        Deploys an onboarded application (`appId`) across the target edge cloud
+        zones (`edgeCloudZones`) under a caller-chosen `appDeploymentName`. On
+        success an `appDeploymentId` is minted and returned with a `Location`
+        header; deployment is modelled as asynchronous (`202 Accepted`).
+
+        See the API description for the parameter-driven functional cases.
+      security:
+        - openId:
+            - edge-application-management:deployments:write
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateAppDeploymentRequest"
+      responses:
+        "202":
+          description: >-
+            Deployment accepted; the minted `appDeploymentId` is returned.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+            Location:
+              description: URI of the created deployment resource.
+              required: false
+              schema:
+                type: string
+                format: uri
+                example: >-
+                  /edge-application-management/vwip/deployments/6ec0bd7f-11c0-53da-975e-2a8ad9ebae0b
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - appDeploymentId
+                properties:
+                  appDeploymentId:
+                    $ref: "#/components/schemas/AppDeploymentId"
+        "400":
+          $ref: "../../shared/errors.yaml#/components/responses/InvalidArgument"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          description: >-
+            The referenced application (`appId`) or one of the edge cloud zones
+            (`edgeCloudZones`) does not exist.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "../../shared/errors.yaml#/components/schemas/CamaraError"
+              example:
+                status: 404
+                code: NOT_FOUND
+                message: No application found for the provided appId.
+        "409":
+          description: The deployment already exists.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "../../shared/errors.yaml#/components/schemas/CamaraError"
+              example:
+                status: 409
+                code: ALREADY_EXISTS
+                message: Deployment already exists
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          `createAppDeployment` deploys an onboarded app across one or more edge
+          cloud zones (docs/DESIGN.md §7). Three control planes drive the
+          outcome: request validation, a cross-reference against the app + zone
+          stores, and store state. The `appDeploymentId` is minted
+          deterministically from the `(appId, appDeploymentName, sorted
+          edgeCloudZones)` identity (RFC 4122 v5 UUID, SHA-256, no new
+          dependency), so re-deploying the same app under the same name across the
+          same zone set (in any order) collides → `409 ALREADY_EXISTS`. The
+          persisted `AppDeploymentInfo` lists one `appInstances` id per target
+          zone (the same derivation `createAppInstance` uses). Canonical
+          EdgeApplicationManagement declares 400/401/403/409/500/503 here (plus
+          404 for the CamaraSim cross-reference). Documented cuts: the individual
+          `AppInstanceInfo` resources are not separately materialised into the
+          app-instance store (the deployment models the aggregate), and the
+          `subscriptionRequest` status-change callback is accepted-not-applied.
+        cases:
+          - input: a valid request naming an onboarded `appId` and catalog `edgeCloudZones`
+            result: '202 — `{ appDeploymentId }` with a `Location` header; the `AppDeploymentInfo` is persisted'
+          - input: the same `appId` + `appDeploymentName` + zone set again (any order)
+            result: '409 ALREADY_EXISTS'
+          - input: the same `appId` + zones under a different `appDeploymentName`
+            result: '202 — a distinct `appDeploymentId`'
+          - input: a well-formed `appId` that was never onboarded
+            result: '404 NOT_FOUND'
+          - input: an `edgeCloudZones` entry that is not in the catalog
+            result: '404 NOT_FOUND'
+          - input: a missing/blank `appDeploymentName`, or one not matching `^[A-Za-z][A-Za-z0-9_]{1,63}$`
+            result: '400 INVALID_ARGUMENT'
+          - input: a missing/non-UUID `appId`, an empty/oversized `edgeCloudZones`, or a non-UUID zone / `kubernetesClusterRefs` entry
+            result: '400 INVALID_ARGUMENT'
+          - input: a body that is not valid JSON
+            result: '400 INVALID_ARGUMENT'
+
 components:
   securitySchemes:
     openId:
@@ -1294,3 +1440,93 @@ components:
           pattern: '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
           minLength: 36
           maxLength: 36
+
+    AppDeploymentName:
+      type: string
+      maxLength: 64
+      pattern: '^[A-Za-z][A-Za-z0-9_]{1,63}$'
+      description: Name of the app deployment, scoped to the app provider.
+      example: prod
+
+    AppDeploymentId:
+      type: string
+      format: uuid
+      description: The unique identifier minted for an application deployment.
+      pattern: '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
+      minLength: 36
+      maxLength: 36
+      example: 6ec0bd7f-11c0-53da-975e-2a8ad9ebae0b
+
+    CreateAppDeploymentRequest:
+      type: object
+      description: The request to deploy an onboarded application across edge cloud zones.
+      required:
+        - appDeploymentName
+        - appId
+        - edgeCloudZones
+      properties:
+        appDeploymentName:
+          $ref: "#/components/schemas/AppDeploymentName"
+        appId:
+          type: string
+          format: uuid
+          description: The identifier of an onboarded application (minted by `submitApp`).
+          pattern: '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
+          minLength: 36
+          maxLength: 36
+          example: 5e3a8c2f-1b4d-5a6e-8f90-2c1d3e4f5a6b
+        edgeCloudZones:
+          type: array
+          description: The target edge cloud zones (from `getEdgeCloudZones`) to deploy onto.
+          minItems: 1
+          maxItems: 100
+          items:
+            $ref: "#/components/schemas/EdgeCloudZoneId"
+        kubernetesClusterRefs:
+          type: array
+          description: Optional references to specific Kubernetes clusters to place onto.
+          maxItems: 100
+          items:
+            $ref: "#/components/schemas/KubernetesClusterRef"
+
+    AppDeploymentInfo:
+      type: object
+      description: >-
+        An application deployment (CAMARA `AppDeploymentInfo`) — an onboarded app
+        placed across one or more edge cloud zones, aggregating the app instances
+        created per zone.
+      required:
+        - appDeploymentName
+        - appDeploymentId
+        - appId
+        - edgeCloudZones
+        - appInstances
+      properties:
+        appDeploymentName:
+          $ref: "#/components/schemas/AppDeploymentName"
+        appDeploymentId:
+          $ref: "#/components/schemas/AppDeploymentId"
+        appId:
+          type: string
+          format: uuid
+          description: The identifier of the onboarded application this deployment runs.
+          pattern: '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
+          minLength: 36
+          maxLength: 36
+          example: 5e3a8c2f-1b4d-5a6e-8f90-2c1d3e4f5a6b
+        edgeCloudZones:
+          type: array
+          description: The edge cloud zones the application is deployed across.
+          maxItems: 100
+          items:
+            $ref: "#/components/schemas/EdgeCloudZoneId"
+        appInstances:
+          type: array
+          description: The application instances created as part of this deployment.
+          maxItems: 100
+          items:
+            type: string
+            format: uuid
+            pattern: '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
+            minLength: 36
+            maxLength: 36

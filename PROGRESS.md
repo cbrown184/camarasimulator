@@ -2769,7 +2769,29 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
       fixed representative `nodePools` entry (no live orchestrator — documented
       cut). `clusterRef` is a stable RFC 4122 v5 UUID (SHA-256, no new dep).
       `x-correlator` echoed.
-    - [ ] the stateful `deployments` resource — later passes.
+    - [~] the stateful `deployments` resource:
+      - [x] `POST /deployments` (`createAppDeployment`,
+        `edge-application-management:deployments:write`) — deploys an onboarded
+        app across one or more edge cloud zones, mints a UUID `appDeploymentId`,
+        persists the rendered `AppDeploymentInfo` in a new in-memory store
+        (`src/apis/edge_application_management/deployment_store.rs`;
+        `Mutex<HashMap>`, no new dep, mirroring the app/instance stores), returns
+        `202 Accepted` + `{appDeploymentId}` + `Location`. Three control planes
+        (DESIGN §7): request validation (missing/invalid `appDeploymentName`,
+        missing/non-UUID `appId`, missing/empty/>100/non-UUID `edgeCloudZones`,
+        non-UUID `kubernetesClusterRefs`, or non-JSON body → 400 INVALID_ARGUMENT);
+        a cross-reference against the app + zone stores (unknown `appId` or any
+        non-catalog `edgeCloudZones` entry → 404 NOT_FOUND); and store state — the
+        `appDeploymentId` is derived from the `(appId, appDeploymentName, sorted
+        edgeCloudZones)` identity (RFC 4122 v5, SHA-256), so re-deploying the same
+        app+name across the same zone *set* (any order) collides → 409
+        ALREADY_EXISTS. The persisted `AppDeploymentInfo` lists one `appInstances`
+        id per zone (same derivation as `createAppInstance`); the individual
+        `AppInstanceInfo` resources are not separately materialised (documented
+        cut), and `subscriptionRequest` is accepted-not-applied. `x-correlator`
+        echoed.
+      - [ ] read/list/delete/patch legs (`getAppDeployment` / `getAppDeployments`
+        / `deleteAppDeployment` / `updateAppDeployment`) — later passes.
 
 ## Cross-cutting (do alongside the item that needs it)
 - [~] `errors.rs`: base CAMARA error model done (`src/errors.rs`, `specs/shared/errors.yaml`); per-version catalogs still TODO (DESIGN §8)
@@ -2795,6 +2817,41 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-10 21:47Z — edge-application-management: added the **`createAppDeployment`
+  leg**, `POST /edge-application-management/vwip/deployments` (scope
+  `edge-application-management:deployments:write`) — the topmost unclaimed
+  actionable `[ ]` leaf (the remaining `[~]` items across the backlog are all
+  either `https://` sink-TLS, which needs a multi-MB rustls client that fights the
+  small-binary directive, or "no live worker/engine" open-ended state streams).
+  Verified against the **authoritative** CAMARA `EdgeApplicationManagement` `wip`
+  spec first: it confirms a real `/deployments` resource
+  (createAppDeployment/getAppDeployment/getAppDeployments/deleteAppDeployment/
+  updateAppDeployment). Scoped to the **create leg** only (read/list/delete/patch
+  left `[ ]` for later passes). Deploys an onboarded app across one or more edge
+  cloud zones: mints a deterministic RFC 4122 v5 `appDeploymentId` from the
+  `(appId, appDeploymentName, sorted edgeCloudZones)` identity (SHA-256, order-
+  independent), persists the rendered `AppDeploymentInfo` in a new in-memory store
+  (`deployment_store.rs`; `Mutex<HashMap>`, lock never across await), returns `202
+  Accepted` + `{appDeploymentId}` + `Location`. Three control planes (DESIGN §7):
+  request validation → 400 INVALID_ARGUMENT; a cross-reference against the app +
+  zone stores (unknown `appId` or any non-catalog zone → 404 NOT_FOUND); and store
+  state (same identity → 409 ALREADY_EXISTS "Deployment already exists"). The
+  persisted info lists one `appInstances` id per zone (same `instance_id`
+  derivation as `createAppInstance`, so ids line up with the app-instance
+  keyspace); the individual `AppInstanceInfo` resources are not separately
+  materialised (documented cut), and `subscriptionRequest` is accepted-not-applied.
+  Code: new `deployment_store` module (wired in `edge_application_management.rs`),
+  `create_app_deployment` handler + `CreateAppDeployment` body + `deployment_id`
+  helper, route wired. spec: added the `/deployments` POST op (202 `{appDeploymentId}`
+  + 400/401/403/404/409/500/503) with `x-camarasim-scenarios` + `AppDeploymentName`/
+  `AppDeploymentId`/`CreateAppDeploymentRequest`/`AppDeploymentInfo` schemas; header
+  op-list + narrative updated. tests: 9 new (1 unit: deployment_id stable/order-
+  independent/uuid-shaped/distinct-per-identity; 8 integration: happy path mints
+  uuid + persists AppDeploymentInfo w/ per-zone appInstances + Location; duplicate
+  identity (reordered zones) → 409; distinct name → new deployment; unknown app →
+  404; non-catalog zone → 404; full 400 validation table + bad JSON; 401/403 auth;
+  x-correlator on success + error) — 2049 pass (was 2040). No new dependency. —
+  binary: 3.7M (3,797,432 bytes)
 - 2026-08-10 — edge-application-management: added the **`getClusters` leg**,
   `GET /edge-application-management/vwip/clusters` (`getClusters`, scope
   `edge-application-management:clusters:read`) — the topmost unclaimed actionable

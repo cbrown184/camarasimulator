@@ -31,6 +31,11 @@
 //!   delete (terminate) an application instance (operationId `deleteAppInstance`,
 //!   scope `edge-application-management:instances:delete`). See
 //!   [`delete_app_instance`].
+//! - `POST /edge-application-management/vwip/deployments` — deploy an onboarded
+//!   application across one or more edge cloud zones, minting an
+//!   `appDeploymentId` (operationId `createAppDeployment`, scope
+//!   `edge-application-management:deployments:write`). See
+//!   [`create_app_deployment`].
 //!
 //! ## What it does
 //!
@@ -73,6 +78,7 @@ use sha2::{Digest, Sha256};
 use crate::auth::verify::Claims;
 use crate::errors::CamaraError;
 
+use super::deployment_store;
 use super::instance_store;
 use super::store;
 
@@ -100,6 +106,9 @@ const INSTANCES_DELETE_SCOPE: &str = "edge-application-management:instances:dele
 
 /// The OAuth2 scope `getClusters` requires (CAMARA EdgeApplicationManagement).
 const CLUSTERS_SCOPE: &str = "edge-application-management:clusters:read";
+
+/// The OAuth2 scope `createAppDeployment` requires (CAMARA EdgeApplicationManagement).
+const DEPLOYMENTS_WRITE_SCOPE: &str = "edge-application-management:deployments:write";
 
 /// The five CAMARA `AppManifest.packageType` values.
 const PACKAGE_TYPES: [&str; 5] = ["QCOW2", "OVA", "CONTAINER", "HELM", "CSAR"];
@@ -130,6 +139,10 @@ pub fn routes() -> Router {
         .route(
             "/edge-application-management/vwip/clusters",
             get(get_clusters),
+        )
+        .route(
+            "/edge-application-management/vwip/deployments",
+            post(create_app_deployment),
         )
 }
 
@@ -687,6 +700,171 @@ async fn create_app_instance(claims: Claims, headers: HeaderMap, body: Bytes) ->
     with_correlator(response, &correlator)
 }
 
+/// The CAMARA `createAppDeployment` request body. Every field is captured as an
+/// `Option` so a *missing* required field is reported as a precise `400
+/// INVALID_ARGUMENT` (rather than a serde rejection). `subscriptionRequest` is
+/// accepted-not-applied (status-change notifications are a later slice), so it is
+/// not modelled here.
+#[derive(Debug, Deserialize)]
+struct CreateAppDeployment {
+    #[serde(rename = "appDeploymentName")]
+    app_deployment_name: Option<String>,
+    #[serde(rename = "appId")]
+    app_id: Option<String>,
+    #[serde(rename = "edgeCloudZones")]
+    edge_cloud_zones: Option<Vec<String>>,
+    #[serde(rename = "kubernetesClusterRefs")]
+    kubernetes_cluster_refs: Option<Vec<String>>,
+}
+
+/// `POST /edge-application-management/vwip/deployments` (`createAppDeployment`).
+///
+/// Deploys an onboarded application across one or more edge cloud zones: the
+/// caller sends an `appDeploymentName`, the `appId` of an onboarded app, and a
+/// non-empty `edgeCloudZones` list of target zones; the simulator validates the
+/// request, mints an `appDeploymentId`, renders the `AppDeploymentInfo`, persists
+/// it in the in-memory [`deployment_store`], and returns `202 Accepted` with the
+/// minted id and a `Location` header (CAMARA models deployment as asynchronous).
+///
+/// There is no upstream orchestrator, so the outcome is driven by the input plus
+/// the two in-memory stores (docs/DESIGN.md §7):
+///
+/// 1. **Request validation** — a missing/blank/invalid `appDeploymentName`, a
+///    missing or non-UUID `appId`, a missing/empty/oversized `edgeCloudZones`
+///    list or a non-UUID zone/`kubernetesClusterRefs` element → `400
+///    INVALID_ARGUMENT`.
+/// 2. **Cross-reference** — the `appId` must name an app onboarded via
+///    `submitApp`, and *every* `edgeCloudZones` entry must name a zone in the
+///    fixed catalog; either miss → `404 NOT_FOUND`.
+/// 3. **Store state** — the `appDeploymentId` is derived deterministically from
+///    the `(appId, appDeploymentName, sorted edgeCloudZones)` identity (see
+///    [`deployment_id`]), so re-deploying the *same* app under the *same* name
+///    across the *same* zones collides → `409 ALREADY_EXISTS` (the CAMARA
+///    "Deployment already exists" conflict).
+///
+/// The rendered `AppDeploymentInfo` lists an `appInstances` id per target zone,
+/// each derived with the same [`instance_id`] derivation `createAppInstance`
+/// uses, so a deployment's instance ids line up with the app-instance resource's
+/// keyspace. The individual `AppInstanceInfo` resources are *not* separately
+/// materialised into the app-instance store (a documented cut — the deployment
+/// models the aggregate). `x-correlator` is echoed on every response.
+async fn create_app_deployment(claims: Claims, headers: HeaderMap, body: Bytes) -> Response {
+    let correlator = headers.get("x-correlator").cloned();
+
+    // Endpoint authorisation: the token must carry this API's deployments scope.
+    if let Err(e) = claims.require_scope(DEPLOYMENTS_WRITE_SCOPE) {
+        return with_correlator(e.into_response(), &correlator);
+    }
+
+    // Parse the request body (malformed JSON / wrong field types → 400).
+    let req: CreateAppDeployment = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(_) => {
+            return invalid_argument(
+                "the request body is not a valid createAppDeployment JSON object",
+                &correlator,
+            )
+        }
+    };
+
+    // Control plane 1 — required-field / shape validation.
+    let name = match req.app_deployment_name.as_deref() {
+        None => return invalid_argument("`appDeploymentName` is required", &correlator),
+        Some(n) if !is_valid_app_name(n) => {
+            return invalid_argument(
+                "`appDeploymentName` must match `^[A-Za-z][A-Za-z0-9_]{1,63}$`",
+                &correlator,
+            )
+        }
+        Some(n) => n,
+    };
+    let app_id = match req.app_id.as_deref() {
+        None => return invalid_argument("`appId` is required", &correlator),
+        Some(a) if !is_uuid(a) => {
+            return invalid_argument("`appId` must be a UUID", &correlator)
+        }
+        Some(a) => a,
+    };
+    let zones = match req.edge_cloud_zones.as_deref() {
+        None => return invalid_argument("`edgeCloudZones` is required", &correlator),
+        Some(z) if z.is_empty() => {
+            return invalid_argument("`edgeCloudZones` must not be empty", &correlator)
+        }
+        Some(z) if z.len() > 100 => {
+            return invalid_argument("`edgeCloudZones` must hold at most 100 entries", &correlator)
+        }
+        Some(z) if !z.iter().all(|id| is_uuid(id)) => {
+            return invalid_argument("every `edgeCloudZones` entry must be a UUID", &correlator)
+        }
+        Some(z) => z,
+    };
+    if let Some(refs) = req.kubernetes_cluster_refs.as_deref() {
+        if refs.len() > 100 {
+            return invalid_argument(
+                "`kubernetesClusterRefs` must hold at most 100 entries",
+                &correlator,
+            );
+        }
+        if !refs.iter().all(|id| is_uuid(id)) {
+            return invalid_argument(
+                "every `kubernetesClusterRefs` entry must be a UUID",
+                &correlator,
+            );
+        }
+    }
+
+    // Control plane 2 — cross-reference the in-memory stores. The app must be
+    // onboarded and *every* target zone must exist in the fixed catalog.
+    if store::get(app_id).is_none() {
+        return with_correlator(
+            CamaraError::not_found("No application found for the provided appId.")
+                .into_response(),
+            &correlator,
+        );
+    }
+    if !zones.iter().all(|id| zone_by_id(id).is_some()) {
+        return with_correlator(
+            CamaraError::not_found(
+                "No edge cloud zone found for one of the provided edgeCloudZones.",
+            )
+            .into_response(),
+            &correlator,
+        );
+    }
+
+    // Render the AppDeploymentInfo. Each target zone contributes one deterministic
+    // `appInstances` id (the same derivation `createAppInstance` uses).
+    let deployment_id = deployment_id(app_id, name, zones);
+    let app_instances: Vec<Value> =
+        zones.iter().map(|z| json!(instance_id(app_id, z))).collect();
+    let info = json!({
+        "appDeploymentName": name,
+        "appDeploymentId": deployment_id,
+        "appId": app_id,
+        "edgeCloudZones": zones,
+        "appInstances": app_instances,
+    });
+
+    // Control plane 3 — store state (same deployment identity → 409).
+    if !deployment_store::insert(deployment_id.clone(), info) {
+        return with_correlator(
+            CamaraError::new(StatusCode::CONFLICT, "ALREADY_EXISTS", "Deployment already exists")
+                .into_response(),
+            &correlator,
+        );
+    }
+
+    let location = format!("/edge-application-management/vwip/deployments/{deployment_id}");
+    let mut response =
+        (StatusCode::ACCEPTED, Json(json!({ "appDeploymentId": deployment_id }))).into_response();
+    if let Ok(value) = HeaderValue::from_str(&location) {
+        response
+            .headers_mut()
+            .insert(HeaderName::from_static("location"), value);
+    }
+    with_correlator(response, &correlator)
+}
+
 /// `GET /edge-application-management/vwip/app-instances/{appInstanceId}`
 /// (`getAppInstance`).
 ///
@@ -962,6 +1140,30 @@ fn instance_status(zone_status: &str) -> &'static str {
 fn instance_id(app_id: &str, zone_id: &str) -> String {
     let mut h =
         Sha256::digest(format!("eam-instance:{app_id}\u{1f}{zone_id}").as_bytes());
+    h[6] = (h[6] & 0x0f) | 0x50; // version 5
+    h[8] = (h[8] & 0x3f) | 0x80; // variant (10xx)
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7], h[8], h[9], h[10], h[11], h[12], h[13], h[14], h[15]
+    )
+}
+
+/// A stable, RFC 4122 (version 5, name-based) UUID `appDeploymentId` for a
+/// deployment, derived from its identity — the `(appId, appDeploymentName,
+/// sorted edgeCloudZones)` triple — via SHA-256 (deterministic, no new
+/// dependency). The version (`5`) and variant nibbles are forced so the id
+/// satisfies the strict CAMARA `AppDeploymentId` UUID pattern. The zones are
+/// sorted first so the identity is order-independent (deploying the same app+name
+/// across the same zone *set*, in any order, hits the same id). Deriving the id
+/// from the identity is what makes a duplicate deployment collide (→ `409
+/// ALREADY_EXISTS`), matching CAMARA's "Deployment already exists" conflict.
+fn deployment_id(app_id: &str, name: &str, zones: &[String]) -> String {
+    let mut sorted = zones.to_vec();
+    sorted.sort();
+    let joined = sorted.join(",");
+    let mut h = Sha256::digest(
+        format!("eam-deployment:{app_id}\u{1f}{name}\u{1f}{joined}").as_bytes(),
+    );
     h[6] = (h[6] & 0x0f) | 0x50; // version 5
     h[8] = (h[8] & 0x3f) | 0x80; // variant (10xx)
     format!(
@@ -2519,6 +2721,261 @@ mod tests {
         assert_eq!(
             headers.get("x-correlator").and_then(|v| v.to_str().ok()),
             Some("corr-clusters")
+        );
+    }
+
+    // --- createAppDeployment: pure units -----------------------------------
+
+    #[test]
+    fn deployment_id_is_stable_order_independent_uuid_shaped() {
+        let app = "5e3a8c2f-1b4d-5a6e-8f90-2c1d3e4f5a6b";
+        let a = zone_id("camarasim-edge-eu-west-1");
+        let b = zone_id("camarasim-edge-us-east-1");
+
+        let id = deployment_id(app, "prod", &[a.clone(), b.clone()]);
+        assert!(is_uuid(&id), "deployment id {id} is a UUID");
+        // Stable per identity.
+        assert_eq!(id, deployment_id(app, "prod", &[a.clone(), b.clone()]));
+        // Order-independent over the zone set.
+        assert_eq!(id, deployment_id(app, "prod", &[b.clone(), a.clone()]));
+        // A different name, app, or zone set → a different id.
+        assert_ne!(id, deployment_id(app, "staging", &[a.clone(), b.clone()]));
+        assert_ne!(
+            id,
+            deployment_id("00000000-0000-4000-8000-000000000000", "prod", &[a.clone(), b.clone()])
+        );
+        assert_ne!(id, deployment_id(app, "prod", &[a.clone()]));
+    }
+
+    // --- createAppDeployment: integration through the real router ----------
+
+    async fn post_deployment(
+        token: Option<&str>,
+        body: &str,
+        correlator: Option<&str>,
+    ) -> (StatusCode, HeaderMap, Value) {
+        let mut builder = Request::builder()
+            .method("POST")
+            .uri("/edge-application-management/vwip/deployments")
+            .header("host", HOST)
+            .header("content-type", "application/json");
+        if let Some(t) = token {
+            builder = builder.header("authorization", format!("Bearer {t}"));
+        }
+        if let Some(c) = correlator {
+            builder = builder.header("x-correlator", c);
+        }
+        let response = app()
+            .oneshot(builder.body(Body::from(body.to_string())).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let headers = response.headers().clone();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, headers, json)
+    }
+
+    /// A second active catalog zone, distinct from [`active_zone`].
+    fn second_zone() -> String {
+        zone_id("camarasim-edge-us-east-1")
+    }
+
+    #[tokio::test]
+    async fn create_app_deployment_mints_a_uuid_persists_and_lists_instances() {
+        let (_, app_id) = submit_and_get_id("deploy_ok_app").await;
+        let zones = vec![active_zone(), second_zone()];
+        let token = mint_token(DEPLOYMENTS_WRITE_SCOPE).await;
+        let body = json!({
+            "appDeploymentName": "prod",
+            "appId": app_id,
+            "edgeCloudZones": zones,
+        });
+        let (status, headers, resp) = post_deployment(Some(&token), &body.to_string(), None).await;
+
+        assert_eq!(status, StatusCode::ACCEPTED);
+        let deployment_id = resp["appDeploymentId"].as_str().expect("appDeploymentId string");
+        assert!(is_uuid(deployment_id), "appDeploymentId {deployment_id} is a UUID");
+        // The 202 body carries only the minted id (CAMARA createAppDeployment).
+        assert_eq!(resp.as_object().unwrap().len(), 1);
+        // Location header points at the deployment resource.
+        assert_eq!(
+            headers.get("location").and_then(|v| v.to_str().ok()),
+            Some(
+                format!("/edge-application-management/vwip/deployments/{deployment_id}").as_str()
+            )
+        );
+        // The rendered AppDeploymentInfo is persisted with all required fields.
+        let stored = deployment_store::get(deployment_id).expect("deployment persisted");
+        assert_eq!(stored["appDeploymentName"], "prod");
+        assert_eq!(stored["appDeploymentId"], json!(deployment_id));
+        assert_eq!(stored["appId"], json!(app_id));
+        assert_eq!(stored["edgeCloudZones"], json!(zones));
+        // One appInstances id per target zone, keyed like createAppInstance.
+        assert_eq!(
+            stored["appInstances"],
+            json!([instance_id(&app_id, &zones[0]), instance_id(&app_id, &zones[1])])
+        );
+    }
+
+    #[tokio::test]
+    async fn create_app_deployment_same_identity_conflicts() {
+        let (_, app_id) = submit_and_get_id("deploy_dup_app").await;
+        let token = mint_token(DEPLOYMENTS_WRITE_SCOPE).await;
+        let zones = vec![active_zone(), second_zone()];
+        let body = json!({
+            "appDeploymentName": "prod",
+            "appId": app_id,
+            "edgeCloudZones": zones,
+        });
+        let (status, _, _) = post_deployment(Some(&token), &body.to_string(), None).await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+
+        // Same identity, zones in a different order → same id → 409.
+        let reordered = json!({
+            "appDeploymentName": "prod",
+            "appId": app_id,
+            "edgeCloudZones": vec![second_zone(), active_zone()],
+        });
+        let (status, _, resp) = post_deployment(Some(&token), &reordered.to_string(), None).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(resp["code"], "ALREADY_EXISTS");
+        assert_eq!(resp["status"], 409);
+    }
+
+    #[tokio::test]
+    async fn create_app_deployment_distinct_name_or_zones_is_a_new_deployment() {
+        let (_, app_id) = submit_and_get_id("deploy_distinct_app").await;
+        let token = mint_token(DEPLOYMENTS_WRITE_SCOPE).await;
+        let first = json!({
+            "appDeploymentName": "prod",
+            "appId": app_id,
+            "edgeCloudZones": vec![active_zone()],
+        });
+        let (s1, _, r1) = post_deployment(Some(&token), &first.to_string(), None).await;
+        assert_eq!(s1, StatusCode::ACCEPTED);
+
+        // A different name → a distinct deployment (not a 409).
+        let renamed = json!({
+            "appDeploymentName": "staging",
+            "appId": app_id,
+            "edgeCloudZones": vec![active_zone()],
+        });
+        let (s2, _, r2) = post_deployment(Some(&token), &renamed.to_string(), None).await;
+        assert_eq!(s2, StatusCode::ACCEPTED);
+        assert_ne!(r1["appDeploymentId"], r2["appDeploymentId"]);
+    }
+
+    #[tokio::test]
+    async fn create_app_deployment_unknown_app_is_not_found() {
+        let token = mint_token(DEPLOYMENTS_WRITE_SCOPE).await;
+        // A well-formed UUID that was never onboarded.
+        let body = json!({
+            "appDeploymentName": "prod",
+            "appId": "00000000-0000-5000-8000-000000000000",
+            "edgeCloudZones": vec![active_zone()],
+        });
+        let (status, _, resp) = post_deployment(Some(&token), &body.to_string(), None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(resp["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn create_app_deployment_unknown_zone_is_not_found() {
+        let (_, app_id) = submit_and_get_id("deploy_badzone_app").await;
+        let token = mint_token(DEPLOYMENTS_WRITE_SCOPE).await;
+        // One catalog zone plus a well-formed UUID that is not in the catalog.
+        let body = json!({
+            "appDeploymentName": "prod",
+            "appId": app_id,
+            "edgeCloudZones": vec![active_zone(), "00000000-0000-4000-8000-000000000000".to_string()],
+        });
+        let (status, _, resp) = post_deployment(Some(&token), &body.to_string(), None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(resp["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn create_app_deployment_validates_the_request_body() {
+        let (_, app_id) = submit_and_get_id("deploy_validate_app").await;
+        let token = mint_token(DEPLOYMENTS_WRITE_SCOPE).await;
+        let z = active_zone();
+
+        // A table of bodies that must each be rejected as 400 INVALID_ARGUMENT.
+        let cases = vec![
+            // missing appDeploymentName
+            json!({ "appId": app_id, "edgeCloudZones": [z] }),
+            // bad appDeploymentName pattern
+            json!({ "appDeploymentName": "1bad", "appId": app_id, "edgeCloudZones": [z] }),
+            // missing appId
+            json!({ "appDeploymentName": "prod", "edgeCloudZones": [z] }),
+            // non-UUID appId
+            json!({ "appDeploymentName": "prod", "appId": "nope", "edgeCloudZones": [z] }),
+            // missing edgeCloudZones
+            json!({ "appDeploymentName": "prod", "appId": app_id }),
+            // empty edgeCloudZones
+            json!({ "appDeploymentName": "prod", "appId": app_id, "edgeCloudZones": [] }),
+            // non-UUID zone element
+            json!({ "appDeploymentName": "prod", "appId": app_id, "edgeCloudZones": ["nope"] }),
+            // non-UUID kubernetesClusterRefs element
+            json!({ "appDeploymentName": "prod", "appId": app_id, "edgeCloudZones": [z], "kubernetesClusterRefs": ["nope"] }),
+        ];
+        for body in cases {
+            let (status, _, resp) = post_deployment(Some(&token), &body.to_string(), None).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "body {body} should be 400");
+            assert_eq!(resp["code"], "INVALID_ARGUMENT", "body {body} code");
+        }
+
+        // A body that is not valid JSON.
+        let (status, _, resp) = post_deployment(Some(&token), "{not json", None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(resp["code"], "INVALID_ARGUMENT");
+    }
+
+    #[tokio::test]
+    async fn create_app_deployment_requires_authentication_and_scope() {
+        let (_, app_id) = submit_and_get_id("deploy_auth_app").await;
+        let body = json!({
+            "appDeploymentName": "prod",
+            "appId": app_id,
+            "edgeCloudZones": vec![active_zone()],
+        });
+        // No token → 401.
+        let (status, _, _) = post_deployment(None, &body.to_string(), None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        // Wrong scope → 403.
+        let wrong = mint_token(INSTANCES_WRITE_SCOPE).await;
+        let (status, _, resp) = post_deployment(Some(&wrong), &body.to_string(), None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(resp["code"], "PERMISSION_DENIED");
+    }
+
+    #[tokio::test]
+    async fn create_app_deployment_echoes_x_correlator_on_success_and_error() {
+        let (_, app_id) = submit_and_get_id("deploy_corr_app").await;
+        let token = mint_token(DEPLOYMENTS_WRITE_SCOPE).await;
+        // Success path.
+        let ok = json!({
+            "appDeploymentName": "prod",
+            "appId": app_id,
+            "edgeCloudZones": vec![active_zone()],
+        });
+        let (status, headers, _) =
+            post_deployment(Some(&token), &ok.to_string(), Some("corr-dep-ok")).await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-dep-ok")
+        );
+        // Error path (validation 400).
+        let (status, headers, _) =
+            post_deployment(Some(&token), "{not json", Some("corr-dep-err")).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-dep-err")
         );
     }
 }

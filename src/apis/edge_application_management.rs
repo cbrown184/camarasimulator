@@ -21,6 +21,7 @@
 //!   EdgeApplicationManagement `wip`, mounted at its canonical `vwip` base path
 //!   like the other unreleased EdgeCloud APIs).
 
+pub mod deployment_store;
 pub mod instance_store;
 pub mod store;
 pub mod vwip;
