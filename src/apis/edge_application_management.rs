@@ -8,16 +8,20 @@
 //! discovery *finds* the right edge zone for a device; Edge Application
 //! Management *places workloads* onto those zones.
 //!
-//! CamaraSim implements the read-only zone-catalog leg first — the
-//! `edge-cloud-zones` a provider deploys onto — reusing the fixed EdgeCloud zone
-//! table shape shared across the EdgeCloud family (docs/DESIGN.md §7). The
-//! stateful app / app-instance / deployment resources are later passes.
+//! CamaraSim serves the read-only zone-catalog leg (the `edge-cloud-zones` a
+//! provider deploys onto, reusing the fixed EdgeCloud zone table shape shared
+//! across the EdgeCloud family — docs/DESIGN.md §7), the stateful `apps` CRUD
+//! (onboard/read/list/delete), and the `createAppInstance` leg — instantiating
+//! an onboarded app onto a specific zone (in-memory [`instance_store`]). The
+//! remaining app-instance read/list/delete legs, and the deployment / cluster
+//! resources, are later passes.
 //!
 //! One submodule per major version (docs/DESIGN.md §5, §9). So far:
 //! - [`vwip`] — mounted at `/edge-application-management/vwip` (CAMARA
 //!   EdgeApplicationManagement `wip`, mounted at its canonical `vwip` base path
 //!   like the other unreleased EdgeCloud APIs).
 
+pub mod instance_store;
 pub mod store;
 pub mod vwip;
 

@@ -59,6 +59,7 @@ use sha2::{Digest, Sha256};
 use crate::auth::verify::Claims;
 use crate::errors::CamaraError;
 
+use super::instance_store;
 use super::store;
 
 /// The OAuth2 scope `getEdgeCloudZones` requires (CAMARA EdgeApplicationManagement).
@@ -72,6 +73,9 @@ const APPS_READ_SCOPE: &str = "edge-application-management:apps:read";
 
 /// The OAuth2 scope `deleteApp` requires (CAMARA EdgeApplicationManagement).
 const APPS_DELETE_SCOPE: &str = "edge-application-management:apps:delete";
+
+/// The OAuth2 scope `createAppInstance` requires (CAMARA EdgeApplicationManagement).
+const INSTANCES_WRITE_SCOPE: &str = "edge-application-management:instances:write";
 
 /// The five CAMARA `AppManifest.packageType` values.
 const PACKAGE_TYPES: [&str; 5] = ["QCOW2", "OVA", "CONTAINER", "HELM", "CSAR"];
@@ -90,6 +94,10 @@ pub fn routes() -> Router {
         .route(
             "/edge-application-management/vwip/apps/:app_id",
             get(get_app).delete(delete_app),
+        )
+        .route(
+            "/edge-application-management/vwip/app-instances",
+            post(create_app_instance),
         )
 }
 
@@ -359,6 +367,164 @@ fn app_manifest_info(app_id: String, mut manifest: Value) -> Value {
     manifest
 }
 
+/// The CAMARA `createAppInstance` request body. Every field is captured as an
+/// `Option` so a *missing* required field is reported as a precise `400
+/// INVALID_ARGUMENT` (rather than a serde rejection). `subscriptionRequest` is
+/// accepted-not-applied (status-change notifications are a later slice), so it
+/// is not modelled here.
+#[derive(Debug, Deserialize)]
+struct CreateAppInstance {
+    name: Option<String>,
+    #[serde(rename = "appId")]
+    app_id: Option<String>,
+    #[serde(rename = "edgeCloudZoneId")]
+    edge_cloud_zone_id: Option<String>,
+    #[serde(rename = "kubernetesClusterRef")]
+    kubernetes_cluster_ref: Option<String>,
+}
+
+/// `POST /edge-application-management/vwip/app-instances` (`createAppInstance`).
+///
+/// Instantiates an onboarded application onto a specific edge cloud zone: the
+/// caller sends the app instance `name`, the `appId` of an onboarded app, and
+/// the `edgeCloudZoneId` of a target zone; the simulator validates the request,
+/// mints an `appInstanceId`, renders the `AppInstanceInfo`, persists it in the
+/// in-memory [`instance_store`], and returns `202 Accepted` with a `Location`
+/// header (CAMARA models instantiation as asynchronous).
+///
+/// There is no upstream orchestrator, so the outcome is driven by the input plus
+/// the two in-memory stores (docs/DESIGN.md §7):
+///
+/// 1. **Request validation** — a missing/blank/invalid `name`, a missing or
+///    non-UUID `appId` / `edgeCloudZoneId`, or a non-UUID `kubernetesClusterRef`
+///    → `400 INVALID_ARGUMENT`.
+/// 2. **Cross-reference** — the `appId` must name an app onboarded via
+///    `submitApp` and the `edgeCloudZoneId` must name a zone in the fixed
+///    catalog; either miss → `404 NOT_FOUND`.
+/// 3. **Store state** — the `appInstanceId` is derived deterministically from
+///    the `(appId, edgeCloudZoneId)` pair (see [`instance_id`]), so instantiating
+///    the *same* app onto the *same* zone collides → `409 ALREADY_EXISTS` (the
+///    CAMARA "already instantiated in the given Edge Cloud Zone" conflict).
+///
+/// The reported `status` is a genuine second control plane: it is derived from
+/// the target zone's own catalog `edgeCloudZoneStatus` (see [`instance_status`]),
+/// so the chosen zone selects `ready` / `failed` / `instantiating`. The
+/// `componentEndpointInfo` (runtime endpoints) is omitted — there is no live
+/// workload — a documented cut. `x-correlator` is echoed on every response.
+async fn create_app_instance(claims: Claims, headers: HeaderMap, body: Bytes) -> Response {
+    let correlator = headers.get("x-correlator").cloned();
+
+    // Endpoint authorisation: the token must carry this API's instances scope.
+    if let Err(e) = claims.require_scope(INSTANCES_WRITE_SCOPE) {
+        return with_correlator(e.into_response(), &correlator);
+    }
+
+    // Parse the request body (malformed JSON / wrong field types → 400).
+    let req: CreateAppInstance = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(_) => {
+            return invalid_argument(
+                "the request body is not a valid createAppInstance JSON object",
+                &correlator,
+            )
+        }
+    };
+
+    // Control plane 1 — required-field / shape validation.
+    let name = match req.name.as_deref() {
+        None => return invalid_argument("`name` is required", &correlator),
+        Some(n) if !is_valid_app_name(n) => {
+            return invalid_argument(
+                "`name` must match `^[A-Za-z][A-Za-z0-9_]{1,63}$`",
+                &correlator,
+            )
+        }
+        Some(n) => n,
+    };
+    let app_id = match req.app_id.as_deref() {
+        None => return invalid_argument("`appId` is required", &correlator),
+        Some(a) if !is_uuid(a) => {
+            return invalid_argument("`appId` must be a UUID", &correlator)
+        }
+        Some(a) => a,
+    };
+    let zone_id_in = match req.edge_cloud_zone_id.as_deref() {
+        None => return invalid_argument("`edgeCloudZoneId` is required", &correlator),
+        Some(z) if !is_uuid(z) => {
+            return invalid_argument("`edgeCloudZoneId` must be a UUID", &correlator)
+        }
+        Some(z) => z,
+    };
+    if let Some(k) = req.kubernetes_cluster_ref.as_deref() {
+        if !is_uuid(k) {
+            return invalid_argument("`kubernetesClusterRef` must be a UUID", &correlator);
+        }
+    }
+
+    // Control plane 2 — cross-reference the two in-memory stores. The app must be
+    // onboarded (so its `appProvider` can be echoed) and the zone must exist.
+    let manifest = match store::get(app_id) {
+        Some(m) => m,
+        None => {
+            return with_correlator(
+                CamaraError::not_found("No application found for the provided appId.")
+                    .into_response(),
+                &correlator,
+            )
+        }
+    };
+    let zone = match zone_by_id(zone_id_in) {
+        Some(z) => z,
+        None => {
+            return with_correlator(
+                CamaraError::not_found(
+                    "No edge cloud zone found for the provided edgeCloudZoneId.",
+                )
+                .into_response(),
+                &correlator,
+            )
+        }
+    };
+
+    // Render the AppInstanceInfo. `appProvider` is echoed from the onboarded
+    // app's manifest; `status` is derived from the target zone's catalog status.
+    let instance_id = instance_id(app_id, zone_id_in);
+    let provider = manifest.get("appProvider").cloned().unwrap_or(Value::Null);
+    let mut info = json!({
+        "appInstanceId": instance_id,
+        "name": name,
+        "appId": app_id,
+        "appProvider": provider,
+        "edgeCloudZoneId": zone_id_in,
+        "status": instance_status(zone.3),
+    });
+    if let Some(k) = req.kubernetes_cluster_ref.as_deref() {
+        info["kubernetesClusterRef"] = json!(k);
+    }
+
+    // Control plane 3 — store state (same app on the same zone → 409).
+    if !instance_store::insert(instance_id.clone(), info.clone()) {
+        return with_correlator(
+            CamaraError::new(
+                StatusCode::CONFLICT,
+                "ALREADY_EXISTS",
+                "Application already instantiated in the given Edge Cloud Zone",
+            )
+            .into_response(),
+            &correlator,
+        );
+    }
+
+    let location = format!("/edge-application-management/vwip/app-instances/{instance_id}");
+    let mut response = (StatusCode::ACCEPTED, Json(info)).into_response();
+    if let Ok(value) = HeaderValue::from_str(&location) {
+        response
+            .headers_mut()
+            .insert(HeaderName::from_static("location"), value);
+    }
+    with_correlator(response, &correlator)
+}
+
 /// The subset of CAMARA `AppManifest` fields CamaraSim validates. All are
 /// captured as `Option`/`Value` so a *missing* required field is reported as a
 /// precise `400 INVALID_ARGUMENT` (rather than a serde rejection), and the
@@ -472,6 +638,84 @@ fn zone_id(zone_name: &str) -> String {
     )
 }
 
+/// Find the fixed-catalog zone whose derived [`zone_id`] equals `id`, if any.
+/// Backs `createAppInstance`'s zone cross-reference: an `edgeCloudZoneId` that
+/// names no catalog zone → `404 NOT_FOUND`.
+fn zone_by_id(id: &str) -> Option<&'static (&'static str, &'static str, &'static str, &'static str)> {
+    EDGE_ZONES.iter().find(|z| zone_id(z.0) == id)
+}
+
+/// Map a target zone's catalog `edgeCloudZoneStatus` to the app instance's
+/// `status`, making the chosen zone a genuine second control plane
+/// (docs/DESIGN.md §7): an `active` zone instantiates cleanly (`ready`), an
+/// `inactive` zone can't host the workload (`failed`), and an `unknown`-status
+/// zone is still bringing it up (`instantiating`). The `terminating` / `unknown`
+/// instance states are teardown/degraded transitions not reachable on create (a
+/// documented cut).
+fn instance_status(zone_status: &str) -> &'static str {
+    match zone_status {
+        "active" => "ready",
+        "inactive" => "failed",
+        _ => "instantiating",
+    }
+}
+
+/// A stable, RFC 4122 (version 5, name-based) UUID `appInstanceId` for an app
+/// instance, derived from the `(appId, edgeCloudZoneId)` pair via SHA-256
+/// (deterministic, no new dependency). The version (`5`) and variant nibbles are
+/// forced so the id satisfies the strict CAMARA UUID pattern. Deriving the id
+/// from the (app, zone) pair is what makes a duplicate instantiation collide (→
+/// `409 ALREADY_EXISTS`), matching CAMARA's "already instantiated in the given
+/// Edge Cloud Zone" conflict.
+fn instance_id(app_id: &str, zone_id: &str) -> String {
+    let mut h =
+        Sha256::digest(format!("eam-instance:{app_id}\u{1f}{zone_id}").as_bytes());
+    h[6] = (h[6] & 0x0f) | 0x50; // version 5
+    h[8] = (h[8] & 0x3f) | 0x80; // variant (10xx)
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7], h[8], h[9], h[10], h[11], h[12], h[13], h[14], h[15]
+    )
+}
+
+/// Whether `s` matches the strict CAMARA UUID pattern
+/// `^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`.
+/// Checked by hand — no `regex` dependency. Used by `createAppInstance` to
+/// reject a malformed `appId` / `edgeCloudZoneId` / `kubernetesClusterRef` with
+/// `400 INVALID_ARGUMENT`.
+fn is_uuid(s: &str) -> bool {
+    let b = s.as_bytes();
+    if b.len() != 36 {
+        return false;
+    }
+    let hex = |c: u8| c.is_ascii_digit() || (b'a'..=b'f').contains(&c);
+    for (i, &c) in b.iter().enumerate() {
+        match i {
+            8 | 13 | 18 | 23 => {
+                if c != b'-' {
+                    return false;
+                }
+            }
+            14 => {
+                if !(b'1'..=b'5').contains(&c) {
+                    return false;
+                }
+            }
+            19 => {
+                if !matches!(c, b'8' | b'9' | b'a' | b'b') {
+                    return false;
+                }
+            }
+            _ => {
+                if !hex(c) {
+                    return false;
+                }
+            }
+        }
+    }
+    true
+}
+
 /// A 400 `INVALID_ARGUMENT` CAMARA error, with the correlator echoed.
 fn invalid_argument(message: &str, correlator: &Option<HeaderValue>) -> Response {
     with_correlator(
@@ -526,41 +770,6 @@ mod tests {
     fn zone_id_is_stable_and_distinct_per_zone() {
         assert_eq!(zone_id("camarasim-edge-eu-west-1"), zone_id("camarasim-edge-eu-west-1"));
         assert_ne!(zone_id("camarasim-edge-eu-west-1"), zone_id("camarasim-edge-us-east-1"));
-    }
-
-    /// Whether `s` matches the strict CAMARA UUID pattern
-    /// `^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`.
-    fn is_uuid(s: &str) -> bool {
-        let b = s.as_bytes();
-        if b.len() != 36 {
-            return false;
-        }
-        let hex = |c: u8| c.is_ascii_digit() || (b'a'..=b'f').contains(&c);
-        for (i, &c) in b.iter().enumerate() {
-            match i {
-                8 | 13 | 18 | 23 => {
-                    if c != b'-' {
-                        return false;
-                    }
-                }
-                14 => {
-                    if !(b'1'..=b'5').contains(&c) {
-                        return false;
-                    }
-                }
-                19 => {
-                    if !matches!(c, b'8' | b'9' | b'a' | b'b') {
-                        return false;
-                    }
-                }
-                _ => {
-                    if !hex(c) {
-                        return false;
-                    }
-                }
-            }
-        }
-        true
     }
 
     // --- Integration through the real router -------------------------------
@@ -1246,6 +1455,273 @@ mod tests {
         assert_eq!(
             headers.get("x-correlator").and_then(|v| v.to_str().ok()),
             Some("corr-del-404")
+        );
+    }
+
+    // --- createAppInstance: pure units -------------------------------------
+
+    #[test]
+    fn instance_id_is_stable_uuid_shaped_and_keyed_on_app_and_zone() {
+        let app = "5e3a8c2f-1b4d-5a6e-8f90-2c1d3e4f5a6b";
+        let zone_a = zone_id("camarasim-edge-eu-west-1");
+        let zone_b = zone_id("camarasim-edge-us-east-1");
+        let id = instance_id(app, &zone_a);
+        assert!(is_uuid(&id), "instance id {id} is a UUID");
+        assert_eq!(id, instance_id(app, &zone_a), "stable per (app, zone)");
+        // A different zone → a different instance; a different app → different too.
+        assert_ne!(id, instance_id(app, &zone_b));
+        assert_ne!(
+            id,
+            instance_id("00000000-0000-4000-8000-000000000000", &zone_a)
+        );
+    }
+
+    #[test]
+    fn instance_status_follows_the_target_zone_status() {
+        assert_eq!(instance_status("active"), "ready");
+        assert_eq!(instance_status("inactive"), "failed");
+        assert_eq!(instance_status("unknown"), "instantiating");
+    }
+
+    #[test]
+    fn is_uuid_accepts_the_camara_pattern_and_rejects_junk() {
+        assert!(is_uuid("5e3a8c2f-1b4d-5a6e-8f90-2c1d3e4f5a6b"));
+        assert!(is_uuid("00000000-0000-4000-8000-000000000000"));
+        assert!(!is_uuid("not-a-uuid"));
+        assert!(!is_uuid("5E3A8C2F-1B4D-5A6E-8F90-2C1D3E4F5A6B")); // uppercase rejected
+        assert!(!is_uuid("00000000-0000-6000-8000-000000000000")); // version 6 rejected
+        assert!(!is_uuid("00000000-0000-4000-c000-000000000000")); // variant c rejected
+    }
+
+    // --- createAppInstance: integration through the real router ------------
+
+    async fn post_instance(
+        token: Option<&str>,
+        body: &str,
+        correlator: Option<&str>,
+    ) -> (StatusCode, HeaderMap, Value) {
+        let mut builder = Request::builder()
+            .method("POST")
+            .uri("/edge-application-management/vwip/app-instances")
+            .header("host", HOST)
+            .header("content-type", "application/json");
+        if let Some(t) = token {
+            builder = builder.header("authorization", format!("Bearer {t}"));
+        }
+        if let Some(c) = correlator {
+            builder = builder.header("x-correlator", c);
+        }
+        let response = app()
+            .oneshot(builder.body(Body::from(body.to_string())).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let headers = response.headers().clone();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, headers, json)
+    }
+
+    /// An active catalog zone (→ `ready`).
+    fn active_zone() -> String {
+        zone_id("camarasim-edge-eu-west-1")
+    }
+
+    #[tokio::test]
+    async fn create_app_instance_mints_a_uuid_echoes_provider_and_persists() {
+        let (_, app_id) = submit_and_get_id("instance_ok_app").await;
+        let zone = active_zone();
+        let token = mint_token(INSTANCES_WRITE_SCOPE).await;
+        let body = json!({ "name": "prod", "appId": app_id, "edgeCloudZoneId": zone });
+        let (status, headers, resp) = post_instance(Some(&token), &body.to_string(), None).await;
+
+        assert_eq!(status, StatusCode::ACCEPTED);
+        let instance_id = resp["appInstanceId"].as_str().expect("appInstanceId string");
+        assert!(is_uuid(instance_id), "appInstanceId {instance_id} is a UUID");
+        assert_eq!(resp["name"], "prod");
+        assert_eq!(resp["appId"], json!(app_id));
+        assert_eq!(resp["edgeCloudZoneId"], json!(zone));
+        // appProvider is echoed from the onboarded app's manifest.
+        assert_eq!(resp["appProvider"], "CamaraSim Test");
+        // active zone → ready.
+        assert_eq!(resp["status"], "ready");
+        // Location header points at the instance resource.
+        assert_eq!(
+            headers.get("location").and_then(|v| v.to_str().ok()),
+            Some(
+                format!("/edge-application-management/vwip/app-instances/{instance_id}")
+                    .as_str()
+            )
+        );
+        // The rendered AppInstanceInfo is persisted under the minted id.
+        assert_eq!(instance_store::get(instance_id), Some(resp.clone()));
+    }
+
+    #[tokio::test]
+    async fn kubernetes_cluster_ref_is_echoed_when_supplied() {
+        let (_, app_id) = submit_and_get_id("instance_k8s_app").await;
+        let token = mint_token(INSTANCES_WRITE_SCOPE).await;
+        let cluster = "00000000-0000-4000-8000-000000000000";
+        let body = json!({
+            "name": "withcluster", "appId": app_id, "edgeCloudZoneId": active_zone(),
+            "kubernetesClusterRef": cluster,
+        });
+        let (status, _, resp) = post_instance(Some(&token), &body.to_string(), None).await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(resp["kubernetesClusterRef"], cluster);
+    }
+
+    #[tokio::test]
+    async fn the_target_zone_status_drives_the_instance_status() {
+        let (_, app_id) = submit_and_get_id("instance_zone_status_app").await;
+        let token = mint_token(INSTANCES_WRITE_SCOPE).await;
+        // inactive zone → failed.
+        let inactive = zone_id("camarasim-edge-us-west-2");
+        let body = json!({ "name": "oninactive", "appId": app_id, "edgeCloudZoneId": inactive });
+        let (status, _, resp) = post_instance(Some(&token), &body.to_string(), None).await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(resp["status"], "failed");
+        // unknown-status zone → instantiating.
+        let unknown = zone_id("camarasim-edge-ap-south-1");
+        let body = json!({ "name": "onunknown", "appId": app_id, "edgeCloudZoneId": unknown });
+        let (status, _, resp) = post_instance(Some(&token), &body.to_string(), None).await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(resp["status"], "instantiating");
+    }
+
+    #[tokio::test]
+    async fn same_app_same_zone_is_already_exists_but_a_new_zone_is_a_new_instance() {
+        let (_, app_id) = submit_and_get_id("instance_dup_app").await;
+        let token = mint_token(INSTANCES_WRITE_SCOPE).await;
+        let zone_a = active_zone();
+        let body = json!({ "name": "dup", "appId": app_id, "edgeCloudZoneId": zone_a });
+
+        let (s1, _, r1) = post_instance(Some(&token), &body.to_string(), None).await;
+        assert_eq!(s1, StatusCode::ACCEPTED);
+        // Same (app, zone) again → 409 ALREADY_EXISTS.
+        let (s2, _, r2) = post_instance(Some(&token), &body.to_string(), None).await;
+        assert_eq!(s2, StatusCode::CONFLICT);
+        assert_eq!(r2["code"], "ALREADY_EXISTS");
+        assert_eq!(r2["status"], 409);
+
+        // Same app on a different zone → a fresh 202 with a distinct id.
+        let zone_b = zone_id("camarasim-edge-us-east-1");
+        let body_b = json!({ "name": "dup", "appId": app_id, "edgeCloudZoneId": zone_b });
+        let (s3, _, r3) = post_instance(Some(&token), &body_b.to_string(), None).await;
+        assert_eq!(s3, StatusCode::ACCEPTED);
+        assert_ne!(r1["appInstanceId"], r3["appInstanceId"]);
+    }
+
+    #[tokio::test]
+    async fn unknown_app_id_is_not_found() {
+        // A well-formed but never-onboarded appId → 404.
+        let token = mint_token(INSTANCES_WRITE_SCOPE).await;
+        let body = json!({
+            "name": "orphan", "appId": "00000000-0000-4000-8000-000000000000",
+            "edgeCloudZoneId": active_zone(),
+        });
+        let (status, _, resp) = post_instance(Some(&token), &body.to_string(), None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(resp["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn unknown_zone_id_is_not_found() {
+        // A real app but a valid UUID naming no catalog zone → 404.
+        let (_, app_id) = submit_and_get_id("instance_bad_zone_app").await;
+        let token = mint_token(INSTANCES_WRITE_SCOPE).await;
+        let body = json!({
+            "name": "nozone", "appId": app_id,
+            "edgeCloudZoneId": "11111111-1111-4111-8111-111111111111",
+        });
+        let (status, _, resp) = post_instance(Some(&token), &body.to_string(), None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(resp["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn missing_or_malformed_fields_are_invalid_argument() {
+        let token = mint_token(INSTANCES_WRITE_SCOPE).await;
+        let zone = active_zone();
+        let valid_app = "00000000-0000-4000-8000-000000000000";
+        let cases = vec![
+            // missing name
+            json!({ "appId": valid_app, "edgeCloudZoneId": zone }),
+            // bad name pattern
+            json!({ "name": "1bad", "appId": valid_app, "edgeCloudZoneId": zone }),
+            // missing appId
+            json!({ "name": "ok", "edgeCloudZoneId": zone }),
+            // non-UUID appId
+            json!({ "name": "ok", "appId": "not-a-uuid", "edgeCloudZoneId": zone }),
+            // missing edgeCloudZoneId
+            json!({ "name": "ok", "appId": valid_app }),
+            // non-UUID zone
+            json!({ "name": "ok", "appId": valid_app, "edgeCloudZoneId": "nope" }),
+            // non-UUID kubernetesClusterRef
+            json!({ "name": "ok", "appId": valid_app, "edgeCloudZoneId": zone,
+                    "kubernetesClusterRef": "nope" }),
+        ];
+        for body in cases {
+            let (status, _, resp) = post_instance(Some(&token), &body.to_string(), None).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "body {body} → 400");
+            assert_eq!(resp["code"], "INVALID_ARGUMENT", "body {body}");
+        }
+    }
+
+    #[tokio::test]
+    async fn create_app_instance_malformed_json_body_is_invalid_argument() {
+        let token = mint_token(INSTANCES_WRITE_SCOPE).await;
+        let (status, _, resp) = post_instance(Some(&token), "{ not json", None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(resp["code"], "INVALID_ARGUMENT");
+    }
+
+    #[tokio::test]
+    async fn create_app_instance_without_the_scope_is_forbidden() {
+        let (_, app_id) = submit_and_get_id("instance_scope_gated_app").await;
+        // A token with the apps read scope, not the instances write scope.
+        let token = mint_token(APPS_READ_SCOPE).await;
+        let body = json!({ "name": "nope", "appId": app_id, "edgeCloudZoneId": active_zone() });
+        let (status, _, resp) = post_instance(Some(&token), &body.to_string(), None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(resp["code"], "PERMISSION_DENIED");
+    }
+
+    #[tokio::test]
+    async fn create_app_instance_missing_token_is_unauthenticated() {
+        let body = json!({
+            "name": "nope", "appId": "00000000-0000-4000-8000-000000000000",
+            "edgeCloudZoneId": active_zone(),
+        });
+        let (status, _, resp) = post_instance(None, &body.to_string(), None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(resp["code"], "UNAUTHENTICATED");
+    }
+
+    #[tokio::test]
+    async fn create_app_instance_echoes_x_correlator_on_success_and_error() {
+        let (_, app_id) = submit_and_get_id("instance_correlated_app").await;
+        let token = mint_token(INSTANCES_WRITE_SCOPE).await;
+        let body = json!({ "name": "corr", "appId": app_id, "edgeCloudZoneId": active_zone() });
+
+        // Success (202) echoes x-correlator.
+        let (status, headers, _) =
+            post_instance(Some(&token), &body.to_string(), Some("corr-inst-ok")).await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-inst-ok")
+        );
+
+        // Error (409, same app+zone) echoes x-correlator too.
+        let (status, headers, _) =
+            post_instance(Some(&token), &body.to_string(), Some("corr-inst-409")).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-inst-409")
         );
     }
 }

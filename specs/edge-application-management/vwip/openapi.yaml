@@ -12,12 +12,14 @@
 # *places workloads* onto those zones (apps, app-instances, deployments).
 #
 # This slice serves:
-#   GET    /edge-cloud-zones  (getEdgeCloudZones) — read-only zone catalog
-#   POST   /apps              (submitApp)         — onboard an application (stateful)
-#   GET    /apps/{appId}      (getApp)            — read back an onboarded app
-#   GET    /apps              (getApps)           — list onboarded apps
-#   DELETE /apps/{appId}      (deleteApp)         — delete an onboarded app
-# The remaining app-instance, deployment and cluster resources are later passes.
+#   GET    /edge-cloud-zones  (getEdgeCloudZones)  — read-only zone catalog
+#   POST   /apps              (submitApp)          — onboard an application (stateful)
+#   GET    /apps/{appId}      (getApp)             — read back an onboarded app
+#   GET    /apps              (getApps)            — list onboarded apps
+#   DELETE /apps/{appId}      (deleteApp)          — delete an onboarded app
+#   POST   /app-instances     (createAppInstance)  — instantiate an app onto a zone (stateful)
+# The remaining app-instance read/list/delete legs, and the deployment and
+# cluster resources, are later passes.
 openapi: 3.0.3
 info:
   title: Edge Application Management
@@ -59,6 +61,37 @@ info:
     validated only for presence/non-emptiness — the full `requiredResources`
     `oneOf` (KubernetesResources / VmResources / …) validation is a documented
     cut.
+
+    ### `createAppInstance`
+
+    Instantiates an onboarded application onto a specific edge cloud zone: the
+    caller supplies the instance `name`, the `appId` of an app onboarded via
+    `submitApp`, and the `edgeCloudZoneId` of a target zone. The simulator mints
+    an `appInstanceId`, renders an `AppInstanceInfo`, remembers it in memory, and
+    returns `202 Accepted` with a `Location` header (CAMARA models instantiation
+    as asynchronous). Three control planes:
+
+    1. **Request validation** — a missing/blank/invalid `name`, a missing or
+       non-UUID `appId` / `edgeCloudZoneId`, or a non-UUID `kubernetesClusterRef`
+       → `400 INVALID_ARGUMENT`.
+    2. **Cross-reference** — the `appId` must name an onboarded app (its
+       `appProvider` is echoed into the response) and the `edgeCloudZoneId` must
+       name a zone in the fixed `edge-cloud-zones` catalog. Either miss →
+       `404 NOT_FOUND`.
+    3. **Store state** — the `appInstanceId` is derived deterministically from
+       the `(appId, edgeCloudZoneId)` pair, so instantiating the *same* app onto
+       the *same* zone collides → `409 ALREADY_EXISTS` (CAMARA's "already
+       instantiated in the given Edge Cloud Zone" conflict).
+
+    The reported `status` is a genuine second control plane: it follows the
+    target zone's own catalog `edgeCloudZoneStatus` — an `active` zone →
+    `ready`, an `inactive` zone → `failed`, an `unknown`-status zone →
+    `instantiating`. The `componentEndpointInfo` (runtime endpoints) is omitted —
+    there is no live workload — and the `terminating` / `unknown` instance states
+    (teardown/degraded transitions) are unreachable on create: documented cuts.
+    The `subscriptionRequest` status-change callback is accepted-not-applied
+    (notifications are a later slice). The read/list/delete instance legs
+    (`getAppInstance` / `getAppInstances` / `deleteAppInstance`) are later passes.
   version: "wip"
   license:
     name: Apache-2.0
@@ -319,6 +352,124 @@ paths:
             result: '404 NOT_FOUND'
           - input: a malformed (non-UUID) `appId`
             result: '404 NOT_FOUND (the canonical 400 folded into 404)'
+
+  /app-instances:
+    post:
+      operationId: createAppInstance
+      summary: Instantiate an application onto an edge cloud zone
+      description: |
+        Instantiates an onboarded application (`appId`) onto a target edge cloud
+        zone (`edgeCloudZoneId`). On success an `AppInstanceInfo` is returned with
+        a minted `appInstanceId` and a `Location` header; instantiation is modelled
+        as asynchronous (`202 Accepted`).
+
+        See the API description for the parameter-driven functional cases.
+      security:
+        - openId:
+            - edge-application-management:instances:write
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateAppInstanceRequest"
+      responses:
+        "202":
+          description: >-
+            Application instance accepted for instantiation; the rendered
+            `AppInstanceInfo` (with its minted `appInstanceId`) is returned.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+            Location:
+              description: URI of the created app instance resource.
+              required: false
+              schema:
+                type: string
+                format: uri
+                example: >-
+                  /edge-application-management/vwip/app-instances/6ec0bd7f-11c0-53da-975e-2a8ad9ebae0b
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppInstanceInfo"
+        "400":
+          $ref: "../../shared/errors.yaml#/components/responses/InvalidArgument"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          description: >-
+            The referenced application (`appId`) or edge cloud zone
+            (`edgeCloudZoneId`) does not exist.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "../../shared/errors.yaml#/components/schemas/CamaraError"
+              example:
+                status: 404
+                code: NOT_FOUND
+                message: No application found for the provided appId.
+        "409":
+          description: The application is already instantiated in the given edge cloud zone.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "../../shared/errors.yaml#/components/schemas/CamaraError"
+              example:
+                status: 409
+                code: ALREADY_EXISTS
+                message: Application already instantiated in the given Edge Cloud Zone
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          `createAppInstance` instantiates an onboarded app onto a specific edge
+          cloud zone (docs/DESIGN.md §7). Three control planes drive the outcome:
+          request validation, a cross-reference against the app + zone stores, and
+          store state. The `appInstanceId` is minted deterministically from the
+          `(appId, edgeCloudZoneId)` pair (RFC 4122 v5 UUID, SHA-256, no new
+          dependency), so re-instantiating the same app on the same zone collides →
+          `409 ALREADY_EXISTS`. The reported `status` is a second plane: it follows
+          the target zone's own catalog `edgeCloudZoneStatus`
+          (active → ready, inactive → failed, unknown → instantiating). Canonical
+          EdgeApplicationManagement declares 400/401/403/409/500/503 here (plus 404
+          for the CamaraSim cross-reference). Documented cuts: `componentEndpointInfo`
+          (no live workload), the `terminating`/`unknown` instance states (unreachable
+          on create), and the `subscriptionRequest` status-change callback
+          (accepted-not-applied).
+        cases:
+          - input: a valid request naming an onboarded `appId` and a catalog `edgeCloudZoneId` (an active zone)
+            result: '202 — `AppInstanceInfo` with a minted `appInstanceId`, `status: ready`, and a `Location` header'
+          - input: the same `appId` + `edgeCloudZoneId` again
+            result: '409 ALREADY_EXISTS'
+          - input: the same `appId` on a different catalog zone
+            result: '202 — a distinct `appInstanceId`'
+          - input: '`edgeCloudZoneId` naming an `inactive` catalog zone'
+            result: '202 — `status: failed`'
+          - input: '`edgeCloudZoneId` naming an `unknown`-status catalog zone'
+            result: '202 — `status: instantiating`'
+          - input: a well-formed `appId` that was never onboarded
+            result: '404 NOT_FOUND'
+          - input: a well-formed `edgeCloudZoneId` that is not in the catalog
+            result: '404 NOT_FOUND'
+          - input: a missing/blank `name`, or a `name` not matching `^[A-Za-z][A-Za-z0-9_]{1,63}$`
+            result: '400 INVALID_ARGUMENT'
+          - input: a missing or non-UUID `appId` / `edgeCloudZoneId` / `kubernetesClusterRef`
+            result: '400 INVALID_ARGUMENT'
+          - input: a body that is not valid JSON
+            result: '400 INVALID_ARGUMENT'
 
   /edge-cloud-zones:
     get:
@@ -597,3 +748,106 @@ components:
               minLength: 36
               maxLength: 36
               example: 5e3a8c2f-1b4d-5a6e-8f90-2c1d3e4f5a6b
+
+    AppInstanceName:
+      type: string
+      maxLength: 64
+      pattern: '^[A-Za-z][A-Za-z0-9_]{1,63}$'
+      description: Name of the app instance, scoped to the app provider.
+      example: prod
+
+    AppInstanceStatus:
+      type: string
+      description: The lifecycle status of an application instance.
+      enum:
+        - ready
+        - instantiating
+        - failed
+        - terminating
+        - unknown
+      default: unknown
+
+    CreateAppInstanceRequest:
+      type: object
+      description: The request to instantiate an onboarded application onto an edge cloud zone.
+      required:
+        - name
+        - appId
+        - edgeCloudZoneId
+      properties:
+        name:
+          $ref: "#/components/schemas/AppInstanceName"
+        appId:
+          type: string
+          format: uuid
+          description: The identifier of an onboarded application (minted by `submitApp`).
+          pattern: '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
+          minLength: 36
+          maxLength: 36
+          example: 5e3a8c2f-1b4d-5a6e-8f90-2c1d3e4f5a6b
+        edgeCloudZoneId:
+          type: string
+          format: uuid
+          description: The identifier of the target edge cloud zone (from `getEdgeCloudZones`).
+          pattern: '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
+          minLength: 36
+          maxLength: 36
+          example: 6ec0bd7f-11c0-53da-975e-2a8ad9ebae0b
+        kubernetesClusterRef:
+          type: string
+          format: uuid
+          description: Optional reference to a specific Kubernetes cluster in the zone.
+          pattern: '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
+          minLength: 36
+          maxLength: 36
+
+    AppInstanceInfo:
+      type: object
+      description: >-
+        A running (or instantiating) application instance (CAMARA
+        `AppInstanceInfo`). CamaraSim omits the runtime `componentEndpointInfo`
+        (there is no live workload — a documented cut).
+      required:
+        - name
+        - appId
+        - appInstanceId
+        - appProvider
+        - edgeCloudZoneId
+      properties:
+        name:
+          $ref: "#/components/schemas/AppInstanceName"
+        appId:
+          type: string
+          format: uuid
+          description: The identifier of the onboarded application this instance runs.
+          pattern: '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
+          minLength: 36
+          maxLength: 36
+          example: 5e3a8c2f-1b4d-5a6e-8f90-2c1d3e4f5a6b
+        appInstanceId:
+          type: string
+          format: uuid
+          description: The unique identifier minted for this application instance.
+          pattern: '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
+          minLength: 36
+          maxLength: 36
+          example: 6ec0bd7f-11c0-53da-975e-2a8ad9ebae0b
+        appProvider:
+          $ref: "#/components/schemas/AppProvider"
+        status:
+          $ref: "#/components/schemas/AppInstanceStatus"
+        edgeCloudZoneId:
+          type: string
+          format: uuid
+          description: The edge cloud zone this instance is placed on.
+          pattern: '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
+          minLength: 36
+          maxLength: 36
+          example: 6ec0bd7f-11c0-53da-975e-2a8ad9ebae0b
+        kubernetesClusterRef:
+          type: string
+          format: uuid
+          description: The Kubernetes cluster this instance is placed on, if one was requested.
+          pattern: '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
+          minLength: 36
+          maxLength: 36

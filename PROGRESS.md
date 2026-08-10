@@ -2721,8 +2721,29 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
         synchronous `204` (async `202`/`DELETE_REQUESTED` + `sink` notification a
         documented cut). **Completes the `apps` CRUD** (`app-instances`/
         `deployments` remain). `x-correlator` echoed. No new dep.
-    - [ ] the stateful `app-instances` / `deployments` resources + `clusters`
-      — later passes.
+    - [~] the stateful `app-instances` resource:
+      - [x] `POST /app-instances` (`createAppInstance`,
+        `edge-application-management:instances:write`) — instantiates an
+        onboarded app onto an edge cloud zone, mints a UUID `appInstanceId`,
+        persists the rendered `AppInstanceInfo` in a new in-memory store
+        (`src/apis/edge_application_management/instance_store.rs`; `Mutex<HashMap>`,
+        no new dep), and returns `202 Accepted` + a `Location` header (CAMARA
+        models instantiation as async). Three control planes (DESIGN §7): request
+        validation (missing/blank/invalid `name`, missing or non-UUID `appId`/
+        `edgeCloudZoneId`/`kubernetesClusterRef`, or non-JSON body → 400
+        INVALID_ARGUMENT); a cross-reference against the two in-memory stores —
+        the `appId` must be an onboarded app (its `appProvider` is echoed) and the
+        `edgeCloudZoneId` must name a catalog zone, else → 404 NOT_FOUND; and store
+        state — the `appInstanceId` is derived deterministically from the
+        `(appId, edgeCloudZoneId)` pair, so re-instantiating the same app on the
+        same zone collides → 409 ALREADY_EXISTS. Second plane: `status` follows the
+        target zone's own catalog `edgeCloudZoneStatus` (active→`ready`,
+        inactive→`failed`, unknown→`instantiating`). Cuts: `componentEndpointInfo`
+        (no live workload), the `terminating`/`unknown` instance states (unreachable
+        on create), and the `subscriptionRequest` callback (accepted-not-applied).
+        `x-correlator` echoed. No new dep.
+      - [ ] `getAppInstance` / `getAppInstances` / `deleteAppInstance` — later passes.
+    - [ ] the stateful `deployments` resource + `clusters` — later passes.
 
 ## Cross-cutting (do alongside the item that needs it)
 - [~] `errors.rs`: base CAMARA error model done (`src/errors.rs`, `specs/shared/errors.yaml`); per-version catalogs still TODO (DESIGN §8)
@@ -2747,6 +2768,39 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 ## Scan journal
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
+
+- 2026-08-10 — edge-application-management: added the **createAppInstance leg**,
+  `POST /edge-application-management/vwip/app-instances` (`createAppInstance`,
+  scope `edge-application-management:instances:write`) — the topmost genuinely
+  actionable increment. (The earlier `[ ]` leaves remain out of reach for a
+  clean, weightless single pass: every `https://` sink-TLS item needs a rustls
+  TLS client — a multi-MB dependency that fights the prime directive "keep the
+  binary small / justify every dependency", especially as the design docs note
+  test receivers run on `http://` loopback; the remaining lifecycle-stream items
+  are "no live engine/worker" open-ended state machines; `dedicated-network-areas`
+  is spatial-later.) Instantiates an onboarded app onto an edge cloud zone: mints
+  a deterministic UUID `appInstanceId` from the `(appId, edgeCloudZoneId)` pair,
+  persists the rendered `AppInstanceInfo` in a new in-memory store
+  (`instance_store.rs`; `Mutex<HashMap>`, lock never held across await), returns
+  `202 Accepted` + `Location`. Three control planes (DESIGN §7): request
+  validation → 400 INVALID_ARGUMENT; a cross-reference against both in-memory
+  stores (unknown `appId` or non-catalog `edgeCloudZoneId` → 404 NOT_FOUND; the
+  app's `appProvider` is echoed); and store state (same app+zone → 409
+  ALREADY_EXISTS, matching CAMARA's "already instantiated in the given Edge Cloud
+  Zone"). Second plane: `status` follows the target zone's catalog status
+  (active→ready / inactive→failed / unknown→instantiating). Cuts:
+  `componentEndpointInfo`, `terminating`/`unknown` states, `subscriptionRequest`
+  callback. Code: new `instance_store` (insert = 409 detector; test-gated get),
+  `create_app_instance` handler + `instance_id`/`instance_status`/`zone_by_id`/
+  `is_uuid` helpers (promoted `is_uuid` out of the test module). spec: added the
+  `/app-instances` POST op (202 + 400/401/403/404/409/500/503) with
+  `x-camarasim-scenarios` + `AppInstanceInfo`/`CreateAppInstanceRequest`/
+  `AppInstanceName`/`AppInstanceStatus` schemas; header/description updated.
+  tests: 13 new (mint+persist+Location+provider echo; k8s ref echo; zone-status→
+  instance-status; same-app-same-zone 409 vs new-zone new instance; unknown app
+  404; unknown zone 404; 7 validation/malformed-JSON 400s; 403 without scope; 401
+  no token; x-correlator on 202 and 409) — 2012 pass. No new dependency. —
+  binary: 3.6M (3,733,656 bytes)
 
 - 2026-08-10 — edge-application-management: added the **app delete leg**,
   `DELETE /edge-application-management/vwip/apps/{appId}` (`deleteApp`, scope
