@@ -4,6 +4,8 @@
 //! Endpoints:
 //! - `POST /dedicated-network/vwip/networks` — create a dedicated network
 //!   (operationId `createNetwork`).
+//! - `GET /dedicated-network/vwip/networks/{networkId}` — read a dedicated
+//!   network back by id (operationId `readNetwork`).
 //!
 //! ## What it does
 //!
@@ -45,13 +47,24 @@
 //!
 //! `sinkCredential` is accepted but never echoed (it is a secret) and — this
 //! slice being create-only — no notification is delivered (a documented cut;
-//! notifications, read/list/delete arrive in later passes). `x-correlator` is
+//! notifications, list/delete arrive in later passes). `x-correlator` is
 //! echoed on every response.
+//!
+//! ## `readNetwork` — read a network back
+//!
+//! `GET /networks/{networkId}` returns the stored `NetworkInfo` (`200`) or, when
+//! no network exists for the id, `404 NOT_FOUND`. Like the QoD `getSession` read
+//! leg, the `networkId` is an opaque, server-minted UUID, so the **only** control
+//! plane is the in-memory store state (there is no reserved-suffix plane on a
+//! minted id): a `networkId` returned by a prior `createNetwork` reads back its
+//! `NetworkInfo`; anything else → `404`. It requires the read scope
+//! `dedicated-network:networks:read`. `x-correlator` is echoed.
 
 use axum::body::Bytes;
+use axum::extract::Path;
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::post;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -66,9 +79,18 @@ use super::store;
 /// Networks).
 const CREATE_SCOPE: &str = "dedicated-network:networks:create";
 
+/// The OAuth2 scope `readNetwork` requires (CAMARA Dedicated Network —
+/// Networks).
+const READ_SCOPE: &str = "dedicated-network:networks:read";
+
 /// Routes for Dedicated Network — Networks vwip, mounted at their canonical URLs.
 pub fn routes() -> Router {
-    Router::new().route("/dedicated-network/vwip/networks", post(create_network))
+    Router::new()
+        .route("/dedicated-network/vwip/networks", post(create_network))
+        .route(
+            "/dedicated-network/vwip/networks/:network_id",
+            get(read_network),
+        )
 }
 
 /// A `CreateNetwork` request body (CAMARA `BaseNetworkInfo`). Every field is
@@ -229,6 +251,28 @@ async fn create_network(claims: Claims, headers: HeaderMap, body: Bytes) -> Resp
     store::insert(id.clone(), info.clone());
 
     with_correlator((StatusCode::CREATED, Json(info)).into_response(), &correlator)
+}
+
+/// `GET /dedicated-network/vwip/networks/{networkId}` — read a dedicated network
+/// back by id (`readNetwork`).
+///
+/// Keyed only on the store state (the `networkId` is a server-minted opaque
+/// UUID, so there is no reserved-suffix plane): a known id returns its stored
+/// `NetworkInfo` (`200`); an unknown one → `404 NOT_FOUND`.
+async fn read_network(claims: Claims, headers: HeaderMap, Path(network_id): Path<String>) -> Response {
+    let correlator = headers.get("x-correlator").cloned();
+
+    if let Err(e) = claims.require_scope(READ_SCOPE) {
+        return with_correlator(e.into_response(), &correlator);
+    }
+
+    match store::get(&network_id) {
+        Some(info) => with_correlator((StatusCode::OK, Json(info)).into_response(), &correlator),
+        None => with_correlator(
+            CamaraError::not_found("No network found for the provided networkId.").into_response(),
+            &correlator,
+        ),
+    }
 }
 
 /// The lifecycle `status` a `serviceAreaId` maps to (its trailing three digits
@@ -520,6 +564,34 @@ mod tests {
         (status, headers, json)
     }
 
+    async fn get_network(
+        token: Option<&str>,
+        network_id: &str,
+        correlator: Option<&str>,
+    ) -> (StatusCode, HeaderMap, Value) {
+        let mut builder = Request::builder()
+            .method("GET")
+            .uri(format!("/dedicated-network/vwip/networks/{network_id}"))
+            .header("host", HOST);
+        if let Some(t) = token {
+            builder = builder.header("authorization", format!("Bearer {t}"));
+        }
+        if let Some(c) = correlator {
+            builder = builder.header("x-correlator", c);
+        }
+        let response = app()
+            .oneshot(builder.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let headers = response.headers().clone();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, headers, json)
+    }
+
     // A valid CreateNetwork body whose serviceAreaId ends in `d`.
     fn valid_body(area_tail: u16) -> Value {
         json!({
@@ -704,6 +776,77 @@ mod tests {
         assert_eq!(
             headers.get("x-correlator").and_then(|v| v.to_str().ok()),
             Some("corr-err")
+        );
+    }
+
+    // --- readNetwork -------------------------------------------------------
+
+    #[tokio::test]
+    async fn created_network_reads_back_by_id() {
+        // Create, then read the same NetworkInfo back verbatim.
+        let create = mint_token(CREATE_SCOPE).await;
+        let (status, _, created) = post_network(Some(&create), valid_body(2), None).await;
+        assert_eq!(status, StatusCode::CREATED);
+        let id = created["id"].as_str().unwrap();
+
+        let read = mint_token(READ_SCOPE).await;
+        let (status, _, fetched) = get_network(Some(&read), id, None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(fetched, created);
+        assert_eq!(fetched["status"], "ACTIVATED");
+    }
+
+    #[tokio::test]
+    async fn unknown_network_is_not_found() {
+        let read = mint_token(READ_SCOPE).await;
+        let (status, _, body) =
+            get_network(Some(&read), "11111111-1111-4111-8111-111111111111", None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn read_token_without_the_scope_is_forbidden() {
+        let token = mint_token("some:other-scope").await;
+        let (status, _, body) =
+            get_network(Some(&token), "11111111-1111-4111-8111-111111111111", None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["code"], "PERMISSION_DENIED");
+    }
+
+    #[tokio::test]
+    async fn read_missing_token_is_unauthenticated() {
+        let (status, _, body) =
+            get_network(None, "11111111-1111-4111-8111-111111111111", None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["code"], "UNAUTHENTICATED");
+    }
+
+    #[tokio::test]
+    async fn read_echoes_x_correlator_on_success_and_error() {
+        // Success path.
+        let create = mint_token(CREATE_SCOPE).await;
+        let (_, _, created) = post_network(Some(&create), valid_body(1), None).await;
+        let id = created["id"].as_str().unwrap();
+        let read = mint_token(READ_SCOPE).await;
+        let (status, headers, _) = get_network(Some(&read), id, Some("corr-read")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-read")
+        );
+
+        // 404 path.
+        let (status, headers, _) = get_network(
+            Some(&read),
+            "22222222-2222-4222-8222-222222222222",
+            Some("corr-404"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-404")
         );
     }
 }

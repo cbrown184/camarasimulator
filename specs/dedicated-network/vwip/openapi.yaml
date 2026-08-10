@@ -7,9 +7,9 @@
 # CamaraSim's parameter-driven functional cases (docs/DESIGN.md §7, §9). Backed
 # by `src/apis/dedicated_network/vwip.rs`; spec and code must not drift.
 #
-# This slice serves the create leg `POST /networks` (`createNetwork`). The
-# read / list / delete legs (`readNetwork` / `listNetworks` / `deleteNetwork`)
-# arrive in later passes.
+# This slice serves the create leg `POST /networks` (`createNetwork`) and the
+# read leg `GET /networks/{networkId}` (`readNetwork`). The list / delete legs
+# (`listNetworks` / `deleteNetwork`) arrive in later passes.
 openapi: 3.0.3
 info:
   title: Dedicated Network - Networks
@@ -185,12 +185,78 @@ paths:
           - input: "a valid body, serviceAreaId tail d (non-reserved)"
             result: "201 NetworkInfo with status = REQUESTED/RESERVED/ACTIVATED for d % 3 = 0/1/2"
 
+  /networks/{networkId}:
+    get:
+      operationId: readNetwork
+      summary: Read a dedicated network by id
+      description: |
+        Returns the `NetworkInfo` of the dedicated network previously created
+        under `networkId` (`200`), or `404 NOT_FOUND` when no such network
+        exists. In CamaraSim the `networkId` is a server-minted opaque UUID, so
+        the only control plane is the in-memory store state — a valid id from a
+        prior `createNetwork` reads back, anything else is `404` (there is no
+        reserved-suffix plane on a minted id).
+      security:
+        - openId:
+            - dedicated-network:networks:read
+      parameters:
+        - $ref: "#/components/parameters/NetworkId"
+        - $ref: "#/components/parameters/XCorrelator"
+      responses:
+        "200":
+          description: The dedicated network was found.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NetworkInfo"
+              examples:
+                activated:
+                  summary: An activated network read back
+                  value:
+                    id: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+                    status: ACTIVATED
+                    name: factory-floor
+                    networkProfileId: "00000000-0000-4000-8000-000000000abc"
+                    serviceTime:
+                      start: "2024-01-01T00:00:00Z"
+                      end: "2024-12-31T23:59:59Z"
+                    serviceAreaId: "00000000-0000-4000-8000-000000000002"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+      x-camarasim-scenarios:
+        description: >-
+          Result selected only from the in-memory store state, keyed on the
+          server-minted opaque `networkId` (docs/DESIGN.md §7): a known id
+          returns its stored NetworkInfo, an unknown one is 404. There is no
+          reserved-suffix plane on a minted id.
+        cases:
+          - input: a networkId returned by a prior createNetwork
+            result: "200 NetworkInfo (the stored network, verbatim)"
+          - input: any other (unknown / never-created) networkId
+            result: "404 NOT_FOUND"
+
 components:
   securitySchemes:
     openId:
       $ref: "../../auth/openapi.yaml#/components/securitySchemes/camaraOAuth"
 
   parameters:
+    NetworkId:
+      name: networkId
+      in: path
+      required: true
+      description: The identifier of a dedicated network (server-minted).
+      schema:
+        type: string
+        format: uuid
+        maxLength: 36
     XCorrelator:
       name: x-correlator
       in: header

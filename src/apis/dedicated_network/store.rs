@@ -40,10 +40,9 @@ pub fn insert(id: String, network: Value) {
 }
 
 /// Fetch the `NetworkInfo` stored under `id`, or `None` if no such network
-/// exists (never created, or created in a different process). The read/delete
-/// legs (later passes) use the distinction to answer `200`/`204` vs `404`.
-/// Test-support only until those legs land.
-#[cfg(test)]
+/// exists (never created, or created in a different process). `readNetwork`
+/// uses the distinction to answer `200` vs `404`; the delete leg (a later pass)
+/// will too.
 pub fn get(id: &str) -> Option<Value> {
     store()
         .lock()

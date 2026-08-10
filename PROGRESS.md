@@ -1100,6 +1100,14 @@ derives from that phoneNumber's trailing three digits (else an FNV hash of
 branch, ETag/`If-None-Match`/304 caching, and overlay resolution are documented
 cuts.
 
+**Dedicated Network — Networks vwip** now has its read leg too:
+`GET /dedicated-network/vwip/networks/{networkId}` (`readNetwork`, scope
+`dedicated-network:networks:read`) reads the stored `NetworkInfo` back (`200`)
+or `404 NOT_FOUND` for an unknown id. Like QoD `getSession`, the `networkId` is
+a server-minted opaque UUID, so the only control plane is the in-memory store
+state (no reserved-suffix plane on a minted id). `x-correlator` echoed. The
+list/delete legs and the sibling Dedicated-Networks APIs remain later passes.
+
 ## In progress (claimed this pass)
 
 _None._  <!-- agent: put the claimed item + run timestamp here, clear it when done -->
@@ -2549,9 +2557,13 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     teardown-only state). `sinkCredential` accepted but never echoed (a secret);
     no notification delivered (create-only slice, documented cut). Self-contained
     RFC 3339 date-time shape check (no new dep). `x-correlator` echoed.
-  - [ ] `GET /networks/{networkId}` (`readNetwork`) · `GET /networks`
-    (`listNetworks`) · `DELETE /networks/{networkId}` (`deleteNetwork`) — the
-    read/list/delete legs over the same store (later passes).
+  - [x] `GET /networks/{networkId}` (`readNetwork`,
+    `dedicated-network:networks:read`) — reads the stored `NetworkInfo` back
+    (`200`) or `404 NOT_FOUND` for an unknown id. Keyed only on the store state
+    (the minted opaque `networkId` has no reserved-suffix plane), mirroring QoD
+    `getSession`. `x-correlator` echoed.
+  - [ ] `GET /networks` (`listNetworks`) · `DELETE /networks/{networkId}`
+    (`deleteNetwork`) — the list/delete legs over the same store (later passes).
   - [ ] the other sibling Dedicated-Networks APIs (`dedicated-network-accesses`,
     `dedicated-network-areas`) — later, as capacity allows (the `-areas` API is
     spatial).
@@ -2581,6 +2593,24 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-10 — dedicated-network: added the read leg,
+  `GET /dedicated-network/vwip/networks/{networkId}` (`readNetwork`, scope
+  `dedicated-network:networks:read`) — the natural next slice after last pass's
+  `createNetwork` and the topmost unclaimed `[ ]` backlog leaf (the read/list/
+  delete legs over the same store). The TLS `https://` sink leaf in Phase 3 stays
+  a deliberate deferred cut (needs a rustls stack vs "keep the binary small").
+  Mirrors QoD `getSession`: keyed only on the in-memory store state — a known,
+  minted `networkId` reads its stored `NetworkInfo` back (`200`), an unknown one
+  → `404 NOT_FOUND`; the minted opaque UUID has no reserved-suffix plane, so the
+  store is the sole control plane (documented). Made `store::get` non-test
+  (`readNetwork` now uses it). `x-correlator` echoed on `200`+`404`. spec: added
+  the `GET /networks/{networkId}` op (a `networkId` path param, 200 NetworkInfo +
+  example, 401/403/404, `x-camarasim-scenarios`) to
+  `specs/dedicated-network/vwip/openapi.yaml`; header comment updated
+  (create+read now served, list/delete later). tests: +5 (read-back verbatim +
+  status, unknown → 404, scope 403, no-token 401, x-correlator on 200+404).
+  `cargo test` 1889 green (was 1884); `cargo build --release` green. No new dep.
+  — binary: 3.4M (3,549,184 B)
 - 2026-08-10 — dedicated-network: added a **new API**,
   `POST /dedicated-network/vwip/networks` (`createNetwork`, scope
   `dedicated-network:networks:create`) — the resource sibling of last passes'
