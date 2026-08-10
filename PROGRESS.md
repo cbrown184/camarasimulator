@@ -2529,9 +2529,32 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     a stable canonical `id` (UUID tail = catalog index), so `GET /profiles/{id}`
     returns the same profile the list holds. No device identifier → no
     reserved-error plane.
-  - [ ] the sibling Dedicated-Networks APIs (`dedicated-network`,
-    `dedicated-network-accesses`, `dedicated-network-areas`) — later, as capacity
-    allows (the `-areas` API is spatial).
+- [~] Dedicated Network — Networks vwip (`/dedicated-network/vwip`; CAMARA
+  DedicatedNetworks `wip` — no released version, mounted at its canonical `vwip`
+  base path; **stateful**, resource-oriented, two-legged — the resource sibling
+  of Network Profiles; in-memory network store
+  `src/apis/dedicated_network/store.rs`):
+  - [x] `POST /networks` (`createNetwork`, `dedicated-network:networks:create`)
+    — creates a dedicated network from a `CreateNetwork` body (`name`,
+    `networkProfileId` **xor** `qosProfileName`, `serviceTime`, `serviceAreaId`,
+    optional `sink`/`sinkCredential`), mints an opaque UUID `id`, persists the
+    rendered `NetworkInfo` in the store, and returns `201`. Two control planes
+    (DESIGN §7): request validation (bad body/`name` length/the profile `oneOf`/
+    non-UUID `networkProfileId`|`serviceAreaId`/empty `qosProfileName`/missing or
+    malformed `serviceTime`/non-`https` `sink` → 400 INVALID_ARGUMENT; a UTC
+    `serviceTime.end` before `start` → 400 OUT_OF_RANGE); and the required
+    `serviceAreaId` UUID identifier — reserved trailing-digit suffix → canonical
+    CAMARA error (`…404` → no such service area), else `d % 3` picks the created
+    `status` (`0`/`…000`→REQUESTED, `1`→RESERVED, `2`→ACTIVATED; TERMINATED is a
+    teardown-only state). `sinkCredential` accepted but never echoed (a secret);
+    no notification delivered (create-only slice, documented cut). Self-contained
+    RFC 3339 date-time shape check (no new dep). `x-correlator` echoed.
+  - [ ] `GET /networks/{networkId}` (`readNetwork`) · `GET /networks`
+    (`listNetworks`) · `DELETE /networks/{networkId}` (`deleteNetwork`) — the
+    read/list/delete legs over the same store (later passes).
+  - [ ] the other sibling Dedicated-Networks APIs (`dedicated-network-accesses`,
+    `dedicated-network-areas`) — later, as capacity allows (the `-areas` API is
+    spatial).
 - [ ] Other CAMARA APIs as capacity allows
 
 ## Cross-cutting (do alongside the item that needs it)
@@ -2558,6 +2581,40 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-10 — dedicated-network: added a **new API**,
+  `POST /dedicated-network/vwip/networks` (`createNetwork`, scope
+  `dedicated-network:networks:create`) — the resource sibling of last passes'
+  Network Profiles catalog and the topmost unclaimed `[ ]` backlog leaf
+  (the sibling Dedicated-Networks APIs). Confirmed the contract from the
+  authoritative upstream `dedicated-network.yaml` (`wip`, WebFetch):
+  `CreateNetwork` = `BaseNetworkInfo` (`name`, `networkProfileId` **oneOf**
+  `qosProfileName`, required `serviceTime`{start,end}, required `serviceAreaId`,
+  optional `sink`/`sinkCredential`) → `201 NetworkInfo` (`id` + `status`
+  REQUESTED/RESERVED/ACTIVATED/TERMINATED), errors 400/401/403. Stateful,
+  resource-oriented, two-legged. Scoped to the create leg this pass; the
+  read/list/delete legs and the other siblings (`-accesses`, spatial `-areas`)
+  recorded as remaining sub-steps. Two control planes (DESIGN §7): request
+  validation (bad body/`name` length/the profile `oneOf`/non-UUID
+  `networkProfileId`|`serviceAreaId`/empty `qosProfileName`/missing-or-malformed
+  `serviceTime`/non-`https` `sink` → 400 INVALID_ARGUMENT; a UTC
+  `serviceTime.end` before `start` → 400 OUT_OF_RANGE) and the required
+  `serviceAreaId` UUID (reserved suffix → canonical CAMARA error; else `d % 3`
+  picks the created `status`). `sinkCredential` accepted but never echoed (secret);
+  create-only, so no notification delivered (documented cut). New
+  `src/apis/dedicated_network/{,vwip,store}.rs` (in-memory store mirroring QoD,
+  UUID minting via SHA-256, no `uuid`/`rand` dep) + self-contained RFC 3339
+  date-time shape check (no new dep); wired into `apis::routes`, the openapi
+  `SPECS` table, and the `/` catalog. spec: new vendored
+  `specs/dedicated-network/vwip/openapi.yaml` (POST op + CreateNetwork/
+  BaseNetworkInfo/NetworkInfo/ServiceTime/NetworkStatus/NetworkError + shared-error
+  `$ref`s + `x-camarasim-scenarios`). tests: +18 (store: id shape/uniqueness,
+  read-back; pure: uuid-shape, status selection wraps, rfc3339 shape,
+  build-info omits secret/absent fields; integration: happy path echo + persist,
+  serviceAreaId → status, qosProfileName alternative, reserved …404/…429/…422 →
+  canonical error, oneOf both/neither → 400, non-UUID/missing-end/non-https →
+  400, end<start → OUT_OF_RANGE, https sink echoed but credential not, scope 403,
+  no-token 401, x-correlator on 201+404). `cargo test` 1884 green (was 1866);
+  `cargo build --release` green. No new dep. — binary: 3.4M (3,543,144 B)
 - 2026-08-10 — dedicated-network-profiles: added the second operation,
   `GET /dedicated-network-profiles/vwip/profiles` (`readNetworkProfiles`, scope
   `dedicated-network-profiles:profiles:read`) — the paginated catalog list, the

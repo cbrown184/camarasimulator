@@ -1,0 +1,355 @@
+# CamaraSim — Dedicated Network - Networks, API version vwip (CAMARA
+# DedicatedNetworks, work-in-progress).
+#
+# Vendored from the CAMARA DedicatedNetworks API family (dedicated-network.yaml,
+# version `wip`, whose canonical base path is `dedicated-network/vwip`, so
+# CamaraSim mounts it there, honouring the version in the URL) and annotated with
+# CamaraSim's parameter-driven functional cases (docs/DESIGN.md §7, §9). Backed
+# by `src/apis/dedicated_network/vwip.rs`; spec and code must not drift.
+#
+# This slice serves the create leg `POST /networks` (`createNetwork`). The
+# read / list / delete legs (`readNetwork` / `listNetworks` / `deleteNetwork`)
+# arrive in later passes.
+openapi: 3.0.3
+info:
+  title: Dedicated Network - Networks
+  description: |
+    Provision and manage **dedicated networks**: customer-provisioned private
+    networks with a chosen connectivity profile, a service-time window and a
+    service area. The `POST /networks` operation creates a dedicated network and
+    returns a `NetworkInfo` carrying the minted `id` and a lifecycle `status`
+    (`REQUESTED` → `RESERVED` → `ACTIVATED` → `TERMINATED`).
+
+    This is the CamaraSim reference double for CAMARA Dedicated Network -
+    Networks (`wip`), the resource sibling of the read-only **Network Profiles**
+    catalog. `createNetwork` requires the `dedicated-network:networks:create`
+    scope.
+
+    ## Two-legged provisioning call
+
+    A dedicated network exists independently of any single subscriber, so this is
+    a two-legged (`client_credentials`) provisioning call: there is no
+    device/line identifier and no three-legged dance. State is held in memory
+    (single node, DESIGN §4).
+
+    ## Functional cases — the input is the control plane (docs/DESIGN.md §7)
+
+    Two control planes:
+
+    - **Request validation → 400.** A body that is not a valid `CreateNetwork`;
+      a `name` outside `1..=1024` chars; neither-or-both of `networkProfileId` /
+      `qosProfileName` (the schema `oneOf`); a non-UUID `networkProfileId` /
+      `serviceAreaId`; an empty `qosProfileName`; a `serviceTime` missing or with
+      a malformed `start`/`end`; or a `sink` not matching `^https://.+$` →
+      `400 INVALID_ARGUMENT`. A `serviceTime` whose (UTC) `end` precedes its
+      `start` → `400 OUT_OF_RANGE`.
+    - **`serviceAreaId` identifier plane.** The required `serviceAreaId` UUID is
+      the identifier. Its trailing three digits drive the result: a reserved
+      suffix (`…400`, `…401`, `…403`, `…404`, `…409`, `…422`, `…429`, `…500`,
+      `…503`; see the referenced `errors.yaml`) → that canonical CAMARA error
+      (e.g. `…404` → `404 NOT_FOUND`, no such service area); otherwise `d % 3`
+      selects the created network's lifecycle `status` — `0` (incl. `…000` /
+      no-digits) → `REQUESTED`, `1` → `RESERVED`, `2` → `ACTIVATED`. So
+      `serviceAreaId` is a genuine second plane.
+
+    `sinkCredential` is accepted but never echoed (it is a secret), and — this
+    slice being create-only — no notification is delivered (a documented cut).
+    CamaraSim exposes the full shared reserved-error set here so every reserved
+    suffix is reachable; canonical Dedicated Network declares a subset for this
+    operation (400/401/403).
+  version: "wip"
+  license:
+    name: Apache-2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0.html
+
+servers:
+  - url: "{apiRoot}/dedicated-network/vwip"
+    variables:
+      apiRoot:
+        default: http://localhost:8080
+        description: API root, e.g. the CamaraSim base URL.
+
+paths:
+  /networks:
+    post:
+      operationId: createNetwork
+      summary: Create a dedicated network with the given configuration
+      description: |
+        Creates a dedicated network from the submitted `CreateNetwork` body,
+        mints an opaque UUID `id`, and returns the rendered `NetworkInfo`
+        (`201`). In CamaraSim the result is derived from the request — see the
+        API description for the parameter-driven functional cases (request
+        validation → 400; a reserved `serviceAreaId` trailing suffix → the
+        matching canonical error; otherwise the trailing digits select the
+        created network's lifecycle `status`).
+      security:
+        - openId:
+            - dedicated-network:networks:create
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateNetwork"
+            examples:
+              withProfile:
+                summary: A network booked against a network profile
+                value:
+                  name: factory-floor
+                  networkProfileId: "00000000-0000-4000-8000-000000000abc"
+                  serviceTime:
+                    start: "2024-01-01T00:00:00Z"
+                    end: "2024-12-31T23:59:59Z"
+                  serviceAreaId: "00000000-0000-4000-8000-000000000001"
+      responses:
+        "201":
+          description: The dedicated network was created.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NetworkInfo"
+              examples:
+                reserved:
+                  summary: A newly reserved network (serviceAreaId tail 001)
+                  value:
+                    id: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+                    status: RESERVED
+                    name: factory-floor
+                    networkProfileId: "00000000-0000-4000-8000-000000000abc"
+                    serviceTime:
+                      start: "2024-01-01T00:00:00Z"
+                      end: "2024-12-31T23:59:59Z"
+                    serviceAreaId: "00000000-0000-4000-8000-000000000001"
+        "400":
+          description: |
+            400 — invalid request. CamaraSim returns `INVALID_ARGUMENT` for a
+            malformed body/field (bad JSON, `name` length, the profile `oneOf`, a
+            non-UUID id, a missing/malformed `serviceTime`, a non-`https` sink),
+            and `OUT_OF_RANGE` for a `serviceTime` whose `end` precedes its
+            `start`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NetworkError"
+              examples:
+                outOfRange:
+                  summary: serviceTime.end precedes serviceTime.start
+                  value:
+                    status: 400
+                    code: OUT_OF_RANGE
+                    message: "`serviceTime.end` must not precede `serviceTime.start`."
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "409":
+          $ref: "../../shared/errors.yaml#/components/responses/Conflict"
+        "422":
+          $ref: "../../shared/errors.yaml#/components/responses/ServiceNotApplicable"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          Result selected from the request body and the `serviceAreaId`
+          identifier (docs/DESIGN.md §7). Request validation runs first (→ 400);
+          then a reserved `serviceAreaId` trailing suffix → the matching
+          canonical CAMARA error; otherwise the trailing three digits `d % 3`
+          select the created network's lifecycle `status`. Reserved error
+          suffixes come from the shared convention in errors.yaml.
+        cases:
+          - input: a body that is not a valid CreateNetwork (bad JSON / unknown field)
+            result: "400 INVALID_ARGUMENT"
+          - input: neither or both of networkProfileId / qosProfileName
+            result: "400 INVALID_ARGUMENT (the schema oneOf)"
+          - input: a non-UUID serviceAreaId or networkProfileId
+            result: "400 INVALID_ARGUMENT"
+          - input: a serviceTime missing start/end, or a malformed date-time
+            result: "400 INVALID_ARGUMENT"
+          - input: a serviceTime whose (UTC) end precedes its start
+            result: "400 OUT_OF_RANGE"
+          - input: a sink not matching ^https://.+$
+            result: "400 INVALID_ARGUMENT"
+          - input: serviceAreaId whose trailing digits are a reserved suffix (e.g. …404)
+            result: the canonical CAMARA error for that status (…404 = no such service area)
+          - input: "a valid body, serviceAreaId tail d (non-reserved)"
+            result: "201 NetworkInfo with status = REQUESTED/RESERVED/ACTIVATED for d % 3 = 0/1/2"
+
+components:
+  securitySchemes:
+    openId:
+      $ref: "../../auth/openapi.yaml#/components/securitySchemes/camaraOAuth"
+
+  parameters:
+    XCorrelator:
+      name: x-correlator
+      in: header
+      required: false
+      description: Correlation id for the request, echoed back on the response.
+      schema:
+        type: string
+
+  headers:
+    XCorrelator:
+      description: The `x-correlator` from the request, echoed if one was sent.
+      required: false
+      schema:
+        type: string
+
+  schemas:
+    ServiceTime:
+      type: object
+      description: The window during which the dedicated network is in service.
+      required:
+        - start
+        - end
+      properties:
+        start:
+          type: string
+          format: date-time
+          maxLength: 64
+          description: When the service starts (RFC 3339).
+          example: "2024-01-01T00:00:00Z"
+        end:
+          type: string
+          format: date-time
+          maxLength: 64
+          description: When the service ends (RFC 3339, at or after `start`).
+          example: "2024-12-31T23:59:59Z"
+
+    SinkCredential:
+      type: object
+      description: |
+        Credential for authenticating notification callbacks (CAMARA
+        `SinkCredential`). Accepted by CamaraSim but never echoed (a secret) and
+        — this slice being create-only — never applied.
+      required:
+        - credentialType
+      properties:
+        credentialType:
+          type: string
+          enum:
+            - PLAIN
+            - ACCESSTOKEN
+            - REFRESHTOKEN
+          description: The type of the credential.
+
+    BaseNetworkInfo:
+      type: object
+      description: |
+        Common attributes of a dedicated network. Exactly one of
+        `networkProfileId` / `qosProfileName` must be supplied (the `oneOf`).
+      required:
+        - serviceTime
+        - serviceAreaId
+      oneOf:
+        - required:
+            - networkProfileId
+        - required:
+            - qosProfileName
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 1024
+          description: A human-readable name for the network.
+          example: factory-floor
+        networkProfileId:
+          type: string
+          format: uuid
+          maxLength: 36
+          description: The network profile to book (from the Network Profiles catalog).
+        qosProfileName:
+          type: string
+          minLength: 1
+          maxLength: 256
+          description: A bare QoS profile name (alternative to `networkProfileId`).
+          example: voice
+        serviceTime:
+          $ref: "#/components/schemas/ServiceTime"
+        serviceAreaId:
+          type: string
+          format: uuid
+          maxLength: 36
+          description: The identifier of the service area the network applies to.
+        sink:
+          type: string
+          format: uri
+          maxLength: 2048
+          pattern: "^https://.+$"
+          description: The `https://` address notifications are delivered to.
+        sinkCredential:
+          $ref: "#/components/schemas/SinkCredential"
+
+    CreateNetwork:
+      description: The body for `createNetwork` — the common dedicated-network attributes.
+      allOf:
+        - $ref: "#/components/schemas/BaseNetworkInfo"
+
+    NetworkStatus:
+      type: string
+      description: |
+        The dedicated network's lifecycle status.
+        - `REQUESTED`: requested, not yet approved.
+        - `RESERVED`: accepted; resources committed but not yet usable.
+        - `ACTIVATED`: usable by devices with access.
+        - `TERMINATED`: used and up for deletion.
+      enum:
+        - REQUESTED
+        - RESERVED
+        - ACTIVATED
+        - TERMINATED
+
+    NetworkInfo:
+      description: |
+        A created dedicated network: the common attributes plus the minted `id`
+        and the lifecycle `status`. `sinkCredential` is never returned (a
+        secret).
+      allOf:
+        - $ref: "#/components/schemas/BaseNetworkInfo"
+        - type: object
+          required:
+            - id
+            - status
+          properties:
+            id:
+              type: string
+              format: uuid
+              maxLength: 36
+              description: The dedicated network's identifier (server-minted).
+            status:
+              $ref: "#/components/schemas/NetworkStatus"
+
+    NetworkError:
+      description: >-
+        The CAMARA error body for this API — the shared `CamaraError` shape with
+        this operation's `code` set.
+      allOf:
+        - $ref: "../../shared/errors.yaml#/components/schemas/CamaraError"
+        - type: object
+          properties:
+            code:
+              type: string
+              enum:
+                - INVALID_ARGUMENT
+                - OUT_OF_RANGE
+                - UNAUTHENTICATED
+                - PERMISSION_DENIED
+                - INVALID_TOKEN_CONTEXT
+                - NOT_FOUND
+                - IDENTIFIER_NOT_FOUND
+                - CONFLICT
+                - SERVICE_NOT_APPLICABLE
+                - TOO_MANY_REQUESTS
+                - INTERNAL
+                - UNAVAILABLE
