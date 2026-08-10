@@ -1,9 +1,13 @@
 //! Edge Application Management **vwip** (CAMARA EdgeApplicationManagement `wip`).
 //!
-//! One endpoint so far:
+//! Endpoints so far:
 //! - `GET /edge-application-management/vwip/edge-cloud-zones` — list the edge
 //!   cloud zones the operator offers for application placement (operationId
 //!   `getEdgeCloudZones`, scope `edge-application-management:edge-cloud-zones:read`).
+//! - `POST /edge-application-management/vwip/apps` — submit (onboard) an
+//!   application, minting an `appId` (operationId `submitApp`, scope
+//!   `edge-application-management:apps:write`). The first **stateful** leg — see
+//!   [`submit_app`] and [`crate::apis::edge_application_management::store`].
 //!
 //! ## What it does
 //!
@@ -33,10 +37,11 @@
 //! `edge-application-management:edge-cloud-zones:read` scope. `x-correlator` is
 //! echoed on every response.
 
+use axum::body::Bytes;
 use axum::extract::RawQuery;
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -45,15 +50,25 @@ use sha2::{Digest, Sha256};
 use crate::auth::verify::Claims;
 use crate::errors::CamaraError;
 
+use super::store;
+
 /// The OAuth2 scope `getEdgeCloudZones` requires (CAMARA EdgeApplicationManagement).
 const ZONES_SCOPE: &str = "edge-application-management:edge-cloud-zones:read";
 
+/// The OAuth2 scope `submitApp` requires (CAMARA EdgeApplicationManagement).
+const APPS_WRITE_SCOPE: &str = "edge-application-management:apps:write";
+
+/// The five CAMARA `AppManifest.packageType` values.
+const PACKAGE_TYPES: [&str; 5] = ["QCOW2", "OVA", "CONTAINER", "HELM", "CSAR"];
+
 /// Routes for Edge Application Management vwip, mounted at their canonical URLs.
 pub fn routes() -> Router {
-    Router::new().route(
-        "/edge-application-management/vwip/edge-cloud-zones",
-        get(get_edge_cloud_zones),
-    )
+    Router::new()
+        .route(
+            "/edge-application-management/vwip/edge-cloud-zones",
+            get(get_edge_cloud_zones),
+        )
+        .route("/edge-application-management/vwip/apps", post(submit_app))
 }
 
 /// The operator's fixed edge cloud zones:
@@ -142,6 +157,174 @@ async fn get_edge_cloud_zones(
 struct Raw {
     region: Option<String>,
     status: Option<String>,
+}
+
+/// `POST /edge-application-management/vwip/apps` (`submitApp`).
+///
+/// Submits (onboards) an application: the caller sends an `AppManifest`, the
+/// simulator validates it, mints an `appId`, persists the manifest in the
+/// in-memory [`store`], and returns `201 { appId }` (`SubmittedApp`).
+///
+/// There is no upstream orchestrator, so the two control planes are the input
+/// alone (docs/DESIGN.md §7):
+///
+/// 1. **Request validation** — a missing/blank required field, a `name` that
+///    violates the CAMARA pattern, an unknown `packageType`, or an empty
+///    `componentSpec` → `400 INVALID_ARGUMENT`.
+/// 2. **Store state** — the `appId` is derived deterministically from the app's
+///    identity (`name` + `version` + `appProvider`; see [`app_id`]), so
+///    submitting the *same* application twice collides → `409 ALREADY_EXISTS`.
+///
+/// The nested `appRepo` / `requiredResources` / `componentSpec` item shapes are
+/// checked only for presence/non-emptiness — the full `oneOf`
+/// (`KubernetesResources` / `VmResources` / …) validation is a documented cut.
+async fn submit_app(claims: Claims, headers: HeaderMap, body: Bytes) -> Response {
+    let correlator = headers.get("x-correlator").cloned();
+
+    // Endpoint authorisation: the token must carry this API's write scope.
+    if let Err(e) = claims.require_scope(APPS_WRITE_SCOPE) {
+        return with_correlator(e.into_response(), &correlator);
+    }
+
+    // Parse the AppManifest body (malformed JSON / wrong field types → 400).
+    let manifest: AppManifest = match serde_json::from_slice(&body) {
+        Ok(m) => m,
+        Err(_) => {
+            return invalid_argument(
+                "the request body is not a valid AppManifest JSON object",
+                &correlator,
+            )
+        }
+    };
+
+    // Control plane 1 — required-field / shape validation.
+    if let Err(message) = manifest.validate() {
+        return invalid_argument(&message, &correlator);
+    }
+
+    // Identity fields are guaranteed present by `validate()` above.
+    let name = manifest.name.as_deref().unwrap_or_default();
+    let version = manifest.version.as_deref().unwrap_or_default();
+    let provider = manifest.app_provider.clone().unwrap_or(Value::Null);
+    let app_id = app_id(name, version, &provider);
+
+    // Control plane 2 — store state (re-submitting the same app → 409).
+    let stored: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+    if !store::insert(app_id.clone(), stored) {
+        return with_correlator(
+            CamaraError::new(
+                StatusCode::CONFLICT,
+                "ALREADY_EXISTS",
+                "App already exists",
+            )
+            .into_response(),
+            &correlator,
+        );
+    }
+
+    with_correlator(
+        (StatusCode::CREATED, Json(json!({ "appId": app_id }))).into_response(),
+        &correlator,
+    )
+}
+
+/// The subset of CAMARA `AppManifest` fields CamaraSim validates. All are
+/// captured as `Option`/`Value` so a *missing* required field is reported as a
+/// precise `400 INVALID_ARGUMENT` (rather than a serde rejection), and the
+/// nested shapes we don't fully model pass through untouched.
+#[derive(Debug, Deserialize)]
+struct AppManifest {
+    name: Option<String>,
+    version: Option<String>,
+    #[serde(rename = "appProvider")]
+    app_provider: Option<Value>,
+    #[serde(rename = "packageType")]
+    package_type: Option<String>,
+    #[serde(rename = "appRepo")]
+    app_repo: Option<Value>,
+    #[serde(rename = "requiredResources")]
+    required_resources: Option<Value>,
+    #[serde(rename = "componentSpec")]
+    component_spec: Option<Value>,
+}
+
+impl AppManifest {
+    /// Validate the required fields, returning a human-readable message on the
+    /// first violation (mapped by the caller to `400 INVALID_ARGUMENT`).
+    fn validate(&self) -> Result<(), String> {
+        match self.name.as_deref() {
+            None => return Err("`name` is required".into()),
+            Some(name) if !is_valid_app_name(name) => {
+                return Err(
+                    "`name` must match `^[A-Za-z][A-Za-z0-9_]{1,63}$`".into(),
+                )
+            }
+            Some(_) => {}
+        }
+        if self.version.as_deref().unwrap_or_default().is_empty() {
+            return Err("`version` is required".into());
+        }
+        if !self.app_provider.as_ref().is_some_and(|v| !v.is_null()) {
+            return Err("`appProvider` is required".into());
+        }
+        match self.package_type.as_deref() {
+            None => return Err("`packageType` is required".into()),
+            Some(pt) if !PACKAGE_TYPES.contains(&pt) => {
+                return Err(
+                    "`packageType` must be one of QCOW2, OVA, CONTAINER, HELM, CSAR"
+                        .into(),
+                )
+            }
+            Some(_) => {}
+        }
+        if !self.app_repo.as_ref().is_some_and(|v| !v.is_null()) {
+            return Err("`appRepo` is required".into());
+        }
+        if !self.required_resources.as_ref().is_some_and(|v| !v.is_null()) {
+            return Err("`requiredResources` is required".into());
+        }
+        match self.component_spec.as_ref() {
+            Some(Value::Array(items)) if !items.is_empty() => {}
+            _ => return Err("`componentSpec` must be a non-empty array".into()),
+        }
+        Ok(())
+    }
+}
+
+/// Whether `name` matches the CAMARA `AppManifest.name` pattern
+/// `^[A-Za-z][A-Za-z0-9_]{1,63}$` (2–64 chars, starting with a letter, the rest
+/// letters/digits/underscore). Checked by hand — no `regex` dependency.
+fn is_valid_app_name(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    if !(2..=64).contains(&bytes.len()) {
+        return false;
+    }
+    if !bytes[0].is_ascii_alphabetic() {
+        return false;
+    }
+    bytes[1..]
+        .iter()
+        .all(|&c| c.is_ascii_alphanumeric() || c == b'_')
+}
+
+/// A stable, RFC 4122 (version 5, name-based) UUID `appId` for a submitted
+/// application, derived from its identity — the `(name, version, appProvider)`
+/// triple — via SHA-256 (deterministic, no new dependency). The version (`5`)
+/// and variant nibbles are forced so the id satisfies the strict
+/// `SubmittedApp.appId` UUID pattern the CAMARA schema requires. Deriving the id
+/// from the identity is what makes a duplicate submission collide (→ `409
+/// ALREADY_EXISTS`).
+pub fn app_id(name: &str, version: &str, provider: &Value) -> String {
+    // Canonical JSON of the provider so the identity is stable regardless of
+    // whether `appProvider` is a string or a structured object.
+    let provider = serde_json::to_string(provider).unwrap_or_default();
+    let mut h = Sha256::digest(format!("eam-app:{name}\u{1f}{version}\u{1f}{provider}").as_bytes());
+    h[6] = (h[6] & 0x0f) | 0x50; // version 5
+    h[8] = (h[8] & 0x3f) | 0x80; // variant (10xx)
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7], h[8], h[9], h[10], h[11], h[12], h[13], h[14], h[15]
+    )
 }
 
 /// A stable, RFC 4122 (version 5, name-based) UUID `edgeCloudZoneId` for a zone,
@@ -415,6 +598,204 @@ mod tests {
         assert_eq!(
             headers.get("x-correlator").and_then(|v| v.to_str().ok()),
             Some("corr-err")
+        );
+    }
+
+    // --- submitApp: pure units --------------------------------------------
+
+    #[test]
+    fn app_name_pattern_is_enforced() {
+        assert!(is_valid_app_name("Ab"));
+        assert!(is_valid_app_name("My_App_1"));
+        assert!(is_valid_app_name(&format!("A{}", "b".repeat(63)))); // 64 chars
+        assert!(!is_valid_app_name("A")); // too short (min 2)
+        assert!(!is_valid_app_name("1abc")); // must start with a letter
+        assert!(!is_valid_app_name("my-app")); // hyphen not allowed
+        assert!(!is_valid_app_name("")); // empty
+        assert!(!is_valid_app_name(&format!("A{}", "b".repeat(64)))); // 65 chars
+    }
+
+    #[test]
+    fn app_id_is_deterministic_uuid_shaped_and_identity_keyed() {
+        let p = json!("Acme");
+        let a = app_id("MyApp", "1.0.0", &p);
+        assert_eq!(a, app_id("MyApp", "1.0.0", &p), "stable per identity");
+        // A UUID shape satisfying the strict CAMARA pattern.
+        assert!(is_uuid(&a), "app id {a} is a UUID");
+        assert_eq!(&a[14..15], "5", "version nibble is 5");
+        // Each identity coordinate changes the id.
+        assert_ne!(a, app_id("MyApp", "2.0.0", &p));
+        assert_ne!(a, app_id("OtherApp", "1.0.0", &p));
+        assert_ne!(a, app_id("MyApp", "1.0.0", &json!("Beta")));
+    }
+
+    // --- submitApp: integration through the real router -------------------
+
+    /// A complete, valid `AppManifest` body for app `name` (identity keyed on
+    /// `name`/`version`/`appProvider`, so a distinct `name` per test avoids the
+    /// process-global store colliding across parallel tests).
+    fn manifest(name: &str) -> Value {
+        json!({
+            "name": name,
+            "version": "1.0.0",
+            "appProvider": "CamaraSim Test",
+            "packageType": "CONTAINER",
+            "appRepo": { "type": "PUBLICREPO", "imagePath": "https://repo.example/app:1" },
+            "requiredResources": { "infraKind": "CONTAINER" },
+            "componentSpec": [
+                { "componentName": "web", "networkInterfaces": [
+                    { "interfaceId": "eth0", "protocol": "TCP", "port": 8080,
+                      "visibilityType": "VISIBILITY_EXTERNAL" }
+                ] }
+            ]
+        })
+    }
+
+    async fn post_app(
+        token: Option<&str>,
+        body: &str,
+        correlator: Option<&str>,
+    ) -> (StatusCode, HeaderMap, Value) {
+        let mut builder = Request::builder()
+            .method("POST")
+            .uri("/edge-application-management/vwip/apps")
+            .header("host", HOST)
+            .header("content-type", "application/json");
+        if let Some(t) = token {
+            builder = builder.header("authorization", format!("Bearer {t}"));
+        }
+        if let Some(c) = correlator {
+            builder = builder.header("x-correlator", c);
+        }
+        let response = app()
+            .oneshot(builder.body(Body::from(body.to_string())).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let headers = response.headers().clone();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, headers, json)
+    }
+
+    async fn submit_ok(token: &str, body: &Value) -> (StatusCode, HeaderMap, Value) {
+        post_app(Some(token), &body.to_string(), None).await
+    }
+
+    #[tokio::test]
+    async fn submit_app_mints_a_uuid_app_id_and_persists_the_manifest() {
+        let token = mint_token(APPS_WRITE_SCOPE).await;
+        let body = manifest("submit_ok_app");
+        let (status, _, resp) = submit_ok(&token, &body).await;
+        assert_eq!(status, StatusCode::CREATED);
+        let app_id = resp["appId"].as_str().expect("appId string");
+        assert!(is_uuid(app_id), "appId {app_id} is a UUID");
+        // The manifest is persisted under the minted id.
+        assert_eq!(store::get(app_id), Some(body));
+    }
+
+    #[tokio::test]
+    async fn resubmitting_the_same_app_is_already_exists() {
+        let token = mint_token(APPS_WRITE_SCOPE).await;
+        let body = manifest("duplicate_app");
+        let (status, _, first) = submit_ok(&token, &body).await;
+        assert_eq!(status, StatusCode::CREATED);
+        let (status, _, second) = submit_ok(&token, &body).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(second["code"], "ALREADY_EXISTS");
+        assert_eq!(second["status"], 409);
+        // Sanity: the first call really did succeed with an id.
+        assert!(first["appId"].is_string());
+    }
+
+    #[tokio::test]
+    async fn a_different_version_of_the_same_app_gets_a_new_id() {
+        let token = mint_token(APPS_WRITE_SCOPE).await;
+        let (s1, _, r1) = submit_ok(&token, &manifest("versioned_app")).await;
+        let mut v2 = manifest("versioned_app");
+        v2["version"] = json!("2.0.0");
+        let (s2, _, r2) = submit_ok(&token, &v2).await;
+        assert_eq!(s1, StatusCode::CREATED);
+        assert_eq!(s2, StatusCode::CREATED);
+        assert_ne!(r1["appId"], r2["appId"], "distinct version → distinct appId");
+    }
+
+    #[tokio::test]
+    async fn missing_required_field_is_invalid_argument() {
+        let token = mint_token(APPS_WRITE_SCOPE).await;
+        let mut body = manifest("missing_pkg_app");
+        body.as_object_mut().unwrap().remove("packageType");
+        let (status, _, resp) = submit_ok(&token, &body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(resp["code"], "INVALID_ARGUMENT");
+    }
+
+    #[tokio::test]
+    async fn bad_name_pattern_is_invalid_argument() {
+        let token = mint_token(APPS_WRITE_SCOPE).await;
+        let mut body = manifest("placeholder");
+        body["name"] = json!("1-bad-name"); // starts with a digit, has hyphens
+        let (status, _, resp) = submit_ok(&token, &body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(resp["code"], "INVALID_ARGUMENT");
+    }
+
+    #[tokio::test]
+    async fn unknown_package_type_is_invalid_argument() {
+        let token = mint_token(APPS_WRITE_SCOPE).await;
+        let mut body = manifest("bad_pkg_app");
+        body["packageType"] = json!("ZIP");
+        let (status, _, resp) = submit_ok(&token, &body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(resp["code"], "INVALID_ARGUMENT");
+    }
+
+    #[tokio::test]
+    async fn empty_component_spec_is_invalid_argument() {
+        let token = mint_token(APPS_WRITE_SCOPE).await;
+        let mut body = manifest("empty_components_app");
+        body["componentSpec"] = json!([]);
+        let (status, _, resp) = submit_ok(&token, &body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(resp["code"], "INVALID_ARGUMENT");
+    }
+
+    #[tokio::test]
+    async fn malformed_json_body_is_invalid_argument() {
+        let token = mint_token(APPS_WRITE_SCOPE).await;
+        let (status, _, resp) = post_app(Some(&token), "{not json", None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(resp["code"], "INVALID_ARGUMENT");
+    }
+
+    #[tokio::test]
+    async fn submit_app_without_the_write_scope_is_forbidden() {
+        // A token carrying only the zones *read* scope must not submit apps.
+        let token = mint_token(ZONES_SCOPE).await;
+        let (status, _, resp) = submit_ok(&token, &manifest("forbidden_app")).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(resp["code"], "PERMISSION_DENIED");
+    }
+
+    #[tokio::test]
+    async fn submit_app_missing_token_is_unauthenticated() {
+        let (status, _, resp) =
+            post_app(None, &manifest("noauth_app").to_string(), None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(resp["code"], "UNAUTHENTICATED");
+    }
+
+    #[tokio::test]
+    async fn submit_app_echoes_x_correlator_on_success() {
+        let token = mint_token(APPS_WRITE_SCOPE).await;
+        let (status, headers, _) =
+            post_app(Some(&token), &manifest("correlated_app").to_string(), Some("corr-apps")).await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-apps")
         );
     }
 }

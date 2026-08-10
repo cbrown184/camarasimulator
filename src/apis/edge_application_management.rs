@@ -18,6 +18,7 @@
 //!   EdgeApplicationManagement `wip`, mounted at its canonical `vwip` base path
 //!   like the other unreleased EdgeCloud APIs).
 
+pub mod store;
 pub mod vwip;
 
 use axum::Router;

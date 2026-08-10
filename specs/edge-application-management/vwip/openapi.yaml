@@ -11,24 +11,28 @@
 # Discovery): discovery *finds* the right edge zone for a device; this API
 # *places workloads* onto those zones (apps, app-instances, deployments).
 #
-# This slice serves the read-only zone-catalog leg:
-#   GET /edge-cloud-zones  (getEdgeCloudZones)
-# The stateful app / app-instance / deployment resources are later passes.
+# This slice serves:
+#   GET  /edge-cloud-zones  (getEdgeCloudZones) — read-only zone catalog
+#   POST /apps              (submitApp)         — onboard an application (stateful)
+# The remaining app read/delete, app-instance, deployment and cluster resources
+# are later passes.
 openapi: 3.0.3
 info:
   title: Edge Application Management
   description: |
     Manage the lifecycle of applications deployed onto an operator's edge cloud.
     This CamaraSim slice serves the **edge cloud zone catalog** — the zones a
-    provider can deploy onto — as a fixed, in-memory set (there is no upstream
-    orchestrator to query — DESIGN §7). It requires the
-    `edge-application-management:edge-cloud-zones:read` scope.
+    provider can deploy onto, a fixed in-memory set (there is no upstream
+    orchestrator to query — DESIGN §7) — and the first stateful leg,
+    **`submitApp`**, which onboards an application.
 
     ## Functional cases — the input is the control plane (docs/DESIGN.md §7)
 
-    `getEdgeCloudZones` returns the fixed catalog filtered by two query
-    parameters (there is no device identifier, so no reserved-error plane — this
-    is a pure catalog, like QoS Profiles):
+    ### `getEdgeCloudZones`
+
+    Returns the fixed catalog filtered by two query parameters (there is no
+    device identifier, so no reserved-error plane — this is a pure catalog, like
+    QoS Profiles):
 
     1. **`region`** — return only zones whose `edgeCloudRegion` matches exactly.
        An unknown region yields an empty array (a *list* never 404s).
@@ -37,9 +41,22 @@ info:
 
     Both filters combine (AND). With neither, the whole catalog is returned.
 
-    Examples: no query → the full catalog; `?status=active` → the active zones;
-    `?region=us-east-1` → the single zone in that region; `?region=nowhere` →
-    `[]`; `?status=RETIRED` → `400 INVALID_ARGUMENT`.
+    ### `submitApp`
+
+    Onboards an application from a submitted `AppManifest`, mints an `appId` and
+    remembers the manifest in memory. Two control planes:
+
+    1. **Request validation** — a missing/blank required field, a `name` that
+       violates the CAMARA pattern, an unknown `packageType`, or an empty
+       `componentSpec` → `400 INVALID_ARGUMENT`.
+    2. **Store state** — the `appId` is derived deterministically from the app's
+       identity (`name` + `version` + `appProvider`), so submitting the *same*
+       application twice collides → `409 ALREADY_EXISTS`.
+
+    The nested `appRepo` / `requiredResources` / `componentSpec` item shapes are
+    validated only for presence/non-emptiness — the full `requiredResources`
+    `oneOf` (KubernetesResources / VmResources / …) validation is a documented
+    cut.
   version: "wip"
   license:
     name: Apache-2.0
@@ -53,6 +70,92 @@ servers:
         description: API root, e.g. the CamaraSim base URL.
 
 paths:
+  /apps:
+    post:
+      operationId: submitApp
+      summary: Submit (onboard) an application
+      description: |
+        Submits an `AppManifest` to onboard an application onto the operator's
+        edge cloud. On success the application is registered and a `SubmittedApp`
+        (`appId`) is returned.
+
+        See the API description for the parameter-driven functional cases.
+      security:
+        - openId:
+            - edge-application-management:apps:write
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AppManifest"
+      responses:
+        "201":
+          description: Application submitted; the minted `appId` is returned.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SubmittedApp"
+              example:
+                appId: 5e3a8c2f-1b4d-5a6e-8f90-2c1d3e4f5a6b
+        "400":
+          $ref: "../../shared/errors.yaml#/components/responses/InvalidArgument"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "409":
+          description: The application already exists.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "../../shared/errors.yaml#/components/schemas/CamaraError"
+              example:
+                status: 409
+                code: ALREADY_EXISTS
+                message: App already exists
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          `submitApp` is CamaraSim's first stateful Edge Application Management
+          leg (docs/DESIGN.md §7). Two control planes drive the outcome: request
+          validation and store state. The `appId` is minted deterministically
+          from the app identity (`name` + `version` + `appProvider`) as an RFC
+          4122 v5 UUID (SHA-256, no new dependency), so re-submitting the same
+          application collides → `409 ALREADY_EXISTS`. Canonical
+          EdgeApplicationManagement declares 400/401/403/409/500/503 here.
+          Documented cut: the full `requiredResources` `oneOf` and nested
+          `appRepo`/`componentSpec` item shapes are validated only for
+          presence/non-emptiness.
+        cases:
+          - input: a valid `AppManifest`
+            result: '201 — `{ appId }` (the manifest is persisted in memory)'
+          - input: the same `AppManifest` submitted again (same name/version/appProvider)
+            result: '409 ALREADY_EXISTS'
+          - input: same app but a different `version`
+            result: '201 — a distinct `appId`'
+          - input: a missing required field (name/version/appProvider/packageType/appRepo/requiredResources/componentSpec)
+            result: '400 INVALID_ARGUMENT'
+          - input: '`name` not matching `^[A-Za-z][A-Za-z0-9_]{1,63}$`'
+            result: '400 INVALID_ARGUMENT'
+          - input: '`packageType` not one of QCOW2/OVA/CONTAINER/HELM/CSAR'
+            result: '400 INVALID_ARGUMENT'
+          - input: an empty `componentSpec` array
+            result: '400 INVALID_ARGUMENT'
+          - input: a body that is not valid JSON
+            result: '400 INVALID_ARGUMENT'
+
   /edge-cloud-zones:
     get:
       operationId: getEdgeCloudZones
@@ -209,3 +312,91 @@ components:
           maxLength: 64
           description: Human-readable name of the geographical edge cloud region.
           example: eu-west-1
+
+    AppProvider:
+      type: string
+      maxLength: 64
+      description: The name of the application provider onboarding the app.
+      example: CamaraSim Test
+
+    AppRepo:
+      type: object
+      description: >-
+        The repository from which the application image is pulled. CamaraSim
+        validates only its presence (the full field set is a documented cut).
+      required:
+        - type
+        - imagePath
+      properties:
+        type:
+          type: string
+          enum: [PRIVATEREPO, PUBLICREPO]
+        imagePath:
+          type: string
+          format: uri
+          example: https://repo.example/app:1
+
+    AppManifest:
+      type: object
+      description: >-
+        The application onboarding manifest (CAMARA `AppManifest`). CamaraSim
+        validates the required top-level fields; the nested
+        `requiredResources`/`componentSpec` shapes are checked only for
+        presence/non-emptiness (documented cut — see the API description).
+      required:
+        - name
+        - version
+        - appProvider
+        - packageType
+        - appRepo
+        - requiredResources
+        - componentSpec
+      properties:
+        name:
+          type: string
+          maxLength: 64
+          pattern: '^[A-Za-z][A-Za-z0-9_]{1,63}$'
+          description: The name of the application. Immutable app identity coordinate.
+          example: MyEdgeApp
+        version:
+          type: string
+          maxLength: 64
+          description: The version of the application. Immutable app identity coordinate.
+          example: 1.0.0
+        appProvider:
+          $ref: "#/components/schemas/AppProvider"
+        packageType:
+          type: string
+          description: The type of the application image package.
+          enum: [QCOW2, OVA, CONTAINER, HELM, CSAR]
+          example: CONTAINER
+        appRepo:
+          $ref: "#/components/schemas/AppRepo"
+        requiredResources:
+          type: object
+          description: >-
+            The infrastructure resources the application needs (CAMARA
+            `oneOf` KubernetesResources / VmResources / ContainerResources /
+            DockerComposeResources, discriminated by `infraKind`). CamaraSim
+            validates presence only (documented cut).
+        componentSpec:
+          type: array
+          minItems: 1
+          description: Per-component network specification.
+          items:
+            type: object
+
+    SubmittedApp:
+      type: object
+      description: The identifier of a successfully submitted application.
+      required:
+        - appId
+      properties:
+        appId:
+          type: string
+          format: uuid
+          description: The unique identifier minted for the submitted application.
+          pattern: '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
+          minLength: 36
+          maxLength: 36
+          example: 5e3a8c2f-1b4d-5a6e-8f90-2c1d3e4f5a6b

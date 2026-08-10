@@ -2681,8 +2681,28 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
       (AND); neither → the whole catalog. `x-correlator` echoed. The canonical
       `EdgeCloudZones` `minItems: 1` is relaxed so a filter narrowing to zero
       returns `[]` (documented deviation).
-    - [ ] the stateful `apps` / `app-instances` / `deployments` resources +
-      `clusters` — later passes.
+    - [~] the stateful `apps` resource:
+      - [x] `POST /apps` (`submitApp`,
+        `edge-application-management:apps:write`) — the first **stateful** leg.
+        Onboards an application from a submitted `AppManifest`, mints a
+        UUID-shaped `appId` and persists the manifest in a new in-memory store
+        (`src/apis/edge_application_management/store.rs`; `Mutex<HashMap>`, lock
+        never held across await, mirroring the blockchain/QoD stores), `201
+        {appId}` (`SubmittedApp`). Two control planes (DESIGN §7): request
+        validation (missing/blank required field — name/version/appProvider/
+        packageType/appRepo/requiredResources/componentSpec — bad `name` pattern
+        `^[A-Za-z][A-Za-z0-9_]{1,63}$`, unknown `packageType`, empty
+        `componentSpec`, or malformed JSON → 400 INVALID_ARGUMENT); and store
+        state — the `appId` is derived deterministically from the app identity
+        (`name`+`version`+`appProvider`, RFC 4122 v5 UUID via SHA-256, no new
+        dep), so re-submitting the same app collides → 409 `ALREADY_EXISTS`.
+        Nested `requiredResources` `oneOf` / `appRepo` / `componentSpec` item
+        shapes validated for presence/non-emptiness only (documented cut).
+        `x-correlator` echoed.
+      - [ ] `GET /apps` (`getApps`) · `GET /apps/{appId}` (`getApp`) ·
+        `DELETE /apps/{appId}` (`deleteApp`) — later passes.
+    - [ ] the stateful `app-instances` / `deployments` resources + `clusters`
+      — later passes.
 
 ## Cross-cutting (do alongside the item that needs it)
 - [~] `errors.rs`: base CAMARA error model done (`src/errors.rs`, `specs/shared/errors.yaml`); per-version catalogs still TODO (DESIGN §8)
@@ -2708,6 +2728,41 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-10 — edge-application-management: added the **first stateful leg**,
+  `POST /edge-application-management/vwip/apps` (`submitApp`, scope
+  `edge-application-management:apps:write`) — the topmost unclaimed actionable
+  `[ ]` leaf (last pass began this API with the read-only `getEdgeCloudZones`;
+  its stateful `apps`/`app-instances`/`deployments` resources were the next
+  thing). Confirmed the contract from the authoritative upstream (now its own
+  repo) `camaraproject/EdgeApplicationManagement` `edge-application-management.yaml`
+  (`wip`, WebFetch): `POST /apps` = request body `AppManifest` (required
+  name/version/appProvider/packageType/appRepo/requiredResources/componentSpec),
+  `201 SubmittedApp` ({appId: uuid}), errors 400/401/403/409 `ALREADY_EXISTS`/
+  500/503. In CamaraSim it onboards the app, mints a UUID-shaped `appId` and
+  persists the manifest in a new in-memory store
+  (`src/apis/edge_application_management/store.rs`; `Mutex<HashMap>`, lock never
+  across await, mirroring the blockchain store). Two control planes (DESIGN §7):
+  request validation (missing/blank required field, bad `name` pattern
+  `^[A-Za-z][A-Za-z0-9_]{1,63}$`, unknown `packageType`, empty `componentSpec`,
+  malformed JSON → 400 INVALID_ARGUMENT — validated by hand, no `regex` dep) and
+  store state — the `appId` is derived deterministically from the app identity
+  (`name`+`version`+`appProvider`, RFC 4122 v5 UUID via SHA-256, no new dep), so
+  re-submitting the same app collides → 409 `ALREADY_EXISTS`. Nested
+  `requiredResources` `oneOf` / `appRepo` / `componentSpec` item shapes validated
+  for presence/non-emptiness only (documented cut). New `store.rs`
+  (`insert`/`get`) + `pub mod store` in `edge_application_management.rs`; new
+  route + `submit_app` handler + `AppManifest` struct + `is_valid_app_name` /
+  `app_id` helpers in `vwip.rs`; `x-correlator` echoed on 201/400/409. spec:
+  added the `/apps` POST op (submitApp) + `AppManifest`/`AppProvider`/`AppRepo`/
+  `SubmittedApp` schemas + `x-camarasim-scenarios` + description to
+  `specs/edge-application-management/vwip/openapi.yaml` (409 → shared
+  `CamaraError`). tests: +13 (2 pure: name-pattern enforcement, app_id
+  deterministic/uuid/identity-keyed; 11 integration: submit→201+persists,
+  resubmit→409 ALREADY_EXISTS, different version→distinct id, missing required
+  field→400, bad name→400, unknown packageType→400, empty componentSpec→400,
+  malformed JSON→400, wrong scope→403, no token→401, x-correlator echoed). No new
+  dep. `cargo test` 1981 pass (was 1968); `cargo build --release` ok. binary
+  (release): 3,691,816 bytes (~3.6M).
 - 2026-08-10 — edge-application-management: **new API begun** —
   `GET /edge-application-management/vwip/edge-cloud-zones` (`getEdgeCloudZones`,
   scope `edge-application-management:edge-cloud-zones:read`). All prior-phase
