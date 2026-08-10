@@ -8,17 +8,22 @@
 #
 # Serves `POST /sponsorship` (`startSponsorship`),
 # `GET /sponsorship/{sponsorId}/{campaignId}/{sessionId}/session-status`
-# (`getSessionStatus`) and
+# (`getSessionStatus`),
 # `DELETE /sponsorship/{sponsorId}/{campaignId}/{sessionId}/revoke`
-# (`revokeSponsorship`).
+# (`revokeSponsorship`),
+# `GET /campaign/{sponsorId}/{campaignId}/campaign-status` (`getCampaignStatus`)
+# and `GET /campaign/{sponsorId}/{campaignId}/active-sponsorships`
+# (`getActiveSponsorships`).
 #
 # Divergences from the upstream CAMARA source (documented cuts):
-#   - The sponsorship **start**, **session-status** read and **revoke** are
-#     mounted. The upstream also defines campaign-management operations; those,
-#     and the end-of-session `webhookUrl` callback, are deferred to later passes
-#     (see PROGRESS.md). `startSponsorship` persists the granted session in an
-#     in-memory store so `getSessionStatus` can read it back and
-#     `revokeSponsorship` can evict it.
+#   - The sponsorship **start**, **session-status** read and **revoke**, plus the
+#     campaign **status** (`getCampaignStatus`) and **active-sponsorships** list
+#     (`getActiveSponsorships`), are mounted. The upstream campaign-management
+#     operations (`configureAlerts`, `manageCampaign`) and the end-of-session
+#     `webhookUrl` callback are deferred to later passes (see PROGRESS.md).
+#     `startSponsorship` persists the granted session in an in-memory store so
+#     `getSessionStatus` can read it back, `revokeSponsorship` can evict it, and
+#     `getActiveSponsorships` can scan it for a campaign's active sessions.
 #   - `getSessionStatus`'s `endReason` values `session_revoked` and
 #     `not_available` are documented in the schema but not reachable through a
 #     status read: `revokeSponsorship` **evicts** the session, so a revoked
@@ -518,6 +523,106 @@ paths:
           - input: 'status "active" or "paused"'
             result: 'completionReason "not_available"; endTime in the future'
 
+  /campaign/{sponsorId}/{campaignId}/active-sponsorships:
+    get:
+      operationId: getActiveSponsorships
+      summary: List a campaign's currently-active sponsorship sessions
+      description: |
+        List the sponsorship sessions of a campaign that are **currently active**
+        — each as a `{ sessionId, phoneNumber }` pair — together with their
+        `totalCount`. A session is *active* when it is inside its granted window
+        and still has data remaining (the same condition `getSessionStatus`
+        reports as `active`).
+
+        Two control planes (docs/DESIGN.md §7): as with `getCampaignStatus`, a
+        reserved trailing-digit suffix on the campaignId's embedded UUID selects a
+        canonical CAMARA error (`…404` → 404 campaign-not-found); otherwise the
+        in-memory session store is scanned for this `sponsorId`/`campaignId` and
+        filtered to the active sessions. A campaign with no active sessions returns
+        `200` with an empty array and `totalCount: 0` — a CAMARA list never `404`s
+        on an empty result. Malformed path identifiers yield `400 INVALID_ARGUMENT`.
+      security:
+        - openId:
+            - sponsored-data:campaign:read
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+        - name: sponsorId
+          in: path
+          required: true
+          description: The sponsoring company (`local@domain.tld`).
+          schema:
+            $ref: "#/components/schemas/SponsorId"
+        - name: campaignId
+          in: path
+          required: true
+          description: The campaign (`UUID@domain.tld`); its embedded UUID is the error-plane control.
+          schema:
+            $ref: "#/components/schemas/CampaignId"
+      responses:
+        "200":
+          description: Successful operation. The campaign's active sponsorship sessions.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ActiveSponsorships"
+              examples:
+                twoActive:
+                  summary: A campaign with two active sponsored subscribers
+                  value:
+                    sponsorId: acme@sponsor.example.com
+                    campaignId: 123e4567-e89b-12d3-a456-426614174000@sponsor.example.com
+                    activeSponsorships:
+                      - sessionId: 8f14e45f-ceea-4e0a-9d1f-2e3c4b5a6d70
+                        phoneNumber: "+123456789012"
+                      - sessionId: 1b9d6bcd-bbfd-4b2d-9b5d-ab8dfbbd4bed
+                        phoneNumber: "+123456789013"
+                    totalCount: 2
+                none:
+                  summary: A campaign with no active sessions
+                  value:
+                    sponsorId: acme@sponsor.example.com
+                    campaignId: 123e4567-e89b-12d3-a456-426614174000@sponsor.example.com
+                    activeSponsorships: []
+                    totalCount: 0
+        "400":
+          $ref: "../../shared/errors.yaml#/components/responses/InvalidArgument"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "409":
+          $ref: "../../shared/errors.yaml#/components/responses/Conflict"
+        "422":
+          $ref: "../../shared/errors.yaml#/components/responses/ServiceNotApplicable"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          Result selected from the campaignId's embedded UUID and the in-memory
+          session store (docs/DESIGN.md §7). A reserved trailing-digit suffix on
+          the UUID selects a canonical CAMARA error; otherwise the store is scanned
+          and filtered to the active sessions.
+        cases:
+          - input: "sponsorId not local@domain, or campaignId not UUID@domain"
+            result: "400 INVALID_ARGUMENT"
+          - input: "campaignId UUID trailing three digits in {400,401,403,404,409,422,429,500,503}"
+            result: "the matching canonical CAMARA error (e.g. …404 -> 404 NOT_FOUND)"
+          - input: "sessions stored for this sponsorId/campaignId, some inside their window with data remaining"
+            result: "200 listing those active sessions ({sessionId, phoneNumber}) with totalCount = their number"
+          - input: "a stored session past its endTime, or with its grant fully consumed"
+            result: "excluded from activeSponsorships (it is inactive)"
+          - input: "no active sessions for the campaign"
+            result: "200 with activeSponsorships [] and totalCount 0 (a list never 404s)"
+
 components:
   securitySchemes:
     openId:
@@ -824,6 +929,42 @@ components:
             - data_exhausted
             - not_available
           example: not_available
+
+    ActiveSponsorships:
+      type: object
+      additionalProperties: false
+      description: >-
+        A campaign's currently-active sponsorship sessions — each a
+        `{ sessionId, phoneNumber }` pair — with their total count.
+      required:
+        - sponsorId
+        - campaignId
+        - activeSponsorships
+        - totalCount
+      properties:
+        sponsorId:
+          $ref: "#/components/schemas/SponsorId"
+        campaignId:
+          $ref: "#/components/schemas/CampaignId"
+        activeSponsorships:
+          type: array
+          description: The active sessions of the campaign.
+          items:
+            type: object
+            additionalProperties: false
+            required:
+              - sessionId
+              - phoneNumber
+            properties:
+              sessionId:
+                $ref: "#/components/schemas/SessionId"
+              phoneNumber:
+                $ref: "#/components/schemas/PhoneNumber"
+        totalCount:
+          type: integer
+          minimum: 0
+          description: Total number of sponsored subscribers currently active for the campaign.
+          example: 2
 
     SponsoredDataError:
       description: >-

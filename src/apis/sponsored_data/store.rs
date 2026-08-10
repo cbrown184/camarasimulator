@@ -91,6 +91,24 @@ pub fn remove_matching(
     }
 }
 
+/// Return every stored session whose `sponsorId` / `campaignId` match the given
+/// pair, as `(sessionId, record)` clones. The whole map is scanned under a single
+/// lock (never held across an `.await`).
+///
+/// `getActiveSponsorships` uses this to list a campaign's sessions and then
+/// filters the clones to the currently-active ones (the "active" derivation lives
+/// in `super::vwip`, alongside the matching `session-status` view). Order is
+/// unspecified (the map is unordered); the caller sorts for a stable response.
+pub fn all_matching(sponsor_id: &str, campaign_id: &str) -> Vec<(String, SponsorshipRecord)> {
+    store()
+        .lock()
+        .expect("sponsored-data session store not poisoned")
+        .iter()
+        .filter(|(_, r)| r.sponsor_id == sponsor_id && r.campaign_id == campaign_id)
+        .map(|(id, r)| (id.clone(), r.clone()))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -143,5 +161,35 @@ mod tests {
             remove_matching(&id, &rec.sponsor_id, &rec.campaign_id).is_none(),
             "single-use → second revoke is None"
         );
+    }
+
+    #[test]
+    fn all_matching_returns_only_the_pairs_sessions() {
+        // Uniquely-keyed sponsor/campaign so this isolates from the shared store.
+        let sponsor = "am-unit@sponsor.example.com";
+        let campaign = "abcdabcd-abcd-abcd-abcd-abcdabcd0777@sponsor.example.com";
+        let other_campaign = "abcdabcd-abcd-abcd-abcd-abcdabcd0888@sponsor.example.com";
+
+        let mk = |campaign: &str, phone: &str| SponsorshipRecord {
+            sponsor_id: sponsor.to_string(),
+            campaign_id: campaign.to_string(),
+            phone_number: phone.to_string(),
+            start_time: 1_717_200_000,
+            end_time: 1_717_200_600,
+            data_volume_mb: 50,
+        };
+        insert("am-unit-1".to_string(), mk(campaign, "+123456789012"));
+        insert("am-unit-2".to_string(), mk(campaign, "+123456789013"));
+        insert("am-unit-3".to_string(), mk(other_campaign, "+123456789014"));
+
+        let mut got = all_matching(sponsor, campaign);
+        got.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(got.len(), 2, "only the pair's two sessions");
+        assert_eq!(got[0].0, "am-unit-1");
+        assert_eq!(got[1].0, "am-unit-2");
+        assert_eq!(got[0].1.phone_number, "+123456789012");
+
+        // An unknown pair matches nothing.
+        assert!(all_matching(sponsor, "no-such-campaign").is_empty());
     }
 }

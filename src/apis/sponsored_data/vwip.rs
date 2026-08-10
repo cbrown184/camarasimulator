@@ -1,6 +1,6 @@
 //! Sponsored Data **vwip** (CAMARA Sponsored Data, work-in-progress).
 //!
-//! Four endpoints:
+//! Five endpoints:
 //! - `POST /sponsored-data/vwip/sponsorship` — start a data-sponsorship session
 //!   for a subscriber in a campaign (operationId `startSponsorship`).
 //! - `GET /sponsored-data/vwip/sponsorship/{sponsorId}/{campaignId}/{sessionId}/session-status`
@@ -10,6 +10,9 @@
 //! - `GET /sponsored-data/vwip/campaign/{sponsorId}/{campaignId}/campaign-status`
 //!   — report a campaign's operational state and data balance (operationId
 //!   `getCampaignStatus`), derived statelessly from the campaignId.
+//! - `GET /sponsored-data/vwip/campaign/{sponsorId}/{campaignId}/active-sponsorships`
+//!   — list a campaign's currently-active sessions (operationId
+//!   `getActiveSponsorships`).
 //!
 //! ## What it does
 //!
@@ -101,8 +104,20 @@
 //! CAMARA error (`…404` → 404 campaign-not-found), else the trailing three
 //! digits `d` fix `campaignType` (`d` even → prepaid, odd → postpaid) and
 //! `status` (`(d/2) mod 3` → active / paused / completed) with the matching
-//! `completionReason` and data-volume balance (see [`campaign_status_body`]). The
-//! remaining campaign operations (`getActiveSponsorships`, `configureAlerts`,
+//! `completionReason` and data-volume balance (see [`campaign_status_body`]).
+//!
+//! ## Active sponsorships (`getActiveSponsorships`)
+//!
+//! `GET …/campaign/{sponsorId}/{campaignId}/active-sponsorships` (scope
+//! [`CAMPAIGN_READ_SCOPE`]) lists the campaign's **currently-active** sponsorship
+//! sessions as `{ sessionId, phoneNumber }` pairs plus their `totalCount`. Two
+//! control planes (docs/DESIGN.md §7): a reserved trailing-digit suffix on the
+//! campaignId's embedded UUID selects a canonical CAMARA error (as with
+//! `getCampaignStatus`); otherwise the in-memory store is scanned for this
+//! `(sponsorId, campaignId)` and filtered to the [`is_active`] sessions (inside
+//! their window with data remaining — the same condition `getSessionStatus`
+//! reports as `active`). An empty result is `200` with an empty array (a CAMARA
+//! list never `404`s). The remaining campaign operations (`configureAlerts`,
 //! `manageCampaign`) stay deferred to later passes.
 
 use axum::body::Bytes;
@@ -177,6 +192,10 @@ pub fn routes() -> Router {
         .route(
             "/sponsored-data/vwip/campaign/:sponsor_id/:campaign_id/campaign-status",
             get(get_campaign_status),
+        )
+        .route(
+            "/sponsored-data/vwip/campaign/:sponsor_id/:campaign_id/active-sponsorships",
+            get(get_active_sponsorships),
         )
 }
 
@@ -380,6 +399,28 @@ async fn get_session_status(
     with_correlator((StatusCode::OK, Json(body)).into_response(), &correlator)
 }
 
+/// The data consumed / available (MB) for a stored session, derived from the
+/// grant and the stored `phoneNumber`'s trailing three digits `d` (docs/DESIGN.md
+/// §7): `consumed = d % (grant + 1)` (so `0..=grant`), `available = grant −
+/// consumed`. Shared by the `session-status` read and the active-sponsorships
+/// list so the two derivations never drift. Pure over the record.
+fn consumption(record: &SponsorshipRecord) -> (i64, i64) {
+    let grant = record.data_volume_mb;
+    // `grant` is always `>= 1` (validated at start), so `grant + 1 >= 2`.
+    let tail = scenarios::trailing_three_digits(&record.phone_number).unwrap_or(0) as i64;
+    let consumed = tail % (grant + 1);
+    (consumed, grant - consumed)
+}
+
+/// Whether a stored session is still **active** at `now`: inside its granted
+/// window and with data remaining. This is exactly the condition under which
+/// [`session_status_body`] reports `sessionStatus:"active"`, reused so
+/// `getActiveSponsorships` and `getSessionStatus` agree on what "active" means.
+fn is_active(record: &SponsorshipRecord, now: i64) -> bool {
+    let (_, available) = consumption(record);
+    now < record.end_time && available > 0
+}
+
 /// Render a started session's live `session-status` view from the stored grant.
 /// Pure over its inputs (the clock is passed in as `now`) so every derived figure
 /// is unit-testable exactly.
@@ -393,11 +434,7 @@ async fn get_session_status(
 ///   fully-consumed grant → `"inactive"` / `data_exhausted`; else `"active"`
 ///   (no `endReason`).
 fn session_status_body(session_id: &str, record: &SponsorshipRecord, now: i64) -> Value {
-    let grant = record.data_volume_mb;
-    // `grant` is always `>= 1` (validated at start), so `grant + 1 >= 2`.
-    let tail = scenarios::trailing_three_digits(&record.phone_number).unwrap_or(0) as i64;
-    let consumed = tail % (grant + 1);
-    let available = grant - consumed;
+    let (consumed, available) = consumption(record);
 
     let (status, end_reason) = if now >= record.end_time {
         ("inactive", Some("validity_expired"))
@@ -601,6 +638,97 @@ fn campaign_status_body(sponsor_id: &str, campaign_id: &str, d: i64, now: i64) -
         body["remainingDataVolume"] = json!(CAMPAIGN_CONTRACTED_MB - used);
     }
     body
+}
+
+/// `GET /sponsored-data/vwip/campaign/{sponsorId}/{campaignId}/active-sponsorships`
+/// (operationId `getActiveSponsorships`).
+///
+/// Lists the sponsorship sessions of the addressed campaign that are **currently
+/// active**, as `{ sessionId, phoneNumber }` pairs, plus their `totalCount`.
+/// Requires a token carrying [`CAMPAIGN_READ_SCOPE`] (this operation lives under
+/// the `/campaign/…` collection, alongside `getCampaignStatus`).
+///
+/// Two control planes (docs/DESIGN.md §7):
+/// - **`campaignId` reserved-error suffix.** As with `getCampaignStatus`, a
+///   reserved trailing-digit suffix on the campaignId's embedded UUID selects a
+///   canonical CAMARA error (e.g. `…404` → `404 NOT_FOUND`, campaign not found),
+///   so the error set stays reachable from this endpoint too.
+/// - **Store state (filtered to active).** Otherwise the in-memory store is
+///   scanned for sessions under this `(sponsorId, campaignId)` and filtered to the
+///   [`is_active`] ones (inside their window with data remaining — the same
+///   condition `getSessionStatus` reports as `active`). A campaign with no active
+///   sessions returns `200` with an empty array and `totalCount:0` — a CAMARA list
+///   never `404`s on an empty result.
+///
+/// Malformed path identifiers → `400 INVALID_ARGUMENT`. `x-correlator` is echoed
+/// on every response.
+async fn get_active_sponsorships(
+    claims: Claims,
+    headers: HeaderMap,
+    Path((sponsor_id, campaign_id)): Path<(String, String)>,
+) -> Response {
+    // Optional correlation header, echoed on every response (CAMARA Commonalities).
+    let correlator = headers.get("x-correlator").cloned();
+
+    // Endpoint authorisation: the token must carry the campaign read scope.
+    if let Err(e) = claims.require_scope(CAMPAIGN_READ_SCOPE) {
+        return with_correlator(e.into_response(), &correlator);
+    }
+
+    // The path identifiers are the request's only input; both must be well-formed.
+    if !is_sponsor_id(&sponsor_id) {
+        return invalid_argument(
+            "`sponsorId` must be `local@domain.tld` (e.g. acme@sponsor.example.com).",
+            &correlator,
+        );
+    }
+    if !is_campaign_id(&campaign_id) {
+        return invalid_argument("`campaignId` must be `UUID@domain.tld`.", &correlator);
+    }
+
+    // Reserved-error plane on the campaignId's embedded UUID (mirrors
+    // getCampaignStatus): the UUID part is used, not the whole string, so a
+    // sponsor domain that happens to carry digits never perturbs the case.
+    let uuid_part = campaign_id.split('@').next().unwrap_or(campaign_id.as_str());
+    if let Some(err) = scenarios::reserved_error(uuid_part) {
+        return with_correlator(err.into_response(), &correlator);
+    }
+
+    // Scan the store for this campaign's sessions and keep the active ones.
+    let now = unix_now();
+    let active: Vec<(String, String)> = store::all_matching(&sponsor_id, &campaign_id)
+        .into_iter()
+        .filter(|(_, r)| is_active(r, now))
+        .map(|(id, r)| (id, r.phone_number))
+        .collect();
+
+    let body = active_sponsorships_body(&sponsor_id, &campaign_id, active);
+    with_correlator((StatusCode::OK, Json(body)).into_response(), &correlator)
+}
+
+/// Build the `200` `getActiveSponsorships` representation from the active
+/// `(sessionId, phoneNumber)` pairs. Pure over its inputs so the shape is exactly
+/// unit-testable. The pairs are sorted by `sessionId` for a stable response (the
+/// store is unordered), and `totalCount` is the number of active sessions.
+fn active_sponsorships_body(
+    sponsor_id: &str,
+    campaign_id: &str,
+    mut active: Vec<(String, String)>,
+) -> Value {
+    active.sort_by(|a, b| a.0.cmp(&b.0));
+    let total = active.len();
+    let items: Vec<Value> = active
+        .into_iter()
+        .map(|(session_id, phone_number)| {
+            json!({ "sessionId": session_id, "phoneNumber": phone_number })
+        })
+        .collect();
+    json!({
+        "sponsorId": sponsor_id,
+        "campaignId": campaign_id,
+        "activeSponsorships": items,
+        "totalCount": total,
+    })
 }
 
 /// A 400 `INVALID_ARGUMENT` CAMARA error, with the correlator echoed.
@@ -1634,6 +1762,199 @@ mod tests {
         assert_eq!(
             headers.get("x-correlator").and_then(|v| v.to_str().ok()),
             Some("corr-camp-err")
+        );
+    }
+
+    // --- getActiveSponsorships --------------------------------------------
+
+    /// Build the `active-sponsorships` URL, percent-encoding the `@` in the
+    /// sponsor/campaign path segments (mirrors `campaign_status_url`).
+    fn active_url(sponsor: &str, campaign: &str) -> String {
+        format!(
+            "/sponsored-data/vwip/campaign/{}/{}/active-sponsorships",
+            sponsor.replace('@', "%40"),
+            campaign.replace('@', "%40"),
+        )
+    }
+
+    /// Start a session under an explicit sponsor/campaign/phone, returning its id.
+    async fn start_session_for(
+        token: &str,
+        sponsor: &str,
+        campaign: &str,
+        phone: &str,
+    ) -> String {
+        let body = json!({
+            "sponsorId": sponsor,
+            "campaignId": campaign,
+            "phoneNumber": phone,
+            "webhookUrl": WEBHOOK,
+            "callbackToken": CB_TOKEN,
+        })
+        .to_string();
+        let (status, _, resp) = post(Some(token), &body, None).await;
+        assert_eq!(status, StatusCode::CREATED, "start should 201 for {phone}");
+        resp["sessionId"].as_str().unwrap().to_string()
+    }
+
+    /// `is_active` follows the window and the remaining grant, and `consumption`
+    /// derives the MB figures from the phone tail — a pure unit (clock passed in).
+    #[test]
+    fn is_active_reflects_window_and_remaining_data() {
+        let now = 1_717_200_000;
+        let mut rec = SponsorshipRecord {
+            sponsor_id: SPONSOR.to_string(),
+            campaign_id: CAMPAIGN.to_string(),
+            phone_number: "+123456789012".to_string(), // tail 12 → 38 available
+            start_time: now - 60,
+            end_time: now + 600,
+            data_volume_mb: 50,
+        };
+        assert!(is_active(&rec, now), "inside window with data → active");
+        assert!(!is_active(&rec, now + 601), "past endTime → inactive");
+        // Fully consumed (tail 050 on a 50 MB grant) → inactive even in-window.
+        rec.phone_number = "+123456789050".to_string();
+        assert!(!is_active(&rec, now));
+        let (consumed, available) = consumption(&rec);
+        assert_eq!(consumed, 50);
+        assert_eq!(available, 0);
+    }
+
+    /// `active_sponsorships_body` sorts by `sessionId`, counts, and renders the
+    /// `{ sessionId, phoneNumber }` pairs — a pure unit.
+    #[test]
+    fn active_sponsorships_body_sorts_and_counts() {
+        let active = vec![
+            ("sid-b".to_string(), "+123456789013".to_string()),
+            ("sid-a".to_string(), "+123456789012".to_string()),
+        ];
+        let body = active_sponsorships_body(SPONSOR, CAMPAIGN, active);
+        assert_eq!(body["sponsorId"], SPONSOR);
+        assert_eq!(body["campaignId"], CAMPAIGN);
+        assert_eq!(body["totalCount"], 2);
+        let items = body["activeSponsorships"].as_array().unwrap();
+        assert_eq!(items[0]["sessionId"], "sid-a"); // sorted
+        assert_eq!(items[0]["phoneNumber"], "+123456789012");
+        assert_eq!(items[1]["sessionId"], "sid-b");
+        // Empty input → empty array, totalCount 0 (a list never 404s).
+        let empty = active_sponsorships_body(SPONSOR, CAMPAIGN, vec![]);
+        assert_eq!(empty["totalCount"], 0);
+        assert!(empty["activeSponsorships"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn active_sponsorships_lists_only_active_sessions() {
+        let create = mint_token(CREATE_SCOPE).await;
+        let read = mint_token(CAMPAIGN_READ_SCOPE).await;
+        // A sponsor unused by any other test → the store scan isolates cleanly.
+        let sponsor = "active-list@sponsor.example.com";
+        let campaign = campaign_tail("012"); // uuid tail 012 → not reserved
+
+        let a1 = start_session_for(&create, sponsor, &campaign, "+123456789012").await;
+        let a2 = start_session_for(&create, sponsor, &campaign, "+123456789013").await;
+        // Tail 050 on the 50 MB default grant is fully consumed → inactive.
+        let _exhausted = start_session_for(&create, sponsor, &campaign, "+123456789050").await;
+
+        let (status, _, body) = get_status(Some(&read), &active_url(sponsor, &campaign), None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["sponsorId"], sponsor);
+        assert_eq!(body["campaignId"], campaign);
+        assert_eq!(body["totalCount"], 2, "only the two active sessions");
+        let items = body["activeSponsorships"].as_array().unwrap();
+        assert_eq!(items.len(), 2);
+        let ids: Vec<&str> = items
+            .iter()
+            .map(|i| i["sessionId"].as_str().unwrap())
+            .collect();
+        assert!(ids.contains(&a1.as_str()));
+        assert!(ids.contains(&a2.as_str()));
+        let phones: Vec<&str> = items
+            .iter()
+            .map(|i| i["phoneNumber"].as_str().unwrap())
+            .collect();
+        assert!(phones.contains(&"+123456789012"));
+        assert!(phones.contains(&"+123456789013"));
+        assert!(!phones.contains(&"+123456789050"), "exhausted session excluded");
+    }
+
+    #[tokio::test]
+    async fn active_sponsorships_empty_campaign_is_200_empty_array() {
+        let read = mint_token(CAMPAIGN_READ_SCOPE).await;
+        let sponsor = "empty-list@sponsor.example.com";
+        let campaign = campaign_tail("013");
+        let (status, _, body) = get_status(Some(&read), &active_url(sponsor, &campaign), None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["totalCount"], 0);
+        assert!(body["activeSponsorships"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn active_sponsorships_reserved_suffix_selects_a_canonical_camara_error() {
+        let read = mint_token(CAMPAIGN_READ_SCOPE).await;
+        for (tail, code, http) in [
+            ("404", "NOT_FOUND", StatusCode::NOT_FOUND),
+            ("429", "TOO_MANY_REQUESTS", StatusCode::TOO_MANY_REQUESTS),
+        ] {
+            let (status, _, body) =
+                get_status(Some(&read), &active_url(SPONSOR, &campaign_tail(tail)), None).await;
+            assert_eq!(status, http, "tail {tail}");
+            assert_eq!(body["code"], code, "tail {tail}");
+        }
+    }
+
+    #[tokio::test]
+    async fn active_sponsorships_malformed_ids_are_400() {
+        let read = mint_token(CAMPAIGN_READ_SCOPE).await;
+        let (status, _, body) = get_status(Some(&read), &active_url("not-an-id", CAMPAIGN), None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "INVALID_ARGUMENT");
+        let (status, _, body) = get_status(
+            Some(&read),
+            &active_url(SPONSOR, "not-a-uuid@sponsor.example.com"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "INVALID_ARGUMENT");
+    }
+
+    #[tokio::test]
+    async fn active_sponsorships_auth_is_enforced() {
+        // No token → 401.
+        let (status, _, _) = get_status(None, &active_url(SPONSOR, CAMPAIGN), None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        // A sponsorship-read token lacks the campaign scope → 403.
+        let read = mint_token(READ_SCOPE).await;
+        let (status, _, _) = get_status(Some(&read), &active_url(SPONSOR, CAMPAIGN), None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn active_sponsorships_echoes_x_correlator() {
+        let read = mint_token(CAMPAIGN_READ_SCOPE).await;
+        // Success path echoes.
+        let (status, headers, _) = get_status(
+            Some(&read),
+            &active_url("corr-list@sponsor.example.com", &campaign_tail("013")),
+            Some("corr-active-ok"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-active-ok")
+        );
+        // Error (404) path echoes too.
+        let (status, headers, _) = get_status(
+            Some(&read),
+            &active_url(SPONSOR, &campaign_tail("404")),
+            Some("corr-active-err"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-active-err")
         );
     }
 }

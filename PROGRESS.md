@@ -2112,7 +2112,18 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
       with the matching `completionReason` (`completed` + `(d/6)` odd →
       `data_exhausted` spending the whole allotment, else `time_expired`). Window
       anchored to now. `x-correlator` echoed. No new dep.
-    - [ ] `getActiveSponsorships` / `configureAlerts` / `manageCampaign` — deferred.
+    - [x] `GET /campaign/{sponsorId}/{campaignId}/active-sponsorships`
+      (`getActiveSponsorships`, scope `sponsored-data:campaign:read`) — lists the
+      campaign's **currently-active** sessions as `{sessionId, phoneNumber}` pairs
+      + `totalCount`. Two control planes (DESIGN §7): a reserved trailing-digit
+      suffix on the campaignId UUID → canonical CAMARA error (mirrors
+      `getCampaignStatus`); else the shared session store is scanned for the
+      `(sponsorId, campaignId)` pair (new `store::all_matching`) and filtered to
+      the active sessions (shared `is_active`/`consumption`, extracted from
+      `getSessionStatus` so the two derivations don't drift). Empty campaign → 200
+      empty array, `totalCount:0` (a list never 404s). Malformed path ids → 400
+      INVALID_ARGUMENT. `x-correlator` echoed. No new dep.
+    - [ ] `configureAlerts` / `manageCampaign` — deferred.
 - [~] Click to Dial vwip (`/click-to-dial/vwip`; CAMARA ClickToDial `wip`;
   two-legged, business-facing call origination):
   - [x] `POST /calls` (`createCall`, `click-to-dial:calls:create`) — create a
@@ -2519,6 +2530,25 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-10 — sponsored-data: added `GET /campaign/{sponsorId}/{campaignId}/
+  active-sponsorships` (`getActiveSponsorships`, scope
+  `sponsored-data:campaign:read`) — lists a campaign's **currently-active**
+  sponsorship sessions as `{sessionId, phoneNumber}` pairs + `totalCount`, keyed
+  off the canonical CAMARA shape (fetched from the upstream SponsoredData wip
+  spec). Two control planes (DESIGN §7): a reserved trailing-digit suffix on the
+  campaignId UUID → canonical CAMARA error (mirrors `getCampaignStatus`); else the
+  shared session store is scanned for the `(sponsorId, campaignId)` pair (new
+  `store::all_matching`) and filtered to the active sessions. Extracted shared
+  `is_active`/`consumption` helpers from `getSessionStatus` so "active" means the
+  same for the list and the status read (no drift). Empty campaign → 200 empty
+  array, `totalCount:0` (a list never 404s); malformed path ids → 400
+  INVALID_ARGUMENT; `x-correlator` echoed. Spec: added the `active-sponsorships`
+  path (params, 200 `ActiveSponsorships` schema, two examples, functional cases)
+  to `specs/sponsored-data/vwip/openapi.yaml`; refreshed the header/divergence
+  notes. Tests: 9 new (1 store `all_matching` unit; 2 pure builder units for
+  `is_active`/`consumption` + `active_sponsorships_body`; 6 router active/empty/
+  reserved-suffix/malformed/auth/correlator). `cargo test` 1845 green,
+  `cargo build --release` green. No new dep. — binary: 3.4M (3,477,448 B)
 - 2026-08-09 — sponsored-data: added `GET /campaign/{sponsorId}/{campaignId}/
   campaign-status` (`getCampaignStatus`, scope `sponsored-data:campaign:read`) —
   the first of the Sponsored Data *campaign* operations. Reports a whole
