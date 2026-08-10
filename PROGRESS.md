@@ -2567,8 +2567,14 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     wrapper); optional `name` query param filters by network name (a second
     control plane), a `name` > 1024 chars → 400 INVALID_ARGUMENT. `store::all()`
     + self-contained form-query decode (no new dep).
-  - [ ] `DELETE /networks/{networkId}` (`deleteNetwork`) — the delete leg over
-    the same store (later pass).
+  - [x] `DELETE /networks/{networkId}` (`deleteNetwork`,
+    `dedicated-network:networks:delete`) — evicts the stored network named by the
+    opaque `networkId` from the same in-memory store (new `store::remove`):
+    present → `204 No Content` (single-use), unknown/already-deleted → `404
+    NOT_FOUND`. Keyed only on store state (opaque `networkId`, no
+    reserved-identifier plane, mirroring QoD `deleteSession`); synchronous `204`
+    (no async `202`/`DELETE_REQUESTED`), no `sink` notification (documented cut).
+    `x-correlator` echoed. **Completes the Networks CRUD.**
   - [ ] the other sibling Dedicated-Networks APIs (`dedicated-network-accesses`,
     `dedicated-network-areas`) — later, as capacity allows (the `-areas` API is
     spatial).
@@ -2598,6 +2604,27 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-10 — dedicated-network: added the delete leg,
+  `DELETE /dedicated-network/vwip/networks/{networkId}` (`deleteNetwork`, scope
+  `dedicated-network:networks:delete`) — the topmost unclaimed `[ ]` backlog
+  leaf after last pass's `listNetworks`, **completing the Networks CRUD**.
+  Confirmed the contract from the authoritative upstream `dedicated-network.yaml`
+  (`wip`, WebFetch): `deleteNetwork` returns `204 No Content` (x-correlator
+  header) with errors 400/401/403/404 and scope `dedicated-network:networks:delete`.
+  Mirrors QoD `deleteSession`: keyed only on the in-memory store state (the minted
+  opaque `networkId` has no reserved-suffix plane) — a known id evicts its network
+  → `204` (single-use), an unknown/already-deleted id → `404 NOT_FOUND`. Deletion
+  is synchronous (no async `202`/`DELETE_REQUESTED`) with no `sink` notification
+  (documented cut; the create leg records no notification target). New
+  `store::remove` (returns the evicted `NetworkInfo`, lock never across await,
+  mirroring QoD). `x-correlator` echoed on `204`+`404`. spec: added the
+  `DELETE /networks/{networkId}` op (a `networkId` path param, 204 + x-correlator
+  header, 401/403/404, `x-camarasim-scenarios`) to
+  `specs/dedicated-network/vwip/openapi.yaml`; header comment updated
+  (create+read+list+delete → CRUD complete). tests: +5 (create→delete 204 →
+  gone (read 404, second delete 404 single-use); unknown id → 404; scope 403;
+  no-token 401; x-correlator on 204+404). `cargo test` 1902 green (was 1897);
+  `cargo build --release` green. No new dep. — binary: 3.5M (3,563,528 B)
 - 2026-08-10 — dedicated-network: added the list leg,
   `GET /dedicated-network/vwip/networks` (`listNetworks`, scope
   `dedicated-network:networks:read`) — the topmost unclaimed `[ ]` backlog leaf

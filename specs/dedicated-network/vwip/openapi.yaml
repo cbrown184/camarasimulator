@@ -8,9 +8,9 @@
 # by `src/apis/dedicated_network/vwip.rs`; spec and code must not drift.
 #
 # This slice serves the create leg `POST /networks` (`createNetwork`), the read
-# leg `GET /networks/{networkId}` (`readNetwork`), and the list leg
-# `GET /networks` (`listNetworks`). The delete leg (`deleteNetwork`) arrives in a
-# later pass.
+# leg `GET /networks/{networkId}` (`readNetwork`), the list leg `GET /networks`
+# (`listNetworks`), and the delete leg `DELETE /networks/{networkId}`
+# (`deleteNetwork`). This completes the Networks CRUD.
 openapi: 3.0.3
 info:
   title: Dedicated Network - Networks
@@ -324,6 +324,47 @@ paths:
           - input: a networkId returned by a prior createNetwork
             result: "200 NetworkInfo (the stored network, verbatim)"
           - input: any other (unknown / never-created) networkId
+            result: "404 NOT_FOUND"
+    delete:
+      operationId: deleteNetwork
+      summary: Delete a dedicated network by id
+      description: |
+        Deletes the dedicated network previously created under `networkId`,
+        evicting it from the in-memory store, and returns `204 No Content`; an
+        unknown or already-deleted id → `404 NOT_FOUND`. In CamaraSim the
+        `networkId` is a server-minted opaque UUID, so the only control plane is
+        the store state — a valid id from a prior `createNetwork` deletes
+        (single-use), anything else is `404` (there is no reserved-suffix plane
+        on a minted id). Deletion is synchronous (no async `202`/`DELETE_REQUESTED`
+        form) and delivers no `sink` notification (a documented cut).
+      security:
+        - openId:
+            - dedicated-network:networks:delete
+      parameters:
+        - $ref: "#/components/parameters/NetworkId"
+        - $ref: "#/components/parameters/XCorrelator"
+      responses:
+        "204":
+          description: The dedicated network was deleted.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+      x-camarasim-scenarios:
+        description: >-
+          Result selected only from the in-memory store state, keyed on the
+          server-minted opaque `networkId` (docs/DESIGN.md §7): a known id is
+          evicted and returns 204, an unknown or already-deleted id is 404. The
+          delete is single-use; there is no reserved-suffix plane on a minted id.
+        cases:
+          - input: a networkId returned by a prior createNetwork
+            result: "204 No Content (the network is evicted; a second delete is 404)"
+          - input: any other (unknown / already-deleted) networkId
             result: "404 NOT_FOUND"
 
 components:

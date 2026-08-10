@@ -8,6 +8,8 @@
 //!   network back by id (operationId `readNetwork`).
 //! - `GET /dedicated-network/vwip/networks` — list dedicated networks, optionally
 //!   filtered by `name` (operationId `listNetworks`).
+//! - `DELETE /dedicated-network/vwip/networks/{networkId}` — delete a dedicated
+//!   network by id (operationId `deleteNetwork`).
 //!
 //! ## What it does
 //!
@@ -72,6 +74,19 @@
 //! `400 INVALID_ARGUMENT`). Like the other list legs in CamaraSim, the store is
 //! process-global, so the list reflects every network created this run.
 //! `x-correlator` is echoed.
+//!
+//! ## `deleteNetwork` — delete a network
+//!
+//! `DELETE /networks/{networkId}` evicts the stored network named by the opaque,
+//! server-minted `networkId` from the in-memory store: a known id → `204 No
+//! Content` (single-use — a second delete of the same id is `404`); an unknown or
+//! already-deleted id → `404 NOT_FOUND`. Like `readNetwork`, the `networkId` has
+//! no reserved-suffix plane, so the **only** control plane is the store state. It
+//! requires the delete scope `dedicated-network:networks:delete`. The upstream
+//! deletion is synchronous `204` (no async `202`/`DELETE_REQUESTED` form), and
+//! CamaraSim delivers no `sink` notification (this API's create leg records no
+//! notification target — a documented cut, mirroring QoD `deleteSession`).
+//! `x-correlator` is echoed.
 
 use axum::body::Bytes;
 use axum::extract::{Path, RawQuery};
@@ -96,6 +111,10 @@ const CREATE_SCOPE: &str = "dedicated-network:networks:create";
 /// Networks).
 const READ_SCOPE: &str = "dedicated-network:networks:read";
 
+/// The OAuth2 scope `deleteNetwork` requires (CAMARA Dedicated Network —
+/// Networks).
+const DELETE_SCOPE: &str = "dedicated-network:networks:delete";
+
 /// Routes for Dedicated Network — Networks vwip, mounted at their canonical URLs.
 pub fn routes() -> Router {
     Router::new()
@@ -105,7 +124,7 @@ pub fn routes() -> Router {
         )
         .route(
             "/dedicated-network/vwip/networks/:network_id",
-            get(read_network),
+            get(read_network).delete(delete_network),
         )
 }
 
@@ -284,6 +303,30 @@ async fn read_network(claims: Claims, headers: HeaderMap, Path(network_id): Path
 
     match store::get(&network_id) {
         Some(info) => with_correlator((StatusCode::OK, Json(info)).into_response(), &correlator),
+        None => with_correlator(
+            CamaraError::not_found("No network found for the provided networkId.").into_response(),
+            &correlator,
+        ),
+    }
+}
+
+/// `DELETE /dedicated-network/vwip/networks/{networkId}` — delete a dedicated
+/// network by id (`deleteNetwork`).
+///
+/// Keyed only on the store state (the `networkId` is a server-minted opaque
+/// UUID, so there is no reserved-suffix plane): a known id evicts its network
+/// and returns `204 No Content` (single-use); an unknown or already-deleted id
+/// → `404 NOT_FOUND`. Synchronous deletion (no async `202`/`DELETE_REQUESTED`),
+/// no `sink` notification (a documented cut). Mirrors QoD `deleteSession`.
+async fn delete_network(claims: Claims, headers: HeaderMap, Path(network_id): Path<String>) -> Response {
+    let correlator = headers.get("x-correlator").cloned();
+
+    if let Err(e) = claims.require_scope(DELETE_SCOPE) {
+        return with_correlator(e.into_response(), &correlator);
+    }
+
+    match store::remove(&network_id) {
+        Some(_) => with_correlator(StatusCode::NO_CONTENT.into_response(), &correlator),
         None => with_correlator(
             CamaraError::not_found("No network found for the provided networkId.").into_response(),
             &correlator,
@@ -745,6 +788,34 @@ mod tests {
         (status, headers, json)
     }
 
+    async fn delete_network_req(
+        token: Option<&str>,
+        network_id: &str,
+        correlator: Option<&str>,
+    ) -> (StatusCode, HeaderMap, Value) {
+        let mut builder = Request::builder()
+            .method("DELETE")
+            .uri(format!("/dedicated-network/vwip/networks/{network_id}"))
+            .header("host", HOST);
+        if let Some(t) = token {
+            builder = builder.header("authorization", format!("Bearer {t}"));
+        }
+        if let Some(c) = correlator {
+            builder = builder.header("x-correlator", c);
+        }
+        let response = app()
+            .oneshot(builder.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let headers = response.headers().clone();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, headers, json)
+    }
+
     // A valid CreateNetwork body whose serviceAreaId ends in `d`.
     fn valid_body(area_tail: u16) -> Value {
         json!({
@@ -1093,6 +1164,88 @@ mod tests {
         assert_eq!(
             headers.get("x-correlator").and_then(|v| v.to_str().ok()),
             Some("corr-list")
+        );
+    }
+
+    // --- deleteNetwork -----------------------------------------------------
+
+    #[tokio::test]
+    async fn created_network_can_be_deleted_then_is_gone() {
+        // Create, delete (204), then a read and a second delete both 404.
+        let create = mint_token(CREATE_SCOPE).await;
+        let (status, _, created) = post_network(Some(&create), valid_body(2), None).await;
+        assert_eq!(status, StatusCode::CREATED);
+        let id = created["id"].as_str().unwrap().to_string();
+
+        let del = mint_token(DELETE_SCOPE).await;
+        let (status, _, body) = delete_network_req(Some(&del), &id, None).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(body, Value::Null, "204 carries no body");
+        assert!(store::get(&id).is_none(), "evicted from the store");
+
+        // A read of the deleted id is now 404.
+        let read = mint_token(READ_SCOPE).await;
+        let (status, _, _) = get_network(Some(&read), &id, None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        // The delete is single-use: a second delete of the same id is 404.
+        let (status, _, body) = delete_network_req(Some(&del), &id, None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn delete_unknown_network_is_not_found() {
+        let del = mint_token(DELETE_SCOPE).await;
+        let (status, _, body) =
+            delete_network_req(Some(&del), "33333333-3333-4333-8333-333333333333", None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn delete_token_without_the_scope_is_forbidden() {
+        // A create-scoped token cannot delete (delete needs its own scope).
+        let token = mint_token(CREATE_SCOPE).await;
+        let (status, _, body) =
+            delete_network_req(Some(&token), "33333333-3333-4333-8333-333333333333", None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["code"], "PERMISSION_DENIED");
+    }
+
+    #[tokio::test]
+    async fn delete_missing_token_is_unauthenticated() {
+        let (status, _, body) =
+            delete_network_req(None, "33333333-3333-4333-8333-333333333333", None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["code"], "UNAUTHENTICATED");
+    }
+
+    #[tokio::test]
+    async fn delete_echoes_x_correlator_on_success_and_error() {
+        // 204 path.
+        let create = mint_token(CREATE_SCOPE).await;
+        let (_, _, created) = post_network(Some(&create), valid_body(1), None).await;
+        let id = created["id"].as_str().unwrap();
+        let del = mint_token(DELETE_SCOPE).await;
+        let (status, headers, _) = delete_network_req(Some(&del), id, Some("corr-del")).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-del")
+        );
+
+        // 404 path.
+        let (status, headers, _) = delete_network_req(
+            Some(&del),
+            "44444444-4444-4444-8444-444444444444",
+            Some("corr-del-404"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-del-404")
         );
     }
 }

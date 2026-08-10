@@ -13,7 +13,7 @@
 //!
 //! The stored value is the network's rendered `NetworkInfo` JSON, returned
 //! verbatim by `GET`. `createNetwork` writes; the `readNetwork` (`get`) and
-//! `listNetworks` (`all`) legs read; the delete leg (a later pass) will evict.
+//! `listNetworks` (`all`) legs read; `deleteNetwork` (`remove`) evicts.
 
 use serde_json::Value;
 use std::collections::HashMap;
@@ -62,6 +62,18 @@ pub fn all() -> Vec<Value> {
         .values()
         .cloned()
         .collect()
+}
+
+/// Evict the network stored under `id`, returning its `NetworkInfo` if one was
+/// present (so the eviction can be observed as single-use) or `None` if the id
+/// was unknown/already deleted. `deleteNetwork` (DELETE /networks/{networkId})
+/// uses the distinction to answer `204` vs `404`. Mirrors
+/// [`crate::apis::quality_on_demand::store::remove`].
+pub fn remove(id: &str) -> Option<Value> {
+    store()
+        .lock()
+        .expect("dedicated-network store not poisoned")
+        .remove(id)
 }
 
 /// Mint a fresh, opaque, UUID-v4-shaped network `id` (CAMARA `NetworkId` is
