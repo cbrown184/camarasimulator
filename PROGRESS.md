@@ -2504,6 +2504,27 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     cuts: `subscriptionRequest` change-notification callback (accepted-not-
     applied), the `CapabilitySetFootprint` branch, ETag/If-None-Match/304 caching,
     and resolving `overlayExtends` against real API definitions.
+- [~] Dedicated Network — Network Profiles vwip (`/dedicated-network-profiles/vwip`;
+  CAMARA DedicatedNetworks `wip` — no released version, mounted at its canonical
+  `vwip` base path; stateless, non-spatial, two-legged catalog — the
+  Dedicated-Networks analogue of QoS Profiles):
+  - [x] `GET /profiles/{profileId}` (`readNetworkProfile`,
+    `dedicated-network-profiles:profiles:read`) — single-profile lookup from a
+    fixed catalog (no upstream backend). The `profileId` path param is the sole
+    control plane, in three layers (DESIGN §7): not UUID-shaped → 400
+    INVALID_ARGUMENT; reserved trailing-digit suffix → canonical CAMARA error
+    (`…404` → 404 no-such-profile); else the trailing three digits `d` select one
+    of a fixed 4-entry `NetworkProfile` template table (`d % 4`; `…000`/no-digits
+    → template 0), so the profile is a genuine second plane. The returned `id`
+    echoes the requested `profileId`; each profile carries `name`,
+    `maxNumberOfDevices`, `aggregatedUl/DlThroughput` (`BitRate`), `qosProfiles`
+    (reusing the QoS Profiles catalog names) and `defaultQosProfile`.
+    `x-correlator` echoed. No new dep.
+  - [ ] `GET /profiles` (`readNetworkProfiles`) — the paginated
+    `NetworkProfilesPage` list (a later slice).
+  - [ ] the sibling Dedicated-Networks APIs (`dedicated-network`,
+    `dedicated-network-accesses`, `dedicated-network-areas`) — later, as capacity
+    allows (the `-areas` API is spatial).
 - [ ] Other CAMARA APIs as capacity allows
 
 ## Cross-cutting (do alongside the item that needs it)
@@ -2530,6 +2551,38 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-10 — dedicated-network-profiles: added a **new API**,
+  `GET /dedicated-network-profiles/vwip/profiles/{profileId}`
+  (`readNetworkProfile`, scope `dedicated-network-profiles:profiles:read`) — the
+  first CAMARA DedicatedNetworks operation, the stateless read-only catalog
+  analogue of QoS Profiles. Chosen because every implemented API's CRUD +
+  notifications are complete and the topmost `[ ]` backlog leaves are all
+  deferred for concrete reasons (TLS `https://` sink delivery needs a rustls
+  stack vs "keep the binary small" — an explicit deliberate-decision cut, not an
+  automated pass; the campaign/intermediate-transition legs need a live
+  engine), so the top *safe* unit is a new API under "Other CAMARA APIs as
+  capacity allows". Confirmed the contract from the authoritative upstream
+  `dedicated-network-profiles.yaml` (WebFetch): `NetworkProfile` (`id`,
+  `maxNumberOfDevices`, `aggregatedUl/DlThroughput` `BitRate`, `qosProfiles`,
+  `defaultQosProfile`), errors 400/401/403/404. Stateless, **non-spatial**
+  (a network profile is a connectivity template, no coordinates), two-legged
+  (the catalog exists independently of any subscriber — no device identifier).
+  Scoped to the single-profile lookup this pass; the paginated `readNetworkProfiles`
+  list and sibling Dedicated-Networks APIs recorded as remaining sub-steps.
+  Control plane (DESIGN §7): the `profileId` path param in three layers — not
+  UUID-shaped → 400 INVALID_ARGUMENT; reserved trailing-digit suffix → canonical
+  CAMARA error (`…404` → 404 no-such-profile); else the trailing three digits
+  `d` pick a fixed 4-entry template table (`d % 4`; `…000`/no-digits → template
+  0), the requested id echoed back. New `src/apis/dedicated_network_profiles/{,
+  vwip}.rs`; wired into `apis::routes`, the openapi `SPECS` table, and the `/`
+  catalog. spec: new vendored `specs/dedicated-network-profiles/vwip/openapi.yaml`
+  (GET op + NetworkProfile/BitRate/NetworkProfilesError + shared-error `$ref`s +
+  `x-camarasim-scenarios`). tests: +11 (pure: uuid-shape, every-template-valid,
+  digit-selection-wraps; integration: happy-path selected profile, distinct ids
+  → distinct profiles, no-digits → template 0, reserved …404/…429/…422 →
+  canonical error, malformed id → 400, scope 403, missing-token 401,
+  x-correlator on 200+404). `cargo test` 1856 green (was 1845); `cargo build
+  --release` green. No new dep. — binary: 3.4M (3,496,392 B)
 - 2026-08-10 — sponsored-data: added `GET /campaign/{sponsorId}/{campaignId}/
   active-sponsorships` (`getActiveSponsorships`, scope
   `sponsored-data:campaign:read`) — lists a campaign's **currently-active**

@@ -1,0 +1,293 @@
+# CamaraSim — Dedicated Network - Network Profiles, API version vwip (CAMARA
+# DedicatedNetworks, work-in-progress).
+#
+# Vendored from the CAMARA DedicatedNetworks API family
+# (dedicated-network-profiles.yaml, version `wip`, whose canonical base path is
+# `dedicated-network-profiles/vwip`, so CamaraSim mounts it there, honouring the
+# version in the URL) and annotated with CamaraSim's parameter-driven functional
+# cases (docs/DESIGN.md §7, §9). Backed by
+# `src/apis/dedicated_network_profiles/vwip.rs`; spec and code must not drift.
+#
+# This slice serves the single-profile lookup `GET /profiles/{profileId}`
+# (`readNetworkProfile`). The collection query `GET /profiles`
+# (`readNetworkProfiles`, a paginated `NetworkProfilesPage`) is a later slice.
+openapi: 3.0.3
+info:
+  title: Dedicated Network - Network Profiles
+  description: |
+    Discover the **network profiles** a dedicated network offers. A network
+    profile is a named, operator-published template describing the connectivity
+    a dedicated network provides: how many devices it admits
+    (`maxNumberOfDevices`), its aggregated up/down throughput
+    (`aggregatedUlThroughput` / `aggregatedDlThroughput`), the set of
+    Quality-on-Demand profiles it permits (`qosProfiles`), and which of those is
+    the default (`defaultQosProfile`). A client consults this read-only catalog
+    before booking a dedicated network — the Dedicated-Networks analogue of the
+    QoS Profiles API.
+
+    This is the CamaraSim reference double for CAMARA Dedicated Network - Network
+    Profiles (`wip`). The `/profiles/{profileId}` lookup requires the
+    `dedicated-network-profiles:profiles:read` scope.
+
+    ## Two-legged catalog query
+
+    The profiles exist independently of any subscriber, so — like QoS Profiles —
+    this is a two-legged (`client_credentials`) service query: there is no
+    device/line identifier and no three-legged dance.
+
+    ## Fixed catalog
+
+    CamaraSim serves a **fixed catalog** of network profiles (there is no
+    upstream network to query — DESIGN §7). The single-profile lookup returns the
+    profile the requested `profileId` maps to, echoing that id back as the body's
+    `id`.
+
+    ## Functional cases — the input is the control plane (docs/DESIGN.md §7)
+
+    The `profileId` path parameter is the sole control plane, in three layers:
+
+    - **Malformed id.** A `profileId` that is not UUID-shaped (`format: uuid`,
+      `maxLength: 36`) → `400 INVALID_ARGUMENT`.
+    - **Reserved error suffix (identifier).** A UUID contains digits, so the
+      shared reserved-error convention applies unchanged (see the referenced
+      `errors.yaml`): if the id's trailing three digits name a reserved CAMARA
+      status (`…400`, `…401`, `…403`, `…404`, `…409`, `…422`, `…429`, `…500`,
+      `…503`) the endpoint answers with that canonical CAMARA error — e.g.
+      `…-000000000404` → `404 NOT_FOUND` (no such profile).
+    - **Profile selection.** Otherwise the id's trailing three digits `d`
+      (`000`–`999`, or `0` when the id has fewer than three digits) select one of
+      a fixed set of profile templates (`d % N`), so the returned profile is a
+      genuine second plane. The returned `id` echoes the requested `profileId`.
+
+    CamaraSim exposes the full shared reserved-error set here so every reserved
+    suffix is reachable; canonical Network Profiles declares a subset for this
+    operation (400/401/403/404).
+  version: "wip"
+  license:
+    name: Apache-2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0.html
+
+servers:
+  - url: "{apiRoot}/dedicated-network-profiles/vwip"
+    variables:
+      apiRoot:
+        default: http://localhost:8080
+        description: API root, e.g. the CamaraSim base URL.
+
+paths:
+  /profiles/{profileId}:
+    get:
+      operationId: readNetworkProfile
+      summary: Retrieve a network profile by id
+      description: |
+        Returns the network profile identified by `profileId`. In CamaraSim the
+        catalog is fixed and the answer is derived from `profileId` — see the API
+        description for the parameter-driven functional cases (a malformed id →
+        `400`; a reserved trailing suffix → the matching canonical error;
+        otherwise the trailing digits select a fixed profile template and the
+        requested id is echoed back).
+      security:
+        - openId:
+            - dedicated-network-profiles:profiles:read
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+        - name: profileId
+          in: path
+          required: true
+          description: The identifier of the network profile to retrieve (UUID).
+          schema:
+            type: string
+            format: uuid
+            maxLength: 36
+      responses:
+        "200":
+          description: The network profile.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NetworkProfile"
+              examples:
+                iotMassive:
+                  summary: A massive-IoT network profile
+                  value:
+                    id: "00000000-0000-4000-8000-000000000001"
+                    name: iot-massive
+                    maxNumberOfDevices: 100000
+                    aggregatedUlThroughput:
+                      value: 10
+                      unit: Mbps
+                    aggregatedDlThroughput:
+                      value: 10
+                      unit: Mbps
+                    qosProfiles:
+                      - standard
+                      - low-latency
+                    defaultQosProfile: standard
+        "400":
+          description: |
+            400 — invalid request. CamaraSim returns `INVALID_ARGUMENT` for a
+            `profileId` that is not UUID-shaped.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NetworkProfilesError"
+              examples:
+                invalidArgument:
+                  summary: Malformed profileId
+                  value:
+                    status: 400
+                    code: INVALID_ARGUMENT
+                    message: "`profileId` must be a UUID."
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "409":
+          $ref: "../../shared/errors.yaml#/components/responses/Conflict"
+        "422":
+          $ref: "../../shared/errors.yaml#/components/responses/ServiceNotApplicable"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          Result selected from the `profileId` path parameter (docs/DESIGN.md
+          §7). A malformed id → 400; a reserved trailing suffix → the matching
+          canonical CAMARA error; otherwise the trailing three digits select a
+          fixed profile template and the requested id is echoed back. Reserved
+          error suffixes come from the shared convention in errors.yaml.
+        cases:
+          - input: a profileId that is not UUID-shaped
+            result: "400 INVALID_ARGUMENT"
+          - input: profileId whose trailing digits are a reserved suffix (e.g. …404)
+            result: the canonical CAMARA error for that status (…404 = no such profile)
+          - input: "a well-formed profileId with a non-reserved tail d"
+            result: "200 with the (d % N) profile template, id echoing the request"
+          - input: a well-formed profileId with fewer than three digits
+            result: "200 with the first profile template (tail treated as 000)"
+
+components:
+  securitySchemes:
+    openId:
+      $ref: "../../auth/openapi.yaml#/components/securitySchemes/camaraOAuth"
+
+  parameters:
+    XCorrelator:
+      name: x-correlator
+      in: header
+      required: false
+      description: Correlation id for the request, echoed back on the response.
+      schema:
+        type: string
+
+  headers:
+    XCorrelator:
+      description: The `x-correlator` from the request, echoed if one was sent.
+      required: false
+      schema:
+        type: string
+
+  schemas:
+    BitRate:
+      type: object
+      description: A bit rate, as a value and a unit.
+      properties:
+        value:
+          type: integer
+          format: int32
+          minimum: 1
+          maximum: 1024
+          example: 10
+        unit:
+          type: string
+          enum:
+            - bps
+            - kbps
+            - Mbps
+            - Gbps
+            - Tbps
+          example: Mbps
+
+    NetworkProfile:
+      type: object
+      description: |
+        A named, operator-published template describing the connectivity a
+        dedicated network offers.
+      required:
+        - id
+        - maxNumberOfDevices
+        - aggregatedUlThroughput
+        - aggregatedDlThroughput
+        - qosProfiles
+        - defaultQosProfile
+      properties:
+        id:
+          type: string
+          format: uuid
+          maxLength: 36
+          description: The network profile's identifier.
+        name:
+          type: string
+          maxLength: 1024
+          description: A human-readable name for the profile.
+          example: iot-massive
+        maxNumberOfDevices:
+          type: integer
+          format: int64
+          minimum: 1
+          maximum: 9007199254740991
+          description: The maximum number of devices the profile admits.
+          example: 100000
+        aggregatedUlThroughput:
+          $ref: "#/components/schemas/BitRate"
+        aggregatedDlThroughput:
+          $ref: "#/components/schemas/BitRate"
+        qosProfiles:
+          type: array
+          description: The QoS profiles this network profile permits.
+          minItems: 1
+          maxItems: 256
+          items:
+            type: string
+            minLength: 3
+            maxLength: 256
+            pattern: "^[a-zA-Z0-9_.-]+$"
+        defaultQosProfile:
+          type: string
+          minLength: 3
+          maxLength: 256
+          pattern: "^[a-zA-Z0-9_.-]+$"
+          description: The default QoS profile (one of `qosProfiles`).
+          example: standard
+
+    NetworkProfilesError:
+      description: >-
+        The CAMARA error body for this API — the shared `CamaraError` shape with
+        this operation's `code` set.
+      allOf:
+        - $ref: "../../shared/errors.yaml#/components/schemas/CamaraError"
+        - type: object
+          properties:
+            code:
+              type: string
+              enum:
+                - INVALID_ARGUMENT
+                - OUT_OF_RANGE
+                - UNAUTHENTICATED
+                - PERMISSION_DENIED
+                - INVALID_TOKEN_CONTEXT
+                - NOT_FOUND
+                - IDENTIFIER_NOT_FOUND
+                - CONFLICT
+                - SERVICE_NOT_APPLICABLE
+                - TOO_MANY_REQUESTS
+                - INTERNAL
+                - UNAVAILABLE

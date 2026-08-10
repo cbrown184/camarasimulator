@@ -56,6 +56,7 @@
 //! - **Network Access Devices vwip** — `/network-access-devices/vwip/…`.
 //! - **Short Message Service v0alpha1** — `/sms/v0alpha1/…`.
 //! - **Capabilities and Restrictions vwip** — `/capabilities-and-restrictions/vwip/…`.
+//! - **Dedicated Network — Network Profiles vwip** — `/dedicated-network-profiles/vwip/…`.
 //!
 //! Plus [`openapi`], which serves each mounted API's vendored OpenAPI spec at
 //! `/{api}/v{n}/openapi.yaml` (docs/DESIGN.md §9).
@@ -72,6 +73,7 @@ pub mod connected_network_type;
 pub mod connectivity_insights;
 pub mod consent_info;
 pub mod customer_insights;
+pub mod dedicated_network_profiles;
 pub mod device_authenticity;
 pub mod device_data_volume;
 pub mod device_identifier;
@@ -171,5 +173,6 @@ pub fn routes() -> Router {
         .merge(network_access_devices::routes())
         .merge(short_message_service::routes())
         .merge(capabilities_and_restrictions::routes())
+        .merge(dedicated_network_profiles::routes())
         .merge(openapi::routes())
 }
