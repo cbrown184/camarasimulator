@@ -2645,10 +2645,15 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
           store so a bad query wins over a 404. House pagination envelope
           (`page`/`perPage`/`totalCount`/`totalPages`, mirroring Network Profiles).
           `x-correlator` echoed. No new dep.
-        - [ ] `POST /accesses/{accessId}/devices/add` (`addDevicesToAccess`,
-          `…:devices:add`) + `POST /accesses/{accessId}/devices/remove`
-          (`removeDevicesFromAccess`, `…:devices:remove`) — the device-mutation
-          legs (201/207 add, 204/207 remove) — later passes.
+        - [x] `POST /accesses/{accessId}/devices/add` (`addDevicesToAccess`,
+          `…:devices:add`) — appends a bare `AddDevicesRequest` (JSON array of
+          1..=100 Devices) to the access's `recentAccessDevices` roster (atomic
+          `store::update`), recomputes `stats`, returns the added `AccessDevices`
+          (`201 AddDevicesSuccess`). Body validation → 400 before store → 404;
+          per-device GRANTED/DENIED plane; 207/422 folded into AccessDevice.status.
+        - [ ] `POST /accesses/{accessId}/devices/remove`
+          (`removeDevicesFromAccess`, `…:devices:remove`) — the device-remove
+          leg (204/207) — later pass.
     - [ ] `dedicated-network-areas` (spatial) — later.
 - [ ] Other CAMARA APIs as capacity allows
 
@@ -2676,6 +2681,37 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-10 — dedicated-network-accesses: added the **device-add leg**,
+  `POST /dedicated-network-accesses/vwip/accesses/{accessId}/devices/add`
+  (`addDevicesToAccess`, scope `dedicated-network-accesses:devices:add`) — the
+  topmost unclaimed actionable `[ ]` leaf (the remaining earlier `[ ]` leaves are
+  the deferred `https://` sink-TLS infra). Confirmed the contract from the
+  authoritative upstream `dedicated-network-accesses.yaml` (`wip`, WebFetch):
+  request body `AddDevicesRequest` = a **bare** `Devices` array (minItems 1,
+  maxItems 100) of CAMARA `Device`s; `201 AddDevicesSuccess` = an `AccessDevices`
+  array (of `AccessDevice` {device,status}); plus 207 `AddDevicesPartialSuccess`,
+  400/401/403/404, 409, 422 `NO_VALID_DEVICE`. In CamaraSim the leg appends the
+  submitted devices to the access's recorded `recentAccessDevices` roster and
+  recomputes `stats` **atomically** (new `store::update`, closure under the map
+  lock, never across await; roster capped at the 100 most-recent to honour the
+  schema `maxItems: 100`, stats derived from the same window so they agree), and
+  returns the added `AccessDevices` (201). Two control planes (DESIGN §7): request
+  validation (non-array body / array outside 1..=100 / device with no identifier /
+  non-E.164 phoneNumber → 400 INVALID_ARGUMENT, validated **before** the store so
+  a bad body wins over a 404) and the opaque `accessId` → store state (unknown →
+  404, no reserved-suffix plane, mirroring `readAccess`); the per-device
+  GRANTED/DENIED grant rides on each device's identifier exactly as
+  `createAccess`. 207 partial-success + 422 folded into `AccessDevice.status`
+  (documented cut, mirroring `createAccess`). New route + `add_devices` handler in
+  `vwip.rs`; `x-correlator` echoed on 201/400/404. spec: added the
+  `/accesses/{accessId}/devices/add` POST op (addDevicesToAccess) +
+  `AddDevicesRequest`/`AddDevicesSuccess` schemas + `x-camarasim-scenarios` to
+  `specs/dedicated-network-accesses/vwip/openapi.yaml`; header + description +
+  cuts updated. tests: +6 (1 store-unit: update mutates-in-place / reports
+  presence; 5 integration: create→add appends roster + updates stats + listDevices
+  sees it, malformed-body-400-before-store (non-array/empty/>100/no-id/non-E164),
+  unknown-access→404, wrong-scope→403, no-token→401). No new dep. `cargo test`
+  1950 pass; `cargo build --release` ok. binary (release): 3,644,048 bytes (~3.5M).
 - 2026-08-10 — dedicated-network-accesses: added the **device-roster read leg**,
   `GET /dedicated-network-accesses/vwip/accesses/{accessId}/devices`
   (`listDevices`, scope `dedicated-network-accesses:devices:read`) — the topmost

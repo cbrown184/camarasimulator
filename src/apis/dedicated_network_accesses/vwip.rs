@@ -12,6 +12,8 @@
 //!   access by id (operationId `deleteAccess`).
 //! - `GET /dedicated-network-accesses/vwip/accesses/{accessId}/devices` — list
 //!   the devices bound to an access, paginated (operationId `listDevices`).
+//! - `POST /dedicated-network-accesses/vwip/accesses/{accessId}/devices/add` —
+//!   add devices to an access (operationId `addDevicesToAccess`).
 //!
 //! ## What it does
 //!
@@ -60,9 +62,24 @@
 //! the CAMARA `207` multi-status form with a `ResultForDevice[]` body — CamaraSim
 //! represents partial denials as data inside the `201 AccessInfo`
 //! (`stats`/`recentAccessDevices`) rather than as a `207` — the `409`/`422`
-//! request-level device conflicts, `sink` notification delivery, the list /
-//! delete legs, and the `/accesses/{accessId}/devices…` sub-resources.
+//! request-level device conflicts, `sink` notification delivery, and the
+//! device-**remove** sub-resource (`POST /accesses/{accessId}/devices/remove`).
 //! `x-correlator` is echoed on every response.
+//!
+//! ## `addDevicesToAccess` — add devices to an access
+//!
+//! `POST /accesses/{accessId}/devices/add` takes a bare `AddDevicesRequest` (a
+//! JSON array of `1..=100` CAMARA `Device`s — the array *is* the body), grants
+//! each device by the same per-device plane as `createAccess`, appends them to
+//! the stored access's `recentAccessDevices` roster and recomputes its `stats`
+//! atomically ([`super::store::update`]), and returns the added devices as an
+//! `AddDevicesSuccess` (`AccessDevices` array, `201`). Request validation runs
+//! before the store lookup (a bad body → `400 INVALID_ARGUMENT`, winning over a
+//! `404`); an unknown/malformed `accessId` (a server-minted opaque UUID, no
+//! reserved-suffix plane) → `404 NOT_FOUND`. It requires the
+//! `dedicated-network-accesses:devices:add` scope. The `207`
+//! partial-success/`422 NO_VALID_DEVICE` forms remain documented cuts (denials
+//! ride inside each `AccessDevice.status`, as in `createAccess`).
 //!
 //! ## `readAccess` — read an access back
 //!
@@ -124,6 +141,10 @@ const DELETE_SCOPE: &str = "dedicated-network-accesses:accesses:delete";
 /// Accesses).
 const DEVICES_READ_SCOPE: &str = "dedicated-network-accesses:devices:read";
 
+/// The OAuth2 scope `addDevicesToAccess` requires (CAMARA Dedicated Network —
+/// Accesses).
+const DEVICES_ADD_SCOPE: &str = "dedicated-network-accesses:devices:add";
+
 /// Routes for Dedicated Network — Accesses vwip, mounted at their canonical URLs.
 pub fn routes() -> Router {
     Router::new()
@@ -138,6 +159,10 @@ pub fn routes() -> Router {
         .route(
             "/dedicated-network-accesses/vwip/accesses/:access_id/devices",
             get(list_devices),
+        )
+        .route(
+            "/dedicated-network-accesses/vwip/accesses/:access_id/devices/add",
+            post(add_devices),
         )
 }
 
@@ -420,6 +445,121 @@ async fn list_devices(
 
     let page = build_access_devices_page(devices, &params);
     with_correlator((StatusCode::OK, Json(page)).into_response(), &correlator)
+}
+
+/// `POST /dedicated-network-accesses/vwip/accesses/{accessId}/devices/add` — add
+/// devices to an existing dedicated network access (`addDevicesToAccess`).
+///
+/// The request body is a bare `AddDevicesRequest` — a JSON array of `1..=100`
+/// CAMARA `Device`s (the array *is* the body; there is no wrapping object).
+/// Each device is evaluated to the same per-device `GRANTED`/`DENIED` grant as
+/// `createAccess` (a reserved-suffix identifier → `DENIED`, any other →
+/// `GRANTED`), appended to the access's stored `recentAccessDevices` roster, and
+/// the aggregate `stats` recomputed — all atomically via [`store::update`]. On
+/// success the added devices are returned as an `AddDevicesSuccess`
+/// (`AccessDevices` array) with `201`.
+///
+/// Two control planes (docs/DESIGN.md §7), in order: **request validation** —
+/// a body that is not a JSON array, an array outside `1..=100` items, a device
+/// carrying no identifier, or a non-E.164 `phoneNumber` → `400 INVALID_ARGUMENT`
+/// (validated before the store lookup, so a bad body wins over a `404`); and the
+/// **store state** — the opaque server-minted `accessId` (no reserved-suffix
+/// plane) resolves to a known access (→ `201`) or an unknown/malformed one (→
+/// `404 NOT_FOUND`). The **per-device grant** plane rides on the submitted
+/// devices exactly as in `createAccess`. The CAMARA `207` partial-success form
+/// (a `ResultForDevice[]` body) and the `422 NO_VALID_DEVICE` case are documented
+/// cuts — CamaraSim folds every device's outcome into its `AccessDevice.status`
+/// inside the `201`, mirroring `createAccess`. Requires the
+/// `dedicated-network-accesses:devices:add` scope. `x-correlator` echoed.
+async fn add_devices(
+    claims: Claims,
+    headers: HeaderMap,
+    Path(access_id): Path<String>,
+    body: Bytes,
+) -> Response {
+    let correlator = headers.get("x-correlator").cloned();
+
+    if let Err(e) = claims.require_scope(DEVICES_ADD_SCOPE) {
+        return with_correlator(e.into_response(), &correlator);
+    }
+
+    // Body is a bare `AddDevicesRequest` — a JSON array of Device objects.
+    let devices: Vec<Value> = match serde_json::from_slice(&body) {
+        Ok(devices) => devices,
+        Err(_) => {
+            return invalid_argument(
+                "Request body must be a JSON array of Device objects.",
+                &correlator,
+            )
+        }
+    };
+
+    // Array bounds (`minItems: 1`, `maxItems: 100`) — mirrors `createAccess`'s
+    // `devices` bound, so the two device-array validations behave identically.
+    if !(1..=100).contains(&devices.len()) {
+        return invalid_argument(
+            "The request body must contain between 1 and 100 devices.",
+            &correlator,
+        );
+    }
+    for device in &devices {
+        if let Err(msg) = validate_device(device) {
+            return invalid_argument(&msg, &correlator);
+        }
+    }
+
+    // Resolve each submitted device to its grant status (the per-device plane).
+    let added: Vec<Value> = devices
+        .iter()
+        .map(|device| {
+            let status = device_status(device);
+            json!({ "device": device, "status": status })
+        })
+        .collect();
+
+    // Append to the access's roster and recompute its stats atomically; `None`
+    // means no such access (→ 404). Body validation already ran, so a bad body
+    // wins over this 404 (mirrors `listDevices`).
+    let hit = store::update(&access_id, |info| {
+        let Some(obj) = info.as_object_mut() else {
+            return;
+        };
+        let roster = obj
+            .entry("recentAccessDevices")
+            .or_insert_with(|| Value::Array(Vec::new()));
+        if !roster.is_array() {
+            *roster = Value::Array(Vec::new());
+        }
+        let arr = roster.as_array_mut().expect("roster is an array");
+        arr.extend(added.iter().cloned());
+        // Keep only the most-recent 100 (schema `recentAccessDevices` maxItems:
+        // 100); `stats` is recomputed from this same window so the two agree.
+        if arr.len() > 100 {
+            let excess = arr.len() - 100;
+            arr.drain(0..excess);
+        }
+        let total_granted = arr.iter().filter(|d| d["status"] == "GRANTED").count();
+        let total_denied = arr.len() - total_granted;
+        obj.insert(
+            "stats".to_string(),
+            json!({
+                "totalDevices": total_granted + total_denied,
+                "totalGranted": total_granted,
+                "totalDenied": total_denied,
+            }),
+        );
+    });
+
+    match hit {
+        Some(()) => with_correlator(
+            (StatusCode::CREATED, Json(added)).into_response(),
+            &correlator,
+        ),
+        None => with_correlator(
+            CamaraError::not_found("No access found for the provided accessId.").into_response(),
+            &correlator,
+        ),
+    }
 }
 
 /// The validated `page`/`perPage`/`deviceStatus` list controls for `listDevices`.
@@ -1562,6 +1702,177 @@ mod tests {
     #[tokio::test]
     async fn list_devices_without_a_token_is_unauthenticated() {
         let (status, _h, _b) = get_devices(None, &uuid_ending(12), None, None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    // --- addDevicesToAccess ------------------------------------------------
+
+    async fn post_add_devices(
+        token: Option<&str>,
+        access_id: &str,
+        body: Value,
+        correlator: Option<&str>,
+    ) -> (StatusCode, HeaderMap, Value) {
+        let mut builder = Request::builder()
+            .method("POST")
+            .uri(format!(
+                "/dedicated-network-accesses/vwip/accesses/{access_id}/devices/add"
+            ))
+            .header("host", HOST)
+            .header("content-type", "application/json");
+        if let Some(t) = token {
+            builder = builder.header("authorization", format!("Bearer {t}"));
+        }
+        if let Some(c) = correlator {
+            builder = builder.header("x-correlator", c);
+        }
+        let response = app()
+            .oneshot(builder.body(Body::from(serde_json::to_vec(&body).unwrap())).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let headers = response.headers().clone();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = if bytes.is_empty() {
+            Value::Null
+        } else {
+            serde_json::from_slice(&bytes).unwrap()
+        };
+        (status, headers, json)
+    }
+
+    #[tokio::test]
+    async fn add_devices_appends_to_the_roster_and_updates_stats() {
+        // Create an access with one granted device …
+        let create = mint_token(CREATE_SCOPE).await;
+        let (status, _h, created) = post_access(
+            &create,
+            json!({
+                "networkId": uuid_ending(12),
+                "devices": [{ "phoneNumber": "+123456789012" }] // GRANTED
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let id = created["id"].as_str().unwrap().to_string();
+
+        // … then add two more (one granted, one reserved → denied). The body is a
+        // bare JSON array (AddDevicesRequest), not an object.
+        let add = mint_token(DEVICES_ADD_SCOPE).await;
+        let (status, headers, body) = post_add_devices(
+            Some(&add),
+            &id,
+            json!([
+                { "networkAccessIdentifier": "user@operator" }, // GRANTED
+                { "phoneNumber": "+123456789404" }              // reserved → DENIED
+            ]),
+            Some("corr-add"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(headers.get("x-correlator").unwrap(), "corr-add");
+        // The 201 body is the AccessDevices for the added devices only.
+        let added = body.as_array().unwrap();
+        assert_eq!(added.len(), 2);
+        assert!(added.iter().any(|d| d["status"] == "GRANTED"));
+        let denied = added.iter().find(|d| d["status"] == "DENIED").unwrap();
+        assert_eq!(denied["device"]["phoneNumber"], "+123456789404");
+
+        // The roster + stats now reflect the create (1) plus the two added (3).
+        let read = mint_token(READ_SCOPE).await;
+        let (status, _h, info) = get_access(&read, &id).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(info["stats"]["totalDevices"], 3);
+        assert_eq!(info["stats"]["totalGranted"], 2);
+        assert_eq!(info["stats"]["totalDenied"], 1);
+        assert_eq!(info["recentAccessDevices"].as_array().unwrap().len(), 3);
+
+        // listDevices sees the extended roster too.
+        let list = mint_token(DEVICES_READ_SCOPE).await;
+        let (status, _h, page) = get_devices(Some(&list), &id, None, None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(page["pagination"]["totalCount"], 3);
+    }
+
+    #[tokio::test]
+    async fn add_devices_rejects_a_malformed_body_before_the_store() {
+        let add = mint_token(DEVICES_ADD_SCOPE).await;
+        // A non-array body (an object) → 400 INVALID_ARGUMENT, even on an unknown
+        // access (body validated before the store lookup).
+        let (status, _h, body) = post_add_devices(
+            Some(&add),
+            &uuid_ending(999),
+            json!({ "devices": [{ "phoneNumber": "+1" }] }),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "INVALID_ARGUMENT");
+        // Empty array (below minItems 1) → 400.
+        let (status, _h, _b) = post_add_devices(Some(&add), &uuid_ending(999), json!([]), None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        // More than 100 devices → 400.
+        let many: Vec<Value> = (0..101).map(|_| json!({ "networkAccessIdentifier": "u@o" })).collect();
+        let (status, _h, _b) =
+            post_add_devices(Some(&add), &uuid_ending(999), json!(many), None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        // A device with no identifier → 400.
+        let (status, _h, _b) =
+            post_add_devices(Some(&add), &uuid_ending(999), json!([{ "foo": "bar" }]), None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        // A non-E.164 phoneNumber → 400.
+        let (status, _h, _b) = post_add_devices(
+            Some(&add),
+            &uuid_ending(999),
+            json!([{ "phoneNumber": "12345" }]),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn add_devices_to_an_unknown_access_is_404() {
+        // A well-formed body on a never-created access → 404 NOT_FOUND (the minted
+        // accessId has no reserved-suffix plane), correlator echoed.
+        let add = mint_token(DEVICES_ADD_SCOPE).await;
+        let (status, headers, body) = post_add_devices(
+            Some(&add),
+            &uuid_ending(777),
+            json!([{ "phoneNumber": "+123456789012" }]),
+            Some("corr-add"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["code"], "NOT_FOUND");
+        assert_eq!(headers.get("x-correlator").unwrap(), "corr-add");
+    }
+
+    #[tokio::test]
+    async fn add_devices_without_the_scope_is_forbidden() {
+        // The devices *read* scope does not grant the devices *add* scope.
+        let token = mint_token(DEVICES_READ_SCOPE).await;
+        let (status, _h, _b) = post_add_devices(
+            Some(&token),
+            &uuid_ending(12),
+            json!([{ "phoneNumber": "+123456789012" }]),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn add_devices_without_a_token_is_unauthenticated() {
+        let (status, _h, _b) = post_add_devices(
+            None,
+            &uuid_ending(12),
+            json!([{ "phoneNumber": "+123456789012" }]),
+            None,
+        )
+        .await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
     }
 }

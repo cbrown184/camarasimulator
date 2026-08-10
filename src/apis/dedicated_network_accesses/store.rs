@@ -81,6 +81,25 @@ pub fn remove(id: &str) -> Option<Value> {
         .remove(id)
 }
 
+/// Atomically mutate the stored `AccessInfo` under `id` in place, returning
+/// `Some(())` if an access was present (so the caller can answer `201` vs
+/// `404`) or `None` if the id was unknown. The closure runs while the map lock
+/// is held, so a concurrent read/mutate can't observe a half-applied change;
+/// it is purely synchronous (no `.await`), so the lock is never held across an
+/// await point and the async runtime is never blocked. `addDevicesToAccess`
+/// uses this to append to the access's `recentAccessDevices` roster and
+/// recompute its `stats` in one step.
+pub fn update<F>(id: &str, f: F) -> Option<()>
+where
+    F: FnOnce(&mut Value),
+{
+    store()
+        .lock()
+        .expect("dedicated-network-accesses store not poisoned")
+        .get_mut(id)
+        .map(f)
+}
+
 /// Mint a fresh, opaque, UUID-v4-shaped access `id` (CAMARA `AccessId` is
 /// `format: uuid`).
 ///
@@ -149,6 +168,20 @@ mod tests {
     #[test]
     fn unknown_access_id_reads_back_none() {
         assert_eq!(get("no-such-access-id"), None);
+    }
+
+    #[test]
+    fn update_mutates_in_place_and_reports_presence() {
+        // `update` applies the closure to a present access and persists it.
+        let id = new_access_id();
+        insert(id.clone(), json!({ "id": id, "count": 1 }));
+        let hit = update(&id, |info| {
+            info["count"] = json!(2);
+        });
+        assert_eq!(hit, Some(()), "an existing access is mutated");
+        assert_eq!(get(&id).unwrap()["count"], 2, "the mutation persists");
+        // An unknown id is a no-op that reports absence (→ 404 at the handler).
+        assert_eq!(update("no-such-access-id", |_| {}), None);
     }
 
     #[test]
