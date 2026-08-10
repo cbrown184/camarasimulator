@@ -2520,8 +2520,15 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     `maxNumberOfDevices`, `aggregatedUl/DlThroughput` (`BitRate`), `qosProfiles`
     (reusing the QoS Profiles catalog names) and `defaultQosProfile`.
     `x-correlator` echoed. No new dep.
-  - [ ] `GET /profiles` (`readNetworkProfiles`) — the paginated
-    `NetworkProfilesPage` list (a later slice).
+  - [x] `GET /profiles` (`readNetworkProfiles`) — the paginated
+    `NetworkProfilesPage` list (`{ items, pagination }`) over the fixed catalog.
+    Two control planes (DESIGN §7): the optional exact-match `name` filter
+    (unknown name → empty page; a list never 404s) and the `page`/`perPage`
+    window (defaults 1/10; non-integer → 400 INVALID_ARGUMENT, `<1` → 400
+    OUT_OF_RANGE; `RawQuery` + `serde_urlencoded`, no new dep). Each item carries
+    a stable canonical `id` (UUID tail = catalog index), so `GET /profiles/{id}`
+    returns the same profile the list holds. No device identifier → no
+    reserved-error plane.
   - [ ] the sibling Dedicated-Networks APIs (`dedicated-network`,
     `dedicated-network-accesses`, `dedicated-network-areas`) — later, as capacity
     allows (the `-areas` API is spatial).
@@ -2551,6 +2558,35 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-10 — dedicated-network-profiles: added the second operation,
+  `GET /dedicated-network-profiles/vwip/profiles` (`readNetworkProfiles`, scope
+  `dedicated-network-profiles:profiles:read`) — the paginated catalog list, the
+  natural next slice after last pass's single-profile lookup and the topmost
+  unclaimed `[ ]` backlog leaf. Confirmed the contract from the authoritative
+  upstream `dedicated-network-profiles.yaml` (WebFetch): `GET /profiles` with
+  `perPage`/`page`/`name` query params → a `NetworkProfilesPage`
+  (`{ items, pagination }`), errors 400/401/403. Returns a `NetworkProfilesPage`
+  over the fixed 4-entry catalog. Two control planes (DESIGN §7): the optional
+  exact-match `name` filter (unknown name → empty page; a list never 404s) and
+  the `page`/`perPage` window (defaults 1/10; non-integer → 400 INVALID_ARGUMENT,
+  `<1` → 400 OUT_OF_RANGE; `name` >1024 chars → 400 INVALID_ARGUMENT). No device
+  identifier → no reserved-error plane (mirrors QoS Profiles' list). Each catalog
+  item gets a stable canonical `id` (a UUID whose trailing three digits are the
+  catalog index), so the list and the single-profile lookup agree —
+  `GET /profiles/{id}` returns the same profile the list holds at that id. Reused
+  the `RawQuery` + `serde_urlencoded` pagination pattern from Carrier Billing /
+  Network Traffic Analysis; `pagination` envelope is the house
+  `page`/`perPage`/`totalCount`/`totalPages` shape (canonical refs an external
+  `CAMARA_common` Pagination — inlined an equivalent, documented in the spec).
+  spec: added the `GET /profiles` op (params, 200 `NetworkProfilesPage` +
+  example, 400/401/403, `x-camarasim-scenarios`) and the `NetworkProfilesPage` /
+  `Pagination` schemas to `specs/dedicated-network-profiles/vwip/openapi.yaml`.
+  tests: +21 (pure: template-id round-trips to its own template, page-envelope
+  windowing/counts, empty-catalog zero-pages; integration: full-catalog default,
+  list id → same profile via lookup, pagination + past-end empty, name filter
+  known/unknown, bad-pagination 400s, scope 403 / no-token 401, x-correlator).
+  `cargo test` 1866 green (was 1845); `cargo build --release` green. No new dep.
+  — binary: 3.4M (3,509,856 B)
 - 2026-08-10 — dedicated-network-profiles: added a **new API**,
   `GET /dedicated-network-profiles/vwip/profiles/{profileId}`
   (`readNetworkProfile`, scope `dedicated-network-profiles:profiles:read`) — the

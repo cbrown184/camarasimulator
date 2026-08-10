@@ -1,9 +1,13 @@
 //! Dedicated Network — Network Profiles **vwip** (CAMARA DedicatedNetworks,
 //! work-in-progress).
 //!
-//! One endpoint (this slice):
+//! Endpoints:
 //! - `GET /dedicated-network-profiles/vwip/profiles/{profileId}` — look up a
 //!   single network profile by its id (operationId `readNetworkProfile`).
+//! - `GET /dedicated-network-profiles/vwip/profiles` — the paginated catalog
+//!   query (operationId `readNetworkProfiles`), a `NetworkProfilesPage`
+//!   (`{ items, pagination }`) narrowed by the optional `name` filter and the
+//!   `page`/`perPage` pagination window.
 //!
 //! ## What it does
 //!
@@ -41,7 +45,7 @@
 //! Example: `…-000000000001` → the `iot-massive` template; `…-000000000002` →
 //! `public-safety`; `…-000000000404` → `404 NOT_FOUND`; `not-a-uuid` → `400`.
 
-use axum::extract::Path;
+use axum::extract::{Path, RawQuery};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
@@ -59,10 +63,15 @@ const READ_SCOPE: &str = "dedicated-network-profiles:profiles:read";
 /// Routes for Dedicated Network — Network Profiles vwip, mounted at their
 /// canonical URLs.
 pub fn routes() -> Router {
-    Router::new().route(
-        "/dedicated-network-profiles/vwip/profiles/:profileId",
-        get(read_network_profile),
-    )
+    Router::new()
+        .route(
+            "/dedicated-network-profiles/vwip/profiles",
+            get(read_network_profiles),
+        )
+        .route(
+            "/dedicated-network-profiles/vwip/profiles/:profileId",
+            get(read_network_profile),
+        )
 }
 
 /// `GET /dedicated-network-profiles/vwip/profiles/{profileId}` — the
@@ -96,6 +105,166 @@ async fn read_network_profile(
     let profile = network_profile(&profile_id, digits);
 
     with_correlator((StatusCode::OK, Json(profile)).into_response(), &correlator)
+}
+
+/// `GET /dedicated-network-profiles/vwip/profiles` — the paginated catalog query
+/// (`readNetworkProfiles`). Returns a `NetworkProfilesPage` (`{ items, pagination }`)
+/// over the fixed catalog. Two control planes (docs/DESIGN.md §7): the optional
+/// `name` filter (exact match; an unknown name → an empty page — a list never
+/// 404s) and the `page`/`perPage` pagination window over the (filtered) catalog.
+/// There is no device/line identifier, so — like QoS Profiles' list — there is no
+/// reserved-identifier error plane.
+async fn read_network_profiles(
+    claims: Claims,
+    headers: HeaderMap,
+    RawQuery(query): RawQuery,
+) -> Response {
+    // Optional correlation header, echoed on every response (CAMARA Commonalities).
+    let correlator = headers.get("x-correlator").cloned();
+
+    // Endpoint authorisation: the token must carry this API's scope.
+    if let Err(e) = claims.require_scope(READ_SCOPE) {
+        return with_correlator(e.into_response(), &correlator);
+    }
+
+    // Validate + default the query parameters (page/perPage/name).
+    let params = match parse_list_params(query.as_deref(), &correlator) {
+        Ok(p) => p,
+        Err(response) => return response,
+    };
+
+    // The full catalog: each template rendered with its stable canonical id (a
+    // UUID whose trailing three digits are the template index, so a client can
+    // look the same profile up again via `GET /profiles/{id}`).
+    let catalog: Vec<Value> = (0..TEMPLATES.len())
+        .map(|i| network_profile(&template_id(i), i as u16))
+        .collect();
+
+    // `name` filter (exact match) — a genuine control plane; an unknown name
+    // narrows to an empty page.
+    let filtered: Vec<Value> = match params.name.as_deref() {
+        Some(name) => catalog
+            .into_iter()
+            .filter(|p| p["name"].as_str() == Some(name))
+            .collect(),
+        None => catalog,
+    };
+
+    let page = network_profiles_page(filtered, &params);
+    with_correlator((StatusCode::OK, Json(page)).into_response(), &correlator)
+}
+
+/// The validated `page`/`perPage`/`name` list controls for `readNetworkProfiles`.
+struct ListParams {
+    /// 1-based page index (schema `minimum: 1`, default `1`).
+    page: i64,
+    /// Page size (schema `minimum: 1`, default `10`).
+    per_page: i64,
+    /// Optional exact-match `name` filter.
+    name: Option<String>,
+}
+
+/// Parse and validate the `readNetworkProfiles` query string. A non-integer
+/// `page`/`perPage` → 400 `INVALID_ARGUMENT`; a value `< 1` → 400 `OUT_OF_RANGE`;
+/// an absent parameter falls back to its schema default. Unknown query params are
+/// ignored. `name` is passed through verbatim (schema `maxLength: 1024`).
+fn parse_list_params(
+    query: Option<&str>,
+    correlator: &Option<HeaderValue>,
+) -> Result<ListParams, Response> {
+    #[derive(serde::Deserialize, Default)]
+    struct Raw {
+        page: Option<String>,
+        #[serde(rename = "perPage")]
+        per_page: Option<String>,
+        name: Option<String>,
+    }
+
+    let raw: Raw = serde_urlencoded::from_str(query.unwrap_or("")).map_err(|_| {
+        invalid_argument(
+            "the query string is not valid application/x-www-form-urlencoded",
+            correlator,
+        )
+    })?;
+
+    let page = parse_positive_int(raw.page.as_deref(), "page", 1, correlator)?;
+    let per_page = parse_positive_int(raw.per_page.as_deref(), "perPage", 10, correlator)?;
+    if let Some(name) = raw.name.as_deref() {
+        if name.chars().count() > 1024 {
+            return Err(invalid_argument(
+                "`name` must be at most 1024 characters.",
+                correlator,
+            ));
+        }
+    }
+
+    Ok(ListParams {
+        page,
+        per_page,
+        name: raw.name,
+    })
+}
+
+/// Parse an optional integer query parameter with a schema `minimum: 1`: absent
+/// → `default`; a non-integer → 400 `INVALID_ARGUMENT`; a value `< 1` → 400
+/// `OUT_OF_RANGE`.
+fn parse_positive_int(
+    value: Option<&str>,
+    name: &str,
+    default: i64,
+    correlator: &Option<HeaderValue>,
+) -> Result<i64, Response> {
+    match value {
+        None => Ok(default),
+        Some(raw) => {
+            let parsed: i64 = raw.parse().map_err(|_| {
+                invalid_argument(&format!("`{name}` must be an integer."), correlator)
+            })?;
+            if parsed < 1 {
+                Err(out_of_range(
+                    &format!("`{name}` must be greater than or equal to 1."),
+                    correlator,
+                ))
+            } else {
+                Ok(parsed)
+            }
+        }
+    }
+}
+
+/// Build the `NetworkProfilesPage` (`{ items, pagination }`) for the (already
+/// `name`-filtered) profile list: the `page`-th window of `per_page` items plus a
+/// pagination envelope (`page`/`perPage`/`totalCount`/`totalPages`, the CamaraSim
+/// house convention — mirrors Network Traffic Analysis / Carrier Billing). Pure
+/// over its input, so it is unit-tested directly.
+fn network_profiles_page(profiles: Vec<Value>, params: &ListParams) -> Value {
+    let total_count = profiles.len() as i64;
+    // Ceil-divide; 0 pages when there are no matching profiles.
+    let total_pages = (total_count + params.per_page - 1) / params.per_page;
+
+    // `page` and `per_page` are both `>= 1`; `saturating_mul` guards against an
+    // absurd `page * per_page` overflowing `i64`.
+    let start = (params.page - 1).saturating_mul(params.per_page).min(total_count);
+    let end = start.saturating_add(params.per_page).min(total_count);
+    let items = &profiles[start as usize..end as usize];
+
+    json!({
+        "items": items,
+        "pagination": {
+            "page": params.page,
+            "perPage": params.per_page,
+            "totalCount": total_count,
+            "totalPages": total_pages,
+        },
+    })
+}
+
+/// The stable canonical id for template `index`: a UUID whose trailing three
+/// digits equal the index, so the catalog list and the single-profile lookup
+/// agree — `GET /profiles/{template_id(i)}` returns the same profile the list
+/// carries at that id (`network_profile` selects `digits % N`).
+fn template_id(index: usize) -> String {
+    format!("00000000-0000-4000-8000-000000000{index:03}")
 }
 
 /// The fixed catalog of network-profile templates CamaraSim offers, as
@@ -191,6 +360,14 @@ fn is_uuid_shaped(s: &str) -> bool {
 fn invalid_argument(message: &str, correlator: &Option<HeaderValue>) -> Response {
     with_correlator(
         CamaraError::invalid_argument(message).into_response(),
+        correlator,
+    )
+}
+
+/// A 400 `OUT_OF_RANGE` CAMARA error, with the correlator echoed.
+fn out_of_range(message: &str, correlator: &Option<HeaderValue>) -> Response {
+    with_correlator(
+        CamaraError::new(StatusCode::BAD_REQUEST, "OUT_OF_RANGE", message).into_response(),
         correlator,
     )
 }
@@ -423,6 +600,213 @@ mod tests {
         assert_eq!(
             headers.get("x-correlator").and_then(|v| v.to_str().ok()),
             Some("corr-err")
+        );
+    }
+
+    // --- readNetworkProfiles (list) ---------------------------------------
+
+    // GET the profiles collection with an optional query string and token.
+    async fn get_profiles(
+        token: Option<&str>,
+        query: &str,
+        correlator: Option<&str>,
+    ) -> (StatusCode, HeaderMap, Value) {
+        let uri = if query.is_empty() {
+            "/dedicated-network-profiles/vwip/profiles".to_string()
+        } else {
+            format!("/dedicated-network-profiles/vwip/profiles?{query}")
+        };
+        let mut builder = Request::builder().method("GET").uri(uri).header("host", HOST);
+        if let Some(t) = token {
+            builder = builder.header("authorization", format!("Bearer {t}"));
+        }
+        if let Some(c) = correlator {
+            builder = builder.header("x-correlator", c);
+        }
+        let response = app()
+            .oneshot(builder.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let headers = response.headers().clone();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, headers, json)
+    }
+
+    async fn list_ok(query: &str) -> (StatusCode, Value) {
+        let token = mint_token(READ_SCOPE).await;
+        let (status, _, body) = get_profiles(Some(&token), query, None).await;
+        (status, body)
+    }
+
+    // --- Pure units --------------------------------------------------------
+
+    #[test]
+    fn template_id_tail_selects_its_own_template() {
+        // A catalog list item's id round-trips through the single-profile
+        // selector: GET /profiles/{template_id(i)} picks the same template.
+        for i in 0..TEMPLATES.len() {
+            let id = template_id(i);
+            assert!(is_uuid_shaped(&id), "template id is UUID-shaped");
+            let digits = scenarios::trailing_three_digits(&id).unwrap_or(0);
+            let p = network_profile(&id, digits);
+            assert_eq!(p["name"], TEMPLATES[i].name, "id tail {i} selects template {i}");
+            assert_eq!(p["id"], id);
+        }
+    }
+
+    #[test]
+    fn page_envelope_windows_and_counts() {
+        let all: Vec<Value> = (0..TEMPLATES.len())
+            .map(|i| network_profile(&template_id(i), i as u16))
+            .collect();
+        let n = TEMPLATES.len() as i64;
+
+        // Whole catalog on one big page.
+        let page = network_profiles_page(
+            all.clone(),
+            &ListParams { page: 1, per_page: 100, name: None },
+        );
+        assert_eq!(page["items"].as_array().unwrap().len() as i64, n);
+        assert_eq!(page["pagination"]["totalCount"], n);
+        assert_eq!(page["pagination"]["totalPages"], 1);
+        assert_eq!(page["pagination"]["page"], 1);
+        assert_eq!(page["pagination"]["perPage"], 100);
+
+        // perPage=2 splits into ceil(n/2) pages; page 1 has 2 items.
+        let page = network_profiles_page(
+            all.clone(),
+            &ListParams { page: 1, per_page: 2, name: None },
+        );
+        assert_eq!(page["items"].as_array().unwrap().len(), 2);
+        assert_eq!(page["pagination"]["totalPages"], (n + 1) / 2);
+
+        // A page past the end is empty but still reports the true totals.
+        let page = network_profiles_page(
+            all,
+            &ListParams { page: 999, per_page: 2, name: None },
+        );
+        assert!(page["items"].as_array().unwrap().is_empty());
+        assert_eq!(page["pagination"]["totalCount"], n);
+    }
+
+    #[test]
+    fn empty_catalog_reports_zero_pages() {
+        let page = network_profiles_page(
+            vec![],
+            &ListParams { page: 1, per_page: 10, name: None },
+        );
+        assert!(page["items"].as_array().unwrap().is_empty());
+        assert_eq!(page["pagination"]["totalCount"], 0);
+        assert_eq!(page["pagination"]["totalPages"], 0);
+    }
+
+    // --- Integration through the real router -------------------------------
+
+    #[tokio::test]
+    async fn list_returns_the_full_catalog_by_default() {
+        let (status, body) = list_ok("").await;
+        assert_eq!(status, StatusCode::OK);
+        let items = body["items"].as_array().unwrap();
+        assert_eq!(items.len(), TEMPLATES.len());
+        // Every item is a full NetworkProfile with a UUID-shaped id.
+        for item in items {
+            assert!(is_uuid_shaped(item["id"].as_str().unwrap()));
+            assert!(item["name"].is_string());
+            assert!(item["maxNumberOfDevices"].is_number());
+            assert!(item["aggregatedUlThroughput"]["value"].is_number());
+        }
+        assert_eq!(body["pagination"]["totalCount"], TEMPLATES.len() as i64);
+        assert_eq!(body["pagination"]["page"], 1);
+        assert_eq!(body["pagination"]["perPage"], 10);
+    }
+
+    #[tokio::test]
+    async fn list_item_ids_resolve_to_the_same_profile() {
+        // An id carried by the list looks up to an equal profile via the
+        // single-profile endpoint — the list and the lookup are consistent.
+        let (_, body) = list_ok("").await;
+        let first = body["items"][0].clone();
+        let id = first["id"].as_str().unwrap();
+        let (status, _, looked_up) = get_ok(id).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(looked_up["name"], first["name"]);
+        assert_eq!(looked_up["id"], first["id"]);
+    }
+
+    #[tokio::test]
+    async fn list_paginates() {
+        let (status, body) = list_ok("page=1&perPage=1").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["items"].as_array().unwrap().len(), 1);
+        assert_eq!(body["pagination"]["perPage"], 1);
+        assert_eq!(body["pagination"]["totalPages"], TEMPLATES.len() as i64);
+
+        // Page 2 differs from page 1.
+        let (_, page1) = list_ok("page=1&perPage=1").await;
+        let (_, page2) = list_ok("page=2&perPage=1").await;
+        assert_ne!(page1["items"][0]["id"], page2["items"][0]["id"]);
+
+        // A page past the end is an empty array (never a 404).
+        let (status, body) = list_ok("page=100&perPage=10").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body["items"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_name_filter_narrows_the_catalog() {
+        // A known name → exactly that one profile.
+        let known = TEMPLATES[0].name;
+        let (status, body) = list_ok(&format!("name={known}")).await;
+        assert_eq!(status, StatusCode::OK);
+        let items = body["items"].as_array().unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["name"], known);
+        assert_eq!(body["pagination"]["totalCount"], 1);
+
+        // An unknown name → an empty page (a list never 404s).
+        let (status, body) = list_ok("name=no-such-profile").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body["items"].as_array().unwrap().is_empty());
+        assert_eq!(body["pagination"]["totalCount"], 0);
+    }
+
+    #[tokio::test]
+    async fn list_rejects_bad_pagination() {
+        // Non-integer page/perPage → 400 INVALID_ARGUMENT.
+        let (status, body) = list_ok("page=abc").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "INVALID_ARGUMENT");
+
+        // Below the minimum → 400 OUT_OF_RANGE.
+        let (status, body) = list_ok("perPage=0").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "OUT_OF_RANGE");
+    }
+
+    #[tokio::test]
+    async fn list_scope_and_token_are_enforced() {
+        let token = mint_token("some:other-scope").await;
+        let (status, _, body) = get_profiles(Some(&token), "", None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["code"], "PERMISSION_DENIED");
+
+        let (status, _, body) = get_profiles(None, "", None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["code"], "UNAUTHENTICATED");
+    }
+
+    #[tokio::test]
+    async fn list_echoes_x_correlator() {
+        let token = mint_token(READ_SCOPE).await;
+        let (status, headers, _) = get_profiles(Some(&token), "", Some("corr-list")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-list")
         );
     }
 }
