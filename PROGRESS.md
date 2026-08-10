@@ -2622,8 +2622,17 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
         `AccessInfo` back (`200`) or `404 NOT_FOUND` for an unknown/malformed id;
         store state is the only control plane (opaque minted UUID, no
         reserved-suffix plane), mirroring the sibling `readNetwork`.
-      - [ ] list/delete legs (`listAccesses`, `deleteAccess`)
-        + the `/accesses/{accessId}/devices…` sub-resources (`listDevices`,
+      - [x] list/delete legs (`listAccesses`, `deleteAccess`) — `GET /accesses`
+        returns a bare `AccessInfo[]` (`200`, empty when none), narrowed by the
+        optional `networkId` query filter (a second control plane; non-UUID
+        `networkId` → 400 INVALID_ARGUMENT, unknown-but-valid → `[]`); scope
+        `…:accesses:read`. `DELETE /accesses/{accessId}` evicts a stored access
+        → `204` (single-use) or `404 NOT_FOUND`, keyed only on store state (opaque
+        minted id, no reserved-suffix plane, mirroring `deleteNetwork`); scope
+        `…:accesses:delete`. New `store::all`/`store::remove`; self-contained
+        query decode (no new dep). `x-correlator` echoed. **Completes the
+        Accesses CRUD** (`/devices…` sub-resources remain).
+      - [ ] the `/accesses/{accessId}/devices…` sub-resources (`listDevices`,
         `addDevicesToAccess`, `removeDevicesFromAccess`) — later passes.
     - [ ] `dedicated-network-areas` (spatial) — later.
 - [ ] Other CAMARA APIs as capacity allows
@@ -2652,6 +2661,33 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-10 — dedicated-network-accesses: added the **list + delete legs**,
+  `GET /dedicated-network-accesses/vwip/accesses` (`listAccesses`, scope
+  `…:accesses:read`) and `DELETE /dedicated-network-accesses/vwip/accesses/{accessId}`
+  (`deleteAccess`, scope `…:accesses:delete`) — the topmost unclaimed `[ ]`
+  backlog leaf after last pass's readAccess, completing the Accesses CRUD.
+  Confirmed the contract from the authoritative upstream
+  `dedicated-network-accesses.yaml` (`wip`, WebFetch): `listAccesses` returns a
+  **bare `AccessInfo[]`** (not paginated, maxItems 1,000,000) with an optional
+  `networkId` query filter, responses 200/400/401/403/404; `deleteAccess`
+  204/400/401/403/404, no body on success. Mirrors the sibling Networks legs:
+  `listAccesses` snapshots `store::all()` and filters by the optional `networkId`
+  (a genuine second control plane — non-UUID → 400, unknown-but-valid → `[]`, a
+  list never 404s; the upstream `x-device` header filter is a documented cut);
+  `deleteAccess` evicts via `store::remove()` → `204` single-use or `404`, keyed
+  only on the opaque minted id (no reserved-suffix plane). Added
+  `store::all`/`store::remove` + a self-contained query decoder (`url_form_pairs`
+  /`url_decode`, no new dep); new routes + `list_access`/`delete_access` handlers
+  in `vwip.rs`; `x-correlator` echoed on every response incl. the `204`. spec:
+  added the `/accesses` GET op (listAccesses, `networkId` query param) and the
+  `/accesses/{accessId}` DELETE op (deleteAccess) + their `x-camarasim-scenarios`
+  to `specs/dedicated-network-accesses/vwip/openapi.yaml`; header comment +
+  API description updated. tests: +10 (1 store-unit: all/remove single-use;
+  1 pure: networkId-filter validation; 5 list integration:
+  filter-returns-matching, unknown→`[]`, non-UUID→400, wrong-scope→403,
+  no-token→401; 3 delete integration: evict-single-use-then-read-404,
+  unknown→404, wrong-scope→403, no-token→401). No new dep. `cargo test` 1935
+  pass; `cargo build --release` ok. binary (release): 3,616,856 bytes (~3.5M).
 - 2026-08-10 — dedicated-network-accesses: added the read leg,
   `GET /dedicated-network-accesses/vwip/accesses/{accessId}` (`readAccess`,
   scope `dedicated-network-accesses:accesses:read`) — the topmost unclaimed

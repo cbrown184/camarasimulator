@@ -8,10 +8,10 @@
 # cases (docs/DESIGN.md §7, §9). Backed by
 # `src/apis/dedicated_network_accesses/vwip.rs`; spec and code must not drift.
 #
-# This slice serves the create leg `POST /accesses` (`createAccess`) and the read
-# leg `GET /accesses/{accessId}` (`readAccess`). The list leg `GET /accesses`
-# (`listAccesses`), the delete leg `DELETE /accesses/{accessId}`
-# (`deleteAccess`), and the device sub-resources
+# This slice serves the create leg `POST /accesses` (`createAccess`), the read
+# leg `GET /accesses/{accessId}` (`readAccess`), the list leg `GET /accesses`
+# (`listAccesses`) and the delete leg `DELETE /accesses/{accessId}`
+# (`deleteAccess`) — the full access CRUD. The device sub-resources
 # (`/accesses/{accessId}/devices…`) arrive in later passes.
 openapi: 3.0.3
 info:
@@ -63,15 +63,20 @@ info:
       per-device `recentAccessDevices` list, so `devices` is a genuine second
       plane.
 
-    `sinkCredential` is accepted but never echoed (it is a secret). This slice
-    being create-only, the following are **documented cuts** (later passes): the
-    CAMARA `207` multi-status form with a `ResultForDevice[]` body — CamaraSim
-    represents partial denials as data inside the `201 AccessInfo`
-    (`stats`/`recentAccessDevices`) rather than as a `207` — the `409`/`422`
-    request-level device conflicts, `sink` notification delivery, the read / list
-    / delete legs, and the `/accesses/{accessId}/devices…` sub-resources.
-    CamaraSim exposes the full shared reserved-error set here so every reserved
-    suffix is reachable.
+    `readAccess` reads a created access back by its opaque id, `listAccesses`
+    lists them (optionally filtered by `networkId`), and `deleteAccess` evicts
+    one — the read/list/delete legs are keyed only on the in-memory store state
+    (the minted `accessId` has no reserved-suffix plane), except that
+    `listAccesses` adds the optional `networkId` filter as a second control plane.
+
+    `sinkCredential` is accepted but never echoed (it is a secret). The following
+    remain **documented cuts** (later passes): the CAMARA `207` multi-status form
+    with a `ResultForDevice[]` body — CamaraSim represents partial denials as data
+    inside the `201 AccessInfo` (`stats`/`recentAccessDevices`) rather than as a
+    `207` — the `409`/`422` request-level device conflicts, `sink` notification
+    delivery, the `listAccesses` `x-device` header filter, and the
+    `/accesses/{accessId}/devices…` sub-resources. CamaraSim exposes the full
+    shared reserved-error set here so every reserved suffix is reachable.
   version: "wip"
   license:
     name: Apache-2.0
@@ -204,6 +209,84 @@ paths:
             result: "201 AccessInfo — that device is DENIED, counted in stats.totalDenied"
           - input: "a valid body; a device whose identifier is not a reserved suffix"
             result: "201 AccessInfo — that device is GRANTED, counted in stats.totalGranted"
+    get:
+      operationId: listAccesses
+      summary: List dedicated network accesses
+      description: |
+        Returns a bare JSON array of every stored `AccessInfo` (`200`, empty when
+        none — CAMARA never 404s on an empty list). The optional `networkId`
+        query parameter filters to the accesses created against that network (a
+        genuine control plane): a present but non-UUID `networkId` →
+        `400 INVALID_ARGUMENT`, an unknown-but-valid one → an empty array.
+        Requires the read scope. In CamaraSim the only state is the in-memory
+        store, so the result reflects the accesses created earlier in this
+        process; the `x-device` header filter is a documented cut.
+      security:
+        - openId:
+            - dedicated-network-accesses:accesses:read
+      parameters:
+        - name: networkId
+          in: query
+          required: false
+          description: Filter to accesses created against this dedicated network.
+          schema:
+            type: string
+            format: uuid
+        - $ref: "#/components/parameters/XCorrelator"
+      responses:
+        "200":
+          description: The list of dedicated network accesses (possibly empty).
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                type: array
+                maxItems: 1000000
+                items:
+                  $ref: "#/components/schemas/AccessInfo"
+              examples:
+                oneAccess:
+                  summary: A single access on the filtered network
+                  value:
+                    - id: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+                      networkId: "00000000-0000-4000-8000-000000000012"
+                      stats:
+                        totalDevices: 1
+                        totalGranted: 1
+                        totalDenied: 0
+                      recentAccessDevices:
+                        - device:
+                            phoneNumber: "+123456789012"
+                          status: GRANTED
+        "400":
+          description: |
+            400 — invalid request. CamaraSim returns `INVALID_ARGUMENT` when the
+            `networkId` query parameter is present but not UUID-shaped.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AccessError"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+      x-camarasim-scenarios:
+        description: >-
+          Result selected from the in-memory store state and the optional
+          `networkId` query filter (docs/DESIGN.md §7): the list of stored
+          accesses, narrowed to those on the given network. A list never 404s on
+          an empty result. A non-UUID `networkId` → 400.
+        cases:
+          - input: no networkId
+            result: "200 — a bare array of every stored AccessInfo (empty when none)"
+          - input: networkId matching one or more stored accesses
+            result: "200 — a bare array of just those accesses"
+          - input: a valid UUID networkId matching no stored access
+            result: "200 — an empty array"
+          - input: a networkId query param that is not UUID-shaped
+            result: "400 INVALID_ARGUMENT"
 
   /accesses/{accessId}:
     get:
@@ -263,6 +346,48 @@ paths:
           - input: an accessId returned by a prior createAccess
             result: "200 AccessInfo (the stored access, verbatim)"
           - input: any other (unknown / never-created / malformed) accessId
+            result: "404 NOT_FOUND"
+    delete:
+      operationId: deleteAccess
+      summary: Delete a dedicated network access by id
+      description: |
+        Evicts the access previously created under `accessId`: a known id →
+        `204 No Content` (single-use); an unknown or already-deleted id →
+        `404 NOT_FOUND`. In CamaraSim the `accessId` is a server-minted opaque
+        UUID, so the only control plane is the in-memory store state (there is no
+        reserved-suffix plane on a minted id, mirroring the sibling Networks
+        API's `deleteNetwork`). Deletion is synchronous (no async
+        `202`/`DELETE_REQUESTED`) and delivers no `sink` notification (a
+        documented cut). Requires the
+        `dedicated-network-accesses:accesses:delete` scope.
+      security:
+        - openId:
+            - dedicated-network-accesses:accesses:delete
+      parameters:
+        - $ref: "#/components/parameters/AccessId"
+        - $ref: "#/components/parameters/XCorrelator"
+      responses:
+        "204":
+          description: The dedicated network access was deleted.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+      x-camarasim-scenarios:
+        description: >-
+          Result selected only from the in-memory store state, keyed on the
+          server-minted opaque `accessId` (docs/DESIGN.md §7): a known id is
+          evicted (204, single-use), anything else is 404. There is no
+          reserved-suffix plane on a minted id.
+        cases:
+          - input: an accessId returned by a prior createAccess
+            result: "204 No Content (the access is evicted; single-use)"
+          - input: any other (unknown / already-deleted / malformed) accessId
             result: "404 NOT_FOUND"
 
 components:

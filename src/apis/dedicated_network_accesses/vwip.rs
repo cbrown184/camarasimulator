@@ -4,8 +4,12 @@
 //! Endpoints:
 //! - `POST /dedicated-network-accesses/vwip/accesses` — create a dedicated
 //!   network access (operationId `createAccess`).
+//! - `GET /dedicated-network-accesses/vwip/accesses` — list created accesses,
+//!   optionally filtered by `networkId` (operationId `listAccesses`).
 //! - `GET /dedicated-network-accesses/vwip/accesses/{accessId}` — read a created
 //!   access back by id (operationId `readAccess`).
+//! - `DELETE /dedicated-network-accesses/vwip/accesses/{accessId}` — delete an
+//!   access by id (operationId `deleteAccess`).
 //!
 //! ## What it does
 //!
@@ -67,9 +71,28 @@
 //! reads back, anything else (unknown or malformed) is `404` (there is no
 //! reserved-suffix plane on a minted id, mirroring the sibling `readNetwork`).
 //! It requires the `dedicated-network-accesses:accesses:read` scope.
+//!
+//! ## `listAccesses` — list accesses
+//!
+//! `GET /accesses` returns a bare JSON array of every stored `AccessInfo`
+//! (`200`, empty when none — CAMARA never 404s on an empty list). The optional
+//! `networkId` query parameter filters to the accesses created against that
+//! network (a genuine second control plane); a present but non-UUID `networkId`
+//! → `400 INVALID_ARGUMENT`, and an unknown-but-valid `networkId` → an empty
+//! array. It requires the `dedicated-network-accesses:accesses:read` scope.
+//!
+//! ## `deleteAccess` — delete an access
+//!
+//! `DELETE /accesses/{accessId}` evicts the access named by the opaque
+//! `accessId`: a known id → `204 No Content` (single-use); an unknown or
+//! already-deleted one → `404 NOT_FOUND`. Keyed only on the store state (no
+//! reserved-suffix plane on a minted id), synchronous (no async
+//! `202`/`DELETE_REQUESTED`), no `sink` notification (documented cut); mirrors
+//! the sibling Networks API's `deleteNetwork`. It requires the
+//! `dedicated-network-accesses:accesses:delete` scope.
 
 use axum::body::Bytes;
-use axum::extract::Path;
+use axum::extract::{Path, RawQuery};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -87,19 +110,24 @@ use super::store;
 /// Accesses).
 const CREATE_SCOPE: &str = "dedicated-network-accesses:accesses:create";
 
-/// The OAuth2 scope `readAccess` requires (CAMARA Dedicated Network — Accesses).
+/// The OAuth2 scope `readAccess` **and** `listAccesses` require (CAMARA Dedicated
+/// Network — Accesses).
 const READ_SCOPE: &str = "dedicated-network-accesses:accesses:read";
+
+/// The OAuth2 scope `deleteAccess` requires (CAMARA Dedicated Network —
+/// Accesses).
+const DELETE_SCOPE: &str = "dedicated-network-accesses:accesses:delete";
 
 /// Routes for Dedicated Network — Accesses vwip, mounted at their canonical URLs.
 pub fn routes() -> Router {
     Router::new()
         .route(
             "/dedicated-network-accesses/vwip/accesses",
-            post(create_access),
+            post(create_access).get(list_access),
         )
         .route(
             "/dedicated-network-accesses/vwip/accesses/:access_id",
-            get(read_access),
+            get(read_access).delete(delete_access),
         )
 }
 
@@ -256,6 +284,137 @@ async fn read_access(claims: Claims, headers: HeaderMap, Path(access_id): Path<S
             &correlator,
         ),
     }
+}
+
+/// `GET /dedicated-network-accesses/vwip/accesses` — list dedicated network
+/// accesses (`listAccesses`).
+///
+/// Returns a bare JSON array of the stored `AccessInfo`s (`200`, empty when
+/// none — CAMARA never 404s on an empty list). The optional `networkId` query
+/// parameter filters to the accesses whose `networkId` equals it (a genuine
+/// control plane); a present but non-UUID `networkId` → `400 INVALID_ARGUMENT`,
+/// an unknown-but-valid one → an empty array. Requires the read scope.
+/// `x-correlator` echoed.
+async fn list_access(claims: Claims, headers: HeaderMap, RawQuery(query): RawQuery) -> Response {
+    let correlator = headers.get("x-correlator").cloned();
+
+    if let Err(e) = claims.require_scope(READ_SCOPE) {
+        return with_correlator(e.into_response(), &correlator);
+    }
+
+    // Optional `networkId` filter (schema `format: uuid`). Only `networkId` is a
+    // defined query param; any other is ignored (CAMARA has no others here that
+    // CamaraSim models — `x-device` filtering is a documented cut).
+    let network_id_filter = match parse_network_id_filter(query.as_deref()) {
+        Ok(f) => f,
+        Err(msg) => return invalid_argument(&msg, &correlator),
+    };
+
+    let accesses: Vec<Value> = store::all()
+        .into_iter()
+        .filter(|a| match &network_id_filter {
+            Some(want) => a.get("networkId").and_then(Value::as_str) == Some(want.as_str()),
+            None => true,
+        })
+        .collect();
+
+    with_correlator((StatusCode::OK, Json(accesses)).into_response(), &correlator)
+}
+
+/// `DELETE /dedicated-network-accesses/vwip/accesses/{accessId}` — delete a
+/// dedicated network access by id (`deleteAccess`).
+///
+/// Keyed only on the store state (the `accessId` is a server-minted opaque
+/// UUID, so there is no reserved-suffix plane): a known id evicts its access and
+/// returns `204 No Content` (single-use); an unknown or already-deleted id →
+/// `404 NOT_FOUND`. Synchronous deletion (no async `202`/`DELETE_REQUESTED`), no
+/// `sink` notification (a documented cut). Mirrors the sibling `deleteNetwork`.
+async fn delete_access(
+    claims: Claims,
+    headers: HeaderMap,
+    Path(access_id): Path<String>,
+) -> Response {
+    let correlator = headers.get("x-correlator").cloned();
+
+    if let Err(e) = claims.require_scope(DELETE_SCOPE) {
+        return with_correlator(e.into_response(), &correlator);
+    }
+
+    match store::remove(&access_id) {
+        Some(_) => with_correlator(StatusCode::NO_CONTENT.into_response(), &correlator),
+        None => with_correlator(
+            CamaraError::not_found("No access found for the provided accessId.").into_response(),
+            &correlator,
+        ),
+    }
+}
+
+/// Extract and validate the optional `networkId` query parameter for
+/// `listAccesses`. `Ok(Some(id))` when a valid UUID-shaped `networkId` is
+/// present, `Ok(None)` when absent, and `Err(message)` when a present
+/// `networkId` is not UUID-shaped (schema `format: uuid`). Pure over its input,
+/// so it is unit-tested directly.
+fn parse_network_id_filter(query: Option<&str>) -> Result<Option<String>, String> {
+    let raw = query.unwrap_or("");
+    for (key, value) in url_form_pairs(raw) {
+        if key == "networkId" {
+            if !is_uuid_shaped(&value) {
+                return Err("`networkId` must be a UUID.".to_string());
+            }
+            return Ok(Some(value));
+        }
+    }
+    Ok(None)
+}
+
+/// Parse an `application/x-www-form-urlencoded` query string into decoded
+/// `(key, value)` pairs. A self-contained decoder (`+` → space, `%XX` → byte),
+/// so `listAccesses` needs no query-string dependency (mirrors the sibling
+/// Networks API).
+fn url_form_pairs(query: &str) -> Vec<(String, String)> {
+    query
+        .split('&')
+        .filter(|p| !p.is_empty())
+        .map(|pair| {
+            let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
+            (url_decode(k), url_decode(v))
+        })
+        .collect()
+}
+
+/// Percent/`+` decode a single form component (lossy-UTF-8 for the decoded
+/// bytes). Unknown `%` escapes are left verbatim.
+fn url_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            b'%' if i + 2 < b.len() => {
+                let hi = (b[i + 1] as char).to_digit(16);
+                let lo = (b[i + 2] as char).to_digit(16);
+                match (hi, lo) {
+                    (Some(h), Some(l)) => {
+                        out.push((h * 16 + l) as u8);
+                        i += 3;
+                    }
+                    _ => {
+                        out.push(b'%');
+                        i += 1;
+                    }
+                }
+            }
+            c => {
+                out.push(c);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// The per-device `DeviceStatus` a submitted device maps to: a reserved-suffix
@@ -798,5 +957,194 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    // --- listAccesses ------------------------------------------------------
+
+    #[test]
+    fn network_id_filter_validates_uuid_shape() {
+        assert_eq!(parse_network_id_filter(None), Ok(None));
+        assert_eq!(parse_network_id_filter(Some("")), Ok(None));
+        assert_eq!(
+            parse_network_id_filter(Some(&format!("networkId={}", uuid_ending(7)))),
+            Ok(Some(uuid_ending(7)))
+        );
+        // Unknown params ignored; only networkId is honoured.
+        assert_eq!(parse_network_id_filter(Some("foo=bar")), Ok(None));
+        // A present but non-UUID networkId is rejected.
+        assert!(parse_network_id_filter(Some("networkId=nope")).is_err());
+    }
+
+    async fn list_accesses_req(
+        token: Option<&str>,
+        query: Option<&str>,
+        correlator: Option<&str>,
+    ) -> (StatusCode, HeaderMap, Value) {
+        let uri = match query {
+            Some(q) => format!("/dedicated-network-accesses/vwip/accesses?{q}"),
+            None => "/dedicated-network-accesses/vwip/accesses".to_string(),
+        };
+        let mut builder = Request::builder().method("GET").uri(uri).header("host", HOST);
+        if let Some(t) = token {
+            builder = builder.header("authorization", format!("Bearer {t}"));
+        }
+        if let Some(c) = correlator {
+            builder = builder.header("x-correlator", c);
+        }
+        let response = app()
+            .oneshot(builder.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let headers = response.headers().clone();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = if bytes.is_empty() {
+            Value::Null
+        } else {
+            serde_json::from_slice(&bytes).unwrap()
+        };
+        (status, headers, json)
+    }
+
+    #[tokio::test]
+    async fn list_filtered_by_network_id_returns_only_matching_accesses() {
+        // The store is process-global and shared across parallel tests, so we
+        // isolate by filtering on a networkId no other test uses.
+        let net = uuid_ending(51); // non-reserved suffix
+        let create = mint_token(CREATE_SCOPE).await;
+        for _ in 0..2 {
+            let (status, _h, _b) = post_access(&create, json!({ "networkId": net })).await;
+            assert_eq!(status, StatusCode::CREATED);
+        }
+
+        let read = mint_token(READ_SCOPE).await;
+        let (status, headers, body) =
+            list_accesses_req(Some(&read), Some(&format!("networkId={net}")), Some("corr-list"))
+                .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(headers.get("x-correlator").unwrap(), "corr-list");
+        let items = body.as_array().unwrap();
+        assert_eq!(items.len(), 2, "exactly the two accesses on this networkId");
+        assert!(items.iter().all(|a| a["networkId"] == net));
+    }
+
+    #[tokio::test]
+    async fn list_with_unknown_network_id_is_an_empty_array() {
+        let read = mint_token(READ_SCOPE).await;
+        // A valid UUID that no access uses → empty array (a list never 404s).
+        let (status, _h, body) =
+            list_accesses_req(Some(&read), Some(&format!("networkId={}", uuid_ending(852))), None)
+                .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body.as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn list_with_non_uuid_network_id_is_400() {
+        let read = mint_token(READ_SCOPE).await;
+        let (status, _h, _b) = list_accesses_req(Some(&read), Some("networkId=not-a-uuid"), None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn list_without_the_scope_is_forbidden() {
+        let token = mint_token(CREATE_SCOPE).await;
+        let (status, _h, _b) = list_accesses_req(Some(&token), None, None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn list_without_a_token_is_unauthenticated() {
+        let (status, _h, _b) = list_accesses_req(None, None, None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    // --- deleteAccess ------------------------------------------------------
+
+    async fn delete_access_req(
+        token: Option<&str>,
+        access_id: &str,
+        correlator: Option<&str>,
+    ) -> (StatusCode, HeaderMap, Value) {
+        let mut builder = Request::builder()
+            .method("DELETE")
+            .uri(format!(
+                "/dedicated-network-accesses/vwip/accesses/{access_id}"
+            ))
+            .header("host", HOST);
+        if let Some(t) = token {
+            builder = builder.header("authorization", format!("Bearer {t}"));
+        }
+        if let Some(c) = correlator {
+            builder = builder.header("x-correlator", c);
+        }
+        let response = app()
+            .oneshot(builder.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let headers = response.headers().clone();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = if bytes.is_empty() {
+            Value::Null
+        } else {
+            serde_json::from_slice(&bytes).unwrap()
+        };
+        (status, headers, json)
+    }
+
+    #[tokio::test]
+    async fn delete_evicts_the_access_single_use_then_read_is_404() {
+        // Create, then delete → 204; second delete → 404; a read is then 404 too.
+        let create = mint_token(CREATE_SCOPE).await;
+        let (status, _h, created) =
+            post_access(&create, json!({ "networkId": uuid_ending(12) })).await;
+        assert_eq!(status, StatusCode::CREATED);
+        let id = created["id"].as_str().unwrap().to_string();
+
+        let del = mint_token(DELETE_SCOPE).await;
+        let (status, headers, body) = delete_access_req(Some(&del), &id, Some("corr-del")).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(headers.get("x-correlator").unwrap(), "corr-del");
+        assert_eq!(body, Value::Null, "204 carries no body");
+
+        // Single-use: a second delete is 404.
+        let (status, _h, body) = delete_access_req(Some(&del), &id, None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["code"], "NOT_FOUND");
+
+        // And the access no longer reads back.
+        let read = mint_token(READ_SCOPE).await;
+        let (status, _h, _b) = get_access(&read, &id).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn delete_unknown_access_is_404() {
+        let del = mint_token(DELETE_SCOPE).await;
+        let (status, headers, body) =
+            delete_access_req(Some(&del), &uuid_ending(777), Some("corr-del")).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["status"], 404);
+        assert_eq!(body["code"], "NOT_FOUND");
+        assert_eq!(headers.get("x-correlator").unwrap(), "corr-del");
+    }
+
+    #[tokio::test]
+    async fn delete_without_the_delete_scope_is_forbidden() {
+        // A read-scoped token cannot delete (distinct scope).
+        let read = mint_token(READ_SCOPE).await;
+        let (status, _h, _b) = delete_access_req(Some(&read), &uuid_ending(12), None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn delete_without_a_token_is_unauthenticated() {
+        let (status, _h, _b) = delete_access_req(None, &uuid_ending(12), None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
     }
 }

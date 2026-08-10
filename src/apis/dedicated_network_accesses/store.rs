@@ -13,8 +13,9 @@
 //!
 //! The stored value is the access's rendered `AccessInfo` JSON, returned
 //! verbatim by `GET`. `createAccess` writes (`insert`) and mints ids
-//! (`new_access_id`); the `readAccess` (`get`) leg reads it back. The remaining
-//! list/delete and device legs arrive in later passes.
+//! (`new_access_id`); the `readAccess` (`get`) leg reads one back, `listAccesses`
+//! (`all`) snapshots them all, and `deleteAccess` (`remove`) evicts one. The
+//! `/accesses/{accessId}/devices…` sub-resource legs arrive in later passes.
 
 use serde_json::Value;
 use std::collections::HashMap;
@@ -52,6 +53,32 @@ pub fn get(id: &str) -> Option<Value> {
         .expect("dedicated-network-accesses store not poisoned")
         .get(id)
         .cloned()
+}
+
+/// Snapshot every stored access (its rendered `AccessInfo` JSON), in unspecified
+/// order. `listAccesses` (GET /accesses) uses this to render the list, then
+/// filters it by the optional `networkId` query param. The lock is held only for
+/// the clone of the values, never across an `.await`, so it never blocks the
+/// async runtime. Mirrors [`crate::apis::dedicated_network::store::all`].
+pub fn all() -> Vec<Value> {
+    store()
+        .lock()
+        .expect("dedicated-network-accesses store not poisoned")
+        .values()
+        .cloned()
+        .collect()
+}
+
+/// Evict the access stored under `id`, returning its `AccessInfo` if one was
+/// present (so the eviction can be observed as single-use) or `None` if the id
+/// was unknown/already deleted. `deleteAccess` (DELETE /accesses/{accessId}) uses
+/// the distinction to answer `204` vs `404`. Mirrors
+/// [`crate::apis::dedicated_network::store::remove`].
+pub fn remove(id: &str) -> Option<Value> {
+    store()
+        .lock()
+        .expect("dedicated-network-accesses store not poisoned")
+        .remove(id)
 }
 
 /// Mint a fresh, opaque, UUID-v4-shaped access `id` (CAMARA `AccessId` is
@@ -122,5 +149,18 @@ mod tests {
     #[test]
     fn unknown_access_id_reads_back_none() {
         assert_eq!(get("no-such-access-id"), None);
+    }
+
+    #[test]
+    fn all_snapshots_and_remove_evicts_single_use() {
+        // `all()` includes what we insert; `remove()` returns it once, then None.
+        let id = new_access_id();
+        let info = json!({ "id": id, "networkId": "n-42" });
+        insert(id.clone(), info.clone());
+        assert!(all().contains(&info), "all() must include a stored access");
+        // First remove observes the value (single-use), second sees nothing.
+        assert_eq!(remove(&id), Some(info));
+        assert_eq!(remove(&id), None);
+        assert_eq!(get(&id), None, "removed access no longer reads back");
     }
 }
