@@ -98,6 +98,9 @@ const INSTANCES_READ_SCOPE: &str = "edge-application-management:instances:read";
 /// The OAuth2 scope `deleteAppInstance` requires (CAMARA EdgeApplicationManagement).
 const INSTANCES_DELETE_SCOPE: &str = "edge-application-management:instances:delete";
 
+/// The OAuth2 scope `getClusters` requires (CAMARA EdgeApplicationManagement).
+const CLUSTERS_SCOPE: &str = "edge-application-management:clusters:read";
+
 /// The five CAMARA `AppManifest.packageType` values.
 const PACKAGE_TYPES: [&str; 5] = ["QCOW2", "OVA", "CONTAINER", "HELM", "CSAR"];
 
@@ -123,6 +126,10 @@ pub fn routes() -> Router {
         .route(
             "/edge-application-management/vwip/app-instances/:app_instance_id",
             get(get_app_instance).delete(delete_app_instance),
+        )
+        .route(
+            "/edge-application-management/vwip/clusters",
+            get(get_clusters),
         )
 }
 
@@ -212,6 +219,136 @@ async fn get_edge_cloud_zones(
 struct Raw {
     region: Option<String>,
     status: Option<String>,
+}
+
+/// The operator's fixed Kubernetes clusters:
+/// `(clusterName, provider, kubernetesVersion, edgeCloudZoneName)`.
+///
+/// Each cluster is hosted in one of the fixed [`EDGE_ZONES`] (named by
+/// `edgeCloudZoneName`), so its rendered `edgeCloudZoneId` — derived from that
+/// zone via [`zone_id`] — cross-references the zone catalog, and its
+/// `edgeCloudRegion` is inherited from the zone. `provider` is a CAMARA
+/// `AppProvider` (pattern `^[A-Za-z][A-Za-z0-9_]{7,63}$`, so no spaces — distinct
+/// from a zone's free-text `edgeCloudProvider`). The `clusterRef` is derived from
+/// the cluster name (stable per cluster — see [`cluster_ref`]). Providers,
+/// regions and zones are spread so all three query filters are meaningful.
+const CLUSTERS: [(&str, &str, &str, &str); 4] = [
+    ("camarasim-cluster-eu-west-1a", "CamaraSimEdge", "1.29.4", "camarasim-edge-eu-west-1"),
+    ("camarasim-cluster-eu-central-1a", "CamaraSimEdge", "1.30.1", "camarasim-edge-eu-central-1"),
+    ("camarasim-cluster-us-east-1a", "CamaraSimEdge", "1.28.9", "camarasim-edge-us-east-1"),
+    ("camarasim-cluster-ap-northeast-1a", "PartnerCloud", "1.29.4", "camarasim-edge-ap-northeast-1"),
+];
+
+/// `GET /edge-application-management/vwip/clusters` (`getClusters`).
+///
+/// Lists the operator's fixed Kubernetes-cluster catalog, narrowed by the three
+/// optional query filters. There is no device identifier, so no reserved-error
+/// plane — this is a pure catalog like [`get_edge_cloud_zones`]. Two control
+/// planes (docs/DESIGN.md §7):
+///
+/// 1. **Query filters** — `region` (exact `edgeCloudRegion`), `clusterRef`
+///    (exact `clusterRef`) and `edgeCloudZoneId` (exact `edgeCloudZoneId`)
+///    narrow the catalog, combining with AND. No match → `[]` (a *list* never
+///    404s).
+/// 2. **Validation** — `clusterRef` / `edgeCloudZoneId` are strict UUIDs
+///    (CAMARA `format: uuid`), so a malformed value → `400 INVALID_ARGUMENT`; an
+///    unknown query key is rejected (`deny_unknown_fields`). `region` is a
+///    free-text `EdgeCloudRegion`, so it is not shape-validated (an unknown
+///    region simply matches nothing).
+async fn get_clusters(claims: Claims, headers: HeaderMap, RawQuery(query): RawQuery) -> Response {
+    // Optional correlation header, echoed on every response (CAMARA Commonalities).
+    let correlator = headers.get("x-correlator").cloned();
+
+    // Endpoint authorisation: the token must carry this API's cluster-read scope.
+    if let Err(e) = claims.require_scope(CLUSTERS_SCOPE) {
+        return with_correlator(e.into_response(), &correlator);
+    }
+
+    // Decode the optional region / clusterRef / edgeCloudZoneId query filters.
+    let filters: ClusterQuery =
+        match serde_urlencoded::from_str(query.as_deref().unwrap_or("")) {
+            Ok(f) => f,
+            Err(_) => {
+                return invalid_argument(
+                    "the query string is not valid application/x-www-form-urlencoded",
+                    &correlator,
+                )
+            }
+        };
+
+    // A supplied `clusterRef` / `edgeCloudZoneId` must be a strict CAMARA UUID.
+    if let Some(r) = &filters.cluster_ref {
+        if !is_uuid(r) {
+            return invalid_argument("`clusterRef` must be a valid UUID.", &correlator);
+        }
+    }
+    if let Some(z) = &filters.edge_cloud_zone_id {
+        if !is_uuid(z) {
+            return invalid_argument(
+                "`edgeCloudZoneId` must be a valid UUID.",
+                &correlator,
+            );
+        }
+    }
+
+    // Filter the fixed catalog by the (validated) filters (AND) and render each
+    // matching cluster as a CAMARA `ClusterInfo`.
+    let clusters: Vec<Value> = CLUSTERS
+        .iter()
+        .map(|c| (c, zone_by_name(c.3)))
+        .filter(|(c, zone)| {
+            let region = zone.map(|z| z.2).unwrap_or("");
+            filters.region.as_deref().is_none_or(|r| region == r)
+                && filters.cluster_ref.as_deref().is_none_or(|r| cluster_ref(c.0) == r)
+                && filters
+                    .edge_cloud_zone_id
+                    .as_deref()
+                    .is_none_or(|z| zone_id(c.3) == z)
+        })
+        .map(|(c, zone)| cluster_info(c, zone))
+        .collect();
+
+    with_correlator(
+        (StatusCode::OK, Json(Value::Array(clusters))).into_response(),
+        &correlator,
+    )
+}
+
+/// Render one catalog entry as a CAMARA `ClusterInfo`. The `edgeCloudZoneId` and
+/// `edgeCloudRegion` come from the hosting zone (looked up by name); a fixed
+/// representative `nodePools` entry demonstrates the schema (there is no live
+/// orchestrator to size the pool — DESIGN §7).
+fn cluster_info(
+    c: &(&str, &str, &str, &str),
+    zone: Option<&(&str, &str, &str, &str)>,
+) -> Value {
+    let region = zone.map(|z| z.2).unwrap_or("");
+    json!({
+        "name": c.0,
+        "provider": c.1,
+        "clusterRef": cluster_ref(c.0),
+        "edgeCloudZoneId": zone_id(c.3),
+        "edgeCloudRegion": region,
+        "version": c.2,
+        "nodePools": [{
+            "name": "default-pool",
+            "numNodes": 3,
+            "scalable": true,
+            "nodeResources": { "numCPU": 4, "memory": 8192 },
+        }],
+    })
+}
+
+/// Query parameters for `getClusters` — all optional (an empty query returns the
+/// whole catalog). Unknown keys are rejected (`deny_unknown_fields`).
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ClusterQuery {
+    region: Option<String>,
+    #[serde(rename = "clusterRef")]
+    cluster_ref: Option<String>,
+    #[serde(rename = "edgeCloudZoneId")]
+    edge_cloud_zone_id: Option<String>,
 }
 
 /// `POST /edge-application-management/vwip/apps` (`submitApp`).
@@ -777,6 +914,27 @@ fn zone_id(zone_name: &str) -> String {
 /// names no catalog zone → `404 NOT_FOUND`.
 fn zone_by_id(id: &str) -> Option<&'static (&'static str, &'static str, &'static str, &'static str)> {
     EDGE_ZONES.iter().find(|z| zone_id(z.0) == id)
+}
+
+/// Find the fixed-catalog zone with the given `edgeCloudZoneName`, if any. Backs
+/// `getClusters`: each cluster names its hosting zone, from which the rendered
+/// `edgeCloudZoneId` / `edgeCloudRegion` are taken.
+fn zone_by_name(name: &str) -> Option<&'static (&'static str, &'static str, &'static str, &'static str)> {
+    EDGE_ZONES.iter().find(|z| z.0 == name)
+}
+
+/// A stable, RFC 4122 (version 5, name-based) UUID `clusterRef` for a cluster,
+/// derived from its name via SHA-256 (deterministic, no new dependency). The
+/// version (`5`) and variant nibbles are forced so the id satisfies the strict
+/// `KubernetesClusterRef` UUID pattern the CAMARA schema requires.
+fn cluster_ref(cluster_name: &str) -> String {
+    let mut h = Sha256::digest(format!("eam-cluster:{cluster_name}").as_bytes());
+    h[6] = (h[6] & 0x0f) | 0x50; // version 5
+    h[8] = (h[8] & 0x3f) | 0x80; // variant (10xx)
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7], h[8], h[9], h[10], h[11], h[12], h[13], h[14], h[15]
+    )
 }
 
 /// Map a target zone's catalog `edgeCloudZoneStatus` to the app instance's
@@ -2177,6 +2335,190 @@ mod tests {
         assert_eq!(
             headers.get("x-correlator").and_then(|v| v.to_str().ok()),
             Some("corr-di-404")
+        );
+    }
+
+    // --- getClusters -------------------------------------------------------
+
+    #[test]
+    fn cluster_refs_are_valid_uuids_and_stable_and_distinct() {
+        for c in CLUSTERS {
+            let r = cluster_ref(c.0);
+            assert!(is_uuid(&r), "clusterRef {r} is a UUID");
+            assert_eq!(&r[14..15], "5", "version nibble is 5 for {r}");
+            assert!(
+                matches!(r.as_bytes()[19], b'8' | b'9' | b'a' | b'b'),
+                "variant nibble is 8/9/a/b for {r}"
+            );
+        }
+        assert_eq!(
+            cluster_ref("camarasim-cluster-eu-west-1a"),
+            cluster_ref("camarasim-cluster-eu-west-1a")
+        );
+        assert_ne!(
+            cluster_ref("camarasim-cluster-eu-west-1a"),
+            cluster_ref("camarasim-cluster-us-east-1a")
+        );
+    }
+
+    #[test]
+    fn every_cluster_names_a_catalog_zone() {
+        // Each cluster's hosting zone exists, so its edgeCloudZoneId/region
+        // cross-reference the zone catalog.
+        for c in CLUSTERS {
+            assert!(zone_by_name(c.3).is_some(), "cluster {} names a real zone", c.0);
+        }
+    }
+
+    async fn get_clusters_req(
+        token: Option<&str>,
+        query: &str,
+        correlator: Option<&str>,
+    ) -> (StatusCode, HeaderMap, Value) {
+        let uri = if query.is_empty() {
+            "/edge-application-management/vwip/clusters".to_string()
+        } else {
+            format!("/edge-application-management/vwip/clusters?{query}")
+        };
+        let mut builder = Request::builder().method("GET").uri(uri).header("host", HOST);
+        if let Some(t) = token {
+            builder = builder.header("authorization", format!("Bearer {t}"));
+        }
+        if let Some(c) = correlator {
+            builder = builder.header("x-correlator", c);
+        }
+        let response = app()
+            .oneshot(builder.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let headers = response.headers().clone();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, headers, json)
+    }
+
+    async fn get_clusters_ok(query: &str) -> (StatusCode, HeaderMap, Value) {
+        let token = mint_token(CLUSTERS_SCOPE).await;
+        get_clusters_req(Some(&token), query, None).await
+    }
+
+    #[tokio::test]
+    async fn clusters_no_filter_returns_the_whole_catalog_as_cluster_info() {
+        let (status, _, body) = get_clusters_ok("").await;
+        assert_eq!(status, StatusCode::OK);
+        let arr = body.as_array().expect("array response");
+        assert_eq!(arr.len(), CLUSTERS.len());
+        // Each item carries the required CAMARA ClusterInfo fields, with a
+        // UUID clusterRef/edgeCloudZoneId and a demonstrative nodePool.
+        for c in arr {
+            assert!(c["name"].is_string());
+            assert!(c["provider"].is_string());
+            assert!(is_uuid(c["clusterRef"].as_str().unwrap()));
+            assert!(is_uuid(c["edgeCloudZoneId"].as_str().unwrap()));
+            assert!(c["edgeCloudRegion"].is_string());
+            assert!(c["version"].is_string());
+            let pool = &c["nodePools"][0];
+            assert!(pool["name"].is_string());
+            assert!(pool["numNodes"].is_number());
+            assert!(pool["scalable"].is_boolean());
+            assert!(pool["nodeResources"]["numCPU"].is_number());
+            assert!(pool["nodeResources"]["memory"].is_number());
+        }
+    }
+
+    #[tokio::test]
+    async fn cluster_edge_cloud_zone_id_cross_references_the_zone_catalog() {
+        // A cluster's edgeCloudZoneId equals the derived id of its hosting zone.
+        let (_, _, body) = get_clusters_ok("region=us-east-1").await;
+        let arr = body.as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(
+            arr[0]["edgeCloudZoneId"].as_str().unwrap(),
+            zone_id("camarasim-edge-us-east-1")
+        );
+        assert_eq!(arr[0]["edgeCloudRegion"], "us-east-1");
+    }
+
+    #[tokio::test]
+    async fn cluster_region_filter_narrows_and_unknown_region_is_empty() {
+        let (status, _, body) = get_clusters_ok("region=eu-west-1").await;
+        assert_eq!(status, StatusCode::OK);
+        let arr = body.as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["edgeCloudRegion"], "eu-west-1");
+
+        let (status, _, body) = get_clusters_ok("region=no-such-region").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, json!([]));
+    }
+
+    #[tokio::test]
+    async fn cluster_ref_filter_selects_one_cluster() {
+        let target = cluster_ref("camarasim-cluster-eu-central-1a");
+        let (status, _, body) = get_clusters_ok(&format!("clusterRef={target}")).await;
+        assert_eq!(status, StatusCode::OK);
+        let arr = body.as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["name"], "camarasim-cluster-eu-central-1a");
+        assert_eq!(arr[0]["clusterRef"], target);
+    }
+
+    #[tokio::test]
+    async fn cluster_edge_cloud_zone_id_filter_and_and_combination() {
+        let zone = zone_id("camarasim-edge-eu-west-1");
+        let (_, _, body) = get_clusters_ok(&format!("edgeCloudZoneId={zone}")).await;
+        assert_eq!(body.as_array().unwrap().len(), 1);
+
+        // region and edgeCloudZoneId combine (AND): a matching zone but a
+        // non-matching region → empty.
+        let (_, _, body) =
+            get_clusters_ok(&format!("edgeCloudZoneId={zone}&region=us-east-1")).await;
+        assert_eq!(body, json!([]));
+    }
+
+    #[tokio::test]
+    async fn malformed_cluster_ref_and_zone_id_are_400() {
+        let (status, _, body) = get_clusters_ok("clusterRef=not-a-uuid").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "INVALID_ARGUMENT");
+
+        let (status, _, body) = get_clusters_ok("edgeCloudZoneId=12345").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "INVALID_ARGUMENT");
+    }
+
+    #[tokio::test]
+    async fn cluster_unknown_query_param_is_rejected() {
+        let (status, _, body) = get_clusters_ok("status=active").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "INVALID_ARGUMENT");
+    }
+
+    #[tokio::test]
+    async fn get_clusters_requires_authentication_and_scope() {
+        // No token → 401.
+        let (status, _, _) = get_clusters_req(None, "", None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+        // Wrong scope → 403.
+        let wrong = mint_token(ZONES_SCOPE).await;
+        let (status, _, body) = get_clusters_req(Some(&wrong), "", None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["code"], "PERMISSION_DENIED");
+    }
+
+    #[tokio::test]
+    async fn get_clusters_echoes_x_correlator() {
+        let token = mint_token(CLUSTERS_SCOPE).await;
+        let (status, headers, _) =
+            get_clusters_req(Some(&token), "", Some("corr-clusters")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-clusters")
         );
     }
 }

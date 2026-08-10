@@ -2756,7 +2756,20 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
         `202`/`DELETE_REQUESTED` + `sink` a documented cut). `x-correlator`
         echoed. New `instance_store::all`/`remove` (+ un-gated `get`); no new dep.
         **Completes the `app-instances` CRUD** (`deployments`/`clusters` remain).
-    - [ ] the stateful `deployments` resource + `clusters` — later passes.
+    - [x] `GET /clusters` (`getClusters`,
+      `edge-application-management:clusters:read`) — read-only Kubernetes-cluster
+      catalog leg (fixed 4-entry in-memory catalog, mirroring `getEdgeCloudZones`).
+      Two control planes (DESIGN §7; no device identifier → no reserved-error
+      plane): the `region`/`clusterRef`/`edgeCloudZoneId` query filters narrow the
+      catalog (AND; no match → `[]`), and each cluster is hosted in one of the
+      fixed `edge-cloud-zones` so its `edgeCloudZoneId` cross-references the zone
+      catalog and `edgeCloudRegion` is inherited. `clusterRef`/`edgeCloudZoneId`
+      are strict UUIDs (malformed → 400 INVALID_ARGUMENT); `region` free text
+      (unknown → `[]`); unknown query key → 400. Each `ClusterInfo` carries a
+      fixed representative `nodePools` entry (no live orchestrator — documented
+      cut). `clusterRef` is a stable RFC 4122 v5 UUID (SHA-256, no new dep).
+      `x-correlator` echoed.
+    - [ ] the stateful `deployments` resource — later passes.
 
 ## Cross-cutting (do alongside the item that needs it)
 - [~] `errors.rs`: base CAMARA error model done (`src/errors.rs`, `specs/shared/errors.yaml`); per-version catalogs still TODO (DESIGN §8)
@@ -2782,6 +2795,38 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-10 — edge-application-management: added the **`getClusters` leg**,
+  `GET /edge-application-management/vwip/clusters` (`getClusters`, scope
+  `edge-application-management:clusters:read`) — the topmost unclaimed actionable
+  `[ ]` leaf. Verified against the **authoritative** CAMARA spec first: the
+  EdgeCloud repo was split (Apr 2026) and Edge Application Management now lives in
+  `camaraproject/EdgeApplicationManagement`; its `wip` spec confirms `/clusters`
+  (getClusters) + `/deployments` are real (the previous "deployments + clusters"
+  backlog note was correct). Scoped to the read-only cluster catalog only
+  (`deployments` left `[ ]` for a later pass — it is stateful CRUD). Serves a
+  fixed 4-entry in-memory `ClusterInfo` catalog, mirroring `getEdgeCloudZones`:
+  no device identifier → no reserved-error plane (a pure catalog). Two control
+  planes (DESIGN §7): the `region`/`clusterRef`/`edgeCloudZoneId` query filters
+  (AND; no match → `[]`, a list never 404s), and cross-reference — each cluster
+  is hosted in one of the fixed `edge-cloud-zones`, so its `edgeCloudZoneId`
+  (`zone_id`) and `edgeCloudRegion` come from the zone catalog. Validation:
+  `clusterRef`/`edgeCloudZoneId` are strict UUIDs (malformed → 400
+  INVALID_ARGUMENT, via existing `is_uuid`); `region` free text (unknown → `[]`);
+  unknown query key → 400 (`deny_unknown_fields`). `clusterRef` is a stable RFC
+  4122 v5 UUID (new `cluster_ref` helper, SHA-256, no new dep); each `ClusterInfo`
+  carries a fixed representative `nodePools` entry (no live orchestrator to size
+  it — documented cut). `x-correlator` echoed. Code: new `CLUSTERS` catalog,
+  `get_clusters` handler, `ClusterQuery` (deny_unknown_fields), `cluster_info`,
+  `zone_by_name`, `cluster_ref`; route wired. spec: added the `/clusters` GET op
+  (200 array of ClusterInfo + 400/401/403/429/500/503) with `x-camarasim-scenarios`
+  + `ClusterInfo`/`KubernetesClusterRef`/`KubernetesNodePool`/`EdgeCloudZoneId`/
+  `EdgeCloudRegion` schemas (reuses `AppProvider`); header op-list + narrative
+  updated. tests: 11 new (2 unit: clusterRef UUID validity/stability, every
+  cluster names a real zone; 9 integration: full catalog as ClusterInfo w/
+  nodePool; zoneId cross-reference; region filter + unknown→[]; clusterRef selects
+  one; edgeCloudZoneId filter + AND combo; malformed clusterRef/zoneId→400; unknown
+  query→400; 401 no token + 403 wrong scope; x-correlator echoed) — 2040 pass. No
+  new dependency. — binary: 3.6M (3,770,424 bytes)
 - 2026-08-10 — edge-application-management: completed the **app-instances CRUD** —
   added the read/list/delete legs `GET /app-instances/{appInstanceId}`
   (`getAppInstance`), `GET /app-instances` (`getAppInstances`) and

@@ -21,7 +21,8 @@
 #   GET    /app-instances/{appInstanceId}     (getAppInstance)     — read back an app instance
 #   GET    /app-instances                     (getAppInstances)    — list app instances
 #   DELETE /app-instances/{appInstanceId}     (deleteAppInstance)  — delete an app instance
-# The deployment and cluster resources are later passes.
+#   GET    /clusters                          (getClusters)        — read-only cluster catalog
+# The deployment resource is a later pass.
 openapi: 3.0.3
 info:
   title: Edge Application Management
@@ -113,7 +114,29 @@ info:
       synchronous (the async `202`/`DELETE_REQUESTED` form + `sink` notification
       are a documented cut, mirroring every other CamaraSim delete leg).
 
-    The deployment and cluster resources remain later passes.
+    ### `getClusters`
+
+    Lists the operator's fixed Kubernetes-cluster catalog as an array of
+    `ClusterInfo`, narrowed by three optional query filters. There is no device
+    identifier, so — like `getEdgeCloudZones` — there is no reserved-error plane;
+    this is a pure catalog. Two control planes:
+
+    1. **Query filters** — `region` (exact `edgeCloudRegion`), `clusterRef`
+       (exact `clusterRef`) and `edgeCloudZoneId` (exact `edgeCloudZoneId`)
+       narrow the catalog, combining with AND. No match → an empty array (a
+       *list* never 404s).
+    2. **Validation** — `clusterRef` / `edgeCloudZoneId` are strict UUIDs, so a
+       malformed value → `400 INVALID_ARGUMENT`; an unrecognised query key is
+       rejected. `region` is free text (an unknown region simply matches
+       nothing).
+
+    Each cluster is hosted in one of the fixed `edge-cloud-zones`, so its
+    `edgeCloudZoneId` cross-references the zone catalog and its `edgeCloudRegion`
+    is inherited from that zone. A single fixed, representative `nodePools` entry
+    demonstrates the schema — there is no live orchestrator to size the pool (a
+    documented simplification).
+
+    The deployment resource remains a later pass.
   version: "wip"
   license:
     name: Apache-2.0
@@ -748,6 +771,118 @@ paths:
           - input: an unrecognised query parameter
             result: '400 INVALID_ARGUMENT'
 
+  /clusters:
+    get:
+      operationId: getClusters
+      summary: Retrieve the available Kubernetes clusters
+      description: |
+        Returns the operator's Kubernetes clusters available to host application
+        deployments, as a JSON array of `ClusterInfo`. Narrow the result with the
+        optional `region` / `clusterRef` / `edgeCloudZoneId` filters.
+
+        See the API description for the parameter-driven functional cases.
+      security:
+        - openId:
+            - edge-application-management:clusters:read
+      tags:
+        - Cluster
+      parameters:
+        - name: region
+          in: query
+          required: false
+          description: >-
+            Filter to clusters whose `edgeCloudRegion` matches this value
+            exactly. An unknown region yields an empty array (a list never 404s).
+          schema:
+            $ref: "#/components/schemas/EdgeCloudRegion"
+          example: us-east-1
+        - name: clusterRef
+          in: query
+          required: false
+          description: Filter to the cluster with this `clusterRef`.
+          schema:
+            $ref: "#/components/schemas/KubernetesClusterRef"
+        - name: edgeCloudZoneId
+          in: query
+          required: false
+          description: Filter to clusters hosted in this edge cloud zone.
+          schema:
+            $ref: "#/components/schemas/EdgeCloudZoneId"
+        - $ref: "#/components/parameters/XCorrelator"
+      responses:
+        "200":
+          description: The clusters matching the criteria (possibly empty).
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                type: array
+                maxItems: 100
+                items:
+                  $ref: "#/components/schemas/ClusterInfo"
+              examples:
+                catalog:
+                  summary: A cluster in the catalog
+                  value:
+                    - name: camarasim-cluster-eu-west-1a
+                      provider: CamaraSimEdge
+                      clusterRef: 642f6105-7015-4af1-a4d1-e1ecb8437abc
+                      edgeCloudZoneId: 6ec0bd7f-11c0-53da-975e-2a8ad9ebae0b
+                      edgeCloudRegion: eu-west-1
+                      version: 1.29.4
+                      nodePools:
+                        - name: default-pool
+                          numNodes: 3
+                          scalable: true
+                          nodeResources:
+                            numCPU: 4
+                            memory: 8192
+                empty:
+                  summary: No cluster matches the filter
+                  value: []
+        "400":
+          $ref: "../../shared/errors.yaml#/components/responses/InvalidArgument"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          The result is the fixed Kubernetes-cluster catalog filtered by
+          `region`/`clusterRef`/`edgeCloudZoneId` (docs/DESIGN.md §7). There is no
+          device identifier, so no reserved-error plane applies. Each cluster is
+          hosted in one of the fixed edge-cloud-zones, so its `edgeCloudZoneId`
+          cross-references the zone catalog and `edgeCloudRegion` is inherited from
+          the zone. `clusterRef`/`edgeCloudZoneId` are strict UUIDs, so a malformed
+          value is a 400; `region` is free text (an unknown region just matches
+          nothing). Canonical EdgeApplicationManagement declares 400/401/403/500/503
+          here; 429 is a CamaraSim extension from the shared error set.
+        cases:
+          - input: no query parameters
+            result: '200 — the whole cluster catalog'
+          - input: '`?region=<known>`'
+            result: '200 — the clusters in that region'
+          - input: '`?region=<unknown>`'
+            result: '200 — an empty array (a list never 404s)'
+          - input: '`?clusterRef=<known UUID>`'
+            result: '200 — the single matching cluster'
+          - input: '`?edgeCloudZoneId=<known zone UUID>`'
+            result: '200 — the clusters hosted in that zone'
+          - input: two or more filters together
+            result: '200 — clusters matching all of them (AND)'
+          - input: '`clusterRef` or `edgeCloudZoneId` not a valid UUID'
+            result: '400 INVALID_ARGUMENT'
+          - input: an unrecognised query parameter
+            result: '400 INVALID_ARGUMENT'
+
 components:
   securitySchemes:
     openId:
@@ -838,6 +973,116 @@ components:
           maxLength: 64
           description: Human-readable name of the geographical edge cloud region.
           example: eu-west-1
+
+    EdgeCloudZoneId:
+      type: string
+      format: uuid
+      description: Unique identifier of an edge cloud zone.
+      pattern: '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
+      minLength: 36
+      maxLength: 36
+      example: 6ec0bd7f-11c0-53da-975e-2a8ad9ebae0b
+
+    EdgeCloudRegion:
+      type: string
+      maxLength: 64
+      description: Human-readable name of the geographical edge cloud region.
+      example: eu-west-1
+
+    KubernetesClusterRef:
+      type: string
+      format: uuid
+      description: A globally unique identifier associated with a Kubernetes cluster.
+      pattern: '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
+      minLength: 36
+      maxLength: 36
+      example: 642f6105-7015-4af1-a4d1-e1ecb8437abc
+
+    KubernetesNodePool:
+      type: object
+      description: >-
+        A set of Kubernetes nodes sharing the same configuration. CamaraSim
+        returns a single fixed, representative node pool per cluster (there is no
+        live orchestrator to size the pool — a documented simplification).
+      required:
+        - name
+        - numNodes
+        - nodeResources
+        - scalable
+      properties:
+        name:
+          type: string
+          maxLength: 64
+          description: Human-readable name of the Kubernetes node pool.
+          example: default-pool
+        numNodes:
+          type: integer
+          format: int32
+          minimum: 1
+          maximum: 100
+          description: Number of nodes in the node pool.
+          example: 3
+        scalable:
+          type: boolean
+          description: Whether the node pool can be dynamically scaled by the system.
+          example: true
+        nodeResources:
+          type: object
+          description: Resource configuration of a node.
+          required:
+            - numCPU
+            - memory
+          properties:
+            numCPU:
+              type: integer
+              format: int32
+              minimum: 1
+              maximum: 256
+              description: Number of whole vCPUs for the node.
+              example: 4
+            memory:
+              type: integer
+              format: int32
+              minimum: 1
+              maximum: 16384
+              description: System memory in megabytes for the node.
+              example: 8192
+
+    ClusterInfo:
+      type: object
+      description: Kubernetes cluster information (CAMARA `ClusterInfo`).
+      required:
+        - name
+        - provider
+        - clusterRef
+        - edgeCloudZoneId
+      properties:
+        name:
+          type: string
+          maxLength: 64
+          description: Name of the cluster, scoped to the provider.
+          example: camarasim-cluster-eu-west-1a
+        provider:
+          $ref: "#/components/schemas/AppProvider"
+        clusterRef:
+          $ref: "#/components/schemas/KubernetesClusterRef"
+        edgeCloudZoneId:
+          $ref: "#/components/schemas/EdgeCloudZoneId"
+        edgeCloudRegion:
+          $ref: "#/components/schemas/EdgeCloudRegion"
+        version:
+          type: string
+          maxLength: 64
+          pattern: '^v?\d+\.\d+(?:\.\d+)?(?:[-+][0-9A-Za-z.-]+)?$'
+          description: Kubernetes version of the cluster.
+          example: 1.29.4
+        nodePools:
+          type: array
+          minItems: 1
+          maxItems: 100
+          description: Node pools in the cluster.
+          items:
+            $ref: "#/components/schemas/KubernetesNodePool"
 
     AppProvider:
       type: string
