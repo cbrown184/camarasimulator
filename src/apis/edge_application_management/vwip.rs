@@ -36,6 +36,9 @@
 //!   `appDeploymentId` (operationId `createAppDeployment`, scope
 //!   `edge-application-management:deployments:write`). See
 //!   [`create_app_deployment`].
+//! - `GET /edge-application-management/vwip/deployments/{appDeploymentId}` — read
+//!   back an application deployment (operationId `getAppDeployment`, scope
+//!   `edge-application-management:deployments:read`). See [`get_app_deployment`].
 //!
 //! ## What it does
 //!
@@ -110,6 +113,9 @@ const CLUSTERS_SCOPE: &str = "edge-application-management:clusters:read";
 /// The OAuth2 scope `createAppDeployment` requires (CAMARA EdgeApplicationManagement).
 const DEPLOYMENTS_WRITE_SCOPE: &str = "edge-application-management:deployments:write";
 
+/// The OAuth2 scope `getAppDeployment` requires (CAMARA EdgeApplicationManagement).
+const DEPLOYMENTS_READ_SCOPE: &str = "edge-application-management:deployments:read";
+
 /// The five CAMARA `AppManifest.packageType` values.
 const PACKAGE_TYPES: [&str; 5] = ["QCOW2", "OVA", "CONTAINER", "HELM", "CSAR"];
 
@@ -143,6 +149,10 @@ pub fn routes() -> Router {
         .route(
             "/edge-application-management/vwip/deployments",
             post(create_app_deployment),
+        )
+        .route(
+            "/edge-application-management/vwip/deployments/:app_deployment_id",
+            get(get_app_deployment),
         )
 }
 
@@ -863,6 +873,46 @@ async fn create_app_deployment(claims: Claims, headers: HeaderMap, body: Bytes) 
             .insert(HeaderName::from_static("location"), value);
     }
     with_correlator(response, &correlator)
+}
+
+/// `GET /edge-application-management/vwip/deployments/{appDeploymentId}`
+/// (`getAppDeployment`).
+///
+/// Reads back an application deployment created by [`create_app_deployment`],
+/// returning the stored `AppDeploymentInfo` verbatim (it already carries its
+/// `appDeploymentId`, `appInstances` and the rest of the deployment identity)
+/// with a `200`.
+///
+/// The `appDeploymentId` is an opaque, simulator-minted UUID (there is no
+/// reserved-error plane — the identifier is not caller-chosen), so the **store
+/// state is the only control plane** (docs/DESIGN.md §7): a known id → `200
+/// AppDeploymentInfo`; an unknown or malformed id → `404 NOT_FOUND` (the
+/// canonical 400 malformed-path case is folded into 404, mirroring the sibling
+/// [`get_app`]/[`get_app_instance`] read legs). `x-correlator` is echoed on every
+/// response.
+async fn get_app_deployment(
+    claims: Claims,
+    headers: HeaderMap,
+    Path(app_deployment_id): Path<String>,
+) -> Response {
+    let correlator = headers.get("x-correlator").cloned();
+
+    // Endpoint authorisation: the token must carry this API's deployments read scope.
+    if let Err(e) = claims.require_scope(DEPLOYMENTS_READ_SCOPE) {
+        return with_correlator(e.into_response(), &correlator);
+    }
+
+    match deployment_store::get(&app_deployment_id) {
+        Some(info) => with_correlator(
+            (StatusCode::OK, Json(info)).into_response(),
+            &correlator,
+        ),
+        None => with_correlator(
+            CamaraError::not_found("No application deployment found for the provided appDeploymentId.")
+                .into_response(),
+            &correlator,
+        ),
+    }
 }
 
 /// `GET /edge-application-management/vwip/app-instances/{appInstanceId}`
@@ -2976,6 +3026,138 @@ mod tests {
         assert_eq!(
             headers.get("x-correlator").and_then(|v| v.to_str().ok()),
             Some("corr-dep-err")
+        );
+    }
+
+    // --- getAppDeployment: integration through the real router -------------
+
+    async fn get_deployment_req(
+        token: Option<&str>,
+        deployment_id: &str,
+        correlator: Option<&str>,
+    ) -> (StatusCode, HeaderMap, Value) {
+        let mut builder = Request::builder()
+            .method("GET")
+            .uri(format!(
+                "/edge-application-management/vwip/deployments/{deployment_id}"
+            ))
+            .header("host", HOST);
+        if let Some(t) = token {
+            builder = builder.header("authorization", format!("Bearer {t}"));
+        }
+        if let Some(c) = correlator {
+            builder = builder.header("x-correlator", c);
+        }
+        let response = app()
+            .oneshot(builder.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let headers = response.headers().clone();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, headers, json)
+    }
+
+    /// Create a deployment through the router and return its minted id, so the
+    /// read tests exercise the same path a real caller would.
+    async fn create_deployment(app_name: &str, deployment_name: &str) -> (String, String, Vec<String>) {
+        let (_, app_id) = submit_and_get_id(app_name).await;
+        let zones = vec![active_zone(), second_zone()];
+        let token = mint_token(DEPLOYMENTS_WRITE_SCOPE).await;
+        let body = json!({
+            "appDeploymentName": deployment_name,
+            "appId": app_id,
+            "edgeCloudZones": zones,
+        });
+        let (status, _, resp) = post_deployment(Some(&token), &body.to_string(), None).await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        let deployment_id = resp["appDeploymentId"].as_str().unwrap().to_string();
+        (deployment_id, app_id, zones)
+    }
+
+    #[tokio::test]
+    async fn get_app_deployment_returns_the_stored_info_verbatim() {
+        let (deployment_id, app_id, zones) =
+            create_deployment("get_deploy_app", "prod").await;
+        let read = mint_token(DEPLOYMENTS_READ_SCOPE).await;
+        let (status, _, resp) = get_deployment_req(Some(&read), &deployment_id, None).await;
+        assert_eq!(status, StatusCode::OK);
+        // The AppDeploymentInfo carries the full deployment identity verbatim.
+        assert_eq!(resp["appDeploymentId"], json!(deployment_id));
+        assert_eq!(resp["appDeploymentName"], "prod");
+        assert_eq!(resp["appId"], json!(app_id));
+        assert_eq!(resp["edgeCloudZones"], json!(zones));
+        assert_eq!(
+            resp["appInstances"],
+            json!([instance_id(&app_id, &zones[0]), instance_id(&app_id, &zones[1])])
+        );
+        // The read returns exactly what the store holds.
+        assert_eq!(resp, deployment_store::get(&deployment_id).unwrap());
+    }
+
+    #[tokio::test]
+    async fn get_app_deployment_unknown_id_is_not_found() {
+        let read = mint_token(DEPLOYMENTS_READ_SCOPE).await;
+        let (status, _, resp) =
+            get_deployment_req(Some(&read), "00000000-0000-5000-8000-000000000000", None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(resp["code"], "NOT_FOUND");
+        assert_eq!(resp["status"], 404);
+    }
+
+    #[tokio::test]
+    async fn get_app_deployment_malformed_id_is_not_found() {
+        // A non-UUID path segment folds into 404 (not 400), mirroring get_app.
+        let read = mint_token(DEPLOYMENTS_READ_SCOPE).await;
+        let (status, _, resp) = get_deployment_req(Some(&read), "not-a-uuid", None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(resp["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn get_app_deployment_without_the_read_scope_is_forbidden() {
+        // The deployments *write* scope creates but must not read deployments back.
+        let (deployment_id, _, _) = create_deployment("get_deploy_scope_app", "prod").await;
+        let write = mint_token(DEPLOYMENTS_WRITE_SCOPE).await;
+        let (status, _, resp) = get_deployment_req(Some(&write), &deployment_id, None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(resp["code"], "PERMISSION_DENIED");
+    }
+
+    #[tokio::test]
+    async fn get_app_deployment_missing_token_is_unauthenticated() {
+        let (status, _, resp) =
+            get_deployment_req(None, "00000000-0000-5000-8000-000000000000", None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(resp["code"], "UNAUTHENTICATED");
+    }
+
+    #[tokio::test]
+    async fn get_app_deployment_echoes_x_correlator_on_success_and_error() {
+        let (deployment_id, _, _) = create_deployment("get_deploy_corr_app", "prod").await;
+        let read = mint_token(DEPLOYMENTS_READ_SCOPE).await;
+
+        let (status, headers, _) =
+            get_deployment_req(Some(&read), &deployment_id, Some("corr-gd-ok")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-gd-ok")
+        );
+
+        let (status, headers, _) = get_deployment_req(
+            Some(&read),
+            "00000000-0000-5000-8000-000000000000",
+            Some("corr-gd-404"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-gd-404")
         );
     }
 }

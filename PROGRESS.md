@@ -2790,8 +2790,16 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
         `AppInstanceInfo` resources are not separately materialised (documented
         cut), and `subscriptionRequest` is accepted-not-applied. `x-correlator`
         echoed.
-      - [ ] read/list/delete/patch legs (`getAppDeployment` / `getAppDeployments`
-        / `deleteAppDeployment` / `updateAppDeployment`) — later passes.
+      - [x] `GET /deployments/{appDeploymentId}` (`getAppDeployment`,
+        `edge-application-management:deployments:read`) — reads a created
+        deployment back from `deployment_store`. The `appDeploymentId` is an
+        opaque, server-minted UUID → store state is the sole control plane
+        (DESIGN §7): a stored id → `200` with the persisted `AppDeploymentInfo`
+        verbatim, any other id (never created / already deleted / malformed) →
+        `404 NOT_FOUND` (the canonical 400 malformed-path case folded into 404,
+        mirroring `getApp`/`getAppInstance`). `x-correlator` echoed. No new dep.
+      - [ ] list/delete/patch legs (`getAppDeployments` / `deleteAppDeployment`
+        / `updateAppDeployment`) — later passes.
 
 ## Cross-cutting (do alongside the item that needs it)
 - [~] `errors.rs`: base CAMARA error model done (`src/errors.rs`, `specs/shared/errors.yaml`); per-version catalogs still TODO (DESIGN §8)
@@ -2817,6 +2825,34 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-10 22:47Z — edge-application-management: added the **`getAppDeployment`
+  leg**, `GET /edge-application-management/vwip/deployments/{appDeploymentId}`
+  (scope `edge-application-management:deployments:read`) — the topmost unclaimed
+  actionable `[ ]` leaf (the natural read-back slice after last pass's
+  `createAppDeployment`; every item above it is done, and the remaining `[~]`
+  leaves across the backlog are still the `https://` sink-TLS cases that need a
+  multi-MB rustls client fighting the small-binary directive, or open-ended
+  state streams with no live worker). Verified against the **authoritative**
+  CAMARA `EdgeApplicationManagement` `wip` spec: `getAppDeployment` →
+  `GET /deployments/{appDeploymentId}`, scope `…:deployments:read`, `200`
+  `AppDeploymentInfo`, errors 400/401/403/404/500/503. `createAppDeployment`
+  already persists the rendered `AppDeploymentInfo` (which carries its own
+  `appDeploymentId`/`appInstances`/identity), so the read is a thin store lookup:
+  the opaque, server-minted id → store state is the sole control plane (DESIGN
+  §7), a stored id → `200` verbatim, any other (never-created / already-deleted /
+  malformed) → `404 NOT_FOUND` (canonical 400 malformed-path folded into 404,
+  mirroring `getApp`/`getAppInstance`). `x-correlator` echoed. Code: new
+  `DEPLOYMENTS_READ_SCOPE` const + `get_app_deployment` handler (mirrors
+  `get_app_instance`), route chained onto `/deployments/:app_deployment_id`,
+  module doc refreshed; dropped the now-stale `#[cfg_attr(not(test),
+  allow(dead_code))]` on `deployment_store::get` (now live on the request path).
+  spec: new `/deployments/{appDeploymentId}` GET op (200 `AppDeploymentInfo` +
+  401/403/404/500/503 + `x-camarasim-scenarios`), `AppDeploymentId` path param,
+  header op-list + `getAppDeployment` narrative added. tests: +6 integration
+  (verbatim read-back incl. store-equality + per-zone `appInstances`; unknown-id
+  404; malformed-id → 404; write-scope-can't-read 403; missing-token 401;
+  x-correlator on 200+404) — 2055 pass (was 2049). No new dependency. —
+  binary: 3.63M (3,804,352 bytes, +6,920 B)
 - 2026-08-10 21:47Z — edge-application-management: added the **`createAppDeployment`
   leg**, `POST /edge-application-management/vwip/deployments` (scope
   `edge-application-management:deployments:write`) — the topmost unclaimed

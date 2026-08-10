@@ -23,7 +23,8 @@
 #   DELETE /app-instances/{appInstanceId}     (deleteAppInstance)  — delete an app instance
 #   GET    /clusters                          (getClusters)        — read-only cluster catalog
 #   POST   /deployments                       (createAppDeployment) — deploy an app across zones (stateful)
-# The deployment read/list/delete/patch legs are later passes.
+#   GET    /deployments/{appDeploymentId}      (getAppDeployment)    — read back a deployment
+# The deployment list/delete/patch legs are later passes.
 openapi: 3.0.3
 info:
   title: Edge Application Management
@@ -163,7 +164,16 @@ info:
     individual `AppInstanceInfo` resources are **not** separately materialised
     into the app-instance store (a documented cut — the deployment models the
     aggregate), and the `subscriptionRequest` status-change callback is accepted-
-    not-applied. The deployment read/list/delete/patch legs remain later passes.
+    not-applied.
+
+    ### `getAppDeployment`
+
+    Reads back a deployment created by `createAppDeployment`, returning the stored
+    `AppDeploymentInfo` verbatim (it already carries its `appDeploymentId` and
+    `appInstances`). The `appDeploymentId` is opaque and simulator-minted, so the
+    in-memory store state is the only control plane: a known id → `200`; an unknown
+    *or malformed* id folds into `404 NOT_FOUND` (mirroring `getApp` /
+    `getAppInstance`). The deployment list/delete/patch legs remain later passes.
   version: "wip"
   license:
     name: Apache-2.0
@@ -1029,6 +1039,63 @@ paths:
           - input: a body that is not valid JSON
             result: '400 INVALID_ARGUMENT'
 
+  /deployments/{appDeploymentId}:
+    get:
+      operationId: getAppDeployment
+      summary: Retrieve an application deployment
+      description: |
+        Reads back an application deployment previously created with
+        `createAppDeployment`, returning the stored `AppDeploymentInfo` (which
+        already carries its `appDeploymentId`, `appInstances` and the rest of the
+        deployment identity).
+
+        See the API description for the parameter-driven functional cases.
+      security:
+        - openId:
+            - edge-application-management:deployments:read
+      parameters:
+        - $ref: "#/components/parameters/AppDeploymentId"
+        - $ref: "#/components/parameters/XCorrelator"
+      responses:
+        "200":
+          description: The application deployment.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppDeploymentInfo"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          `getAppDeployment` reads back an application deployment created by
+          `createAppDeployment` (docs/DESIGN.md §7). The `appDeploymentId` is an
+          opaque, simulator-minted UUID (not caller-chosen), so there is no
+          reserved-error plane — the in-memory store state is the only control
+          plane. A known id returns the stored `AppDeploymentInfo` verbatim; an
+          unknown *or malformed* id is folded into `404 NOT_FOUND` (mirroring the
+          other CamaraSim read legs `getApp` / `getAppInstance`). Canonical
+          EdgeApplicationManagement declares 400/401/403/404 here; CamaraSim folds
+          the 400 malformed-path case into 404 (documented deviation) and adds
+          500/503 from the shared error set.
+        cases:
+          - input: an `appDeploymentId` returned by a prior `createAppDeployment`
+            result: '200 — the stored `AppDeploymentInfo`'
+          - input: a well-formed UUID that was never deployed
+            result: '404 NOT_FOUND'
+          - input: a malformed (non-UUID) `appDeploymentId`
+            result: '404 NOT_FOUND (the canonical 400 folded into 404)'
+
 components:
   securitySchemes:
     openId:
@@ -1061,6 +1128,19 @@ components:
       in: path
       required: true
       description: The identifier of an application instance (minted by `createAppInstance`).
+      schema:
+        type: string
+        format: uuid
+        pattern: '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
+        minLength: 36
+        maxLength: 36
+      example: 6ec0bd7f-11c0-53da-975e-2a8ad9ebae0b
+
+    AppDeploymentId:
+      name: appDeploymentId
+      in: path
+      required: true
+      description: The identifier of an application deployment (minted by `createAppDeployment`).
       schema:
         type: string
         format: uuid

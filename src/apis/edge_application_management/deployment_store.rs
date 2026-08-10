@@ -3,9 +3,10 @@
 //!
 //! `POST /deployments` (`createAppDeployment`) deploys an onboarded application
 //! across one or more edge cloud zones: it mints an `appDeploymentId` and
-//! remembers the rendered `AppDeploymentInfo` so the later read/list/delete legs
-//! (`getAppDeployment` / `getAppDeployments` / `deleteAppDeployment`, future
-//! passes) can address it. This module is that state, kept apart from the *app*
+//! remembers the rendered `AppDeploymentInfo` so `getAppDeployment` can read it
+//! back (and the later list/delete/patch legs — `getAppDeployments` /
+//! `deleteAppDeployment` / `updateAppDeployment`, future passes — can address
+//! it). This module is that state, kept apart from the *app*
 //! store ([`super::store`]) and the *app-instance* store
 //! ([`super::instance_store`]) so the three resources don't share a keyspace.
 //!
@@ -53,10 +54,8 @@ pub fn insert(deployment_id: String, info: Value) -> bool {
 }
 
 /// Fetch the `AppDeploymentInfo` stored under `deployment_id`, or `None` if no
-/// such deployment exists. Backs the persistence assertions in the tests; the
-/// `getAppDeployment` read leg (a later pass) will use it on the request path
-/// too, so it is allowed to be unused in the non-test build for now.
-#[cfg_attr(not(test), allow(dead_code))]
+/// such deployment exists. Used on the request path by the `getAppDeployment`
+/// read leg, and by the persistence assertions in the tests.
 pub fn get(deployment_id: &str) -> Option<Value> {
     store()
         .lock()
