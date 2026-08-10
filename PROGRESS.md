@@ -2798,8 +2798,18 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
         verbatim, any other id (never created / already deleted / malformed) →
         `404 NOT_FOUND` (the canonical 400 malformed-path case folded into 404,
         mirroring `getApp`/`getAppInstance`). `x-correlator` echoed. No new dep.
-      - [ ] list/delete/patch legs (`getAppDeployments` / `deleteAppDeployment`
-        / `updateAppDeployment`) — later passes.
+      - [x] `GET /deployments` (`getAppDeployments`) + `DELETE
+        /deployments/{appDeploymentId}` (`deleteAppDeployment`) — the list/delete
+        legs, keyed only on store state (opaque server-minted `appDeploymentId`, no
+        reserved-suffix plane, mirroring the `apps`/`app-instances` list/delete
+        legs). List → `200` array of `AppDeploymentInfo` (empty when none — a list
+        never 404s), the same shape as the single read; scope
+        `edge-application-management:deployments:read`. Delete → `204 No Content`
+        (single-use) / `404 NOT_FOUND` (malformed path folded into 404); scope
+        `edge-application-management:deployments:delete`; synchronous delete (async
+        `202`/`DELETE_REQUESTED` + `sink` a documented cut). New
+        `deployment_store::all`/`remove`; `x-correlator` echoed. No new dep.
+      - [ ] `PATCH /deployments/{appDeploymentId}` (`updateAppDeployment`) — later pass.
 
 ## Cross-cutting (do alongside the item that needs it)
 - [~] `errors.rs`: base CAMARA error model done (`src/errors.rs`, `specs/shared/errors.yaml`); per-version catalogs still TODO (DESIGN §8)
@@ -2825,6 +2835,23 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-10 — edge-application-management: added the deployment **list + delete
+  legs** — `GET /edge-application-management/vwip/deployments` (`getAppDeployments`,
+  scope `…:deployments:read`) and `DELETE …/deployments/{appDeploymentId}`
+  (`deleteAppDeployment`, scope `…:deployments:delete`) — the topmost unclaimed
+  actionable `[ ]` leaf (natural continuation of last pass's `getAppDeployment`;
+  every item above is done, remaining `[ ]` leaves are the `https://` sink-TLS
+  cases needing a multi-MB rustls client vs the small-binary directive, `dedicated-
+  network-areas` (spatial), or open-ended state streams with no live worker). Both
+  keyed only on store state (opaque server-minted id, no reserved-suffix plane),
+  mirroring the `apps`/`app-instances` list/delete legs: list → `200` array of
+  `AppDeploymentInfo` (empty when none, a list never 404s); delete → `204`
+  single-use / `404` (malformed path folded into 404). New `deployment_store::all`/
+  `remove`; spec updated (both operations + description + scenarios). 10 new tests
+  (list present/scope/auth/x-correlator; delete evict+re-404/unknown/malformed/
+  scope-untouched/auth/x-correlator). `cargo test` 2065 green, `cargo build
+  --release` ok. patch leg (`updateAppDeployment`) left for a later pass. No new
+  dep. — binary: 3.7M (3816592 B)
 - 2026-08-10 22:47Z — edge-application-management: added the **`getAppDeployment`
   leg**, `GET /edge-application-management/vwip/deployments/{appDeploymentId}`
   (scope `edge-application-management:deployments:read`) — the topmost unclaimed

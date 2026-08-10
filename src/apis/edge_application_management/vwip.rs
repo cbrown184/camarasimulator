@@ -113,8 +113,12 @@ const CLUSTERS_SCOPE: &str = "edge-application-management:clusters:read";
 /// The OAuth2 scope `createAppDeployment` requires (CAMARA EdgeApplicationManagement).
 const DEPLOYMENTS_WRITE_SCOPE: &str = "edge-application-management:deployments:write";
 
-/// The OAuth2 scope `getAppDeployment` requires (CAMARA EdgeApplicationManagement).
+/// The OAuth2 scope `getAppDeployment` / `getAppDeployments` require (CAMARA
+/// EdgeApplicationManagement).
 const DEPLOYMENTS_READ_SCOPE: &str = "edge-application-management:deployments:read";
+
+/// The OAuth2 scope `deleteAppDeployment` requires (CAMARA EdgeApplicationManagement).
+const DEPLOYMENTS_DELETE_SCOPE: &str = "edge-application-management:deployments:delete";
 
 /// The five CAMARA `AppManifest.packageType` values.
 const PACKAGE_TYPES: [&str; 5] = ["QCOW2", "OVA", "CONTAINER", "HELM", "CSAR"];
@@ -148,11 +152,11 @@ pub fn routes() -> Router {
         )
         .route(
             "/edge-application-management/vwip/deployments",
-            post(create_app_deployment),
+            post(create_app_deployment).get(get_app_deployments),
         )
         .route(
             "/edge-application-management/vwip/deployments/:app_deployment_id",
-            get(get_app_deployment),
+            get(get_app_deployment).delete(delete_app_deployment),
         )
 }
 
@@ -907,6 +911,77 @@ async fn get_app_deployment(
             (StatusCode::OK, Json(info)).into_response(),
             &correlator,
         ),
+        None => with_correlator(
+            CamaraError::not_found("No application deployment found for the provided appDeploymentId.")
+                .into_response(),
+            &correlator,
+        ),
+    }
+}
+
+/// `GET /edge-application-management/vwip/deployments` (`getAppDeployments`).
+///
+/// Lists every application deployment created by [`create_app_deployment`], as a
+/// JSON array of the stored `AppDeploymentInfo` (each already carries its
+/// `appDeploymentId`, `appInstances` and the rest of the deployment identity —
+/// the same representation [`get_app_deployment`] returns for a single
+/// deployment). Mirrors the sibling list legs (`getApps`, `getAppInstances`): a
+/// list returns the same resource shape as its single-item read.
+///
+/// The deployments are simulator-minted and not caller-chosen, so there is no
+/// reserved-error plane — the in-memory store is the only control plane
+/// (docs/DESIGN.md §7): the response is the current store snapshot (an empty
+/// array when nothing has been deployed — a *list* never 404s). `x-correlator`
+/// is echoed on every response.
+async fn get_app_deployments(claims: Claims, headers: HeaderMap) -> Response {
+    let correlator = headers.get("x-correlator").cloned();
+
+    // Endpoint authorisation: the token must carry this API's deployments read scope.
+    if let Err(e) = claims.require_scope(DEPLOYMENTS_READ_SCOPE) {
+        return with_correlator(e.into_response(), &correlator);
+    }
+
+    let deployments = deployment_store::all();
+    with_correlator(
+        (StatusCode::OK, Json(Value::Array(deployments))).into_response(),
+        &correlator,
+    )
+}
+
+/// `DELETE /edge-application-management/vwip/deployments/{appDeploymentId}`
+/// (`deleteAppDeployment`).
+///
+/// Deletes an application deployment previously created with
+/// [`create_app_deployment`], evicting its stored `AppDeploymentInfo` from the
+/// in-memory store. Requires the delete scope
+/// `edge-application-management:deployments:delete`.
+///
+/// Keyed only on the **store state** (docs/DESIGN.md §7): the `appDeploymentId`
+/// is an opaque, simulator-minted UUID (not caller-chosen), so there is no
+/// reserved-error plane. A known id evicts its deployment and returns `204 No
+/// Content` (single-use); an unknown, already-deleted, *or malformed* id → `404
+/// NOT_FOUND` (the canonical 400 malformed-path case is folded into 404,
+/// mirroring [`get_app_deployment`] and the sibling [`delete_app_instance`] leg).
+///
+/// Deletion is synchronous — CAMARA EdgeApplicationManagement's asynchronous
+/// `202 Accepted`/`DELETE_REQUESTED` form and any `sink` notification are a
+/// documented cut, mirroring every other CamaraSim delete leg (QoD
+/// `deleteSession`, `deleteApp`, `deleteAppInstance`, `deleteNetwork`).
+/// `x-correlator` is echoed on every response.
+async fn delete_app_deployment(
+    claims: Claims,
+    headers: HeaderMap,
+    Path(app_deployment_id): Path<String>,
+) -> Response {
+    let correlator = headers.get("x-correlator").cloned();
+
+    // Endpoint authorisation: the token must carry this API's deployments delete scope.
+    if let Err(e) = claims.require_scope(DEPLOYMENTS_DELETE_SCOPE) {
+        return with_correlator(e.into_response(), &correlator);
+    }
+
+    match deployment_store::remove(&app_deployment_id) {
+        Some(_) => with_correlator(StatusCode::NO_CONTENT.into_response(), &correlator),
         None => with_correlator(
             CamaraError::not_found("No application deployment found for the provided appDeploymentId.")
                 .into_response(),
@@ -3158,6 +3233,206 @@ mod tests {
         assert_eq!(
             headers.get("x-correlator").and_then(|v| v.to_str().ok()),
             Some("corr-gd-404")
+        );
+    }
+
+    // --- getAppDeployments (list): integration through the real router -----
+
+    async fn list_deployments_req(
+        token: Option<&str>,
+        correlator: Option<&str>,
+    ) -> (StatusCode, HeaderMap, Value) {
+        let mut builder = Request::builder()
+            .method("GET")
+            .uri("/edge-application-management/vwip/deployments")
+            .header("host", HOST);
+        if let Some(t) = token {
+            builder = builder.header("authorization", format!("Bearer {t}"));
+        }
+        if let Some(c) = correlator {
+            builder = builder.header("x-correlator", c);
+        }
+        let response = app()
+            .oneshot(builder.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let headers = response.headers().clone();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, headers, json)
+    }
+
+    #[tokio::test]
+    async fn get_app_deployments_lists_a_created_deployment_as_app_deployment_info() {
+        // The store is process-global and shared with the other tests, so assert
+        // our created deployment is *present* in the list rather than a total
+        // count. Each listed item is the same AppDeploymentInfo the single read
+        // returns (a list mirrors its single-item read).
+        let (deployment_id, app_id, zones) =
+            create_deployment("list_deploy_app", "prod").await;
+        let read = mint_token(DEPLOYMENTS_READ_SCOPE).await;
+        let (status, _, resp) = list_deployments_req(Some(&read), None).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let items = resp.as_array().expect("the list is a JSON array");
+        let mine = items
+            .iter()
+            .find(|d| d["appDeploymentId"] == json!(deployment_id))
+            .expect("the created deployment is listed");
+        assert_eq!(mine["appDeploymentName"], "prod");
+        assert_eq!(mine["appId"], json!(app_id));
+        assert_eq!(mine["edgeCloudZones"], json!(zones));
+        // The listed item equals exactly what the store holds for that id.
+        assert_eq!(mine, &deployment_store::get(&deployment_id).unwrap());
+    }
+
+    #[tokio::test]
+    async fn get_app_deployments_without_the_read_scope_is_forbidden() {
+        // The deployments *write* scope creates but must not list deployments.
+        let write = mint_token(DEPLOYMENTS_WRITE_SCOPE).await;
+        let (status, _, resp) = list_deployments_req(Some(&write), None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(resp["code"], "PERMISSION_DENIED");
+    }
+
+    #[tokio::test]
+    async fn get_app_deployments_missing_token_is_unauthenticated() {
+        let (status, _, resp) = list_deployments_req(None, None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(resp["code"], "UNAUTHENTICATED");
+    }
+
+    #[tokio::test]
+    async fn get_app_deployments_echoes_x_correlator() {
+        let read = mint_token(DEPLOYMENTS_READ_SCOPE).await;
+        let (status, headers, _) = list_deployments_req(Some(&read), Some("corr-list-dep")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-list-dep")
+        );
+    }
+
+    // --- deleteAppDeployment: integration through the real router ----------
+
+    async fn delete_deployment_req(
+        token: Option<&str>,
+        deployment_id: &str,
+        correlator: Option<&str>,
+    ) -> (StatusCode, HeaderMap, Value) {
+        let mut builder = Request::builder()
+            .method("DELETE")
+            .uri(format!(
+                "/edge-application-management/vwip/deployments/{deployment_id}"
+            ))
+            .header("host", HOST);
+        if let Some(t) = token {
+            builder = builder.header("authorization", format!("Bearer {t}"));
+        }
+        if let Some(c) = correlator {
+            builder = builder.header("x-correlator", c);
+        }
+        let response = app()
+            .oneshot(builder.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let headers = response.headers().clone();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, headers, json)
+    }
+
+    #[tokio::test]
+    async fn delete_app_deployment_evicts_and_a_later_read_404s() {
+        let (deployment_id, _, _) = create_deployment("del_deploy_app", "prod").await;
+        let del = mint_token(DEPLOYMENTS_DELETE_SCOPE).await;
+
+        // First delete removes it → 204 No Content.
+        let (status, _, _) = delete_deployment_req(Some(&del), &deployment_id, None).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert!(deployment_store::get(&deployment_id).is_none(), "evicted from the store");
+
+        // A later read of the deleted deployment is a 404.
+        let read = mint_token(DEPLOYMENTS_READ_SCOPE).await;
+        let (status, _, _) = get_deployment_req(Some(&read), &deployment_id, None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        // Deleting the same id again is a 404 (single-use eviction).
+        let (status, _, resp) = delete_deployment_req(Some(&del), &deployment_id, None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(resp["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn delete_app_deployment_unknown_id_is_not_found() {
+        let del = mint_token(DEPLOYMENTS_DELETE_SCOPE).await;
+        let (status, _, resp) =
+            delete_deployment_req(Some(&del), "00000000-0000-5000-8000-000000000000", None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(resp["code"], "NOT_FOUND");
+        assert_eq!(resp["status"], 404);
+    }
+
+    #[tokio::test]
+    async fn delete_app_deployment_malformed_id_is_not_found() {
+        // A non-UUID path segment folds into 404 (not 400), mirroring the read leg.
+        let del = mint_token(DEPLOYMENTS_DELETE_SCOPE).await;
+        let (status, _, resp) = delete_deployment_req(Some(&del), "not-a-uuid", None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(resp["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn delete_app_deployment_without_the_delete_scope_is_forbidden() {
+        // The deployments *read* scope must not delete deployments; the store is untouched.
+        let (deployment_id, _, _) = create_deployment("del_deploy_scope_app", "prod").await;
+        let read = mint_token(DEPLOYMENTS_READ_SCOPE).await;
+        let (status, _, resp) = delete_deployment_req(Some(&read), &deployment_id, None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(resp["code"], "PERMISSION_DENIED");
+        assert!(
+            deployment_store::get(&deployment_id).is_some(),
+            "a forbidden delete leaves the deployment in place"
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_app_deployment_missing_token_is_unauthenticated() {
+        let (status, _, resp) =
+            delete_deployment_req(None, "00000000-0000-5000-8000-000000000000", None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(resp["code"], "UNAUTHENTICATED");
+    }
+
+    #[tokio::test]
+    async fn delete_app_deployment_echoes_x_correlator_on_success_and_error() {
+        let (deployment_id, _, _) = create_deployment("del_deploy_corr_app", "prod").await;
+        let del = mint_token(DEPLOYMENTS_DELETE_SCOPE).await;
+
+        let (status, headers, _) =
+            delete_deployment_req(Some(&del), &deployment_id, Some("corr-dd-204")).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-dd-204")
+        );
+
+        let (status, headers, _) = delete_deployment_req(
+            Some(&del),
+            "00000000-0000-5000-8000-000000000000",
+            Some("corr-dd-404"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-dd-404")
         );
     }
 }

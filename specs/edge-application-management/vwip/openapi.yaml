@@ -24,7 +24,9 @@
 #   GET    /clusters                          (getClusters)        — read-only cluster catalog
 #   POST   /deployments                       (createAppDeployment) — deploy an app across zones (stateful)
 #   GET    /deployments/{appDeploymentId}      (getAppDeployment)    — read back a deployment
-# The deployment list/delete/patch legs are later passes.
+#   GET    /deployments                        (getAppDeployments)   — list deployments
+#   DELETE /deployments/{appDeploymentId}      (deleteAppDeployment) — delete a deployment
+# The deployment patch leg (updateAppDeployment) is a later pass.
 openapi: 3.0.3
 info:
   title: Edge Application Management
@@ -166,14 +168,27 @@ info:
     aggregate), and the `subscriptionRequest` status-change callback is accepted-
     not-applied.
 
-    ### `getAppDeployment`
+    ### `getAppDeployment` / `getAppDeployments` / `deleteAppDeployment`
 
-    Reads back a deployment created by `createAppDeployment`, returning the stored
-    `AppDeploymentInfo` verbatim (it already carries its `appDeploymentId` and
-    `appInstances`). The `appDeploymentId` is opaque and simulator-minted, so the
-    in-memory store state is the only control plane: a known id → `200`; an unknown
-    *or malformed* id folds into `404 NOT_FOUND` (mirroring `getApp` /
-    `getAppInstance`). The deployment list/delete/patch legs remain later passes.
+    The read/list/delete legs of the deployment resource, mirroring the `apps` and
+    `app-instances` CRUD. Each is keyed only on the in-memory store — the
+    `appDeploymentId` is opaque and simulator-minted, so there is no reserved-error
+    plane.
+
+    - **`getAppDeployment`** (`GET /deployments/{appDeploymentId}`) — a known id →
+      `200` with the stored `AppDeploymentInfo` verbatim (it already carries its
+      `appDeploymentId` and `appInstances`); an unknown *or malformed* id folds into
+      `404 NOT_FOUND` (mirroring `getApp` / `getAppInstance`).
+    - **`getAppDeployments`** (`GET /deployments`) — the current store snapshot as
+      an array of `AppDeploymentInfo` (empty when nothing has been deployed — a list
+      never 404s), the same shape as the single read (mirroring `getApps` /
+      `getAppInstances`).
+    - **`deleteAppDeployment`** (`DELETE /deployments/{appDeploymentId}`) — a known
+      id evicts its deployment → `204 No Content` (single-use); an unknown,
+      already-deleted, *or malformed* id → `404 NOT_FOUND`. Synchronous delete
+      (async `202`/`DELETE_REQUESTED` a documented cut, mirroring `deleteAppInstance`).
+
+    The deployment patch leg (`updateAppDeployment`) remains a later pass.
   version: "wip"
   license:
     name: Apache-2.0
@@ -1038,6 +1053,64 @@ paths:
             result: '400 INVALID_ARGUMENT'
           - input: a body that is not valid JSON
             result: '400 INVALID_ARGUMENT'
+    get:
+      operationId: getAppDeployments
+      summary: List application deployments
+      description: |
+        Lists every application deployment previously created with
+        `createAppDeployment`, as a JSON array of `AppDeploymentInfo` (each
+        already carrying its minted `appDeploymentId`, `appInstances` and the rest
+        of the deployment identity) — the same representation `getAppDeployment`
+        returns for a single deployment.
+
+        See the API description for the parameter-driven functional cases.
+      security:
+        - openId:
+            - edge-application-management:deployments:read
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+      responses:
+        "200":
+          description: The application deployments (possibly an empty array).
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/AppDeploymentInfo"
+              examples:
+                empty:
+                  summary: Nothing deployed yet (a list never 404s)
+                  value: []
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          `getAppDeployments` lists every application deployment created by
+          `createAppDeployment` (docs/DESIGN.md §7). The `appDeploymentId`s are
+          simulator-minted, not caller-chosen, so there is no reserved-error
+          plane — the in-memory store is the only control plane. The response is
+          the current store snapshot as an array of `AppDeploymentInfo`, empty
+          when nothing has been deployed (a list never 404s). CamaraSim returns
+          `AppDeploymentInfo` items so every listed deployment carries its
+          addressable `appDeploymentId`, mirroring the sibling list legs
+          (`getApps`, `getAppInstances`) which return the same shape as their
+          single read. Deployments are not scoped per client (a documented
+          simplification, mirroring the other CamaraSim list legs).
+        cases:
+          - input: after one or more `createAppDeployment` calls
+            result: '200 — an array of `AppDeploymentInfo`, one per deployment'
+          - input: before anything has been deployed
+            result: '200 — an empty array (a list never 404s)'
 
   /deployments/{appDeploymentId}:
     get:
@@ -1091,6 +1164,60 @@ paths:
         cases:
           - input: an `appDeploymentId` returned by a prior `createAppDeployment`
             result: '200 — the stored `AppDeploymentInfo`'
+          - input: a well-formed UUID that was never deployed
+            result: '404 NOT_FOUND'
+          - input: a malformed (non-UUID) `appDeploymentId`
+            result: '404 NOT_FOUND (the canonical 400 folded into 404)'
+    delete:
+      operationId: deleteAppDeployment
+      summary: Delete an application deployment
+      description: |
+        Deletes an application deployment previously created with
+        `createAppDeployment`, evicting its stored `AppDeploymentInfo`. On success
+        the deployment is removed and `204 No Content` is returned.
+
+        See the API description for the parameter-driven functional cases.
+      security:
+        - openId:
+            - edge-application-management:deployments:delete
+      parameters:
+        - $ref: "#/components/parameters/AppDeploymentId"
+        - $ref: "#/components/parameters/XCorrelator"
+      responses:
+        "204":
+          description: The application deployment was deleted.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          `deleteAppDeployment` deletes an application deployment created by
+          `createAppDeployment` (docs/DESIGN.md §7). The `appDeploymentId` is an
+          opaque, simulator-minted UUID (not caller-chosen), so there is no
+          reserved-error plane — the in-memory store state is the only control
+          plane. A known id evicts its deployment and returns `204 No Content`
+          (single-use); an unknown, already-deleted, *or malformed* id folds into
+          `404 NOT_FOUND` (mirroring `getAppDeployment` and the sibling
+          `deleteAppInstance` leg). Deletion is synchronous: CAMARA
+          EdgeApplicationManagement's asynchronous `202 Accepted`/`DELETE_REQUESTED`
+          form and any `sink` notification are a documented cut, mirroring every
+          other CamaraSim delete leg (QoD `deleteSession`, `deleteApp`,
+          `deleteAppInstance`, `deleteNetwork`).
+        cases:
+          - input: an `appDeploymentId` returned by a prior `createAppDeployment`
+            result: '204 — the deployment is evicted (a later `getAppDeployment` 404s)'
+          - input: the same `appDeploymentId` deleted a second time
+            result: '404 NOT_FOUND (single-use eviction)'
           - input: a well-formed UUID that was never deployed
             result: '404 NOT_FOUND'
           - input: a malformed (non-UUID) `appDeploymentId`

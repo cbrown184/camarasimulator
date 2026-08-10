@@ -63,3 +63,32 @@ pub fn get(deployment_id: &str) -> Option<Value> {
         .get(deployment_id)
         .cloned()
 }
+
+/// Snapshot every stored app deployment as its rendered `AppDeploymentInfo`.
+/// Backs the `getAppDeployments` list leg. The lock is held only for the clone
+/// (never across an `.await`); iteration order is unspecified (a `HashMap`),
+/// which is fine — each `AppDeploymentInfo` carries its own `appDeploymentId`, so
+/// callers key off that, not order.
+pub fn all() -> Vec<Value> {
+    store()
+        .lock()
+        .expect("edge-application-management deployment store not poisoned")
+        .values()
+        .cloned()
+        .collect()
+}
+
+/// Evict the app deployment stored under `deployment_id`, returning its
+/// `AppDeploymentInfo` when one was present (and `None` when nothing was stored
+/// there). Backs the `deleteAppDeployment` leg: a `Some` means the deployment
+/// existed and is now gone → `204 No Content`; a `None` means an
+/// unknown/already-deleted id → `404 NOT_FOUND`. The remove-and-report runs under
+/// a single lock hold (never across an `.await`), so a `deleteAppDeployment` is
+/// single-use — two concurrent deletes of the same deployment can't both see it
+/// present.
+pub fn remove(deployment_id: &str) -> Option<Value> {
+    store()
+        .lock()
+        .expect("edge-application-management deployment store not poisoned")
+        .remove(deployment_id)
+}
