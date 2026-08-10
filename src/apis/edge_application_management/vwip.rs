@@ -17,6 +17,20 @@
 //! - `DELETE /edge-application-management/vwip/apps/{appId}` — delete (de-board)
 //!   an onboarded application (operationId `deleteApp`, scope
 //!   `edge-application-management:apps:delete`). See [`delete_app`].
+//! - `POST /edge-application-management/vwip/app-instances` — instantiate an
+//!   onboarded application onto an edge cloud zone (operationId
+//!   `createAppInstance`, scope `edge-application-management:instances:write`).
+//!   See [`create_app_instance`].
+//! - `GET /edge-application-management/vwip/app-instances/{appInstanceId}` — read
+//!   back an application instance (operationId `getAppInstance`, scope
+//!   `edge-application-management:instances:read`). See [`get_app_instance`].
+//! - `GET /edge-application-management/vwip/app-instances` — list every
+//!   application instance (operationId `getAppInstances`, scope
+//!   `edge-application-management:instances:read`). See [`get_app_instances`].
+//! - `DELETE /edge-application-management/vwip/app-instances/{appInstanceId}` —
+//!   delete (terminate) an application instance (operationId `deleteAppInstance`,
+//!   scope `edge-application-management:instances:delete`). See
+//!   [`delete_app_instance`].
 //!
 //! ## What it does
 //!
@@ -77,6 +91,13 @@ const APPS_DELETE_SCOPE: &str = "edge-application-management:apps:delete";
 /// The OAuth2 scope `createAppInstance` requires (CAMARA EdgeApplicationManagement).
 const INSTANCES_WRITE_SCOPE: &str = "edge-application-management:instances:write";
 
+/// The OAuth2 scope `getAppInstance` / `getAppInstances` require (CAMARA
+/// EdgeApplicationManagement).
+const INSTANCES_READ_SCOPE: &str = "edge-application-management:instances:read";
+
+/// The OAuth2 scope `deleteAppInstance` requires (CAMARA EdgeApplicationManagement).
+const INSTANCES_DELETE_SCOPE: &str = "edge-application-management:instances:delete";
+
 /// The five CAMARA `AppManifest.packageType` values.
 const PACKAGE_TYPES: [&str; 5] = ["QCOW2", "OVA", "CONTAINER", "HELM", "CSAR"];
 
@@ -97,7 +118,11 @@ pub fn routes() -> Router {
         )
         .route(
             "/edge-application-management/vwip/app-instances",
-            post(create_app_instance),
+            post(create_app_instance).get(get_app_instances),
+        )
+        .route(
+            "/edge-application-management/vwip/app-instances/:app_instance_id",
+            get(get_app_instance).delete(delete_app_instance),
         )
 }
 
@@ -523,6 +548,115 @@ async fn create_app_instance(claims: Claims, headers: HeaderMap, body: Bytes) ->
             .insert(HeaderName::from_static("location"), value);
     }
     with_correlator(response, &correlator)
+}
+
+/// `GET /edge-application-management/vwip/app-instances/{appInstanceId}`
+/// (`getAppInstance`).
+///
+/// Reads back an application instance created by [`create_app_instance`],
+/// returning the stored `AppInstanceInfo` verbatim (it already carries its
+/// `appInstanceId`) with a `200`.
+///
+/// The `appInstanceId` is an opaque, simulator-minted UUID (there is no
+/// reserved-error plane — the identifier is not caller-chosen), so the **store
+/// state is the only control plane** (docs/DESIGN.md §7): a known id → `200
+/// AppInstanceInfo`; an unknown or malformed id → `404 NOT_FOUND` (the canonical
+/// 400 malformed-path case is folded into 404, mirroring the sibling
+/// [`get_app`]/`readAccess`/`readNetwork` read legs). `x-correlator` is echoed on
+/// every response.
+async fn get_app_instance(
+    claims: Claims,
+    headers: HeaderMap,
+    Path(app_instance_id): Path<String>,
+) -> Response {
+    let correlator = headers.get("x-correlator").cloned();
+
+    // Endpoint authorisation: the token must carry this API's instances read scope.
+    if let Err(e) = claims.require_scope(INSTANCES_READ_SCOPE) {
+        return with_correlator(e.into_response(), &correlator);
+    }
+
+    match instance_store::get(&app_instance_id) {
+        Some(info) => with_correlator(
+            (StatusCode::OK, Json(info)).into_response(),
+            &correlator,
+        ),
+        None => with_correlator(
+            CamaraError::not_found("No application instance found for the provided appInstanceId.")
+                .into_response(),
+            &correlator,
+        ),
+    }
+}
+
+/// `GET /edge-application-management/vwip/app-instances` (`getAppInstances`).
+///
+/// Lists every application instance created by [`create_app_instance`], as a JSON
+/// array of the stored `AppInstanceInfo` (each already carries its
+/// `appInstanceId` — the same representation [`get_app_instance`] returns for a
+/// single instance). Mirrors the sibling list legs (`getApps`, `listAccesses`):
+/// a list returns the same resource shape as its single-item read.
+///
+/// The instances are simulator-minted and not caller-chosen, so there is no
+/// reserved-error plane — the in-memory store is the only control plane
+/// (docs/DESIGN.md §7): the response is the current store snapshot (an empty
+/// array when nothing has been instantiated — a *list* never 404s).
+/// `x-correlator` is echoed on every response.
+async fn get_app_instances(claims: Claims, headers: HeaderMap) -> Response {
+    let correlator = headers.get("x-correlator").cloned();
+
+    // Endpoint authorisation: the token must carry this API's instances read scope.
+    if let Err(e) = claims.require_scope(INSTANCES_READ_SCOPE) {
+        return with_correlator(e.into_response(), &correlator);
+    }
+
+    let instances = instance_store::all();
+    with_correlator(
+        (StatusCode::OK, Json(Value::Array(instances))).into_response(),
+        &correlator,
+    )
+}
+
+/// `DELETE /edge-application-management/vwip/app-instances/{appInstanceId}`
+/// (`deleteAppInstance`).
+///
+/// Deletes (terminates) an application instance previously created with
+/// [`create_app_instance`], evicting its stored `AppInstanceInfo` from the
+/// in-memory store. Requires the delete scope
+/// `edge-application-management:instances:delete`.
+///
+/// Keyed only on the **store state** (docs/DESIGN.md §7): the `appInstanceId` is
+/// an opaque, simulator-minted UUID (not caller-chosen), so there is no
+/// reserved-error plane. A known id evicts its instance and returns `204 No
+/// Content` (single-use); an unknown, already-deleted, *or malformed* id → `404
+/// NOT_FOUND` (the canonical 400 malformed-path case is folded into 404,
+/// mirroring [`get_app_instance`] and the sibling [`delete_app`] leg).
+///
+/// Deletion is synchronous — CAMARA EdgeApplicationManagement's asynchronous
+/// `202 Accepted`/`DELETE_REQUESTED` form and any `sink` notification are a
+/// documented cut, mirroring every other CamaraSim delete leg (QoD
+/// `deleteSession`, `deleteApp`, `deleteNetwork`). `x-correlator` is echoed on
+/// every response.
+async fn delete_app_instance(
+    claims: Claims,
+    headers: HeaderMap,
+    Path(app_instance_id): Path<String>,
+) -> Response {
+    let correlator = headers.get("x-correlator").cloned();
+
+    // Endpoint authorisation: the token must carry this API's instances delete scope.
+    if let Err(e) = claims.require_scope(INSTANCES_DELETE_SCOPE) {
+        return with_correlator(e.into_response(), &correlator);
+    }
+
+    match instance_store::remove(&app_instance_id) {
+        Some(_) => with_correlator(StatusCode::NO_CONTENT.into_response(), &correlator),
+        None => with_correlator(
+            CamaraError::not_found("No application instance found for the provided appInstanceId.")
+                .into_response(),
+            &correlator,
+        ),
+    }
 }
 
 /// The subset of CAMARA `AppManifest` fields CamaraSim validates. All are
@@ -1722,6 +1856,327 @@ mod tests {
         assert_eq!(
             headers.get("x-correlator").and_then(|v| v.to_str().ok()),
             Some("corr-inst-409")
+        );
+    }
+
+    // --- getAppInstance / getAppInstances / deleteAppInstance --------------
+
+    /// Onboard an app and instantiate it onto the active zone, returning the
+    /// minted `appInstanceId` (a distinct app `name` per test avoids the
+    /// process-global stores colliding across parallel tests).
+    async fn create_instance(name: &str) -> String {
+        let (_, app_id) = submit_and_get_id(name).await;
+        let token = mint_token(INSTANCES_WRITE_SCOPE).await;
+        let body = json!({ "name": "prod", "appId": app_id, "edgeCloudZoneId": active_zone() });
+        let (status, _, resp) = post_instance(Some(&token), &body.to_string(), None).await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        resp["appInstanceId"].as_str().unwrap().to_string()
+    }
+
+    async fn get_instance_req(
+        token: Option<&str>,
+        instance_id: &str,
+        correlator: Option<&str>,
+    ) -> (StatusCode, HeaderMap, Value) {
+        let mut builder = Request::builder()
+            .method("GET")
+            .uri(format!(
+                "/edge-application-management/vwip/app-instances/{instance_id}"
+            ))
+            .header("host", HOST);
+        if let Some(t) = token {
+            builder = builder.header("authorization", format!("Bearer {t}"));
+        }
+        if let Some(c) = correlator {
+            builder = builder.header("x-correlator", c);
+        }
+        let response = app()
+            .oneshot(builder.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let headers = response.headers().clone();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, headers, json)
+    }
+
+    async fn list_instances_req(
+        token: Option<&str>,
+        correlator: Option<&str>,
+    ) -> (StatusCode, HeaderMap, Value) {
+        let mut builder = Request::builder()
+            .method("GET")
+            .uri("/edge-application-management/vwip/app-instances")
+            .header("host", HOST);
+        if let Some(t) = token {
+            builder = builder.header("authorization", format!("Bearer {t}"));
+        }
+        if let Some(c) = correlator {
+            builder = builder.header("x-correlator", c);
+        }
+        let response = app()
+            .oneshot(builder.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let headers = response.headers().clone();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, headers, json)
+    }
+
+    async fn delete_instance_req(
+        token: Option<&str>,
+        instance_id: &str,
+        correlator: Option<&str>,
+    ) -> (StatusCode, HeaderMap, Value) {
+        let mut builder = Request::builder()
+            .method("DELETE")
+            .uri(format!(
+                "/edge-application-management/vwip/app-instances/{instance_id}"
+            ))
+            .header("host", HOST);
+        if let Some(t) = token {
+            builder = builder.header("authorization", format!("Bearer {t}"));
+        }
+        if let Some(c) = correlator {
+            builder = builder.header("x-correlator", c);
+        }
+        let response = app()
+            .oneshot(builder.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let headers = response.headers().clone();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, headers, json)
+    }
+
+    // getAppInstance
+
+    #[tokio::test]
+    async fn get_app_instance_returns_the_stored_info_verbatim() {
+        let instance_id = create_instance("get_instance_app").await;
+        let read = mint_token(INSTANCES_READ_SCOPE).await;
+        let (status, _, resp) = get_instance_req(Some(&read), &instance_id, None).await;
+        assert_eq!(status, StatusCode::OK);
+        // The AppInstanceInfo already carries its own appInstanceId.
+        assert_eq!(resp["appInstanceId"], json!(instance_id));
+        assert_eq!(resp["name"], "prod");
+        assert_eq!(resp["status"], "ready");
+        assert_eq!(resp["appProvider"], "CamaraSim Test");
+    }
+
+    #[tokio::test]
+    async fn get_app_instance_unknown_id_is_not_found() {
+        let read = mint_token(INSTANCES_READ_SCOPE).await;
+        let (status, _, resp) =
+            get_instance_req(Some(&read), "00000000-0000-5000-8000-000000000000", None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(resp["code"], "NOT_FOUND");
+        assert_eq!(resp["status"], 404);
+    }
+
+    #[tokio::test]
+    async fn get_app_instance_malformed_id_is_not_found() {
+        // A non-UUID path segment folds into 404 (not 400), mirroring get_app.
+        let read = mint_token(INSTANCES_READ_SCOPE).await;
+        let (status, _, resp) = get_instance_req(Some(&read), "not-a-uuid", None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(resp["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn get_app_instance_without_the_read_scope_is_forbidden() {
+        // The instances *write* scope creates but must not read instances back.
+        let instance_id = create_instance("get_instance_scope_app").await;
+        let write = mint_token(INSTANCES_WRITE_SCOPE).await;
+        let (status, _, resp) = get_instance_req(Some(&write), &instance_id, None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(resp["code"], "PERMISSION_DENIED");
+    }
+
+    #[tokio::test]
+    async fn get_app_instance_missing_token_is_unauthenticated() {
+        let (status, _, resp) =
+            get_instance_req(None, "00000000-0000-5000-8000-000000000000", None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(resp["code"], "UNAUTHENTICATED");
+    }
+
+    #[tokio::test]
+    async fn get_app_instance_echoes_x_correlator_on_success_and_error() {
+        let instance_id = create_instance("get_instance_corr_app").await;
+        let read = mint_token(INSTANCES_READ_SCOPE).await;
+
+        let (status, headers, _) =
+            get_instance_req(Some(&read), &instance_id, Some("corr-gi-ok")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-gi-ok")
+        );
+
+        let (status, headers, _) = get_instance_req(
+            Some(&read),
+            "00000000-0000-5000-8000-000000000000",
+            Some("corr-gi-404"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-gi-404")
+        );
+    }
+
+    // getAppInstances
+
+    #[tokio::test]
+    async fn get_app_instances_lists_a_created_instance() {
+        let instance_id = create_instance("list_instance_app").await;
+        let read = mint_token(INSTANCES_READ_SCOPE).await;
+        let (status, _, resp) = list_instances_req(Some(&read), None).await;
+        assert_eq!(status, StatusCode::OK);
+        let arr = resp.as_array().expect("array response");
+        // Every item is an AppInstanceInfo — carries a UUID appInstanceId.
+        assert!(arr
+            .iter()
+            .all(|i| i["appInstanceId"].as_str().is_some_and(is_uuid)));
+        // The instance we just created appears.
+        let ours = arr
+            .iter()
+            .find(|i| i["appInstanceId"] == json!(instance_id))
+            .expect("created instance is listed");
+        assert_eq!(ours["name"], "prod");
+        assert_eq!(ours["status"], "ready");
+    }
+
+    #[tokio::test]
+    async fn get_app_instances_without_the_read_scope_is_forbidden() {
+        let write = mint_token(INSTANCES_WRITE_SCOPE).await;
+        let (status, _, resp) = list_instances_req(Some(&write), None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(resp["code"], "PERMISSION_DENIED");
+    }
+
+    #[tokio::test]
+    async fn get_app_instances_missing_token_is_unauthenticated() {
+        let (status, _, resp) = list_instances_req(None, None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(resp["code"], "UNAUTHENTICATED");
+    }
+
+    #[tokio::test]
+    async fn get_app_instances_echoes_x_correlator() {
+        let read = mint_token(INSTANCES_READ_SCOPE).await;
+        let (status, headers, _) = list_instances_req(Some(&read), Some("corr-list-inst")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-list-inst")
+        );
+    }
+
+    // deleteAppInstance
+
+    #[tokio::test]
+    async fn delete_app_instance_removes_a_created_instance() {
+        let instance_id = create_instance("delete_instance_app").await;
+        let del = mint_token(INSTANCES_DELETE_SCOPE).await;
+        let (status, _, body) = delete_instance_req(Some(&del), &instance_id, None).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(body, Value::Null); // 204 has an empty body
+
+        // Gone — a later read 404s.
+        let read = mint_token(INSTANCES_READ_SCOPE).await;
+        let (status, _, resp) = get_instance_req(Some(&read), &instance_id, None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(resp["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn delete_app_instance_is_single_use() {
+        let instance_id = create_instance("single_use_delete_instance_app").await;
+        let del = mint_token(INSTANCES_DELETE_SCOPE).await;
+
+        let (status, _, _) = delete_instance_req(Some(&del), &instance_id, None).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        let (status, _, resp) = delete_instance_req(Some(&del), &instance_id, None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(resp["code"], "NOT_FOUND");
+        assert_eq!(resp["status"], 404);
+    }
+
+    #[tokio::test]
+    async fn delete_app_instance_unknown_id_is_not_found() {
+        let del = mint_token(INSTANCES_DELETE_SCOPE).await;
+        let (status, _, resp) =
+            delete_instance_req(Some(&del), "00000000-0000-5000-8000-000000000000", None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(resp["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn delete_app_instance_malformed_id_is_not_found() {
+        let del = mint_token(INSTANCES_DELETE_SCOPE).await;
+        let (status, _, resp) = delete_instance_req(Some(&del), "not-a-uuid", None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(resp["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn delete_app_instance_without_the_delete_scope_is_forbidden() {
+        // The instances *read* scope reads but must not delete; the instance survives.
+        let instance_id = create_instance("delete_instance_scope_app").await;
+        let read = mint_token(INSTANCES_READ_SCOPE).await;
+        let (status, _, resp) = delete_instance_req(Some(&read), &instance_id, None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(resp["code"], "PERMISSION_DENIED");
+
+        // The forbidden call did not evict — the instance is still readable.
+        let read2 = mint_token(INSTANCES_READ_SCOPE).await;
+        let (status, _, _) = get_instance_req(Some(&read2), &instance_id, None).await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn delete_app_instance_missing_token_is_unauthenticated() {
+        let (status, _, resp) =
+            delete_instance_req(None, "00000000-0000-5000-8000-000000000000", None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(resp["code"], "UNAUTHENTICATED");
+    }
+
+    #[tokio::test]
+    async fn delete_app_instance_echoes_x_correlator_on_success_and_error() {
+        let instance_id = create_instance("delete_instance_corr_app").await;
+        let del = mint_token(INSTANCES_DELETE_SCOPE).await;
+
+        let (status, headers, _) =
+            delete_instance_req(Some(&del), &instance_id, Some("corr-di-ok")).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-di-ok")
+        );
+
+        // Error (404, id now gone) echoes x-correlator too.
+        let (status, headers, _) =
+            delete_instance_req(Some(&del), &instance_id, Some("corr-di-404")).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-di-404")
         );
     }
 }

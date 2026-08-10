@@ -2742,7 +2742,20 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
         (no live workload), the `terminating`/`unknown` instance states (unreachable
         on create), and the `subscriptionRequest` callback (accepted-not-applied).
         `x-correlator` echoed. No new dep.
-      - [ ] `getAppInstance` / `getAppInstances` / `deleteAppInstance` — later passes.
+      - [x] `getAppInstance` (`GET /app-instances/{appInstanceId}`,
+        `edge-application-management:instances:read`) / `getAppInstances`
+        (`GET /app-instances`, same scope) / `deleteAppInstance`
+        (`DELETE /app-instances/{appInstanceId}`,
+        `edge-application-management:instances:delete`) — the read/list/delete
+        legs of the app-instance resource, mirroring the `apps` CRUD. Keyed only
+        on the in-memory instance store (opaque minted `appInstanceId`, no
+        reserved-suffix plane): `getAppInstance` → `200` the stored
+        `AppInstanceInfo` verbatim / `404 NOT_FOUND` (malformed folded into 404);
+        `getAppInstances` → `200` array (empty when none, a list never 404s);
+        `deleteAppInstance` → `204` single-use / `404`. Synchronous delete (async
+        `202`/`DELETE_REQUESTED` + `sink` a documented cut). `x-correlator`
+        echoed. New `instance_store::all`/`remove` (+ un-gated `get`); no new dep.
+        **Completes the `app-instances` CRUD** (`deployments`/`clusters` remain).
     - [ ] the stateful `deployments` resource + `clusters` — later passes.
 
 ## Cross-cutting (do alongside the item that needs it)
@@ -2769,6 +2782,24 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-10 — edge-application-management: completed the **app-instances CRUD** —
+  added the read/list/delete legs `GET /app-instances/{appInstanceId}`
+  (`getAppInstance`), `GET /app-instances` (`getAppInstances`) and
+  `DELETE /app-instances/{appInstanceId}` (`deleteAppInstance`), the natural
+  continuation of last pass's `createAppInstance`. All keyed only on the
+  in-memory instance store (opaque minted `appInstanceId`, no reserved-suffix
+  plane, mirroring the `apps` CRUD): read → 200 the stored `AppInstanceInfo`
+  verbatim / 404 (malformed folded into 404); list → 200 array (empty when none);
+  delete → 204 single-use / 404; scopes `instances:read` / `instances:delete`;
+  synchronous delete (async 202/`DELETE_REQUESTED` + `sink` a documented cut);
+  `x-correlator` echoed. Store gained `all`/`remove` (+ un-gated `get`); spec
+  updated (2 new operations under `/app-instances`, new `/app-instances/{id}`
+  path, `AppInstanceId` param, narrative + x-camarasim-scenarios). 22 new tests.
+  No new dependency. `cargo test` 2029 green; `cargo build --release` green.
+  binary: 3.6M (3,752,080 bytes). Remaining EAM cuts: `deployments`/`clusters`
+  (later passes); every `https://` sink-TLS item still needs a rustls client
+  (multi-MB dep vs the small-binary directive; test receivers run on `http://`
+  loopback).
 - 2026-08-10 — edge-application-management: added the **createAppInstance leg**,
   `POST /edge-application-management/vwip/app-instances` (`createAppInstance`,
   scope `edge-application-management:instances:write`) — the topmost genuinely

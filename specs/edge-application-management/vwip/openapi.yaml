@@ -17,9 +17,11 @@
 #   GET    /apps/{appId}      (getApp)             — read back an onboarded app
 #   GET    /apps              (getApps)            — list onboarded apps
 #   DELETE /apps/{appId}      (deleteApp)          — delete an onboarded app
-#   POST   /app-instances     (createAppInstance)  — instantiate an app onto a zone (stateful)
-# The remaining app-instance read/list/delete legs, and the deployment and
-# cluster resources, are later passes.
+#   POST   /app-instances                    (createAppInstance)  — instantiate an app onto a zone (stateful)
+#   GET    /app-instances/{appInstanceId}     (getAppInstance)     — read back an app instance
+#   GET    /app-instances                     (getAppInstances)    — list app instances
+#   DELETE /app-instances/{appInstanceId}     (deleteAppInstance)  — delete an app instance
+# The deployment and cluster resources are later passes.
 openapi: 3.0.3
 info:
   title: Edge Application Management
@@ -90,8 +92,28 @@ info:
     there is no live workload — and the `terminating` / `unknown` instance states
     (teardown/degraded transitions) are unreachable on create: documented cuts.
     The `subscriptionRequest` status-change callback is accepted-not-applied
-    (notifications are a later slice). The read/list/delete instance legs
-    (`getAppInstance` / `getAppInstances` / `deleteAppInstance`) are later passes.
+    (notifications are a later slice).
+
+    ### `getAppInstance` / `getAppInstances` / `deleteAppInstance`
+
+    The read/list/delete legs of the app-instance resource, mirroring the `apps`
+    CRUD. The `appInstanceId` is an opaque, simulator-minted UUID (not
+    caller-chosen), so there is **no reserved-error plane** — the in-memory
+    instance store is the only control plane:
+
+    - **`getAppInstance`** (`GET /app-instances/{appInstanceId}`) — a known id
+      returns the stored `AppInstanceInfo` verbatim (`200`); an unknown *or
+      malformed* id folds into `404 NOT_FOUND`.
+    - **`getAppInstances`** (`GET /app-instances`) — the current store snapshot
+      as an array of `AppInstanceInfo` (`200`), empty when nothing has been
+      instantiated (a list never 404s).
+    - **`deleteAppInstance`** (`DELETE /app-instances/{appInstanceId}`) — a known
+      id evicts its instance and returns `204 No Content` (single-use); an
+      unknown/already-deleted *or malformed* id → `404 NOT_FOUND`. Deletion is
+      synchronous (the async `202`/`DELETE_REQUESTED` form + `sink` notification
+      are a documented cut, mirroring every other CamaraSim delete leg).
+
+    The deployment and cluster resources remain later passes.
   version: "wip"
   license:
     name: Apache-2.0
@@ -470,6 +492,169 @@ paths:
             result: '400 INVALID_ARGUMENT'
           - input: a body that is not valid JSON
             result: '400 INVALID_ARGUMENT'
+    get:
+      operationId: getAppInstances
+      summary: List application instances
+      description: |
+        Lists every application instance previously created with
+        `createAppInstance`, as a JSON array of `AppInstanceInfo` (each already
+        carrying its minted `appInstanceId`) — the same representation
+        `getAppInstance` returns for a single instance.
+
+        See the API description for the parameter-driven functional cases.
+      security:
+        - openId:
+            - edge-application-management:instances:read
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+      responses:
+        "200":
+          description: The application instances (possibly an empty array).
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/AppInstanceInfo"
+              examples:
+                empty:
+                  summary: Nothing instantiated yet (a list never 404s)
+                  value: []
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          `getAppInstances` lists every application instance created by
+          `createAppInstance` (docs/DESIGN.md §7). The `appInstanceId`s are
+          simulator-minted, not caller-chosen, so there is no reserved-error
+          plane — the in-memory store is the only control plane. The response is
+          the current store snapshot as an array of `AppInstanceInfo`, empty when
+          nothing has been instantiated (a list never 404s). CamaraSim returns
+          `AppInstanceInfo` items so every listed instance carries its addressable
+          `appInstanceId`, mirroring the sibling list legs (`getApps`,
+          `listAccesses`) which return the same shape as their single read.
+        cases:
+          - input: after one or more `createAppInstance` calls
+            result: '200 — an array of `AppInstanceInfo`, one per instance'
+          - input: before anything has been instantiated
+            result: '200 — an empty array (a list never 404s)'
+
+  /app-instances/{appInstanceId}:
+    get:
+      operationId: getAppInstance
+      summary: Retrieve an application instance
+      description: |
+        Reads back an application instance previously created with
+        `createAppInstance`, returning the stored `AppInstanceInfo` (which
+        already carries its `appInstanceId`).
+
+        See the API description for the parameter-driven functional cases.
+      security:
+        - openId:
+            - edge-application-management:instances:read
+      parameters:
+        - $ref: "#/components/parameters/AppInstanceId"
+        - $ref: "#/components/parameters/XCorrelator"
+      responses:
+        "200":
+          description: The application instance.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppInstanceInfo"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          `getAppInstance` reads back an application instance created by
+          `createAppInstance` (docs/DESIGN.md §7). The `appInstanceId` is an
+          opaque, simulator-minted UUID (not caller-chosen), so there is no
+          reserved-error plane — the in-memory store state is the only control
+          plane. A known id returns the stored `AppInstanceInfo` verbatim; an
+          unknown *or malformed* id is folded into `404 NOT_FOUND` (mirroring the
+          other CamaraSim read legs). Canonical EdgeApplicationManagement declares
+          400/401/403/404 here; CamaraSim folds the 400 malformed-path case into
+          404 (documented deviation) and adds 500/503 from the shared error set.
+        cases:
+          - input: an `appInstanceId` returned by a prior `createAppInstance`
+            result: '200 — the stored `AppInstanceInfo`'
+          - input: a well-formed UUID that was never instantiated
+            result: '404 NOT_FOUND'
+          - input: a malformed (non-UUID) `appInstanceId`
+            result: '404 NOT_FOUND (the canonical 400 folded into 404)'
+    delete:
+      operationId: deleteAppInstance
+      summary: Delete an application instance
+      description: |
+        Deletes (terminates) an application instance previously created with
+        `createAppInstance`, evicting its stored `AppInstanceInfo`. On success the
+        instance is removed and `204 No Content` is returned.
+
+        See the API description for the parameter-driven functional cases.
+      security:
+        - openId:
+            - edge-application-management:instances:delete
+      parameters:
+        - $ref: "#/components/parameters/AppInstanceId"
+        - $ref: "#/components/parameters/XCorrelator"
+      responses:
+        "204":
+          description: The application instance was deleted.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          `deleteAppInstance` terminates an application instance created by
+          `createAppInstance` (docs/DESIGN.md §7). The `appInstanceId` is an
+          opaque, simulator-minted UUID (not caller-chosen), so there is no
+          reserved-error plane — the in-memory store state is the only control
+          plane. A known id evicts its instance and returns `204 No Content`
+          (single-use); an unknown, already-deleted, *or malformed* id folds into
+          `404 NOT_FOUND` (mirroring `getAppInstance` and the sibling `deleteApp`
+          leg). Deletion is synchronous: CAMARA EdgeApplicationManagement's
+          asynchronous `202 Accepted`/`DELETE_REQUESTED` form and any `sink`
+          notification are a documented cut, mirroring every other CamaraSim
+          delete leg (QoD `deleteSession`, `deleteApp`, `deleteNetwork`).
+        cases:
+          - input: an `appInstanceId` returned by a prior `createAppInstance`
+            result: '204 — the instance is evicted (a later `getAppInstance` 404s)'
+          - input: the same `appInstanceId` deleted a second time
+            result: '404 NOT_FOUND (single-use eviction)'
+          - input: a well-formed UUID that was never instantiated
+            result: '404 NOT_FOUND'
+          - input: a malformed (non-UUID) `appInstanceId`
+            result: '404 NOT_FOUND (the canonical 400 folded into 404)'
 
   /edge-cloud-zones:
     get:
@@ -589,6 +774,19 @@ components:
         minLength: 36
         maxLength: 36
       example: 5e3a8c2f-1b4d-5a6e-8f90-2c1d3e4f5a6b
+
+    AppInstanceId:
+      name: appInstanceId
+      in: path
+      required: true
+      description: The identifier of an application instance (minted by `createAppInstance`).
+      schema:
+        type: string
+        format: uuid
+        pattern: '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
+        minLength: 36
+        maxLength: 36
+      example: 6ec0bd7f-11c0-53da-975e-2a8ad9ebae0b
 
   headers:
     XCorrelator:

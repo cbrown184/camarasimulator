@@ -53,13 +53,41 @@ pub fn insert(instance_id: String, info: Value) -> bool {
 }
 
 /// Fetch the `AppInstanceInfo` stored under `instance_id`, or `None` if no such
-/// instance exists. Backs the persistence assertions in the tests; the future
-/// `getAppInstance` read leg (a later pass) will lift the `#[cfg(test)]` gate.
-#[cfg(test)]
+/// instance exists. Backs the `getAppInstance` read leg (and the persistence
+/// assertions in the tests).
 pub fn get(instance_id: &str) -> Option<Value> {
     store()
         .lock()
         .expect("edge-application-management instance store not poisoned")
         .get(instance_id)
         .cloned()
+}
+
+/// Snapshot every stored app instance as its rendered `AppInstanceInfo`. Backs
+/// the `getAppInstances` list leg. The lock is held only for the clone (never
+/// across an `.await`); iteration order is unspecified (a `HashMap`), which is
+/// fine — each `AppInstanceInfo` carries its own `appInstanceId`, so callers key
+/// off that, not order.
+pub fn all() -> Vec<Value> {
+    store()
+        .lock()
+        .expect("edge-application-management instance store not poisoned")
+        .values()
+        .cloned()
+        .collect()
+}
+
+/// Evict the app instance stored under `instance_id`, returning its
+/// `AppInstanceInfo` when one was present (and `None` when nothing was stored
+/// there). Backs the `deleteAppInstance` leg: a `Some` means the instance
+/// existed and is now gone → `204 No Content`; a `None` means an
+/// unknown/already-deleted id → `404 NOT_FOUND`. The remove-and-report runs
+/// under a single lock hold (never across an `.await`), so a `deleteAppInstance`
+/// is single-use — two concurrent deletes of the same instance can't both see it
+/// present.
+pub fn remove(instance_id: &str) -> Option<Value> {
+    store()
+        .lock()
+        .expect("edge-application-management instance store not poisoned")
+        .remove(instance_id)
 }
