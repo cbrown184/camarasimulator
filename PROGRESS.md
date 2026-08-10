@@ -2632,7 +2632,7 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
         `…:accesses:delete`. New `store::all`/`store::remove`; self-contained
         query decode (no new dep). `x-correlator` echoed. **Completes the
         Accesses CRUD** (`/devices…` sub-resources remain).
-      - [~] the `/accesses/{accessId}/devices…` sub-resources:
+      - [x] the `/accesses/{accessId}/devices…` sub-resources:
         - [x] `GET /accesses/{accessId}/devices` (`listDevices`,
           `dedicated-network-accesses:devices:read`) — reads the access's recorded
           device roster (its `recentAccessDevices`, each an `AccessDevice`) back as
@@ -2651,9 +2651,17 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
           `store::update`), recomputes `stats`, returns the added `AccessDevices`
           (`201 AddDevicesSuccess`). Body validation → 400 before store → 404;
           per-device GRANTED/DENIED plane; 207/422 folded into AccessDevice.status.
-        - [ ] `POST /accesses/{accessId}/devices/remove`
-          (`removeDevicesFromAccess`, `…:devices:remove`) — the device-remove
-          leg (204/207) — later pass.
+        - [x] `POST /accesses/{accessId}/devices/remove`
+          (`removeDevicesFromAccess`, `…:devices:remove`) — evicts the roster
+          entries matching a bare `RemoveDevicesRequest` (JSON array of 1..=100
+          Devices, mirroring `add`) from the access's `recentAccessDevices`
+          (atomic `store::update`), recomputes `stats`, returns `204 No Content`.
+          Matching is by primary identifier (`device_identifier`); a device absent
+          from the roster is an idempotent per-device no-op folded into the `204`
+          (the `207` partial-success form is a documented cut, mirroring `add`).
+          Body validation → 400 before store → 404. **Completes the
+          `/devices…` sub-resources** (`dedicated-network-areas` remains). No new
+          dep. `x-correlator` echoed.
     - [ ] `dedicated-network-areas` (spatial) — later.
 - [ ] Other CAMARA APIs as capacity allows
 
@@ -2681,6 +2689,36 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-10 — dedicated-network-accesses: added the **device-remove leg**,
+  `POST /dedicated-network-accesses/vwip/accesses/{accessId}/devices/remove`
+  (`removeDevicesFromAccess`, scope `dedicated-network-accesses:devices:remove`) —
+  the topmost unclaimed actionable `[ ]` leaf (the remaining earlier `[ ]` leaves
+  are the deferred `https://` sink-TLS infra and the spatial `-areas` API). This
+  **completes the `/accesses/{accessId}/devices…` sub-resources** (listDevices /
+  add / remove all done). The leg evicts the roster entries matching a bare
+  `RemoveDevicesRequest` (a **bare** `Devices` array, minItems 1 / maxItems 100,
+  mirroring `add`) from the access's `recentAccessDevices` and recomputes `stats`
+  **atomically** (reusing `store::update`, closure under the map lock, never across
+  await; `Vec::retain` by primary identifier), returning `204 No Content`. Matching
+  is by `device_identifier` (first present of phoneNumber / NAI / ipv6 / IPv4
+  publicAddress) so a submitted `Device` need not be byte-identical to the stored
+  one; a device absent from the roster is an idempotent per-device no-op folded
+  into the `204` (the `207` partial-success form is a documented cut, mirroring
+  `add`). Two control planes (DESIGN §7): request validation (non-array body /
+  array outside 1..=100 / device with no identifier / non-E.164 phoneNumber → 400
+  INVALID_ARGUMENT, validated **before** the store so a bad body wins over a 404)
+  and the opaque `accessId` → store state (unknown → 404, no reserved-suffix
+  plane, mirroring `readAccess`). New route + `remove_devices` handler in
+  `vwip.rs`; `x-correlator` echoed on 204/400/404. No new store method needed.
+  spec: added the `/accesses/{accessId}/devices/remove` POST op
+  (removeDevicesFromAccess) + `RemoveDevicesRequest` schema +
+  `x-camarasim-scenarios` to `specs/dedicated-network-accesses/vwip/openapi.yaml`;
+  header + description + cuts updated. tests: +6 integration (create→remove evicts
+  matching entries + recomputes stats; absent-device is idempotent no-op;
+  malformed-body-400-before-store (non-array/empty/>100/no-id/non-E164);
+  unknown-access→404 with correlator; wrong-scope→403; no-token→401). No new dep.
+  `cargo test` 1956 pass; `cargo build --release` ok. binary (release): 3,655,648
+  bytes (~3.5M).
 - 2026-08-10 — dedicated-network-accesses: added the **device-add leg**,
   `POST /dedicated-network-accesses/vwip/accesses/{accessId}/devices/add`
   (`addDevicesToAccess`, scope `dedicated-network-accesses:devices:add`) — the

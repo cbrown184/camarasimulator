@@ -12,9 +12,10 @@
 # leg `GET /accesses/{accessId}` (`readAccess`), the list leg `GET /accesses`
 # (`listAccesses`), the delete leg `DELETE /accesses/{accessId}`
 # (`deleteAccess`) — the full access CRUD — the device-roster read leg
-# `GET /accesses/{accessId}/devices` (`listDevices`), and the device-add leg
-# `POST /accesses/{accessId}/devices/add` (`addDevicesToAccess`). The device-remove
-# sub-resource (`POST /accesses/{accessId}/devices/remove`) arrives in a later pass.
+# `GET /accesses/{accessId}/devices` (`listDevices`), the device-add leg
+# `POST /accesses/{accessId}/devices/add` (`addDevicesToAccess`), and the
+# device-remove leg `POST /accesses/{accessId}/devices/remove`
+# (`removeDevicesFromAccess`).
 openapi: 3.0.3
 info:
   title: Dedicated Network - Accesses
@@ -77,15 +78,18 @@ info:
     inside each `AccessDevice.status` (so `createAccess` and `addDevicesToAccess`
     both succeed with the denials counted in `stats`, never a `207`) — the
     `422 NO_VALID_DEVICE` case, the `409` request-level device conflicts, `sink`
-    notification delivery, the `listAccesses` `x-device` header filter, and the
-    device-remove sub-resource (`POST /accesses/{accessId}/devices/remove`).
+    notification delivery, and the `listAccesses` `x-device` header filter.
     `GET /accesses/{accessId}/devices` (`listDevices`) reads back the access's
     recorded device roster (its `recentAccessDevices`) as a paginated
     `AccessDevicesPage`, narrowed by the optional `deviceStatus` filter.
     `POST /accesses/{accessId}/devices/add` (`addDevicesToAccess`) appends devices
-    to that roster and returns the added `AccessDevices` (`201`). CamaraSim
-    exposes the full shared reserved-error set here so every reserved suffix is
-    reachable.
+    to that roster and returns the added `AccessDevices` (`201`);
+    `POST /accesses/{accessId}/devices/remove` (`removeDevicesFromAccess`) evicts
+    matching devices from it (matched by their primary identifier) and returns
+    `204 No Content` — an absent device is an idempotent per-device no-op folded
+    into the access-level `204` (the `207` partial-success form is a documented
+    cut). CamaraSim exposes the full shared reserved-error set here so every
+    reserved suffix is reachable.
   version: "wip"
   license:
     name: Apache-2.0
@@ -616,6 +620,97 @@ paths:
           - input: any other (unknown / never-created / malformed) accessId
             result: "404 NOT_FOUND"
 
+  /accesses/{accessId}/devices/remove:
+    post:
+      operationId: removeDevicesFromAccess
+      summary: Remove devices from a dedicated network access
+      description: |
+        Removes devices from the access `accessId`. The request body is a bare
+        `RemoveDevicesRequest` — a JSON array of `1..=100` CAMARA `Device`s (the
+        array **is** the body, mirroring `addDevicesToAccess`). Each matching
+        device is evicted from the access's recorded `recentAccessDevices` roster
+        and the aggregate `stats` recomputed. A roster entry matches a submitted
+        device when their primary identifiers (the first present of `phoneNumber` /
+        `networkAccessIdentifier` / `ipv6Address` / IPv4 `publicAddress`, as used by
+        the grant plane) are equal. On success the response is `204 No Content`.
+
+        Two control planes (docs/DESIGN.md §7), in order: request validation runs
+        first (a body that is not a JSON array, an array outside `1..=100` items, a
+        device with no identifier, or a non-E.164 `phoneNumber` →
+        `400 INVALID_ARGUMENT`, winning over a `404`); then the opaque
+        server-minted `accessId` resolves against the in-memory store (a known id
+        → `204`; an unknown/malformed one → `404 NOT_FOUND`; there is no
+        reserved-suffix plane on a minted id). A submitted device absent from the
+        roster is an idempotent per-device no-op folded into the access-level
+        `204` — the CAMARA `207` partial-success (`ResultForDevice[]`) form is a
+        documented cut, mirroring `addDevicesToAccess`. Requires the
+        `dedicated-network-accesses:devices:remove` scope.
+      security:
+        - openId:
+            - dedicated-network-accesses:devices:remove
+      parameters:
+        - $ref: "#/components/parameters/AccessId"
+        - $ref: "#/components/parameters/XCorrelator"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RemoveDevicesRequest"
+            examples:
+              twoDevices:
+                summary: Remove two devices by their identifiers
+                value:
+                  - phoneNumber: "+123456789012"
+                  - networkAccessIdentifier: "user@operator"
+      responses:
+        "204":
+          description: |
+            The matching devices were removed from the access's roster (its `stats`
+            recomputed). No body.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+        "400":
+          description: |
+            400 — invalid request. CamaraSim returns `INVALID_ARGUMENT` for a body
+            that is not a JSON array, an array outside 1..=100 items, a device
+            with no identifier, or a non-E.164 `phoneNumber`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AccessError"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+      x-camarasim-scenarios:
+        description: >-
+          Result selected from the request body and the in-memory store state
+          (docs/DESIGN.md §7). Request validation runs first (→ 400); then a known
+          `accessId` has the roster entries matching the submitted devices (by
+          primary identifier) evicted and its `stats` recomputed, returning `204`;
+          an unknown id is 404. A submitted device absent from the roster is an
+          idempotent per-device no-op (still `204`). The `accessId` is a
+          server-minted opaque UUID, so it has no reserved-suffix plane.
+        cases:
+          - input: a body that is not a JSON array of Device objects
+            result: "400 INVALID_ARGUMENT"
+          - input: an array with 0 or more than 100 devices
+            result: "400 INVALID_ARGUMENT"
+          - input: a device carrying none of the four CAMARA Device identifiers
+            result: "400 INVALID_ARGUMENT"
+          - input: a device phoneNumber that is not E.164
+            result: "400 INVALID_ARGUMENT"
+          - input: "a valid body; an accessId with devices matching roster entries"
+            result: "204 No Content — those devices evicted; roster + stats updated"
+          - input: "a valid body naming only devices absent from the roster"
+            result: "204 No Content — an idempotent no-op (roster unchanged)"
+          - input: any other (unknown / never-created / malformed) accessId
+            result: "404 NOT_FOUND"
+
 components:
   securitySchemes:
     openId:
@@ -733,6 +828,18 @@ components:
         `AccessDevices` array, each with its resolved `GRANTED`/`DENIED` status.
       allOf:
         - $ref: "#/components/schemas/AccessDevices"
+        - minItems: 1
+          maxItems: 100
+
+    RemoveDevicesRequest:
+      description: |
+        The body for `removeDevicesFromAccess` — a bare array of the CAMARA
+        `Device`s to remove from the access (the array *is* the body; there is no
+        wrapping object). Must contain 1..=100 items. A device is matched to a
+        roster entry by its primary identifier; a device absent from the roster is
+        an idempotent no-op. On success the operation returns `204 No Content`.
+      allOf:
+        - $ref: "#/components/schemas/Devices"
         - minItems: 1
           maxItems: 100
 

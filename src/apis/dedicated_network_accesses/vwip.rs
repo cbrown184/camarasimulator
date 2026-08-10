@@ -14,6 +14,8 @@
 //!   the devices bound to an access, paginated (operationId `listDevices`).
 //! - `POST /dedicated-network-accesses/vwip/accesses/{accessId}/devices/add` —
 //!   add devices to an access (operationId `addDevicesToAccess`).
+//! - `POST /dedicated-network-accesses/vwip/accesses/{accessId}/devices/remove` —
+//!   remove devices from an access (operationId `removeDevicesFromAccess`).
 //!
 //! ## What it does
 //!
@@ -62,8 +64,7 @@
 //! the CAMARA `207` multi-status form with a `ResultForDevice[]` body — CamaraSim
 //! represents partial denials as data inside the `201 AccessInfo`
 //! (`stats`/`recentAccessDevices`) rather than as a `207` — the `409`/`422`
-//! request-level device conflicts, `sink` notification delivery, and the
-//! device-**remove** sub-resource (`POST /accesses/{accessId}/devices/remove`).
+//! request-level device conflicts and `sink` notification delivery.
 //! `x-correlator` is echoed on every response.
 //!
 //! ## `addDevicesToAccess` — add devices to an access
@@ -80,6 +81,25 @@
 //! `dedicated-network-accesses:devices:add` scope. The `207`
 //! partial-success/`422 NO_VALID_DEVICE` forms remain documented cuts (denials
 //! ride inside each `AccessDevice.status`, as in `createAccess`).
+//!
+//! ## `removeDevicesFromAccess` — remove devices from an access
+//!
+//! `POST /accesses/{accessId}/devices/remove` takes a bare `RemoveDevicesRequest`
+//! (a JSON array of `1..=100` CAMARA `Device`s — the array *is* the body, mirroring
+//! `addDevicesToAccess`), and evicts the matching devices from the stored access's
+//! `recentAccessDevices` roster, recomputing its `stats` atomically
+//! ([`super::store::update`]). A roster entry matches a submitted device when their
+//! primary identifiers (the same first-present-of `phoneNumber` /
+//! `networkAccessIdentifier` / `ipv6Address` / IPv4 `publicAddress` used by the
+//! grant plane) are equal. On success the response is `204 No Content` (there is no
+//! body — the CAMARA `207` partial-success form is a documented cut: a submitted
+//! device absent from the roster is a per-device no-op folded into the access-level
+//! `204`, so the operation is idempotent). Request validation runs before the store
+//! lookup (a bad body → `400 INVALID_ARGUMENT`, winning over a `404`); an
+//! unknown/malformed `accessId` (a server-minted opaque UUID, no reserved-suffix
+//! plane) → `404 NOT_FOUND`. It requires the
+//! `dedicated-network-accesses:devices:remove` scope. `x-correlator` is echoed on
+//! every response, including the `204`.
 //!
 //! ## `readAccess` — read an access back
 //!
@@ -145,6 +165,10 @@ const DEVICES_READ_SCOPE: &str = "dedicated-network-accesses:devices:read";
 /// Accesses).
 const DEVICES_ADD_SCOPE: &str = "dedicated-network-accesses:devices:add";
 
+/// The OAuth2 scope `removeDevicesFromAccess` requires (CAMARA Dedicated
+/// Network — Accesses).
+const DEVICES_REMOVE_SCOPE: &str = "dedicated-network-accesses:devices:remove";
+
 /// Routes for Dedicated Network — Accesses vwip, mounted at their canonical URLs.
 pub fn routes() -> Router {
     Router::new()
@@ -163,6 +187,10 @@ pub fn routes() -> Router {
         .route(
             "/dedicated-network-accesses/vwip/accesses/:access_id/devices/add",
             post(add_devices),
+        )
+        .route(
+            "/dedicated-network-accesses/vwip/accesses/:access_id/devices/remove",
+            post(remove_devices),
         )
 }
 
@@ -555,6 +583,113 @@ async fn add_devices(
             (StatusCode::CREATED, Json(added)).into_response(),
             &correlator,
         ),
+        None => with_correlator(
+            CamaraError::not_found("No access found for the provided accessId.").into_response(),
+            &correlator,
+        ),
+    }
+}
+
+/// `POST /dedicated-network-accesses/vwip/accesses/{accessId}/devices/remove` —
+/// remove devices from an existing dedicated network access
+/// (`removeDevicesFromAccess`).
+///
+/// The request body is a bare `RemoveDevicesRequest` — a JSON array of `1..=100`
+/// CAMARA `Device`s (the array *is* the body, mirroring `addDevicesToAccess`).
+/// Each matching device is evicted from the access's stored `recentAccessDevices`
+/// roster and the aggregate `stats` recomputed — all atomically via
+/// [`store::update`]. A roster entry matches a submitted device when their primary
+/// identifiers ([`device_identifier`], the same first-present-of identifier the
+/// grant plane uses) are equal. On success the response is `204 No Content`.
+///
+/// Two control planes (docs/DESIGN.md §7), in order: **request validation** — a
+/// body that is not a JSON array, an array outside `1..=100` items, a device
+/// carrying no identifier, or a non-E.164 `phoneNumber` → `400 INVALID_ARGUMENT`
+/// (validated before the store lookup, so a bad body wins over a `404`); and the
+/// **store state** — the opaque server-minted `accessId` (no reserved-suffix
+/// plane) resolves to a known access (→ `204`) or an unknown/malformed one (→
+/// `404 NOT_FOUND`). A submitted device that is not in the roster is a per-device
+/// no-op folded into the access-level `204` (so the operation is idempotent) — the
+/// CAMARA `207` partial-success form is a documented cut, mirroring
+/// `addDevicesToAccess`. Requires the `dedicated-network-accesses:devices:remove`
+/// scope. `x-correlator` echoed, including on the `204`.
+async fn remove_devices(
+    claims: Claims,
+    headers: HeaderMap,
+    Path(access_id): Path<String>,
+    body: Bytes,
+) -> Response {
+    let correlator = headers.get("x-correlator").cloned();
+
+    if let Err(e) = claims.require_scope(DEVICES_REMOVE_SCOPE) {
+        return with_correlator(e.into_response(), &correlator);
+    }
+
+    // Body is a bare `RemoveDevicesRequest` — a JSON array of Device objects.
+    let devices: Vec<Value> = match serde_json::from_slice(&body) {
+        Ok(devices) => devices,
+        Err(_) => {
+            return invalid_argument(
+                "Request body must be a JSON array of Device objects.",
+                &correlator,
+            )
+        }
+    };
+
+    // Array bounds (`minItems: 1`, `maxItems: 100`) — mirrors `addDevicesToAccess`.
+    if !(1..=100).contains(&devices.len()) {
+        return invalid_argument(
+            "The request body must contain between 1 and 100 devices.",
+            &correlator,
+        );
+    }
+    for device in &devices {
+        if let Err(msg) = validate_device(device) {
+            return invalid_argument(&msg, &correlator);
+        }
+    }
+
+    // The set of primary identifiers to evict (validation guarantees each device
+    // carries one).
+    let targets: std::collections::HashSet<String> =
+        devices.iter().filter_map(device_identifier).collect();
+
+    // Evict the matching roster entries and recompute stats atomically; `None`
+    // means no such access (→ 404). Body validation already ran, so a bad body
+    // wins over this 404 (mirrors `addDevicesToAccess`).
+    let hit = store::update(&access_id, |info| {
+        let Some(obj) = info.as_object_mut() else {
+            return;
+        };
+        let roster = obj
+            .entry("recentAccessDevices")
+            .or_insert_with(|| Value::Array(Vec::new()));
+        if !roster.is_array() {
+            *roster = Value::Array(Vec::new());
+        }
+        let arr = roster.as_array_mut().expect("roster is an array");
+        arr.retain(|entry| {
+            !entry
+                .get("device")
+                .and_then(device_identifier)
+                .map(|id| targets.contains(&id))
+                .unwrap_or(false)
+        });
+        // `stats` is recomputed from the surviving roster so the two agree.
+        let total_granted = arr.iter().filter(|d| d["status"] == "GRANTED").count();
+        let total_denied = arr.len() - total_granted;
+        obj.insert(
+            "stats".to_string(),
+            json!({
+                "totalDevices": total_granted + total_denied,
+                "totalGranted": total_granted,
+                "totalDenied": total_denied,
+            }),
+        );
+    });
+
+    match hit {
+        Some(()) => with_correlator(StatusCode::NO_CONTENT.into_response(), &correlator),
         None => with_correlator(
             CamaraError::not_found("No access found for the provided accessId.").into_response(),
             &correlator,
@@ -1867,6 +2002,214 @@ mod tests {
     #[tokio::test]
     async fn add_devices_without_a_token_is_unauthenticated() {
         let (status, _h, _b) = post_add_devices(
+            None,
+            &uuid_ending(12),
+            json!([{ "phoneNumber": "+123456789012" }]),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    // --- removeDevicesFromAccess -------------------------------------------
+
+    async fn post_remove_devices(
+        token: Option<&str>,
+        access_id: &str,
+        body: Value,
+        correlator: Option<&str>,
+    ) -> (StatusCode, HeaderMap, Value) {
+        let mut builder = Request::builder()
+            .method("POST")
+            .uri(format!(
+                "/dedicated-network-accesses/vwip/accesses/{access_id}/devices/remove"
+            ))
+            .header("host", HOST)
+            .header("content-type", "application/json");
+        if let Some(t) = token {
+            builder = builder.header("authorization", format!("Bearer {t}"));
+        }
+        if let Some(c) = correlator {
+            builder = builder.header("x-correlator", c);
+        }
+        let response = app()
+            .oneshot(builder.body(Body::from(serde_json::to_vec(&body).unwrap())).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let headers = response.headers().clone();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = if bytes.is_empty() {
+            Value::Null
+        } else {
+            serde_json::from_slice(&bytes).unwrap()
+        };
+        (status, headers, json)
+    }
+
+    #[tokio::test]
+    async fn remove_devices_evicts_matching_entries_and_updates_stats() {
+        // Create an access with three devices: two granted, one reserved → denied.
+        let create = mint_token(CREATE_SCOPE).await;
+        let (status, _h, created) = post_access(
+            &create,
+            json!({
+                "networkId": uuid_ending(12),
+                "devices": [
+                    { "phoneNumber": "+123456789012" },          // GRANTED
+                    { "networkAccessIdentifier": "user@operator" }, // GRANTED
+                    { "phoneNumber": "+123456789404" }           // reserved → DENIED
+                ]
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let id = created["id"].as_str().unwrap().to_string();
+        assert_eq!(created["stats"]["totalDevices"], 3);
+
+        // Remove one granted and the denied one (identified by their identifiers,
+        // not byte-identical Device objects). Body is a bare JSON array.
+        let remove = mint_token(DEVICES_REMOVE_SCOPE).await;
+        let (status, headers, body) = post_remove_devices(
+            Some(&remove),
+            &id,
+            json!([
+                { "phoneNumber": "+123456789012" },
+                { "phoneNumber": "+123456789404" }
+            ]),
+            Some("corr-rm"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(headers.get("x-correlator").unwrap(), "corr-rm");
+        assert!(body.is_null(), "204 carries no body");
+
+        // Only the NAI-granted device survives; stats recomputed to match.
+        let read = mint_token(READ_SCOPE).await;
+        let (status, _h, info) = get_access(&read, &id).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(info["stats"]["totalDevices"], 1);
+        assert_eq!(info["stats"]["totalGranted"], 1);
+        assert_eq!(info["stats"]["totalDenied"], 0);
+        let roster = info["recentAccessDevices"].as_array().unwrap();
+        assert_eq!(roster.len(), 1);
+        assert_eq!(
+            roster[0]["device"]["networkAccessIdentifier"],
+            "user@operator"
+        );
+    }
+
+    #[tokio::test]
+    async fn remove_devices_is_idempotent_for_absent_devices() {
+        // Create an access with one device.
+        let create = mint_token(CREATE_SCOPE).await;
+        let (status, _h, created) = post_access(
+            &create,
+            json!({
+                "networkId": uuid_ending(12),
+                "devices": [{ "phoneNumber": "+123456789012" }]
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let id = created["id"].as_str().unwrap().to_string();
+
+        // Removing a device that was never in the roster is a no-op → still 204.
+        let remove = mint_token(DEVICES_REMOVE_SCOPE).await;
+        let (status, _h, _b) = post_remove_devices(
+            Some(&remove),
+            &id,
+            json!([{ "phoneNumber": "+199999999999" }]),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        // The original roster is untouched.
+        let read = mint_token(READ_SCOPE).await;
+        let (_s, _h, info) = get_access(&read, &id).await;
+        assert_eq!(info["stats"]["totalDevices"], 1);
+        assert_eq!(info["recentAccessDevices"].as_array().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn remove_devices_rejects_a_malformed_body_before_the_store() {
+        let remove = mint_token(DEVICES_REMOVE_SCOPE).await;
+        // Non-array body → 400, even for an unknown access (body validated first).
+        let (status, _h, body) = post_remove_devices(
+            Some(&remove),
+            &uuid_ending(999),
+            json!({ "devices": [{ "phoneNumber": "+1" }] }),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "INVALID_ARGUMENT");
+        // Empty array (below minItems 1) → 400.
+        let (status, _h, _b) =
+            post_remove_devices(Some(&remove), &uuid_ending(999), json!([]), None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        // More than 100 devices → 400.
+        let many: Vec<Value> = (0..101).map(|_| json!({ "networkAccessIdentifier": "u@o" })).collect();
+        let (status, _h, _b) =
+            post_remove_devices(Some(&remove), &uuid_ending(999), json!(many), None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        // A device with no identifier → 400.
+        let (status, _h, _b) = post_remove_devices(
+            Some(&remove),
+            &uuid_ending(999),
+            json!([{ "foo": "bar" }]),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        // A non-E.164 phoneNumber → 400.
+        let (status, _h, _b) = post_remove_devices(
+            Some(&remove),
+            &uuid_ending(999),
+            json!([{ "phoneNumber": "12345" }]),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn remove_devices_from_an_unknown_access_is_404() {
+        // A well-formed body on a never-created access → 404 NOT_FOUND (the minted
+        // accessId has no reserved-suffix plane), correlator echoed.
+        let remove = mint_token(DEVICES_REMOVE_SCOPE).await;
+        let (status, headers, body) = post_remove_devices(
+            Some(&remove),
+            &uuid_ending(777),
+            json!([{ "phoneNumber": "+123456789012" }]),
+            Some("corr-rm"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["code"], "NOT_FOUND");
+        assert_eq!(headers.get("x-correlator").unwrap(), "corr-rm");
+    }
+
+    #[tokio::test]
+    async fn remove_devices_without_the_scope_is_forbidden() {
+        // The devices *add* scope does not grant the devices *remove* scope.
+        let token = mint_token(DEVICES_ADD_SCOPE).await;
+        let (status, _h, _b) = post_remove_devices(
+            Some(&token),
+            &uuid_ending(12),
+            json!([{ "phoneNumber": "+123456789012" }]),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn remove_devices_without_a_token_is_unauthenticated() {
+        let (status, _h, _b) = post_remove_devices(
             None,
             &uuid_ending(12),
             json!([{ "phoneNumber": "+123456789012" }]),
