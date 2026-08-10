@@ -2562,8 +2562,13 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     (`200`) or `404 NOT_FOUND` for an unknown id. Keyed only on the store state
     (the minted opaque `networkId` has no reserved-suffix plane), mirroring QoD
     `getSession`. `x-correlator` echoed.
-  - [ ] `GET /networks` (`listNetworks`) · `DELETE /networks/{networkId}`
-    (`deleteNetwork`) — the list/delete legs over the same store (later passes).
+  - [x] `GET /networks` (`listNetworks`, `dedicated-network:networks:read`) —
+    lists the stored `NetworkInfo`s as a bare JSON array (CAMARA has no list
+    wrapper); optional `name` query param filters by network name (a second
+    control plane), a `name` > 1024 chars → 400 INVALID_ARGUMENT. `store::all()`
+    + self-contained form-query decode (no new dep).
+  - [ ] `DELETE /networks/{networkId}` (`deleteNetwork`) — the delete leg over
+    the same store (later pass).
   - [ ] the other sibling Dedicated-Networks APIs (`dedicated-network-accesses`,
     `dedicated-network-areas`) — later, as capacity allows (the `-areas` API is
     spatial).
@@ -2593,6 +2598,28 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-10 — dedicated-network: added the list leg,
+  `GET /dedicated-network/vwip/networks` (`listNetworks`, scope
+  `dedicated-network:networks:read`) — the topmost unclaimed `[ ]` backlog leaf
+  after last pass's `readNetwork` (list/delete legs over the same store).
+  Confirmed the contract from the authoritative upstream `dedicated-network.yaml`
+  (`wip`, WebFetch): `GET /networks` returns a **bare JSON array** of
+  `NetworkInfo` (no list wrapper, `200`, empty when none) with one optional
+  `name` query param (`maxLength: 1024`); no pagination. Scoped to the list leg
+  this pass; `deleteNetwork` recorded as the one remaining `[ ]` sub-step. Two
+  planes (DESIGN §7): the in-memory store state (every network created this run)
+  and the optional `name` filter (only networks whose `name` equals it; a `name`
+  > 1024 chars → 400 INVALID_ARGUMENT). Shares QoD/carrier-billing's list shape;
+  new `store::all()` (values clone, lock never across await) + a self-contained
+  `application/x-www-form-urlencoded` decoder (`+`/`%XX`), so no query-string
+  dep. `x-correlator` echoed. spec: added the `GET /networks` op (optional
+  `name` query param, 200 array + two examples, 400/401/403,
+  `x-camarasim-scenarios`) to `specs/dedicated-network/vwip/openapi.yaml`; header
+  comment updated (create+read+list served, delete later). tests: +8
+  (`parse_name_filter` unit; list returns created networks filtered by name,
+  empty-array no-match, unfiltered array, name > maxLength → 400, scope 403,
+  no-token 401, x-correlator). `cargo test` 1897 green (was 1889);
+  `cargo build --release` green. No new dep. — binary: 3.4M (3,558,384 B)
 - 2026-08-10 — dedicated-network: added the read leg,
   `GET /dedicated-network/vwip/networks/{networkId}` (`readNetwork`, scope
   `dedicated-network:networks:read`) — the natural next slice after last pass's

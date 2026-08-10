@@ -12,8 +12,8 @@
 //! across an `.await`, so it never blocks the async runtime.
 //!
 //! The stored value is the network's rendered `NetworkInfo` JSON, returned
-//! verbatim by a future `GET`. `createNetwork` writes; the read/list/delete legs
-//! (later passes) read.
+//! verbatim by `GET`. `createNetwork` writes; the `readNetwork` (`get`) and
+//! `listNetworks` (`all`) legs read; the delete leg (a later pass) will evict.
 
 use serde_json::Value;
 use std::collections::HashMap;
@@ -49,6 +49,19 @@ pub fn get(id: &str) -> Option<Value> {
         .expect("dedicated-network store not poisoned")
         .get(id)
         .cloned()
+}
+
+/// Snapshot every stored network (its rendered `NetworkInfo` JSON), in
+/// unspecified order. `listNetworks` (GET /networks) uses this to render the
+/// list. The lock is held only for the clone of the values, never across an
+/// `.await`, so it never blocks the async runtime.
+pub fn all() -> Vec<Value> {
+    store()
+        .lock()
+        .expect("dedicated-network store not poisoned")
+        .values()
+        .cloned()
+        .collect()
 }
 
 /// Mint a fresh, opaque, UUID-v4-shaped network `id` (CAMARA `NetworkId` is

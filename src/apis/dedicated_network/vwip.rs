@@ -6,6 +6,8 @@
 //!   (operationId `createNetwork`).
 //! - `GET /dedicated-network/vwip/networks/{networkId}` — read a dedicated
 //!   network back by id (operationId `readNetwork`).
+//! - `GET /dedicated-network/vwip/networks` — list dedicated networks, optionally
+//!   filtered by `name` (operationId `listNetworks`).
 //!
 //! ## What it does
 //!
@@ -59,9 +61,20 @@
 //! minted id): a `networkId` returned by a prior `createNetwork` reads back its
 //! `NetworkInfo`; anything else → `404`. It requires the read scope
 //! `dedicated-network:networks:read`. `x-correlator` is echoed.
+//!
+//! ## `listNetworks` — list networks
+//!
+//! `GET /networks` returns a JSON **array** of the stored `NetworkInfo`s (`200`,
+//! empty array when none) — the CAMARA operation has no list wrapper. It shares
+//! the read scope `dedicated-network:networks:read`. The optional `name` query
+//! parameter (schema `maxLength: 1024`) is a genuine control plane: when present,
+//! only networks whose `name` equals it are returned (a `name` over 1024 chars →
+//! `400 INVALID_ARGUMENT`). Like the other list legs in CamaraSim, the store is
+//! process-global, so the list reflects every network created this run.
+//! `x-correlator` is echoed.
 
 use axum::body::Bytes;
-use axum::extract::Path;
+use axum::extract::{Path, RawQuery};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -86,7 +99,10 @@ const READ_SCOPE: &str = "dedicated-network:networks:read";
 /// Routes for Dedicated Network — Networks vwip, mounted at their canonical URLs.
 pub fn routes() -> Router {
     Router::new()
-        .route("/dedicated-network/vwip/networks", post(create_network))
+        .route(
+            "/dedicated-network/vwip/networks",
+            post(create_network).get(list_networks),
+        )
         .route(
             "/dedicated-network/vwip/networks/:network_id",
             get(read_network),
@@ -273,6 +289,104 @@ async fn read_network(claims: Claims, headers: HeaderMap, Path(network_id): Path
             &correlator,
         ),
     }
+}
+
+/// `GET /dedicated-network/vwip/networks` — list dedicated networks
+/// (`listNetworks`).
+///
+/// Returns a JSON array of the stored `NetworkInfo`s (`200`, empty when none).
+/// The optional `name` query parameter filters to networks whose `name` equals
+/// it (a genuine control plane); a `name` over the schema's 1024-char limit →
+/// `400 INVALID_ARGUMENT`. Requires the read scope. `x-correlator` echoed.
+async fn list_networks(claims: Claims, headers: HeaderMap, RawQuery(query): RawQuery) -> Response {
+    let correlator = headers.get("x-correlator").cloned();
+
+    if let Err(e) = claims.require_scope(READ_SCOPE) {
+        return with_correlator(e.into_response(), &correlator);
+    }
+
+    // Optional `name` filter (schema `maxLength: 1024`). Only the `name` query
+    // param is defined; any other param is ignored (CAMARA has no others here).
+    let name_filter = match parse_name_filter(query.as_deref()) {
+        Ok(f) => f,
+        Err(msg) => return invalid_argument(&msg, &correlator),
+    };
+
+    let networks: Vec<Value> = store::all()
+        .into_iter()
+        .filter(|n| match &name_filter {
+            Some(want) => n.get("name").and_then(Value::as_str) == Some(want.as_str()),
+            None => true,
+        })
+        .collect();
+
+    with_correlator((StatusCode::OK, Json(networks)).into_response(), &correlator)
+}
+
+/// Extract and validate the optional `name` query parameter for `listNetworks`.
+/// `Ok(Some(name))` when a valid `name` is present, `Ok(None)` when absent, and
+/// `Err(message)` when `name` exceeds the schema's 1024-char `maxLength`. Pure
+/// over its input, so it is unit-tested directly.
+fn parse_name_filter(query: Option<&str>) -> Result<Option<String>, String> {
+    let raw = query.unwrap_or("");
+    for (key, value) in url_form_pairs(raw) {
+        if key == "name" {
+            if value.chars().count() > 1024 {
+                return Err("`name` must be at most 1024 characters.".to_string());
+            }
+            return Ok(Some(value));
+        }
+    }
+    Ok(None)
+}
+
+/// Parse an `application/x-www-form-urlencoded` query string into decoded
+/// `(key, value)` pairs. A self-contained decoder (`+` → space, `%XX` → byte),
+/// so `listNetworks` needs no query-string dependency.
+fn url_form_pairs(query: &str) -> Vec<(String, String)> {
+    query
+        .split('&')
+        .filter(|p| !p.is_empty())
+        .map(|pair| {
+            let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
+            (url_decode(k), url_decode(v))
+        })
+        .collect()
+}
+
+/// Percent/`+` decode a single form component (lossy-UTF-8 for the decoded
+/// bytes). Unknown `%` escapes are left verbatim.
+fn url_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            b'%' if i + 2 < b.len() => {
+                let hi = (b[i + 1] as char).to_digit(16);
+                let lo = (b[i + 2] as char).to_digit(16);
+                match (hi, lo) {
+                    (Some(h), Some(l)) => {
+                        out.push((h * 16 + l) as u8);
+                        i += 3;
+                    }
+                    _ => {
+                        out.push(b'%');
+                        i += 1;
+                    }
+                }
+            }
+            c => {
+                out.push(c);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// The lifecycle `status` a `serviceAreaId` maps to (its trailing three digits
@@ -564,6 +678,45 @@ mod tests {
         (status, headers, json)
     }
 
+    async fn list_networks_req(
+        token: Option<&str>,
+        query: Option<&str>,
+        correlator: Option<&str>,
+    ) -> (StatusCode, HeaderMap, Value) {
+        let uri = match query {
+            Some(q) => format!("/dedicated-network/vwip/networks?{q}"),
+            None => "/dedicated-network/vwip/networks".to_string(),
+        };
+        let mut builder = Request::builder().method("GET").uri(uri).header("host", HOST);
+        if let Some(t) = token {
+            builder = builder.header("authorization", format!("Bearer {t}"));
+        }
+        if let Some(c) = correlator {
+            builder = builder.header("x-correlator", c);
+        }
+        let response = app()
+            .oneshot(builder.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let headers = response.headers().clone();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, headers, json)
+    }
+
+    // Create a network whose `name` is `name` (serviceAreaId tail `area_tail`),
+    // returning the minted id. Used to seed the shared store for list tests.
+    async fn create_named(name: &str, area_tail: u16) -> String {
+        let mut body = valid_body(area_tail);
+        body["name"] = json!(name);
+        let (status, _, created) = create_ok(body).await;
+        assert_eq!(status, StatusCode::CREATED);
+        created["id"].as_str().unwrap().to_string()
+    }
+
     async fn get_network(
         token: Option<&str>,
         network_id: &str,
@@ -847,6 +1000,99 @@ mod tests {
         assert_eq!(
             headers.get("x-correlator").and_then(|v| v.to_str().ok()),
             Some("corr-404")
+        );
+    }
+
+    // --- listNetworks ------------------------------------------------------
+
+    #[test]
+    fn parse_name_filter_extracts_and_validates() {
+        assert_eq!(parse_name_filter(None), Ok(None));
+        assert_eq!(parse_name_filter(Some("")), Ok(None));
+        assert_eq!(parse_name_filter(Some("name=floor-7")), Ok(Some("floor-7".into())));
+        // Percent- and plus-decoding.
+        assert_eq!(parse_name_filter(Some("name=north%20wing")), Ok(Some("north wing".into())));
+        assert_eq!(parse_name_filter(Some("name=north+wing")), Ok(Some("north wing".into())));
+        // Other params are ignored.
+        assert_eq!(parse_name_filter(Some("foo=bar&name=x")), Ok(Some("x".into())));
+        // Over maxLength → error.
+        let long = format!("name={}", "a".repeat(1025));
+        assert!(parse_name_filter(Some(&long)).is_err());
+    }
+
+    #[tokio::test]
+    async fn list_returns_created_networks_filtered_by_name() {
+        // Two networks under one unique name, one under another.
+        let name = "camarasim-list-A";
+        let other = "camarasim-list-B";
+        let id1 = create_named(name, 1).await;
+        let id2 = create_named(name, 2).await;
+        let _id3 = create_named(other, 1).await;
+
+        let read = mint_token(READ_SCOPE).await;
+        let (status, _, body) =
+            list_networks_req(Some(&read), Some(&format!("name={name}")), None).await;
+        assert_eq!(status, StatusCode::OK);
+        let arr = body.as_array().expect("array");
+        assert_eq!(arr.len(), 2, "only the two `{name}` networks");
+        let ids: Vec<&str> = arr.iter().map(|n| n["id"].as_str().unwrap()).collect();
+        assert!(ids.contains(&id1.as_str()) && ids.contains(&id2.as_str()));
+        assert!(arr.iter().all(|n| n["name"] == name));
+    }
+
+    #[tokio::test]
+    async fn list_with_no_match_is_an_empty_array() {
+        let read = mint_token(READ_SCOPE).await;
+        let (status, _, body) =
+            list_networks_req(Some(&read), Some("name=no-such-network-xyzzy"), None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, json!([]));
+    }
+
+    #[tokio::test]
+    async fn list_without_name_returns_a_json_array() {
+        // Seed at least one, then an unfiltered list is a (non-null) array.
+        create_named("camarasim-list-unfiltered", 1).await;
+        let read = mint_token(READ_SCOPE).await;
+        let (status, _, body) = list_networks_req(Some(&read), None, None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.is_array());
+        assert!(!body.as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_name_over_maxlength_is_invalid_argument() {
+        let read = mint_token(READ_SCOPE).await;
+        let query = format!("name={}", "a".repeat(1025));
+        let (status, _, body) = list_networks_req(Some(&read), Some(&query), None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "INVALID_ARGUMENT");
+    }
+
+    #[tokio::test]
+    async fn list_without_the_read_scope_is_forbidden() {
+        let token = mint_token("some:other-scope").await;
+        let (status, _, body) = list_networks_req(Some(&token), None, None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["code"], "PERMISSION_DENIED");
+    }
+
+    #[tokio::test]
+    async fn list_without_a_token_is_unauthenticated() {
+        let (status, _, body) = list_networks_req(None, None, None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["code"], "UNAUTHENTICATED");
+    }
+
+    #[tokio::test]
+    async fn list_echoes_x_correlator() {
+        let read = mint_token(READ_SCOPE).await;
+        let (status, headers, _) =
+            list_networks_req(Some(&read), None, Some("corr-list")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-list")
         );
     }
 }
