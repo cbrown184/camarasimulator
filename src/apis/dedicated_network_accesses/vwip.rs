@@ -10,6 +10,8 @@
 //!   access back by id (operationId `readAccess`).
 //! - `DELETE /dedicated-network-accesses/vwip/accesses/{accessId}` — delete an
 //!   access by id (operationId `deleteAccess`).
+//! - `GET /dedicated-network-accesses/vwip/accesses/{accessId}/devices` — list
+//!   the devices bound to an access, paginated (operationId `listDevices`).
 //!
 //! ## What it does
 //!
@@ -118,6 +120,10 @@ const READ_SCOPE: &str = "dedicated-network-accesses:accesses:read";
 /// Accesses).
 const DELETE_SCOPE: &str = "dedicated-network-accesses:accesses:delete";
 
+/// The OAuth2 scope `listDevices` requires (CAMARA Dedicated Network —
+/// Accesses).
+const DEVICES_READ_SCOPE: &str = "dedicated-network-accesses:devices:read";
+
 /// Routes for Dedicated Network — Accesses vwip, mounted at their canonical URLs.
 pub fn routes() -> Router {
     Router::new()
@@ -128,6 +134,10 @@ pub fn routes() -> Router {
         .route(
             "/dedicated-network-accesses/vwip/accesses/:access_id",
             get(read_access).delete(delete_access),
+        )
+        .route(
+            "/dedicated-network-accesses/vwip/accesses/:access_id/devices",
+            get(list_devices),
         )
 }
 
@@ -347,6 +357,185 @@ async fn delete_access(
             &correlator,
         ),
     }
+}
+
+/// `GET /dedicated-network-accesses/vwip/accesses/{accessId}/devices` — list the
+/// devices bound to a dedicated network access (`listDevices`).
+///
+/// Reads the roster the access recorded at `createAccess` — its stored
+/// `recentAccessDevices` (each an `AccessDevice` of `{ device, status }`) — and
+/// returns it as a paginated `AccessDevicesPage` (`{ items, pagination }`).
+/// Three control planes (docs/DESIGN.md §7): the opaque server-minted `accessId`
+/// → store state (an unknown/malformed id → `404 NOT_FOUND`; there is no
+/// reserved-suffix plane on a minted id, mirroring `readAccess`); the optional
+/// `deviceStatus` filter (`REQUESTED`/`GRANTED`/`DENIED`) narrows the roster (a
+/// genuine second plane; an unknown value → `400 INVALID_ARGUMENT`); and the
+/// `page`/`perPage` pagination window (non-integer → `400 INVALID_ARGUMENT`, a
+/// value `< 1` → `400 OUT_OF_RANGE`). Query validation runs before the store
+/// lookup, so a bad query wins over a `404`. Requires the
+/// `dedicated-network-accesses:devices:read` scope. `x-correlator` echoed.
+async fn list_devices(
+    claims: Claims,
+    headers: HeaderMap,
+    Path(access_id): Path<String>,
+    RawQuery(query): RawQuery,
+) -> Response {
+    let correlator = headers.get("x-correlator").cloned();
+
+    if let Err(e) = claims.require_scope(DEVICES_READ_SCOPE) {
+        return with_correlator(e.into_response(), &correlator);
+    }
+
+    // Validate + default the query parameters (page/perPage/deviceStatus) before
+    // the store lookup, so a malformed query is a 400 regardless of whether the
+    // access exists (mirrors the PATCH "body 400 wins over 404" convention).
+    let params = match parse_devices_list_params(query.as_deref()) {
+        Ok(p) => p,
+        Err(ParamError::Invalid(msg)) => return invalid_argument(&msg, &correlator),
+        Err(ParamError::OutOfRange(msg)) => return out_of_range(&msg, &correlator),
+    };
+
+    // Store state: an unknown/malformed accessId → 404 (no reserved-suffix plane).
+    let info = match store::get(&access_id) {
+        Some(info) => info,
+        None => {
+            return with_correlator(
+                CamaraError::not_found("No access found for the provided accessId.").into_response(),
+                &correlator,
+            )
+        }
+    };
+
+    // The roster is the access's recorded `recentAccessDevices` (AccessDevice[]).
+    let mut devices: Vec<Value> = info
+        .get("recentAccessDevices")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+
+    // `deviceStatus` filter (a genuine second control plane).
+    if let Some(want) = params.device_status.as_deref() {
+        devices.retain(|d| d.get("status").and_then(Value::as_str) == Some(want));
+    }
+
+    let page = build_access_devices_page(devices, &params);
+    with_correlator((StatusCode::OK, Json(page)).into_response(), &correlator)
+}
+
+/// The validated `page`/`perPage`/`deviceStatus` list controls for `listDevices`.
+#[derive(Debug, PartialEq)]
+struct DevicesListParams {
+    /// 1-based page index (schema `minimum: 1`, default `1`).
+    page: i64,
+    /// Page size (schema `minimum: 1`, default `10`).
+    per_page: i64,
+    /// Optional `DeviceStatus` filter (`REQUESTED`/`GRANTED`/`DENIED`).
+    device_status: Option<String>,
+}
+
+/// Why a `listDevices` query parameter was rejected — kept distinct so the
+/// handler maps each to the right CAMARA error (`400 INVALID_ARGUMENT` vs
+/// `400 OUT_OF_RANGE`). Keeping the parse pure over its input lets it be
+/// unit-tested directly.
+#[derive(Debug, PartialEq)]
+enum ParamError {
+    /// Non-integer `page`/`perPage`, or an unknown `deviceStatus` → INVALID_ARGUMENT.
+    Invalid(String),
+    /// A `page`/`perPage` below the schema minimum of 1 → OUT_OF_RANGE.
+    OutOfRange(String),
+}
+
+/// Parse and validate the `listDevices` query string. Absent `page`/`perPage`
+/// fall back to their schema defaults (`1`/`10`); a non-integer → `Invalid`; a
+/// value `< 1` → `OutOfRange`. An unknown `deviceStatus` (not one of the three
+/// enum values) → `Invalid`. Unknown query params are ignored. Pure over its
+/// input, so it is unit-tested directly.
+fn parse_devices_list_params(query: Option<&str>) -> Result<DevicesListParams, ParamError> {
+    let raw = query.unwrap_or("");
+    let mut page_raw: Option<String> = None;
+    let mut per_page_raw: Option<String> = None;
+    let mut device_status: Option<String> = None;
+    for (key, value) in url_form_pairs(raw) {
+        match key.as_str() {
+            "page" => page_raw = Some(value),
+            "perPage" => per_page_raw = Some(value),
+            "deviceStatus" => device_status = Some(value),
+            _ => {} // unknown params ignored
+        }
+    }
+
+    let page = parse_positive_int(page_raw.as_deref(), "page", 1)?;
+    let per_page = parse_positive_int(per_page_raw.as_deref(), "perPage", 10)?;
+
+    if let Some(status) = device_status.as_deref() {
+        if !matches!(status, "REQUESTED" | "GRANTED" | "DENIED") {
+            return Err(ParamError::Invalid(
+                "`deviceStatus` must be one of REQUESTED, GRANTED, DENIED.".to_string(),
+            ));
+        }
+    }
+
+    Ok(DevicesListParams {
+        page,
+        per_page,
+        device_status,
+    })
+}
+
+/// Parse an optional integer query parameter with a schema `minimum: 1`: absent
+/// → `default`; a non-integer → `Invalid`; a value `< 1` → `OutOfRange`. Pure
+/// over its input.
+fn parse_positive_int(value: Option<&str>, name: &str, default: i64) -> Result<i64, ParamError> {
+    match value {
+        None => Ok(default),
+        Some(raw) => {
+            let parsed: i64 = raw
+                .parse()
+                .map_err(|_| ParamError::Invalid(format!("`{name}` must be an integer.")))?;
+            if parsed < 1 {
+                Err(ParamError::OutOfRange(format!(
+                    "`{name}` must be greater than or equal to 1."
+                )))
+            } else {
+                Ok(parsed)
+            }
+        }
+    }
+}
+
+/// Build the `AccessDevicesPage` (`{ items, pagination }`) for the (already
+/// `deviceStatus`-filtered) device roster: the `page`-th window of `per_page`
+/// items plus a pagination envelope (`page`/`perPage`/`totalCount`/`totalPages`,
+/// the CamaraSim house convention — mirrors the sibling Network Profiles list).
+/// Pure over its input, so it is unit-tested directly.
+fn build_access_devices_page(devices: Vec<Value>, params: &DevicesListParams) -> Value {
+    let total_count = devices.len() as i64;
+    // Ceil-divide; 0 pages when there are no matching devices.
+    let total_pages = (total_count + params.per_page - 1) / params.per_page;
+
+    // `page` and `per_page` are both `>= 1`; `saturating_mul` guards against an
+    // absurd `page * per_page` overflowing `i64`.
+    let start = (params.page - 1).saturating_mul(params.per_page).min(total_count);
+    let end = start.saturating_add(params.per_page).min(total_count);
+    let items = &devices[start as usize..end as usize];
+
+    json!({
+        "items": items,
+        "pagination": {
+            "page": params.page,
+            "perPage": params.per_page,
+            "totalCount": total_count,
+            "totalPages": total_pages,
+        },
+    })
+}
+
+/// A 400 `OUT_OF_RANGE` CAMARA error, with the correlator echoed.
+fn out_of_range(message: &str, correlator: &Option<HeaderValue>) -> Response {
+    with_correlator(
+        CamaraError::new(StatusCode::BAD_REQUEST, "OUT_OF_RANGE", message).into_response(),
+        correlator,
+    )
 }
 
 /// Extract and validate the optional `networkId` query parameter for
@@ -1145,6 +1334,234 @@ mod tests {
     #[tokio::test]
     async fn delete_without_a_token_is_unauthenticated() {
         let (status, _h, _b) = delete_access_req(None, &uuid_ending(12), None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    // --- listDevices -------------------------------------------------------
+
+    #[test]
+    fn devices_list_params_default_and_validate() {
+        // Absent → schema defaults.
+        let p = parse_devices_list_params(None).unwrap();
+        assert_eq!((p.page, p.per_page), (1, 10));
+        assert_eq!(p.device_status, None);
+        // Explicit values are honoured; unknown params ignored.
+        let p = parse_devices_list_params(Some("page=2&perPage=5&foo=bar&deviceStatus=GRANTED"))
+            .unwrap();
+        assert_eq!((p.page, p.per_page), (2, 5));
+        assert_eq!(p.device_status.as_deref(), Some("GRANTED"));
+        // Non-integer page → Invalid; below-minimum perPage → OutOfRange.
+        assert_eq!(
+            parse_devices_list_params(Some("page=abc")),
+            Err(ParamError::Invalid("`page` must be an integer.".to_string()))
+        );
+        assert!(matches!(
+            parse_devices_list_params(Some("perPage=0")),
+            Err(ParamError::OutOfRange(_))
+        ));
+        // Unknown deviceStatus → Invalid.
+        assert!(matches!(
+            parse_devices_list_params(Some("deviceStatus=BOGUS")),
+            Err(ParamError::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn access_devices_page_windows_and_envelopes() {
+        let devices: Vec<Value> = (0..3)
+            .map(|i| json!({ "device": { "phoneNumber": format!("+1000000000{i:02}") }, "status": "GRANTED" }))
+            .collect();
+        // Page 1 of perPage 2 → first two items, 2 pages total.
+        let page = build_access_devices_page(
+            devices.clone(),
+            &DevicesListParams { page: 1, per_page: 2, device_status: None },
+        );
+        assert_eq!(page["items"].as_array().unwrap().len(), 2);
+        assert_eq!(page["pagination"]["page"], 1);
+        assert_eq!(page["pagination"]["perPage"], 2);
+        assert_eq!(page["pagination"]["totalCount"], 3);
+        assert_eq!(page["pagination"]["totalPages"], 2);
+        // Page 2 → the remaining single item.
+        let page = build_access_devices_page(
+            devices.clone(),
+            &DevicesListParams { page: 2, per_page: 2, device_status: None },
+        );
+        assert_eq!(page["items"].as_array().unwrap().len(), 1);
+        // A page beyond the end → empty items, envelope still correct.
+        let page = build_access_devices_page(
+            devices,
+            &DevicesListParams { page: 9, per_page: 2, device_status: None },
+        );
+        assert_eq!(page["items"].as_array().unwrap().len(), 0);
+        assert_eq!(page["pagination"]["totalCount"], 3);
+    }
+
+    async fn get_devices(
+        token: Option<&str>,
+        access_id: &str,
+        query: Option<&str>,
+        correlator: Option<&str>,
+    ) -> (StatusCode, HeaderMap, Value) {
+        let uri = match query {
+            Some(q) => format!("/dedicated-network-accesses/vwip/accesses/{access_id}/devices?{q}"),
+            None => format!("/dedicated-network-accesses/vwip/accesses/{access_id}/devices"),
+        };
+        let mut builder = Request::builder().method("GET").uri(uri).header("host", HOST);
+        if let Some(t) = token {
+            builder = builder.header("authorization", format!("Bearer {t}"));
+        }
+        if let Some(c) = correlator {
+            builder = builder.header("x-correlator", c);
+        }
+        let response = app().oneshot(builder.body(Body::empty()).unwrap()).await.unwrap();
+        let status = response.status();
+        let headers = response.headers().clone();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = if bytes.is_empty() {
+            Value::Null
+        } else {
+            serde_json::from_slice(&bytes).unwrap()
+        };
+        (status, headers, json)
+    }
+
+    #[tokio::test]
+    async fn create_then_list_the_devices_of_an_access() {
+        // Create an access with one granted + one denied device, then list them.
+        let create = mint_token(CREATE_SCOPE).await;
+        let (status, _h, created) = post_access(
+            &create,
+            json!({
+                "networkId": uuid_ending(12),
+                "devices": [
+                    { "phoneNumber": "+123456789012" }, // GRANTED
+                    { "phoneNumber": "+123456789404" }  // reserved → DENIED
+                ]
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let id = created["id"].as_str().unwrap();
+
+        let read = mint_token(DEVICES_READ_SCOPE).await;
+        let (status, headers, body) = get_devices(Some(&read), id, None, Some("corr-dev")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(headers.get("x-correlator").unwrap(), "corr-dev");
+        // The page carries both AccessDevices and a pagination envelope.
+        let items = body["items"].as_array().unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(body["pagination"]["totalCount"], 2);
+        assert_eq!(body["pagination"]["page"], 1);
+        assert_eq!(body["pagination"]["perPage"], 10);
+        assert_eq!(body["pagination"]["totalPages"], 1);
+        // Items are the AccessDevice roster the create recorded.
+        assert!(items.iter().any(|d| d["status"] == "GRANTED"));
+        assert!(items.iter().any(|d| d["status"] == "DENIED"));
+    }
+
+    #[tokio::test]
+    async fn list_devices_filters_by_device_status() {
+        let create = mint_token(CREATE_SCOPE).await;
+        let (status, _h, created) = post_access(
+            &create,
+            json!({
+                "networkId": uuid_ending(12),
+                "devices": [
+                    { "phoneNumber": "+123456789012" }, // GRANTED
+                    { "phoneNumber": "+123456789404" }  // DENIED
+                ]
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let id = created["id"].as_str().unwrap();
+
+        let read = mint_token(DEVICES_READ_SCOPE).await;
+        // Filter to just the denied device.
+        let (status, _h, body) = get_devices(Some(&read), id, Some("deviceStatus=DENIED"), None).await;
+        assert_eq!(status, StatusCode::OK);
+        let items = body["items"].as_array().unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["status"], "DENIED");
+        assert_eq!(items[0]["device"]["phoneNumber"], "+123456789404");
+        assert_eq!(body["pagination"]["totalCount"], 1);
+        // A status the roster has none of → empty page (never 404s).
+        let (status, _h, body) =
+            get_devices(Some(&read), id, Some("deviceStatus=REQUESTED"), None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["items"].as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn list_devices_paginates() {
+        let create = mint_token(CREATE_SCOPE).await;
+        let (status, _h, created) = post_access(
+            &create,
+            json!({
+                "networkId": uuid_ending(12),
+                "devices": [
+                    { "phoneNumber": "+123456780001" },
+                    { "phoneNumber": "+123456780002" },
+                    { "phoneNumber": "+123456780003" }
+                ]
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let id = created["id"].as_str().unwrap();
+
+        let read = mint_token(DEVICES_READ_SCOPE).await;
+        let (status, _h, body) = get_devices(Some(&read), id, Some("page=2&perPage=2"), None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["items"].as_array().unwrap().len(), 1, "second page holds the third device");
+        assert_eq!(body["pagination"]["page"], 2);
+        assert_eq!(body["pagination"]["totalCount"], 3);
+        assert_eq!(body["pagination"]["totalPages"], 2);
+    }
+
+    #[tokio::test]
+    async fn list_devices_bad_query_is_400_before_the_store() {
+        let read = mint_token(DEVICES_READ_SCOPE).await;
+        // Non-integer page on an unknown access → 400 (query validated first), not 404.
+        let (status, _h, body) =
+            get_devices(Some(&read), &uuid_ending(999), Some("page=abc"), None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "INVALID_ARGUMENT");
+        // perPage below the minimum → 400 OUT_OF_RANGE.
+        let (status, _h, body) =
+            get_devices(Some(&read), &uuid_ending(999), Some("perPage=0"), None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "OUT_OF_RANGE");
+        // Unknown deviceStatus → 400 INVALID_ARGUMENT.
+        let (status, _h, body) =
+            get_devices(Some(&read), &uuid_ending(999), Some("deviceStatus=BOGUS"), None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "INVALID_ARGUMENT");
+    }
+
+    #[tokio::test]
+    async fn list_devices_unknown_access_is_404() {
+        let read = mint_token(DEVICES_READ_SCOPE).await;
+        let (status, headers, body) =
+            get_devices(Some(&read), &uuid_ending(888), None, Some("corr-dev")).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["code"], "NOT_FOUND");
+        assert_eq!(headers.get("x-correlator").unwrap(), "corr-dev");
+    }
+
+    #[tokio::test]
+    async fn list_devices_without_the_scope_is_forbidden() {
+        // The access read scope does not grant the devices read scope.
+        let token = mint_token(READ_SCOPE).await;
+        let (status, _h, _b) = get_devices(Some(&token), &uuid_ending(12), None, None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn list_devices_without_a_token_is_unauthenticated() {
+        let (status, _h, _b) = get_devices(None, &uuid_ending(12), None, None).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
     }
 }

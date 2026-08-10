@@ -2632,8 +2632,23 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
         `…:accesses:delete`. New `store::all`/`store::remove`; self-contained
         query decode (no new dep). `x-correlator` echoed. **Completes the
         Accesses CRUD** (`/devices…` sub-resources remain).
-      - [ ] the `/accesses/{accessId}/devices…` sub-resources (`listDevices`,
-        `addDevicesToAccess`, `removeDevicesFromAccess`) — later passes.
+      - [~] the `/accesses/{accessId}/devices…` sub-resources:
+        - [x] `GET /accesses/{accessId}/devices` (`listDevices`,
+          `dedicated-network-accesses:devices:read`) — reads the access's recorded
+          device roster (its `recentAccessDevices`, each an `AccessDevice`) back as
+          a paginated `AccessDevicesPage` (`{items, pagination}`). Three control
+          planes (DESIGN §7): opaque `accessId` → store state (unknown → 404, no
+          reserved-suffix plane, mirroring `readAccess`); optional `deviceStatus`
+          filter (`REQUESTED`/`GRANTED`/`DENIED`, unknown → 400 INVALID_ARGUMENT) —
+          a genuine second plane; and the `page`/`perPage` window (non-integer →
+          400 INVALID_ARGUMENT, `<1` → 400 OUT_OF_RANGE), validated before the
+          store so a bad query wins over a 404. House pagination envelope
+          (`page`/`perPage`/`totalCount`/`totalPages`, mirroring Network Profiles).
+          `x-correlator` echoed. No new dep.
+        - [ ] `POST /accesses/{accessId}/devices/add` (`addDevicesToAccess`,
+          `…:devices:add`) + `POST /accesses/{accessId}/devices/remove`
+          (`removeDevicesFromAccess`, `…:devices:remove`) — the device-mutation
+          legs (201/207 add, 204/207 remove) — later passes.
     - [ ] `dedicated-network-areas` (spatial) — later.
 - [ ] Other CAMARA APIs as capacity allows
 
@@ -2661,6 +2676,34 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-10 — dedicated-network-accesses: added the **device-roster read leg**,
+  `GET /dedicated-network-accesses/vwip/accesses/{accessId}/devices`
+  (`listDevices`, scope `dedicated-network-accesses:devices:read`) — the topmost
+  unclaimed `[ ]` backlog leaf after last pass completed the Accesses CRUD.
+  Confirmed the contract from the authoritative upstream
+  `dedicated-network-accesses.yaml` (`wip`, WebFetch): `GET /accesses/{accessId}/devices`
+  → 200 `AccessDevicesPage` (`{items: AccessDevices, pagination: Pagination}`) with
+  `page`/`perPage`/`deviceStatus` query params, responses 200/400/401/403/404;
+  `AccessDevice` = `{device, status(REQUESTED|GRANTED|DENIED)}`. In CamaraSim the
+  roster is the access's recorded `recentAccessDevices` (already `AccessDevice[]`),
+  so `listDevices` reads back exactly what `createAccess` resolved — no new store
+  fn, reuses `store::get`. Three control planes (DESIGN §7): opaque `accessId` →
+  store state (unknown → 404, no reserved-suffix plane, mirroring `readAccess`);
+  optional `deviceStatus` filter (unknown → 400 INVALID_ARGUMENT) — a genuine
+  second plane; `page`/`perPage` window (non-integer → 400 INVALID_ARGUMENT, `<1`
+  → 400 OUT_OF_RANGE), validated before the store so a bad query wins over a 404.
+  House pagination envelope (`page`/`perPage`/`totalCount`/`totalPages`, mirroring
+  Network Profiles). New route + `list_devices` handler + pure
+  `parse_devices_list_params`/`build_access_devices_page` helpers in `vwip.rs`;
+  `x-correlator` echoed. spec: added the `/accesses/{accessId}/devices` GET op
+  (listDevices) + `AccessDevices`/`AccessDevicesPage`/`Pagination` schemas + query
+  params + `x-camarasim-scenarios` to
+  `specs/dedicated-network-accesses/vwip/openapi.yaml`; header + description
+  updated. tests: +9 (2 pure: params default/validate, page windowing/envelope;
+  7 integration: create→list roster, deviceStatus filter + empty-page, pagination,
+  bad-query-400-before-store (INVALID_ARGUMENT/OUT_OF_RANGE/unknown-status),
+  unknown-access→404, wrong-scope→403, no-token→401). No new dep. `cargo test`
+  1944 pass; `cargo build --release` ok. binary (release): 3,631,136 bytes (~3.5M).
 - 2026-08-10 — dedicated-network-accesses: added the **list + delete legs**,
   `GET /dedicated-network-accesses/vwip/accesses` (`listAccesses`, scope
   `…:accesses:read`) and `DELETE /dedicated-network-accesses/vwip/accesses/{accessId}`
