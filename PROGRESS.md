@@ -1108,6 +1108,21 @@ a server-minted opaque UUID, so the only control plane is the in-memory store
 state (no reserved-suffix plane on a minted id). `x-correlator` echoed. The
 list/delete legs and the sibling Dedicated-Networks APIs remain later passes.
 
+The Networks CRUD is now complete, and the first **sibling** Dedicated-Networks
+API has begun: **Dedicated Network — Accesses vwip** is mounted at
+`/dedicated-network-accesses/vwip` with its create leg `POST /accesses`
+(`createAccess`, scope `dedicated-network-accesses:accesses:create`). An access
+binds a set of devices (CAMARA `Device`s) to a dedicated `networkId`; `createAccess`
+mints an opaque UUID `id`, resolves each device to `GRANTED`/`DENIED` from its own
+identifier (a reserved-suffix identifier → `DENIED`), records the rendered
+`AccessInfo` (with aggregate `stats` + `recentAccessDevices`) in a new in-memory
+store, and returns `201`. The `networkId` reserved suffix is the top-level error
+plane (`…404` → no such network); request validation → 400. `sinkCredential` is
+accepted but never echoed. The `207` multi-status form, the read/list/delete legs
+and the `/accesses/{accessId}/devices…` sub-resources are documented cuts for
+later passes. This picks the non-spatial sibling (`-accesses`) ahead of the
+spatial `-areas`, honouring the phase order.
+
 ## In progress (claimed this pass)
 
 _None._  <!-- agent: put the claimed item + run timestamp here, clear it when done -->
@@ -2575,9 +2590,32 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     reserved-identifier plane, mirroring QoD `deleteSession`); synchronous `204`
     (no async `202`/`DELETE_REQUESTED`), no `sink` notification (documented cut).
     `x-correlator` echoed. **Completes the Networks CRUD.**
-  - [ ] the other sibling Dedicated-Networks APIs (`dedicated-network-accesses`,
+  - [~] the other sibling Dedicated-Networks APIs (`dedicated-network-accesses`,
     `dedicated-network-areas`) — later, as capacity allows (the `-areas` API is
     spatial).
+    - [~] **Dedicated Network — Accesses vwip** (`/dedicated-network-accesses/vwip`;
+      stateful, non-spatial — the access sibling of Networks; in-memory access
+      store `src/apis/dedicated_network_accesses/store.rs`):
+      - [x] `POST /accesses` (`createAccess`,
+        `dedicated-network-accesses:accesses:create`) — creates an access from a
+        `CreateAccessRequest` (`networkId` (UUID, required), optional `devices`
+        (1..=100 CAMARA `Device`s), `qosProfiles` (1..=32), `defaultQosProfile`,
+        `sink`/`sinkCredential`), mints an opaque UUID `id`, persists the rendered
+        `AccessInfo`, returns `201`. Three control planes (DESIGN §7): request
+        validation (bad body/non-UUID `networkId`/`devices` bounds/device with no
+        identifier/non-E.164 `phoneNumber`/`qosProfiles` bounds or empty name/
+        non-`https` `sink` → 400 INVALID_ARGUMENT); the `networkId` reserved
+        trailing-digit suffix → canonical CAMARA error (`…404` → no such network);
+        and each device's own identifier → per-device `GRANTED`/`DENIED`, driving
+        `stats` + `recentAccessDevices` (a genuine second plane). `sinkCredential`
+        accepted but never echoed (a secret). Cuts: the `207` multi-status
+        `ResultForDevice[]` form (partial denials are data inside the `201`), the
+        `409`/`422` request-level cases, `sink` notification, and the read/list/
+        delete + `/devices…` legs. `x-correlator` echoed. No new dep.
+      - [ ] read/list/delete legs (`readAccess`, `listAccesses`, `deleteAccess`)
+        + the `/accesses/{accessId}/devices…` sub-resources (`listDevices`,
+        `addDevicesToAccess`, `removeDevicesFromAccess`) — later passes.
+    - [ ] `dedicated-network-areas` (spatial) — later.
 - [ ] Other CAMARA APIs as capacity allows
 
 ## Cross-cutting (do alongside the item that needs it)
@@ -2604,6 +2642,37 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-10 — dedicated-network-accesses: mounted the new **Accesses** sibling
+  API and its create leg, `POST /dedicated-network-accesses/vwip/accesses`
+  (`createAccess`, scope `dedicated-network-accesses:accesses:create`) — the
+  topmost unclaimed `[ ]` backlog leaf after the Networks CRUD completed; picked
+  the non-spatial sibling (`-accesses`) over the spatial `-areas`, honouring the
+  phase order. Confirmed the contract from the authoritative upstream
+  `dedicated-network-accesses.yaml` (`wip`, WebFetch): base path
+  `dedicated-network-accesses/vwip`, `createAccess` 201/207/400/401/403/404/409/422,
+  `CreateAccessRequest` = `BaseAccessInfo` (`networkId` required) + `devices`
+  (1..=100 CAMARA `Device`s), `AccessInfo` with `stats`
+  (totalDevices/Granted/Denied) + `recentAccessDevices` (`AccessDevice`
+  {device,status}), `DeviceStatus` enum REQUESTED/GRANTED/DENIED. New module
+  `src/apis/dedicated_network_accesses/{store.rs,vwip.rs}` +
+  `dedicated_network_accesses.rs`, wired into `apis.rs`, `openapi.rs` and the `/`
+  catalog. Three control planes (DESIGN §7): request validation → 400
+  INVALID_ARGUMENT; `networkId` reserved suffix → canonical error (`…404` = no
+  such network); per-device identifier → GRANTED/DENIED driving stats +
+  recentAccessDevices. `sinkCredential` accepted, never echoed. Cuts documented
+  in the spec: 207 multi-status (partial denials are data in the 201), 409/422
+  request-level cases, sink notification, read/list/delete + `/devices…` legs.
+  In-memory store mirrors `dedicated_network::store` (Mutex<HashMap>, lock never
+  across await; SHA-256 UUID-v4 id mint, no uuid/rand dep). spec: added
+  `specs/dedicated-network-accesses/vwip/openapi.yaml` (createAccess op + Device/
+  Devices/DeviceStatus/AccessDevice/AccessStats/BaseAccessInfo/CreateAccessRequest/
+  AccessInfo/AccessError schemas, x-camarasim-scenarios). tests: +17 (6 pure-unit:
+  uuid/e164 shape, device_identifier precedence, device_status grant/deny,
+  validate_device, build_access_info; 2 store; 9 integration: happy 2-device grant,
+  devices omitted, reserved-suffix device denied+counted, reserved networkId →
+  canonical error, malformed → 400 set, qosProfiles bounds, non-https sink, scope
+  403, no-token 401). `cargo test` 1919 green (was 1902); `cargo build --release`
+  green. No new dep. — binary: 3.5M (3,597,352 B)
 - 2026-08-10 — dedicated-network: added the delete leg,
   `DELETE /dedicated-network/vwip/networks/{networkId}` (`deleteNetwork`, scope
   `dedicated-network:networks:delete`) — the topmost unclaimed `[ ]` backlog

@@ -263,6 +263,10 @@ const SPECS: &[(&str, &str)] = &[
         include_str!("../../specs/dedicated-network/vwip/openapi.yaml"),
     ),
     (
+        "/dedicated-network-accesses/vwip/openapi.yaml",
+        include_str!("../../specs/dedicated-network-accesses/vwip/openapi.yaml"),
+    ),
+    (
         "/auth/openapi.yaml",
         include_str!("../../specs/auth/openapi.yaml"),
     ),

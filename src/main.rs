@@ -362,6 +362,12 @@ async fn catalog() -> Json<Value> {
                 "version": "vwip",
                 "base_path": "/dedicated-network/vwip",
                 "spec_url": "/dedicated-network/vwip/openapi.yaml",
+            },
+            {
+                "name": "dedicated-network-accesses",
+                "version": "vwip",
+                "base_path": "/dedicated-network-accesses/vwip",
+                "spec_url": "/dedicated-network-accesses/vwip/openapi.yaml",
             }
         ],
         "authorization_servers": [{
