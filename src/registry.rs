@@ -377,4 +377,27 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn spec_server_url_matches_mounted_base_path() {
+        // Contract-harness invariant (DESIGN §9): every vendored CAMARA spec
+        // declares its base path in `servers[].url` as `{apiRoot}/{name}/{version}`,
+        // and the router mounts the API at exactly that `base_path()`. A newly
+        // vendored spec that kept the CAMARA template's original server url — or an
+        // entry mounted at a version its spec doesn't declare — is a real drift the
+        // existing catalog↔served-spec tests can't see (they check *which* specs are
+        // served, not that a spec's advertised path matches where it's mounted).
+        // This ties the two together: the served contract must name the served path.
+        for api in APIS {
+            let expected = format!("url: \"{{apiRoot}}{}\"", api.base_path());
+            assert!(
+                api.body.contains(&expected),
+                "{} spec's servers url does not match its mounted base path {} \
+                 (expected the body to contain `{}`)",
+                api.name,
+                api.base_path(),
+                expected
+            );
+        }
+    }
 }

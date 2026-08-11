@@ -2864,15 +2864,23 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `/{api}/v{n}/openapi.yaml`, plus `/auth/openapi.yaml` + `/shared/errors.yaml` so
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
-- [~] Contract-test harness (validate responses against vendored spec) — first
-  slice landed: a registry/wiring contract test (`src/main.rs`
-  `catalog_spec_urls_match_served_specs_and_resolve`) asserts the `/` catalog's
-  `spec_url` set exactly equals the served API-spec set (new
-  `apis::openapi::api_spec_urls`, single source of truth) and that every
-  catalogued `spec_url` resolves as `application/yaml` through the full app, so
-  catalog↔spec drift (a newly mounted API missing from the catalog, or a
-  `spec_url` that 404s) fails CI. Full response-vs-schema validation still TODO
-  (would need a YAML/JSON-Schema validator — a dependency trade-off, deferred).
+- [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - a registry/wiring contract test (`src/main.rs`
+    `catalog_spec_urls_match_served_specs_and_resolve`) asserts the `/` catalog's
+    `spec_url` set exactly equals the served API-spec set (new
+    `apis::openapi::api_spec_urls`, single source of truth) and that every
+    catalogued `spec_url` resolves as `application/yaml` through the full app, so
+    catalog↔spec drift (a newly mounted API missing from the catalog, or a
+    `spec_url` that 404s) fails CI.
+  - a spec↔mount-path contract test (`src/registry.rs`
+    `spec_server_url_matches_mounted_base_path`) asserts every embedded spec
+    declares its base path in `servers[].url` as `{apiRoot}{base_path()}`, so a
+    newly vendored spec that kept the CAMARA template's original server url — or an
+    entry mounted at a version its own spec doesn't declare — fails CI (the served
+    contract must name the path it is served at). Complements the catalog↔served
+    test above, which checks *which* specs serve, not that each names its own path.
+  Full response-vs-schema validation still TODO (would need a YAML/JSON-Schema
+  validator — a dependency trade-off, deferred).
 
 ---
 
@@ -2880,6 +2888,22 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-11 — contract-harness: added a **spec↔mount-path** contract test
+  (`src/registry.rs` `spec_server_url_matches_mounted_base_path`) asserting every
+  embedded vendored spec advertises its base path in `servers[].url` as
+  `{apiRoot}{base_path()}` — the path the router actually mounts it at. The
+  feature-API backlog stays effectively exhausted (remaining `[ ]` leaves are the
+  `https://` sink-TLS cases needing a multi-MB rustls client vs the small-binary
+  directive, and open-ended state streams with no live worker), so this advanced
+  the cross-cutting **contract-test harness** item, closing a real drift the
+  existing catalog↔served-spec tests can't see: those check *which* specs are
+  served, not that a spec names the path it is served at, so a spec copy-pasted
+  with the CAMARA template's original `servers` url — or mounted at a version its
+  own spec doesn't declare — would pass today. Verified the invariant already
+  holds across all 60 registry entries before asserting it (test-only; no vendored
+  spec or server-code change, so no behaviour/spec drift). Tests: +1 registry unit
+  test. `cargo test` 2121 green (was 2120), `cargo build --release` warning-clean.
+  No new dep; binary unchanged (`#[cfg(test)]`-only). — binary: 3.7M (3845736 B, +0 B)
 - 2026-08-11 — registry: collapsed the **two hand-maintained parallel API lists**
   into one source of truth, completing the cross-cutting `registry.rs` §9 item.
   New `src/registry.rs` holds `APIS: &[ApiSpec{name, version, body}]` (each `body`
