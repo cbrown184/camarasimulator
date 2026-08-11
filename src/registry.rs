@@ -837,6 +837,88 @@ mod tests {
         out
     }
 
+    /// Extract a label for every parameter object marked `in: path` that is
+    /// **missing a `required: true`** declaration — without a YAML dep.
+    ///
+    /// OpenAPI makes `required` OPTIONAL on a Parameter Object in general, but for
+    /// a path parameter it is REQUIRED and its value MUST be `true` (a path
+    /// template variable is never omissible). A path parameter with no `required:`
+    /// key, or one set to `false`, is therefore an invalid document. This mirrors
+    /// `declared_path_parameter_names`' object scan: for each `in: path` key (a
+    /// bare mapping key or the first key of a `- ` sequence item) at effective
+    /// indentation `ind`, it scans that parameter object's own sibling keys (at
+    /// indentation `ind`, bounded by a dedent out of the object) for a `required:`
+    /// key and reads its value, and — for a useful label — the object's `name` the
+    /// same way. A key indented past `ind` is a nested child (e.g. a `schema:`
+    /// subtree), so a `required: true` inside a sub-schema never satisfies the
+    /// parameter's own requirement.
+    fn path_parameters_missing_required_true(body: &str) -> Vec<String> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let bare = line.trim_start();
+            let key = bare.strip_prefix("- ").unwrap_or(bare);
+            if key.trim() != "in: path" {
+                continue;
+            }
+            // Indentation of the `in:` key itself (past a `- ` opener, if any).
+            let ind = indent(line) + if bare.len() != key.len() { 2 } else { 0 };
+            let mut required_true = false;
+            let mut name: Option<String> = None;
+            for step in [-1i64, 1] {
+                let mut j = i as i64;
+                loop {
+                    j += step;
+                    if j < 0 || j as usize >= lines.len() {
+                        break;
+                    }
+                    let l = lines[j as usize];
+                    if l.trim().is_empty() {
+                        break;
+                    }
+                    let li = indent(l);
+                    if li < ind {
+                        // Dedented out of this parameter object. A `- name: X`
+                        // sequence-item opener sits at `ind`-2 and carries the
+                        // object's name in its first key — capture it for the label
+                        // before leaving.
+                        if li + 2 == ind {
+                            if let Some(rest) = l.trim_start().strip_prefix("- ") {
+                                if let Some(v) = rest.strip_prefix("name:") {
+                                    let v = v.trim().trim_matches('"').trim_matches('\'');
+                                    if !v.is_empty() && name.is_none() {
+                                        name = Some(v.to_string());
+                                    }
+                                }
+                            }
+                        }
+                        break;
+                    }
+                    if li != ind {
+                        continue; // a nested child (e.g. a `schema:` subtree)
+                    }
+                    let t = l.trim_start().strip_prefix("- ").unwrap_or(l.trim_start());
+                    if let Some(v) = t.strip_prefix("required:") {
+                        if v.trim() == "true" {
+                            required_true = true;
+                        }
+                    }
+                    if let Some(v) = t.strip_prefix("name:") {
+                        let v = v.trim().trim_matches('"').trim_matches('\'');
+                        if !v.is_empty() {
+                            name = Some(v.to_string());
+                        }
+                    }
+                }
+            }
+            if !required_true {
+                out.push(name.unwrap_or_else(|| format!("<unnamed>@line {}", i + 1)));
+            }
+        }
+        out
+    }
+
     /// Extract the labels (`METHOD /path`) of every operation a spec declares
     /// that is **missing** a `responses:` object — without a YAML dep.
     ///
@@ -2083,6 +2165,121 @@ components:
             assert_eq!(
                 templated, declared,
                 "{}: path template variables and declared path parameters must match",
+                api.name
+            );
+        }
+    }
+
+    #[test]
+    fn every_path_parameter_declares_required_true() {
+        // Contract-harness invariant (OpenAPI structural rule): every `in: path`
+        // parameter a mounted spec declares MUST carry `required: true`. OpenAPI
+        // makes `required` OPTIONAL on a Parameter Object in general, but for a path
+        // parameter it is REQUIRED and its value MUST be `true` — a path template
+        // variable is not omissible, so a path parameter with no `required:` key (or
+        // one set to `false`) is an invalid document a Redoc/Swagger/codegen client
+        // rejects or mis-binds. This is a live copy-paste hazard: a new endpoint's
+        // parameter block is drafted from a sibling, so a query parameter (whose
+        // `required` defaults to/reads `false`) re-tagged `in: path`, or a path
+        // parameter block that dropped its `required: true` line, slips past every
+        // existing contract test — the path-templating test checks that path
+        // variables and path parameters line up by *name*, never that each path
+        // parameter is marked required; the responses/operationId/description tests
+        // check operation and response fields, never parameter objects. Verified
+        // true (all 42 `in: path` parameters across the 19 path-templating specs)
+        // before asserting.
+        for api in APIS {
+            let missing = path_parameters_missing_required_true(api.body);
+            assert!(
+                missing.is_empty(),
+                "{} spec declares `in: path` parameter(s) without `required: true`: \
+                 {:?} — a path parameter MUST be `required: true` (OpenAPI)",
+                api.name,
+                missing
+            );
+        }
+    }
+
+    #[test]
+    fn path_parameter_required_extraction_rules() {
+        // Unit-cover `path_parameters_missing_required_true` so the contract test
+        // above can't pass vacuously and its scoping is pinned: a path parameter
+        // carrying `required: true` (sequence or mapping form, name-first or
+        // in-first) is not flagged; one with `required: false`, or none at all, is
+        // flagged; a `required: true` sitting inside a nested `schema:` (not the
+        // parameter's own sibling of `in:`) does not satisfy it; and an `in: query`
+        // parameter — whose `required` is genuinely optional — is never considered.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a/{good}:
+    get:
+      parameters:
+        - name: good
+          in: path
+          required: true
+  /b/{missing}:
+    get:
+      parameters:
+        - name: missing
+          in: path
+          schema:
+            type: string
+  /c/{falsey}:
+    get:
+      parameters:
+        - in: path
+          name: falsey
+          required: false
+  /d/{nested}:
+    get:
+      parameters:
+        - name: nested
+          in: path
+          schema:
+            required: true
+  /e:
+    get:
+      parameters:
+        - name: q
+          in: query
+components:
+  parameters:
+    Legacy:
+      name: legacyGood
+      in: path
+      required: true
+";
+        let flagged = path_parameters_missing_required_true(body);
+        // `good` (sequence item, name-first) and `legacyGood` (bare mapping form)
+        // carry `required: true` → not flagged. `missing` (no `required:` at all),
+        // `falsey` (`required: false`, in-first sequence form), and `nested` (its
+        // only `required: true` is nested inside `schema:`, not a sibling of `in:`)
+        // → flagged. The `in: query` `q` is never a path parameter.
+        assert!(flagged.contains(&"missing".to_string()), "flagged: {flagged:?}");
+        assert!(flagged.contains(&"falsey".to_string()), "flagged: {flagged:?}");
+        assert!(flagged.contains(&"nested".to_string()), "flagged: {flagged:?}");
+        assert!(!flagged.contains(&"good".to_string()), "flagged: {flagged:?}");
+        assert!(!flagged.contains(&"legacyGood".to_string()), "flagged: {flagged:?}");
+        assert!(!flagged.contains(&"q".to_string()), "flagged: {flagged:?}");
+        assert_eq!(
+            flagged.len(),
+            3,
+            "exactly the three broken path parameters expected: {flagged:?}"
+        );
+
+        // Non-vacuous floor: every registered spec already satisfies the invariant
+        // (no `in: path` parameter is missing `required: true`) — combined with the
+        // positive cases above proving the extractor *does* flag real breaks, this
+        // makes the contract test assert over a real, non-empty population rather
+        // than an empty loop.
+        for api in APIS {
+            assert!(
+                path_parameters_missing_required_true(api.body).is_empty(),
+                "{}: every `in: path` parameter must declare `required: true`",
                 api.name
             );
         }

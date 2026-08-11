@@ -3117,6 +3117,28 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     (`responses_missing_description_extraction_rules`, incl. a non-vacuous floor
     over all specs) so the contract can't pass vacuously. Verified true (1157
     response entries across all 57 mounted specs, none missing) before asserting.
+  - a path-parameter-`required: true` contract test (`src/registry.rs`
+    `every_path_parameter_declares_required_true`) asserts every `in: path`
+    parameter a mounted spec declares carries `required: true`. OpenAPI makes
+    `required` OPTIONAL on a Parameter Object in general, but for a **path**
+    parameter it is REQUIRED and its value MUST be `true` (a path template variable
+    is never omissible), so a path parameter with no `required:` key — or one set to
+    `false` — is an invalid document a client/codegen tool rejects or mis-binds.
+    Closes the gap the sibling `path_template_params_match_declared_path_parameters`
+    leaves: that lines up path *variables* and path *parameters* by **name**, never
+    that each path parameter is marked required. Catches the copy-paste drift where
+    a query parameter (whose `required` reads `false`) is re-tagged `in: path`, or a
+    pasted path-parameter block drops its `required: true` line — invisible to the
+    responses/operationId/description tests (operation- and response-scoped) too. A
+    pure `path_parameters_missing_required_true` extractor (no YAML dep; reuses
+    `declared_path_parameter_names`' `in: path` object scan — sequence and mapping
+    forms — and looks for a `required: true` at exactly the parameter object's own
+    child indent, so a `required: true` nested inside a `schema:` never satisfies
+    it) is unit-covered (`path_parameter_required_extraction_rules`: positive
+    name-first/in-first/mapping cases, negative missing/`false`/nested-schema/
+    `in: query` cases, plus a non-vacuous floor over all specs) so the contract
+    can't pass vacuously. Verified true (all 42 `in: path` parameters across the 19
+    path-templating specs) before asserting.
   Full response-vs-schema validation still TODO (would need a YAML/JSON-Schema
   validator — a dependency trade-off, deferred).
 
@@ -3126,6 +3148,32 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-11 — contract-harness: added a **path-parameter-`required: true`**
+  contract test (`src/registry.rs` `every_path_parameter_declares_required_true`)
+  asserting every `in: path` parameter a mounted spec declares carries
+  `required: true`. OpenAPI makes `required` optional on a Parameter Object in
+  general, but for a **path** parameter it is REQUIRED and MUST be `true` (a path
+  template variable is not omissible), so a path param with no `required:` — or one
+  set to `false` — is an invalid document a client/codegen tool rejects or
+  mis-binds. Feature-API backlog stays effectively exhausted (remaining `[ ]` leaves
+  are `https://` sink-TLS cases needing a multi-MB rustls client vs the small-binary
+  directive, and open-ended state streams with no live worker), so this advanced the
+  cross-cutting **contract-test harness** item. Closes the gap the sibling
+  `path_template_params_match_declared_path_parameters` leaves: that lines up path
+  *variables* and path *parameters* by name, never that each path parameter is
+  marked required — so a query param (whose `required` reads `false`) re-tagged
+  `in: path`, or a pasted path-param block that dropped `required: true`, sails
+  through. One pure helper `path_parameters_missing_required_true` (no YAML dep;
+  reuses `declared_path_parameter_names`' `in: path` object scan for both sequence
+  and mapping forms, then requires a `required: true` at exactly the parameter
+  object's own child indent — so a `required: true` nested in a `schema:` never
+  satisfies it) is unit-covered (`path_parameter_required_extraction_rules`:
+  positive name-first/in-first/mapping cases, negative missing/`false`/nested-schema/
+  `in: query` cases, plus a non-vacuous floor over all specs) so the contract can't
+  pass vacuously. Verified true (all 42 `in: path` parameters across the 19
+  path-templating specs) before asserting. Tests: +2 registry (1 contract + 1 helper
+  unit). `cargo test` 2152 green (was 2150), `cargo build --release` warning-clean.
+  No new dep; binary unchanged (`#[cfg(test)]`-only). — binary: 3.7M (3851880 B, +0 B)
 - 2026-08-11 — contract-harness: added an **every-response-has-a-`description`**
   contract test (`src/registry.rs` `every_declared_response_has_a_description`)
   asserting every response a mounted spec declares carries a `description` — the
