@@ -3056,6 +3056,26 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     non-vacuous floor over all specs) so the contract can't pass vacuously.
     Verified true (142 operations across all mounted specs, none missing) before
     asserting.
+  - an every-operation-has-an-`operationId` contract test (`src/registry.rs`
+    `every_operation_declares_an_operation_id`) asserts every operation a mounted
+    spec declares carries an `operationId`. OpenAPI marks it optional, but **CAMARA
+    mandates** one on every operation — it is the operation's canonical name, the
+    method a codegen client derives, and the key each handler/scope narrative is
+    written against. Closes the gap the sibling
+    `operation_ids_are_unique_within_each_spec` leaves: that pins the *other* half
+    of the operationId contract (≥1 per spec, none repeated **within** a document)
+    but a spec with two operations sharing an id and a third with none still passes
+    it. Catches the copy-paste drift where a pasted/edited operation block loses its
+    `operationId:` line, leaving an anonymous operation codegen names arbitrarily —
+    invisible to the required-`responses` test (checks the one REQUIRED field) and
+    the identity/wiring/path-templating/`$ref` tests. A pure
+    `operations_without_operation_id` extractor (no YAML dep; mirrors
+    `operations_without_responses`' path-item/method scoping, but matches the
+    `operationId` **key name** before its inline-value colon rather than a whole
+    trimmed line) is unit-covered (`operations_without_operation_id_extraction_rules`,
+    incl. a non-vacuous floor over all specs) so the contract can't pass vacuously.
+    Verified true (every operation across all 57 mounted specs carries an
+    operationId) before asserting.
   Full response-vs-schema validation still TODO (would need a YAML/JSON-Schema
   validator — a dependency trade-off, deferred).
 
@@ -3065,6 +3085,32 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-11 — contract-harness: added an **every-operation-has-an-`operationId`**
+  contract test (`src/registry.rs` `every_operation_declares_an_operation_id`)
+  asserting every operation a mounted spec declares carries an `operationId`.
+  OpenAPI marks it optional but CAMARA mandates one on every operation (the
+  operation's canonical name — the codegen method name, and the key each simulator
+  handler/scope narrative is written against). Closes the gap the sibling
+  `operation_ids_are_unique_within_each_spec` leaves: that pins ≥1 per spec + no
+  duplicate *within* a doc, but a spec with two ops sharing an id and a third with
+  none passes it (two distinct ids, no dup). Feature-API backlog stays effectively
+  exhausted (remaining `[ ]` leaves are `https://` sink-TLS cases needing a
+  multi-MB rustls client vs the small-binary directive, and open-ended state
+  streams with no live worker), so this advanced the cross-cutting **contract-test
+  harness** item. Closes a live copy-paste drift no existing test sees: an operation
+  block pasted from a sibling can lose its `operationId:` line (an anonymous op
+  codegen names arbitrarily) — the required-`responses`/path-templating/version/
+  parity/`$ref` tests check the one REQUIRED field, path variables, identity, or
+  wiring, never that every op is named. One pure helper
+  `operations_without_operation_id` (no YAML dep; mirrors
+  `operations_without_responses`' path-item/method scoping, matching the
+  `operationId` key name before its inline-value colon) is unit-covered
+  (`operations_without_operation_id_extraction_rules`, incl. a non-vacuous floor
+  over all specs) so the contract can't pass vacuously. Verified true (every
+  operation across all 57 mounted specs carries an operationId) before asserting.
+  Tests: +2 registry (1 contract + 1 helper unit). `cargo test` 2146 green (was
+  2144), `cargo build --release` warning-clean. No new dep; binary unchanged
+  (`#[cfg(test)]`-only). — binary: 3.7M (3851880 B, +0 B)
 - 2026-08-11 — contract-harness: added a **required-`responses`** contract test
   (`src/registry.rs` `every_operation_declares_a_responses_object`) asserting every
   operation a mounted spec declares carries a `responses` object — the single

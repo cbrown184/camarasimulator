@@ -866,6 +866,73 @@ mod tests {
         out
     }
 
+    /// The `METHOD /path` label of every operation a spec declares that carries no
+    /// `operationId` key. Mirrors [`operations_without_responses`]'s scoping (a
+    /// 4-space HTTP-verb key under a 2-space `/…` path item beneath the top-level
+    /// `paths:` block), but scans each operation's block for a 6-space
+    /// `operationId:` key. Unlike `responses:` (a mapping key whose value is the
+    /// nested block on the following lines), `operationId:` is a scalar key with its
+    /// value inline on the same line, so the block is matched on the `operationId`
+    /// key name, not on the whole trimmed line.
+    fn operations_without_operation_id(body: &str) -> Vec<String> {
+        const METHODS: [&str; 8] =
+            ["get", "put", "post", "delete", "patch", "options", "head", "trace"];
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let mut out = Vec::new();
+        let mut in_paths = false;
+        let mut path: Option<String> = None;
+        for (i, line) in lines.iter().enumerate() {
+            let is_top_level_key =
+                !line.is_empty() && !line.starts_with(char::is_whitespace);
+            if is_top_level_key {
+                in_paths = line.trim_end() == "paths:";
+                path = None;
+                continue;
+            }
+            if !in_paths {
+                continue;
+            }
+            if let Some(rest) = line.strip_prefix("  ") {
+                if !rest.starts_with(char::is_whitespace) && rest.starts_with('/') {
+                    let key = rest.trim_end().strip_suffix(':').unwrap_or(rest.trim_end());
+                    path = Some(key.to_string());
+                    continue;
+                }
+            }
+            let Some(current_path) = path.as_deref() else { continue };
+            if indent(line) != 4 {
+                continue;
+            }
+            let key = line.trim_start();
+            let Some(name) = key.strip_suffix(':') else { continue };
+            if name.contains(char::is_whitespace) || !METHODS.contains(&name) {
+                continue;
+            }
+            // Scan the operation's block for a 6-space `operationId:` key (a scalar
+            // key with an inline value, so match on the key name before the colon).
+            let mut has_operation_id = false;
+            for l in &lines[i + 1..] {
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) <= 4 {
+                    break; // dedented out of this operation
+                }
+                if indent(l) == 6
+                    && l.trim_start().split_once(':').map(|(k, _)| k) == Some("operationId")
+                {
+                    has_operation_id = true;
+                    break;
+                }
+            }
+            if !has_operation_id {
+                out.push(format!("{} {}", name.to_uppercase(), current_path));
+            }
+        }
+        out
+    }
+
     #[test]
     fn registry_is_non_empty() {
         // Guards a broken/emptied list: both the catalog and the served specs are
@@ -1927,6 +1994,103 @@ components:
             assert!(
                 operations_without_responses(api.body).is_empty(),
                 "{}: every operation must declare a `responses` object",
+                api.name
+            );
+            total_ops += operation_ids(api.body).len();
+        }
+        assert!(total_ops >= 100, "expected many operations across specs, got {total_ops}");
+    }
+
+    #[test]
+    fn every_operation_declares_an_operation_id() {
+        // Contract-harness invariant (CAMARA API Design Guidelines + DESIGN §9):
+        // every operation a mounted spec declares MUST carry an `operationId`. The
+        // OpenAPI spec makes `operationId` optional, but CAMARA mandates it — it is
+        // the operation's canonical name, the method name a codegen client derives,
+        // and the key each simulator handler/scope narrative is written against.
+        // The sibling `operation_ids_are_unique_within_each_spec` pins the *other*
+        // half of the operationId contract (≥1 per spec, and none repeated *within*
+        // a document) but never that *every* operation carries one: a spec with
+        // three operations, two sharing an id and one with none, passes it (two
+        // distinct ids, no duplicate). This closes that gap — a live copy-paste
+        // hazard, since a new endpoint's spec is drafted from a sibling and an
+        // operation block can be pasted or edited with its `operationId:` line
+        // dropped, leaving an anonymous operation that codegen names arbitrarily.
+        // No other contract test sees it: the responses test checks the one REQUIRED
+        // Operation field, the path-templating/version/parity/`$ref` tests check a
+        // spec's path variables, identity, or wiring. Verified true (every operation
+        // across all mounted specs carries an operationId) before asserting.
+        for api in APIS {
+            let missing = operations_without_operation_id(api.body);
+            assert!(
+                missing.is_empty(),
+                "{} spec has operation(s) with no `operationId` (CAMARA mandates an \
+                 operationId on every operation): {:?}",
+                api.name,
+                missing
+            );
+        }
+    }
+
+    #[test]
+    fn operations_without_operation_id_extraction_rules() {
+        // Unit-cover the `operations_without_operation_id` extractor so the contract
+        // test above can't pass vacuously (an extractor that returned an empty Vec
+        // for every body would make its assertion meaningless) and so its
+        // scoping/indentation rules are pinned: an `operationId:` is a scalar key
+        // with an inline value (unlike `responses:`, whose block is the following
+        // lines), credited only to the operation whose block it sits in; a longer
+        // key such as `operationIdSuffix:` is not mistaken for it; and an HTTP verb
+        // used as a schema property name (not under a path item) is not an operation.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+    post:
+      summary: no operationId here
+      responses:
+        '201':
+          description: created
+  /b/{id}:
+    delete:
+      operationIdSuffix: notAnId
+      responses:
+        '204':
+          description: gone
+components:
+  schemas:
+    Widget:
+      type: object
+      properties:
+        get:
+          type: string
+";
+        // `POST /a` declares no operationId; `DELETE /b/{id}` has only a look-alike
+        // `operationIdSuffix` key, so it is missing too. `GET /a` declares one; the
+        // `get` schema *property* under `components.schemas.Widget` is not under
+        // `paths:`, so it is not an operation and never counted.
+        assert_eq!(
+            operations_without_operation_id(body),
+            vec!["POST /a".to_string(), "DELETE /b/{id}".to_string()]
+        );
+
+        // Non-vacuous floor: across every registered spec, no operation is missing
+        // its `operationId` (the invariant the contract test asserts), and the
+        // extractor sees a non-trivial number of operations overall, so a broken
+        // extractor can't hide behind an empty scan.
+        let mut total_ops = 0usize;
+        for api in APIS {
+            assert!(
+                operations_without_operation_id(api.body).is_empty(),
+                "{}: every operation must declare an `operationId`",
                 api.name
             );
             total_ops += operation_ids(api.body).len();
