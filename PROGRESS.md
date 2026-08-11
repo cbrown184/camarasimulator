@@ -3094,6 +3094,29 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     incl. a non-vacuous floor over all specs) so the contract can't pass vacuously.
     Verified true (114 path items across all 57 mounted specs, all slash-prefixed)
     before asserting.
+  - an every-response-has-a-`description` contract test (`src/registry.rs`
+    `every_declared_response_has_a_description`) asserts every response a mounted
+    spec declares carries a `description` — the **single REQUIRED field** of an
+    OpenAPI Response Object (`headers`/`content`/`links` are all optional), so an
+    inline response without one is an invalid document (a Redoc/Swagger/codegen
+    client has no human-readable outcome to render). A response given as a `$ref`
+    is exempt — it inherits its description from the referenced component (the
+    shared `errors.yaml` error responses are all `$ref`'d this way). Closes the gap
+    the sibling `every_operation_declares_a_responses_object` leaves: that pins the
+    **presence** of the `responses` object, never that each response **within** it
+    is a valid Response Object. Catches the copy-paste drift where a new status
+    branch pasted from a sibling loses or dedents its `description:` line — a break
+    the responses/operationId tests (which check the operation's own required
+    fields) and the identity/wiring/path-templating/`$ref` tests never see. A pure
+    `responses_missing_description` extractor (no YAML dep; mirrors
+    `operations_without_responses`' path-item/method scoping, then treats each
+    8-space status/`default`/`NXX` key under `responses:` as a response entry and
+    scans its block for a `description:`/`$ref:` at exactly the Response Object's
+    own child indent — so a `description` nested deeper inside a `content` schema or
+    a `headers` entry never satisfies it) is unit-covered
+    (`responses_missing_description_extraction_rules`, incl. a non-vacuous floor
+    over all specs) so the contract can't pass vacuously. Verified true (1157
+    response entries across all 57 mounted specs, none missing) before asserting.
   Full response-vs-schema validation still TODO (would need a YAML/JSON-Schema
   validator — a dependency trade-off, deferred).
 
@@ -3103,6 +3126,31 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-11 — contract-harness: added an **every-response-has-a-`description`**
+  contract test (`src/registry.rs` `every_declared_response_has_a_description`)
+  asserting every response a mounted spec declares carries a `description` — the
+  single REQUIRED field of an OpenAPI Response Object (`headers`/`content`/`links`
+  optional) — or is a `$ref` (which inherits its description from the referenced
+  component; the shared `errors.yaml` responses are all `$ref`'d). Feature-API
+  backlog stays effectively exhausted (remaining `[ ]` leaves are `https://`
+  sink-TLS cases needing a multi-MB rustls client vs the small-binary directive,
+  and open-ended state streams with no live worker), so this advanced the
+  cross-cutting **contract-test harness** item. Closes the gap the sibling
+  `every_operation_declares_a_responses_object` leaves: that pins the *presence*
+  of the `responses` object, never that each response *within* it is a valid
+  Response Object — so a status branch pasted from a sibling that loses/dedents
+  its `description:` line sails through. One pure helper
+  `responses_missing_description` (no YAML dep; mirrors `operations_without_responses`'
+  path-item/method scoping, then treats each 8-space status/`default`/`NXX` key
+  under `responses:` as a response entry and requires a `description:`/`$ref:` at
+  exactly the Response Object's own child indent — so a `description` nested deeper
+  in a `content` schema or a `headers` entry never satisfies it) is unit-covered
+  (`responses_missing_description_extraction_rules`, incl. a non-vacuous floor over
+  all specs) so the contract can't pass vacuously. Verified true (1157 response
+  entries across all 57 mounted specs, none missing) before asserting. Tests: +2
+  registry (1 contract + 1 helper unit). `cargo test` 2150 green (was 2148),
+  `cargo build --release` warning-clean. No new dep; binary unchanged
+  (`#[cfg(test)]`-only). — binary: 3.7M (3851880 B, +0 B)
 - 2026-08-11 — contract-harness: added a **slash-prefixed-path-items** contract
   test (`src/registry.rs` `every_paths_object_declares_slash_prefixed_path_items`)
   asserting every mounted spec declares ≥1 path item and that every `paths:` key

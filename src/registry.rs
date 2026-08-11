@@ -976,6 +976,137 @@ mod tests {
         out
     }
 
+    /// The `METHOD /path <status>` label of every **response entry** a spec
+    /// declares whose Response Object carries neither a `description` nor a
+    /// `$ref` — without a YAML dep.
+    ///
+    /// `description` is the single REQUIRED field of an OpenAPI Response Object
+    /// (everything else — `headers`/`content`/`links` — is optional), so an
+    /// inline response missing it is an invalid document: a Redoc/Swagger/codegen
+    /// client is handed an outcome with no human-readable summary to render. A
+    /// response supplied as a `$ref` is exempt — it inherits its description from
+    /// the referenced component (the shared `errors.yaml` responses are all
+    /// `$ref`'d this way). Mirrors [`operations_without_responses`]'s
+    /// path-item/method scoping (a 4-space HTTP-verb key under a 2-space `/…`
+    /// path item beneath the top-level `paths:` block), then within an operation
+    /// finds the 6-space `responses:` key and treats each 8-space status-code /
+    /// `default` / `NXX`-range key under it as a response entry, scanning that
+    /// entry's block (lines indented past 8, until a dedent to ≤8) for a 10-space
+    /// `description:` or `$ref:` field. Matching the field at exactly the response
+    /// object's own child indent (10) means a `description`/`$ref` nested deeper —
+    /// inside a `content` media type's `schema`, or a `headers` entry, say — never
+    /// satisfies the entry.
+    fn responses_missing_description(body: &str) -> Vec<String> {
+        const METHODS: [&str; 8] =
+            ["get", "put", "post", "delete", "patch", "options", "head", "trace"];
+        // A Responses Object key that maps to a Response Object: an HTTP status
+        // code, an `NXX` wildcard range (`1XX`..`5XX`), or `default`. Anything
+        // else under `responses:` (an `x-` extension, say) is not a response.
+        let is_status_key = |key: &str| -> bool {
+            key == "default"
+                || (key.len() == 3
+                    && matches!(key.as_bytes()[0], b'1'..=b'5')
+                    && key.as_bytes()[1..]
+                        .iter()
+                        .all(|&c| c.is_ascii_digit() || c == b'X'))
+        };
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let mut out = Vec::new();
+        let mut in_paths = false;
+        let mut path: Option<String> = None;
+        for (i, line) in lines.iter().enumerate() {
+            let is_top_level_key =
+                !line.is_empty() && !line.starts_with(char::is_whitespace);
+            if is_top_level_key {
+                in_paths = line.trim_end() == "paths:";
+                path = None;
+                continue;
+            }
+            if !in_paths {
+                continue;
+            }
+            if let Some(rest) = line.strip_prefix("  ") {
+                if !rest.starts_with(char::is_whitespace) && rest.starts_with('/') {
+                    let key = rest.trim_end().strip_suffix(':').unwrap_or(rest.trim_end());
+                    path = Some(key.to_string());
+                    continue;
+                }
+            }
+            let Some(current_path) = path.as_deref() else { continue };
+            if indent(line) != 4 {
+                continue;
+            }
+            let key = line.trim_start();
+            let Some(name) = key.strip_suffix(':') else { continue };
+            if name.contains(char::is_whitespace) || !METHODS.contains(&name) {
+                continue;
+            }
+            // Within this operation's block, find the 6-space `responses:` key,
+            // then inspect each 8-space response entry under it.
+            let mut in_responses = false;
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                let li = indent(l);
+                if li <= 4 {
+                    break; // dedented out of this operation
+                }
+                if li == 6 {
+                    // `responses:` opens the block; any other 6-space key (e.g. a
+                    // trailing `security:`) closes it.
+                    in_responses = l.trim_start().strip_suffix(':') == Some("responses");
+                    j += 1;
+                    continue;
+                }
+                if in_responses && li == 8 {
+                    if let Some(k) = l.trim_start().strip_suffix(':') {
+                        let status = k.trim_matches(|c| c == '"' || c == '\'');
+                        if is_status_key(status) {
+                            // Scan this response object's block for a 10-space
+                            // `description:` or `$ref:` field.
+                            let mut satisfied = false;
+                            let mut m = j + 1;
+                            while m < lines.len() {
+                                let e = lines[m];
+                                if e.trim().is_empty() {
+                                    m += 1;
+                                    continue;
+                                }
+                                if indent(e) <= 8 {
+                                    break; // dedented out of this response entry
+                                }
+                                if indent(e) == 10 {
+                                    let field =
+                                        e.trim_start().split_once(':').map(|(f, _)| f);
+                                    if field == Some("description") || field == Some("$ref") {
+                                        satisfied = true;
+                                        break;
+                                    }
+                                }
+                                m += 1;
+                            }
+                            if !satisfied {
+                                out.push(format!(
+                                    "{} {} {}",
+                                    name.to_uppercase(),
+                                    current_path,
+                                    status
+                                ));
+                            }
+                        }
+                    }
+                }
+                j += 1;
+            }
+        }
+        out
+    }
+
     #[test]
     fn registry_is_non_empty() {
         // Guards a broken/emptied list: both the catalog and the served specs are
@@ -2251,5 +2382,116 @@ components:
             total += ks.len();
         }
         assert!(total >= 100, "expected many path items across specs, got {total}");
+    }
+
+    #[test]
+    fn every_declared_response_has_a_description() {
+        // Contract-harness invariant (OpenAPI structural rule): every response a
+        // mounted spec declares MUST carry a `description` — it is the single
+        // REQUIRED field of a Response Object (`headers`/`content`/`links` are all
+        // optional), so an inline response without one is an invalid document: a
+        // Redoc/Swagger/codegen client is handed an outcome with no human-readable
+        // summary to render. A response given as a `$ref` is exempt — it inherits
+        // its description from the referenced component (the shared `errors.yaml`
+        // error responses are all `$ref`'d this way). This closes the gap the
+        // sibling `every_operation_declares_a_responses_object` leaves: that pins
+        // the *presence* of the `responses` object, never that each response
+        // *within* it is a valid Response Object. A live copy-paste hazard — a new
+        // status branch is drafted by pasting a sibling response and can lose or
+        // dedent its `description:` line — that no other contract test sees: the
+        // responses/operationId tests check the operation's own required fields, the
+        // path-templating/version/parity/`$ref` tests check a spec's path variables,
+        // identity, or wiring, never that each declared response describes itself.
+        // Verified true (1157 response entries across all mounted specs, none
+        // missing) before asserting.
+        for api in APIS {
+            let missing = responses_missing_description(api.body);
+            assert!(
+                missing.is_empty(),
+                "{} spec has response(s) with neither a `description` (the single \
+                 REQUIRED field of an OpenAPI Response Object) nor a `$ref`: {:?}",
+                api.name,
+                missing
+            );
+        }
+    }
+
+    #[test]
+    fn responses_missing_description_extraction_rules() {
+        // Unit-cover the `responses_missing_description` extractor so the contract
+        // test above can't pass vacuously (an extractor returning an empty Vec for
+        // every body would make its assertion meaningless) and so its scoping is
+        // pinned: a `description`/`$ref` counts only at the Response Object's own
+        // child indent (10), so one nested deeper — inside a `content` schema or a
+        // `headers` entry — never satisfies the response; a `$ref` response is
+        // exempt; a `default` / `NXX` key is a response entry; and a non-status key
+        // under `responses:` is not.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+        '400':
+          $ref: \"../../shared/errors.yaml#/components/responses/BadRequest\"
+    post:
+      operationId: postA
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                type: object
+                description: a schema description, not the response's own
+        default:
+          description: fallback
+  /b:
+    get:
+      operationId: getB
+      responses:
+        '200':
+          headers:
+            x-correlator:
+              description: a header description, not the response's own
+components:
+  schemas:
+    Widget:
+      type: object
+      properties:
+        get:
+          type: string
+";
+        // Flagged: `POST /a 201` (its only `description` sits at indent 16 inside a
+        // schema, not at the response's own child indent 10) and `GET /b 200` (its
+        // `description` sits inside a `headers` entry). Not flagged: `GET /a 200`
+        // (inline description), `GET /a 400` (a `$ref`, exempt), `POST /a default`
+        // (a `default` response with a description). The `get` schema *property*
+        // under `components.schemas.Widget` is not under `paths:`, so it is never an
+        // operation.
+        assert_eq!(
+            responses_missing_description(body),
+            vec!["POST /a 201".to_string(), "GET /b 200".to_string()]
+        );
+
+        // Non-vacuous floor: across every registered spec, no declared response is
+        // missing its `description` (the invariant the contract test asserts) — and
+        // the corpus carries many operations (hence many response entries), so a
+        // broken extractor can't hide behind an empty scan.
+        let mut total_ops = 0usize;
+        for api in APIS {
+            assert!(
+                responses_missing_description(api.body).is_empty(),
+                "{}: every declared response must carry a `description` or be a `$ref`",
+                api.name
+            );
+            total_ops += operation_ids(api.body).len();
+        }
+        assert!(total_ops >= 100, "expected many operations across specs, got {total_ops}");
     }
 }
