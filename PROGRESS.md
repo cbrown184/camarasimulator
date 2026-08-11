@@ -3048,6 +3048,31 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-11 — contract-harness: added a **required-`info.title`** contract test
+  (`src/registry.rs` `every_spec_declares_a_non_empty_info_title`) asserting every
+  mounted vendored spec declares a non-empty `info.title`. With `info.version`,
+  `title` is one of the two REQUIRED fields of the OpenAPI `info` object — the human
+  name every Redoc/Swagger/codegen client renders as the document heading (a spec
+  without it renders "Untitled") and the label the `/` catalog / per-spec docs pages
+  show. This **completes the required-`info`-field coverage**: an existing test pins
+  `info.version` (`spec_info_version_matches_mounted_url_version`) and another pins the
+  root `openapi:` field (`every_spec_declares_a_valid_openapi_3_version`), but nothing
+  asserted the required `info.title`. Feature-API backlog stays effectively exhausted
+  (remaining `[ ]` leaves are the `https://` sink-TLS cases needing a multi-MB rustls
+  client vs the small-binary directive, and open-ended state streams with no live
+  worker), so this advanced the cross-cutting **contract-test harness** item. Closes a
+  drift no existing test sees: a spec drafted from a CAMARA template can drop or blank
+  its `title:` (dropped in an edit, or left an empty scalar) — the identity/wiring
+  tests (mount-path/version/parity/operationId/oauth/scenarios) all trust the document
+  is a structurally complete OpenAPI doc. One pure helper `info_title` (mirrors
+  `info_version`: scoped to the top-level `info:` block, 2-space direct child, unquotes;
+  a JSON-Schema `title:` inside a component schema is not mistaken for it; blank scalar →
+  `Some("")` distinct from a missing line → `None`) is unit-covered
+  (`info_title_extraction_rules`, incl. a non-vacuous floor over all specs) so the
+  contract can't pass vacuously. Verified true (all 58 specs carry a non-empty title)
+  before asserting. Tests: +2 registry (1 contract + 1 helper unit). `cargo test` 2142
+  green (was 2140), `cargo build --release` warning-clean. No new dep; binary unchanged
+  (`#[cfg(test)]`-only). — binary: 3.7M (3851880 B, +0 B)
 - 2026-08-11 — contract-harness: added a **path-templating** contract test
   (`src/registry.rs` `path_template_params_match_declared_path_parameters`)
   asserting, both ways, that every `{name}` a mounted spec puts in a `paths:` key

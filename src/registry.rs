@@ -363,6 +363,41 @@ mod tests {
         None
     }
 
+    /// Extract `info.title` from an embedded OpenAPI body without a YAML dep.
+    ///
+    /// `title` and `version` are the two REQUIRED fields of an OpenAPI
+    /// document's `info` object — `title` is the human name every
+    /// Redoc/Swagger/codegen client renders as the document's heading (a
+    /// document without it renders "Untitled") and the label the `/` catalog
+    /// shows. Mirrors `info_version`: scans the top-level `info:` block (every
+    /// line until the next unindented key) for its direct-child `title:` entry
+    /// (2-space indent, the CAMARA convention) and returns the unquoted scalar.
+    /// Scoping to the `info:` block keeps a coincidental `title:` line elsewhere
+    /// (e.g. a JSON-Schema `title:` inside a component schema) from being
+    /// mistaken for it. A present-but-blank `title:` returns `Some("")` — a
+    /// distinct case from a missing line (`None`) the contract test rejects.
+    fn info_title(body: &str) -> Option<String> {
+        let mut in_info = false;
+        for line in body.lines() {
+            let is_top_level_key =
+                !line.is_empty() && !line.starts_with(char::is_whitespace);
+            if is_top_level_key {
+                in_info = line.trim_end() == "info:";
+                continue;
+            }
+            if in_info {
+                // `strip_prefix` matches exactly the 2-space indent of an
+                // `info:` direct child, so a deeper `title:` (a 6-space schema
+                // property) never matches here.
+                if let Some(rest) = line.strip_prefix("  title:") {
+                    let v = rest.trim().trim_matches('"').trim_matches('\'');
+                    return Some(v.to_string());
+                }
+            }
+        }
+        None
+    }
+
     /// Extract the root `openapi:` version string from an embedded OpenAPI body,
     /// without a YAML dep.
     ///
@@ -889,6 +924,43 @@ mod tests {
                 api.name,
                 api.version,
                 iv
+            );
+        }
+    }
+
+    #[test]
+    fn every_spec_declares_a_non_empty_info_title() {
+        // Contract-harness invariant (OpenAPI structural rule): every mounted
+        // vendored spec MUST declare a non-empty `info.title`. Together with
+        // `info.version`, `title` is one of the two REQUIRED fields of the
+        // OpenAPI `info` object — the human name every Redoc/Swagger/codegen
+        // client renders as the document's heading (a spec without it renders
+        // "Untitled") and the label the `/` catalog and per-spec docs pages
+        // show. This completes the required-`info`-field coverage:
+        // `spec_info_version_matches_mounted_url_version` pins `info.version`
+        // and `every_spec_declares_a_valid_openapi_3_version` pins the root
+        // `openapi:` field, but nothing yet asserts the required `info.title`.
+        //
+        // A newly vendored spec drafted from a CAMARA template can lose or
+        // blank its `title:` (dropped in an edit, or left as an empty scalar) —
+        // a drift the identity/wiring tests (mount-path/version/parity/
+        // operationId/oauth/scenarios) never look for, since they all trust the
+        // document is a structurally complete OpenAPI doc to begin with.
+        // Verified true across every mounted spec before asserting.
+        for api in APIS {
+            let title = info_title(api.body).unwrap_or_else(|| {
+                panic!(
+                    "{} spec declares no `info.title` — not a structurally \
+                     complete OpenAPI document (`title` is a REQUIRED field of \
+                     the `info` object)",
+                    api.name
+                )
+            });
+            assert!(
+                !title.is_empty(),
+                "{} spec declares an empty `info.title` — the required document \
+                 heading is blank (Redoc/Swagger would render it as \"Untitled\")",
+                api.name
             );
         }
     }
@@ -1498,6 +1570,45 @@ components:
         assert!(!url_version_agrees("v0.3", "1.3.0"));
         assert!(url_version_agrees("v0alpha1", "0.1.0-alpha.1"));
         assert!(!url_version_agrees("v0alpha1", "1.0.0"));
+    }
+
+    #[test]
+    fn info_title_extraction_rules() {
+        // Unit-cover the `info_title` extractor so the contract test above
+        // can't pass vacuously (a broken extractor returning the same string
+        // for every body would make its assertions meaningless), and so the
+        // info-block scoping, quote-stripping, and blank/missing distinction
+        // are pinned.
+
+        // The direct child of `info:` is taken; a JSON-Schema `title:` inside a
+        // component schema (deeper indent, outside the `info:` block) is not.
+        let body = "openapi: 3.0.3\n\
+                    info:\n  title: Number Verification\n  version: \"1.0.0\"\n\
+                    paths: {}\n\
+                    components:\n  schemas:\n    Foo:\n      title: not the info title\n";
+        assert_eq!(info_title(body).as_deref(), Some("Number Verification"));
+        // A quoted value is unquoted.
+        assert_eq!(
+            info_title("info:\n  title: \"Quoted API\"\npaths: {}\n").as_deref(),
+            Some("Quoted API")
+        );
+        // A body whose only `title:` sits outside the `info:` block → None.
+        assert_eq!(
+            info_title(
+                "openapi: 3.0.3\ncomponents:\n  schemas:\n    Foo:\n      title: X\n"
+            ),
+            None
+        );
+        // A present-but-blank `title:` returns Some("") (the contract test
+        // rejects it), a distinct case from a missing line (None).
+        assert_eq!(info_title("info:\n  title:\npaths: {}\n").as_deref(), Some(""));
+
+        // Non-vacuous floor: every registered spec declares a non-empty
+        // info.title, so a broken extractor can't hide behind an empty loop.
+        for api in APIS {
+            let t = info_title(api.body).expect("registered spec has an info.title");
+            assert!(!t.is_empty(), "{}", api.name);
+        }
     }
 
     #[test]
