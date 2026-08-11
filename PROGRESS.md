@@ -2992,6 +2992,19 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     rule) — are unit-covered (`security_scheme_extraction_rules`) so the contract
     can't pass vacuously. Verified true across all 57 mounted specs (143
     requirements, all `openId`) before asserting.
+  - an openapi-root-version contract test (`src/registry.rs`
+    `every_spec_declares_a_valid_openapi_3_version`) asserts every mounted spec
+    declares, at its root, a valid `openapi:` version of the OpenAPI 3 family
+    (`3.MINOR.PATCH`, all numeric) — the single REQUIRED root field of an OpenAPI
+    document, which every Redoc/Swagger/codegen client reads first to decide how
+    to interpret the rest (3.0↔3.1 differ in `nullable`/`type`). Hardens the weak
+    `bodies_are_non_empty_openapi_docs` smoke check, which only asserts the body
+    *contains* the substring `openapi:` anywhere — satisfied by a prose mention, a
+    stale Swagger `2.0` header, or a truncated `openapi: 3.0`, none of which is a
+    valid served document. A pure `openapi_version` extractor (top-level-key
+    scoped, so an indented `openapi:` mention in a description isn't matched) +
+    `is_openapi_3_version` validator (no YAML dep) are unit-covered so the contract
+    can't pass vacuously. Verified true (all `3.0.3`) across all mounted specs.
   Full response-vs-schema validation still TODO (would need a YAML/JSON-Schema
   validator — a dependency trade-off, deferred).
 
@@ -3001,6 +3014,34 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-11 — contract-harness: added an **openapi-root-version** contract test
+  (`src/registry.rs` `every_spec_declares_a_valid_openapi_3_version`) asserting every
+  mounted vendored spec declares, at its root, a valid `openapi:` version of the
+  OpenAPI 3 family (`3.MINOR.PATCH`, all numeric). `openapi` is the single REQUIRED
+  root field of an OpenAPI document — the first thing every Redoc/Swagger/codegen
+  client reads to decide how to interpret the rest (3.0↔3.1 differ in `nullable`/
+  `type` handling) — so a document without it, or one declaring a Swagger `2.x`
+  version, is not a spec this simulator serves. The feature-API backlog stays
+  effectively exhausted (remaining `[ ]` leaves are the `https://` sink-TLS cases
+  needing a multi-MB rustls client vs the small-binary directive, and open-ended state
+  streams with no live worker), so this advanced the cross-cutting **contract-test
+  harness** item. Hardens the weak `bodies_are_non_empty_openapi_docs` smoke check,
+  which only asserts the body *contains* the substring `openapi:` anywhere —
+  satisfied by a prose mention inside a description, a stale Swagger `2.0` header, or
+  a malformed/truncated `openapi: 3.0`, none of which is a valid served document. A
+  newly vendored spec drafted from a CAMARA template can lose or mangle its root
+  `openapi:` line (dropped in an edit, indented into a block, or copied from a 2.x
+  source) — a drift the identity/wiring tests (mount-path/version/parity/operationId/
+  oauth/scenarios) never look for, since they all trust the document is structurally
+  an OpenAPI 3 doc to begin with. Verified true (all `3.0.3`) across every mounted
+  spec before asserting. Two pure helpers — `openapi_version` (top-level-key scoped,
+  so an indented `openapi:` in prose isn't matched; unquotes the scalar) and
+  `is_openapi_3_version` (exactly `3.MINOR.PATCH`, all numeric; rejects Swagger 2.x, a
+  truncated two-part `3.0`, an over-long `3.0.3.1`, non-numeric values) — are
+  unit-covered (`openapi_version_extraction_and_validation_rules`) so the contract
+  can't pass vacuously. Tests: +2 registry (1 contract + 1 helper unit). `cargo test`
+  2137 green (was 2135), `cargo build --release` warning-clean. No new dep; binary
+  unchanged (`#[cfg(test)]`-only). — binary: 3.7M (3851880 B, +0 B)
 - 2026-08-11 — contract-harness: added a **security-requirement↔definition** contract
   test (`src/registry.rs` `every_security_requirement_references_a_defined_scheme`)
   asserting every `security` requirement a mounted spec's operations declare names a

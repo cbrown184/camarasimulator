@@ -363,6 +363,52 @@ mod tests {
         None
     }
 
+    /// Extract the root `openapi:` version string from an embedded OpenAPI body,
+    /// without a YAML dep.
+    ///
+    /// `openapi` is the single REQUIRED *root* field of every OpenAPI document —
+    /// the semantic version of the OpenAPI Specification the document follows
+    /// (e.g. `3.0.3`), which every Redoc/Swagger/codegen tool reads first to
+    /// decide how to interpret the rest (3.0 and 3.1 differ in `nullable`/`type`
+    /// handling). It is a top-level key (zero indent). A line is taken as the
+    /// declaration when it is an unindented `openapi:` key; its unquoted scalar is
+    /// returned. An indented `openapi:` (e.g. inside a description block scalar or
+    /// an example) is never at column zero, so a prose mention is not matched.
+    fn openapi_version(body: &str) -> Option<String> {
+        for line in body.lines() {
+            let is_top_level_key =
+                !line.is_empty() && !line.starts_with(char::is_whitespace);
+            if is_top_level_key {
+                if let Some(rest) = line.strip_prefix("openapi:") {
+                    let v = rest.trim().trim_matches('"').trim_matches('\'');
+                    if !v.is_empty() {
+                        return Some(v.to_string());
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Whether a version string is a valid OpenAPI **3** version — exactly
+    /// `3.MINOR.PATCH`, all three parts numeric — the family this simulator
+    /// vendors. Rejects a Swagger `2.x` document (a different, incompatible
+    /// specification), a truncated two-part `3.0`, an over-long `3.0.3.1`, and any
+    /// non-numeric or malformed value.
+    fn is_openapi_3_version(v: &str) -> bool {
+        let mut parts = v.split('.');
+        let (major, minor, patch) =
+            match (parts.next(), parts.next(), parts.next(), parts.next()) {
+                (Some(a), Some(b), Some(c), None) => (a, b, c),
+                _ => return false,
+            };
+        major == "3"
+            && !minor.is_empty()
+            && !patch.is_empty()
+            && minor.bytes().all(|b| b.is_ascii_digit())
+            && patch.bytes().all(|b| b.is_ascii_digit())
+    }
+
     /// Extract every `operationId` value declared in an embedded OpenAPI body,
     /// in document order, without a YAML dep.
     ///
@@ -624,6 +670,47 @@ mod tests {
                 api.body.contains("openapi:"),
                 "{} body is not an OpenAPI document",
                 api.name
+            );
+        }
+    }
+
+    #[test]
+    fn every_spec_declares_a_valid_openapi_3_version() {
+        // Contract-harness invariant (OpenAPI structural rule): every mounted
+        // vendored spec MUST declare, at its root, a valid `openapi:` version of
+        // the OpenAPI 3 family (`3.MINOR.PATCH`, all numeric). `openapi` is the
+        // single REQUIRED root field of an OpenAPI document — the first thing every
+        // Redoc/Swagger/codegen client reads to decide how to interpret the rest
+        // (3.0 and 3.1 differ in `nullable`/`type` handling) — so a document
+        // without it, or one declaring a Swagger `2.x` version, is not a spec this
+        // simulator serves.
+        //
+        // This hardens the weak `bodies_are_non_empty_openapi_docs` smoke check,
+        // which only asserts the body *contains* the substring `openapi:`
+        // anywhere — satisfied by a prose mention inside a description, a stale
+        // Swagger `2.0` header, or a malformed/truncated `openapi: 3.0` — none of
+        // which is a valid served document. A newly vendored spec drafted from a
+        // CAMARA template can lose or mangle its root `openapi:` line (dropped in
+        // an edit, indented into a block, or copied from a 2.x source), a drift the
+        // identity/wiring tests (mount-path/version/parity/operationId/oauth/
+        // scenarios) never look for — they all trust the document is structurally
+        // an OpenAPI 3 doc to begin with. Verified true (all `3.0.3`) across every
+        // mounted spec before asserting.
+        for api in APIS {
+            let v = openapi_version(api.body).unwrap_or_else(|| {
+                panic!(
+                    "{} spec declares no root `openapi:` version — not a valid \
+                     OpenAPI document (the `openapi` field is REQUIRED at the root)",
+                    api.name
+                )
+            });
+            assert!(
+                is_openapi_3_version(&v),
+                "{} spec declares root `openapi: {}`, which is not a valid OpenAPI 3 \
+                 version (`3.MINOR.PATCH`, all numeric) — a Swagger 2.x header or a \
+                 malformed/truncated version the simulator does not serve",
+                api.name,
+                v
             );
         }
     }
@@ -1211,5 +1298,49 @@ components:
         assert!(!url_version_agrees("v0.3", "1.3.0"));
         assert!(url_version_agrees("v0alpha1", "0.1.0-alpha.1"));
         assert!(!url_version_agrees("v0alpha1", "1.0.0"));
+    }
+
+    #[test]
+    fn openapi_version_extraction_and_validation_rules() {
+        // Unit-cover the `openapi_version` extractor and the `is_openapi_3_version`
+        // validator so the contract test above can't pass vacuously (an extractor
+        // that returned the same string for every body, or a validator that
+        // accepted everything, would make its assertions meaningless), and so the
+        // top-level-key / prose discrimination and the version-shape rules are pinned.
+
+        // Extraction: the root `openapi:` key is taken; an indented `openapi:`
+        // mention in a description block scalar (non-zero column) is not.
+        let body = "openapi: 3.0.3\n\
+                    info:\n  title: X\n  description: |\n    an openapi: 2.0 mention inside prose\n  version: \"1.0.0\"\n\
+                    paths: {}\n";
+        assert_eq!(openapi_version(body).as_deref(), Some("3.0.3"));
+        // A quoted value is unquoted.
+        assert_eq!(
+            openapi_version("openapi: \"3.1.0\"\npaths: {}\n").as_deref(),
+            Some("3.1.0")
+        );
+        // No *root* `openapi:` line (only an indented child of `info:`) → None.
+        assert_eq!(openapi_version("info:\n  openapi: 3.0.3\npaths: {}\n"), None);
+
+        // Validation: the OpenAPI 3 family is accepted; a Swagger 2.x header, a
+        // truncated two-part version, an over-long version, and non-numeric or
+        // malformed values are rejected.
+        assert!(is_openapi_3_version("3.0.3"));
+        assert!(is_openapi_3_version("3.1.0"));
+        assert!(!is_openapi_3_version("2.0"));
+        assert!(!is_openapi_3_version("2.0.0"));
+        assert!(!is_openapi_3_version("3.0"));
+        assert!(!is_openapi_3_version("3.0.3.1"));
+        assert!(!is_openapi_3_version("3.0.x"));
+        assert!(!is_openapi_3_version("3..0"));
+        assert!(!is_openapi_3_version(""));
+
+        // Non-vacuous floor: every registered spec declares a valid OpenAPI 3 root
+        // version, so a broken extractor/validator can't hide behind an empty loop.
+        for api in APIS {
+            let v = openapi_version(api.body)
+                .expect("registered spec has a root openapi version");
+            assert!(is_openapi_3_version(&v), "{}: {}", api.name, v);
+        }
     }
 }
