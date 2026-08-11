@@ -481,6 +481,69 @@ mod tests {
     }
 
     #[test]
+    fn every_vendored_spec_on_disk_is_registered() {
+        // Contract-harness invariant (DESIGN §9): the `specs/` tree and the `APIS`
+        // registry must agree in BOTH directions. The compile-time `include_str!`
+        // already fails the build if a *registered* API's spec file is missing
+        // (registry → file), but nothing catches the reverse: a spec vendored on
+        // disk under `specs/…` that was never added to `APIS` compiles fine and is
+        // simply never mounted or served — an invisible, forgotten API. This walks
+        // the on-disk tree and asserts the set of vendored `openapi.yaml` files
+        // exactly equals the set of registered spec paths, so a forgotten
+        // registration (or a stray extra version dir) fails CI.
+        use std::path::Path;
+
+        let specs_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("specs");
+
+        // On disk: every `specs/<name>/<version>/openapi.yaml`, excluding the
+        // shared building blocks (`shared/errors.yaml`, `auth/openapi.yaml`) that
+        // are served for `$ref` resolution but are not mounted APIs.
+        let mut on_disk: HashSet<String> = HashSet::new();
+        for api_entry in std::fs::read_dir(&specs_root).expect("read specs/") {
+            let api_dir = api_entry.expect("specs/ entry").path();
+            if !api_dir.is_dir() {
+                continue;
+            }
+            let name = api_dir.file_name().unwrap().to_string_lossy().into_owned();
+            if name == "shared" || name == "auth" {
+                continue;
+            }
+            for ver_entry in std::fs::read_dir(&api_dir).expect("read spec version dir") {
+                let ver_dir = ver_entry.expect("version entry").path();
+                if !ver_dir.is_dir() {
+                    continue;
+                }
+                let version = ver_dir.file_name().unwrap().to_string_lossy().into_owned();
+                if ver_dir.join("openapi.yaml").is_file() {
+                    on_disk.insert(format!("specs/{name}/{version}/openapi.yaml"));
+                }
+            }
+        }
+
+        // Registered: the spec path each APIS entry embeds via `include_str!`.
+        let registered: HashSet<String> = APIS
+            .iter()
+            .map(|a| format!("specs/{}/{}/openapi.yaml", a.name, a.version))
+            .collect();
+
+        let mut unregistered: Vec<&String> = on_disk.difference(&registered).collect();
+        unregistered.sort();
+        assert!(
+            unregistered.is_empty(),
+            "vendored spec(s) on disk not registered in APIS (they would never be \
+             mounted or served): {unregistered:?}"
+        );
+        // The reverse direction, belt-and-braces with the compile-time
+        // `include_str!`: a registered entry whose vendored file has vanished.
+        let mut missing: Vec<&String> = registered.difference(&on_disk).collect();
+        missing.sort();
+        assert!(
+            missing.is_empty(),
+            "registered API(s) with no vendored spec file on disk: {missing:?}"
+        );
+    }
+
+    #[test]
     fn info_version_extraction_and_agreement_rules() {
         // Unit-cover the two pure helpers so the contract test above can't pass
         // vacuously (e.g. a broken extractor returning the same string for all).

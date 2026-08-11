@@ -2889,6 +2889,15 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     spec *names* its mount path, this proves its declared version *is* that
     version. Two pure helpers (`info_version` extractor, `url_version_agrees`) are
     unit-covered so the contract test can't pass vacuously.
+  - a specs↔registry parity contract test (`src/registry.rs`
+    `every_vendored_spec_on_disk_is_registered`) walks the on-disk `specs/` tree
+    and asserts the set of vendored `specs/<name>/<version>/openapi.yaml` files
+    exactly equals the set of registered `APIS` spec paths (excluding the shared
+    `shared/`+`auth/` `$ref` building blocks). Closes the drift the compile-time
+    `include_str!` can't: that fails the build only for a *registered* API whose
+    file is missing (registry→file); a spec vendored on disk but never added to
+    `APIS` compiles fine and is silently never mounted or served. Now both
+    directions fail CI.
   Full response-vs-schema validation still TODO (would need a YAML/JSON-Schema
   validator — a dependency trade-off, deferred).
 
@@ -2898,6 +2907,25 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-11 — contract-harness: added a **specs↔registry parity** contract test
+  (`src/registry.rs` `every_vendored_spec_on_disk_is_registered`) that walks the
+  on-disk `specs/` tree and asserts the set of vendored
+  `specs/<name>/<version>/openapi.yaml` files exactly equals the set of registered
+  `APIS` spec paths (excluding the shared `shared/`+`auth/` `$ref` building
+  blocks). The feature-API backlog stays effectively exhausted (remaining `[ ]`
+  leaves are the `https://` sink-TLS cases needing a multi-MB rustls client vs the
+  small-binary directive, and open-ended state streams with no live worker), so
+  this advanced the cross-cutting **contract-test harness** item. Closes the one
+  drift direction the existing tests can't see: the compile-time `include_str!`
+  fails the build only for a *registered* API whose spec file is missing
+  (registry→file), but a spec vendored on disk yet never added to `APIS` compiles
+  fine and is silently never mounted or served (file→registry). Reconciled the two
+  sets before asserting (57 on disk = 57 registered, exact match). Test-only walk
+  via `std::fs` + `env!("CARGO_MANIFEST_DIR")` (no request-path I/O, no new dep);
+  the set-difference assertion is non-vacuous (it builds `on_disk` from a real
+  directory walk). Tests: +1 registry contract. `cargo test` 2124 green (was
+  2123), `cargo build --release` warning-clean. No new dep; binary unchanged
+  (`#[cfg(test)]`-only). — binary: 3.7M (3845736 B, +0 B)
 - 2026-08-11 — contract-harness: added a **spec-version↔URL-version** contract
   test (`src/registry.rs` `spec_info_version_matches_mounted_url_version`)
   asserting every embedded vendored spec's declared `info.version` agrees with the
