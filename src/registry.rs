@@ -423,6 +423,62 @@ mod tests {
             .count()
     }
 
+    /// Extract the set of component pointers a `components:` fragment *defines*,
+    /// as `#/components/<section>/<Name>` strings, without a YAML dep.
+    ///
+    /// Scans the top-level `components:` block. A 2-space direct child key opens a
+    /// section (`  schemas:`, `  responses:`, …), and each exact-4-space child key
+    /// under it (`    CamaraError:`) is one defined component. Deeper lines (6-space+
+    /// properties, `content`, `example`, …) sit *inside* a component, so they are
+    /// ignored — only the component objects themselves are collected. Used to prove
+    /// that every `$ref` a spec makes into the shared error model points at a
+    /// component that fragment actually declares.
+    fn component_pointers(body: &str) -> HashSet<String> {
+        let mut out = HashSet::new();
+        let mut in_components = false;
+        let mut section: Option<String> = None;
+        for line in body.lines() {
+            let is_top_level_key =
+                !line.is_empty() && !line.starts_with(char::is_whitespace);
+            if is_top_level_key {
+                in_components = line.trim_end() == "components:";
+                section = None;
+                continue;
+            }
+            if !in_components {
+                continue;
+            }
+            // A 2-space direct child of `components:` (non-space at column 3) opens
+            // a section (`schemas`, `responses`, …). A 4-space line also begins with
+            // two spaces, but its column-3 char *is* a space, so it falls through to
+            // the component check below.
+            if let Some(rest) = line.strip_prefix("  ") {
+                if !rest.starts_with(char::is_whitespace) {
+                    if let Some(name) = rest.trim_end().strip_suffix(':') {
+                        if !name.is_empty() && !name.contains(char::is_whitespace) {
+                            section = Some(name.to_string());
+                        }
+                    }
+                    continue;
+                }
+            }
+            // An exact-4-space child (non-space at column 5) under a section is a
+            // component definition; a bare `Name:` with no trailing value.
+            if let Some(section) = &section {
+                if let Some(rest) = line.strip_prefix("    ") {
+                    if !rest.starts_with(char::is_whitespace) {
+                        if let Some(name) = rest.trim_end().strip_suffix(':') {
+                            if !name.is_empty() && !name.contains(char::is_whitespace) {
+                                out.insert(format!("#/components/{section}/{name}"));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }
+
     /// Does the spec's declared `info.version` agree with the version segment the
     /// API is mounted at in the URL (DESIGN §9 canonical URL versioning)?
     ///
@@ -748,6 +804,113 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn shared_error_refs_resolve_to_defined_components() {
+        // Contract-harness invariant (DESIGN §8/§9 + `apis::openapi` serving): a
+        // spec's cross-file `$ref`s into the shared error model
+        // (`../../shared/errors.yaml#/components/…`) must point at a component that
+        // fragment actually DEFINES. The sibling canonical-path test proves such a
+        // ref uses the one relative path that reaches the served fragment; this
+        // proves the JSON-pointer *into* that fragment names a real component, so a
+        // client (Redoc/Swagger/codegen) dereferencing it gets the response/schema
+        // rather than a dangling pointer.
+        //
+        // The break this catches: a spec drafted by copy-pasting a sibling's error
+        // block can pick a response name that does not exist in the shared fragment
+        // — a typo (`InvalidArguments`), a CAMARA-template name the shared model
+        // never adopted (`Generic404`), or a name renamed in the shared file after
+        // the copy. Both `$ref` halves then look right (correct file, plausible
+        // pointer) yet resolve to nothing. No existing contract test sees this: the
+        // canonical-path test checks only the *file* half of the ref, and the
+        // identity/wiring tests never dereference a spec's cross-file pointers.
+        //
+        // The allowed set is extracted from the embedded shared fragment itself
+        // (not hard-coded), so adding a new shared response automatically widens it
+        // and this test never needs editing when the shared model grows.
+        const SHARED_ERRORS: &str = include_str!("../specs/shared/errors.yaml");
+        let defined = component_pointers(SHARED_ERRORS);
+        // Non-vacuous floor: the fragment defines the CamaraError schema and the
+        // canonical CAMARA response objects (9 statuses today).
+        assert!(
+            defined.contains("#/components/schemas/CamaraError"),
+            "shared/errors.yaml is expected to define the CamaraError schema; \
+             extracted {defined:?}"
+        );
+        assert!(
+            defined.len() >= 10,
+            "expected the shared error model to define ≥10 components \
+             (CamaraError + the canonical responses), got {}: {defined:?}",
+            defined.len()
+        );
+
+        for api in APIS {
+            for target in ref_targets(api.body) {
+                let Some((file, pointer)) = target.split_once('#') else {
+                    continue;
+                };
+                // Only cross-file refs into the shared error model. (Local
+                // intra-document refs have an empty `file` half and are resolved
+                // within the spec itself, not against this fragment.)
+                if !file.contains("shared/errors.yaml") {
+                    continue;
+                }
+                let pointer = format!("#{pointer}");
+                assert!(
+                    defined.contains(&pointer),
+                    "{} spec has a $ref into the shared error model at `{}`, but \
+                     shared/errors.yaml defines no such component — it resolves to a \
+                     dangling pointer when the spec is served. Defined components: {:?}",
+                    api.name,
+                    target,
+                    {
+                        let mut v: Vec<&String> = defined.iter().collect();
+                        v.sort();
+                        v
+                    }
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn component_pointer_extraction_rules() {
+        // Unit-cover the `component_pointers` extractor so the contract test above
+        // can't pass vacuously (an extractor that found no components would make its
+        // per-ref assertions unreachable) and so its section/component/property
+        // discrimination is pinned.
+        let body = "\
+openapi: 3.0.3
+components:
+  schemas:
+    CamaraError:
+      type: object
+      properties:
+        status:
+          type: integer
+  responses:
+    NotFound:
+      description: not found
+      content:
+        application/json:
+          schema:
+            $ref: \"#/components/schemas/CamaraError\"
+paths: {}
+";
+        let ptrs = component_pointers(body);
+        assert!(ptrs.contains("#/components/schemas/CamaraError"));
+        assert!(ptrs.contains("#/components/responses/NotFound"));
+        // Only the components themselves — never their nested property/content keys.
+        assert!(!ptrs.contains("#/components/schemas/properties"));
+        assert!(!ptrs.contains("#/components/schemas/status"));
+        assert!(!ptrs.contains("#/components/responses/content"));
+        assert_eq!(ptrs.len(), 2, "extracted {ptrs:?}");
+        // A body with no `components:` block yields nothing.
+        assert!(component_pointers("openapi: 3.0.3\npaths: {}\n").is_empty());
+        // The real shared fragment defines the CamaraError schema + 9 responses.
+        let shared = component_pointers(include_str!("../specs/shared/errors.yaml"));
+        assert_eq!(shared.len(), 10, "shared components: {shared:?}");
     }
 
     #[test]

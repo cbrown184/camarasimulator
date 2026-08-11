@@ -2954,6 +2954,26 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     54 siblings. A pure `ref_targets` extractor (no YAML dep; handles both
     `$ref:` mapping keys and `- $ref:` sequence items, skips prose) is
     unit-covered so the contract can't pass vacuously.
+  - a shared-error-ref-target contract test (`src/registry.rs`
+    `shared_error_refs_resolve_to_defined_components`) asserts every cross-file
+    `$ref` a mounted spec makes into the shared error model
+    (`../../shared/errors.yaml#/components/…`) points at a component that fragment
+    actually **defines**. The canonical-shared-ref test proves such a ref uses the
+    one path that reaches the served fragment (the *file* half); this proves the
+    JSON-pointer *into* it names a real component (the *fragment* half), so a
+    client dereferencing it gets the response/schema, not a dangling pointer. The
+    break it catches: a spec drafted by copy-pasting a sibling's error block picks
+    a name the shared model never defines — a typo (`InvalidArguments`), a CAMARA-
+    template name never adopted (`Generic404`), or a name renamed in the shared
+    file after the copy — so both `$ref` halves look right yet resolve to nothing.
+    The allowed set is extracted from the embedded shared fragment itself (a pure
+    `component_pointers` helper, no YAML dep — scans `components:` → 2-space
+    section → exact-4-space component keys, ignoring nested property/content
+    lines), so adding a shared response widens it automatically and the test never
+    needs editing. Verified the invariant already holds (all 10 pointers the 57
+    specs use — the `CamaraError` schema + the 9 canonical responses — are
+    defined). The helper is unit-covered (`component_pointer_extraction_rules`) so
+    the contract can't pass vacuously.
   Full response-vs-schema validation still TODO (would need a YAML/JSON-Schema
   validator — a dependency trade-off, deferred).
 
@@ -2963,6 +2983,35 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-11 — contract-harness: added a **shared-error-ref-target** contract test
+  (`src/registry.rs` `shared_error_refs_resolve_to_defined_components`) asserting
+  every cross-file `$ref` a mounted spec makes into the shared error model
+  (`../../shared/errors.yaml#/components/…`) points at a component that fragment
+  actually **defines**. Complements the sibling canonical-shared-ref test, which
+  proves such a ref uses the one relative path that reaches the served fragment
+  (the *file* half); this proves the JSON-pointer *into* it names a real component
+  (the *fragment* half), so a Redoc/Swagger/codegen client dereferencing it gets
+  the response/schema instead of a dangling pointer. Catches the drift a
+  copy-pasted error block introduces: a response name the shared model never
+  defines — a typo (`InvalidArguments`), a CAMARA-template name never adopted
+  (`Generic404`), or one renamed in the shared file after the copy — where both
+  `$ref` halves look right yet resolve to nothing (invisible to the
+  canonical-path test, which checks only the file half, and to the identity/wiring
+  tests, which never dereference cross-file pointers). The feature-API backlog
+  stays effectively exhausted (remaining `[ ]` leaves are the `https://` sink-TLS
+  cases needing a multi-MB rustls client vs the small-binary directive, and
+  open-ended state streams with no live worker), so this advanced the cross-cutting
+  **contract-test harness** item. Verified the invariant already holds before
+  asserting: all 10 pointers the 57 specs reference (the `CamaraError` schema + the
+  9 canonical responses) are defined in `shared/errors.yaml`. The allowed set is
+  extracted from the embedded fragment itself via a pure `component_pointers`
+  helper (no YAML dep; scans `components:` → 2-space section → exact-4-space
+  component keys, ignoring nested property/content lines), so adding a shared
+  response widens it automatically and the test never needs editing; the helper is
+  unit-covered (`component_pointer_extraction_rules`) so the contract can't pass
+  vacuously. Tests: +2 registry (1 contract + 1 helper unit). `cargo test` 2133
+  green (was 2131), `cargo build --release` warning-clean. No new dep; binary
+  unchanged (`#[cfg(test)]`-only). — binary: 3.7M (3851880 B, +0 B)
 - 2026-08-11 — contract-harness: added a **canonical-shared-ref** contract test
   (`src/registry.rs` `shared_fragment_refs_use_the_canonical_relative_path`)
   asserting every cross-file `$ref` a mounted spec makes to the two shared
