@@ -599,6 +599,40 @@ mod tests {
         }
     }
 
+    /// The single `$ref` every mounted spec must use to define its `openId`
+    /// security scheme: a pointer into the shared, centrally-maintained
+    /// `auth/openapi.yaml` `camaraOAuth` definition. A spec sits two directories
+    /// below `specs/` (`specs/<name>/<version>/openapi.yaml`), so the relative path
+    /// up to the shared `auth/openapi.yaml` is identical for every API.
+    const SHARED_OAUTH_REF: &str =
+        "../../auth/openapi.yaml#/components/securitySchemes/camaraOAuth";
+
+    #[test]
+    fn every_spec_refs_the_shared_camara_oauth_scheme() {
+        // Contract-harness invariant (CAMARA canonical auth + DESIGN §8/§9): the
+        // OAuth/OIDC security scheme is defined once, in the shared
+        // `auth/openapi.yaml` as `camaraOAuth` (its `openIdConnectUrl` points at
+        // this server's discovery doc), and every mounted spec references *that*
+        // single source of truth for its `openId` scheme via a `$ref`. A spec that
+        // instead defines the scheme inline is a drift-prone duplicate: its
+        // `openIdConnectUrl`, type, or description can silently diverge from the
+        // shared definition (and from what the resource server actually enforces),
+        // and no existing contract test sees it — the mount-path/version/parity/
+        // operationId tests all check a spec's *identity*, never how it wires auth.
+        // Every business endpoint is OAuth-protected, so every spec must carry the
+        // shared reference. Verified true across all mounted specs before asserting.
+        for api in APIS {
+            assert!(
+                api.body.contains(SHARED_OAUTH_REF),
+                "{} spec does not reference the shared camaraOAuth security scheme \
+                 (expected a `$ref` to `{}`); it likely defines `openId` inline, a \
+                 drift-prone duplicate of the single source of truth in auth/openapi.yaml",
+                api.name,
+                SHARED_OAUTH_REF
+            );
+        }
+    }
+
     #[test]
     fn operation_id_extraction_rules() {
         // Unit-cover the `operation_ids` extractor so the contract test above

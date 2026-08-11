@@ -2910,8 +2910,21 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     `createSubscription`, legitimately recurs across APIs). A pure `operation_ids`
     extractor (no YAML dep; scans for the `operationId:` key, skips prose that
     merely mentions it) is unit-covered so the contract can't pass vacuously.
+  - a shared-security-scheme contract test (`src/registry.rs`
+    `every_spec_refs_the_shared_camara_oauth_scheme`) asserts every mounted spec
+    defines its `openId` security scheme by `$ref`-ing the single shared
+    `auth/openapi.yaml#/components/securitySchemes/camaraOAuth` definition, not
+    inline. The OAuth/OIDC scheme (its `openIdConnectUrl` → this server's discovery
+    doc) is maintained once; a spec that copies it inline is a drift-prone
+    duplicate whose type/url/description can diverge from the source of truth and
+    from what the resource server enforces — a drift the mount-path/version/parity/
+    operationId tests can't see (they check a spec's identity, never how it wires
+    auth). Converged the one remaining inline spec (`iot-sim-fraud-prevention/vwip`)
+    onto the shared `$ref` in the same pass so the invariant holds across all specs.
   Full response-vs-schema validation still TODO (would need a YAML/JSON-Schema
-  validator — a dependency trade-off, deferred).
+  validator — a dependency trade-off, deferred). Noted gap: `iot-sim-fraud-prevention/
+  vwip` is also the sole spec documenting functional cases in prose only (no
+  structured `x-camarasim-scenarios` block) — a candidate for a future pass.
 
 ---
 
@@ -2919,6 +2932,26 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-11 — contract-harness: added a **shared-security-scheme** contract test
+  (`src/registry.rs` `every_spec_refs_the_shared_camara_oauth_scheme`) asserting
+  every mounted vendored spec defines its `openId` security scheme by `$ref`-ing the
+  single shared `auth/openapi.yaml#/components/securitySchemes/camaraOAuth`, not
+  inline. The feature-API backlog stays effectively exhausted (remaining `[ ]`
+  leaves are the `https://` sink-TLS cases needing a multi-MB rustls client vs the
+  small-binary directive, and open-ended state streams with no live worker), so this
+  advanced the cross-cutting **contract-test harness** item. Found and fixed a real
+  drift while surveying: 56/57 mounted specs reference the shared `camaraOAuth`
+  scheme, but `iot-sim-fraud-prevention/vwip` defined `openId` inline — a drift-prone
+  duplicate whose `type`/`openIdConnectUrl`/description can diverge from the single
+  source of truth (and from what the resource server enforces), invisible to the
+  mount-path/version/parity/operationId tests (they check a spec's identity, never
+  how it wires auth). Converged that spec onto the shared `$ref` (same relative depth
+  as its 56 siblings) in the same pass, so the invariant holds across all specs. No
+  behaviour change — the security *requirement* per operation is unchanged; only the
+  scheme *definition* moved from a local copy to the shared reference. Tests: +1
+  registry contract test. `cargo test` 2127 green (was 2126), `cargo build --release`
+  warning-clean. No new dep; binary shrank slightly (the inline block bytes dropped
+  from the embedded spec). — binary: 3.7M (3845672 B, −64 B)
 - 2026-08-11 — contract-harness: added an **operationId-uniqueness** contract test
   (`src/registry.rs` `operation_ids_are_unique_within_each_spec`) asserting every
   mounted vendored spec declares ≥1 `operationId` and none repeats within that

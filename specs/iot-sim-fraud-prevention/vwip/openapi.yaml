@@ -435,10 +435,7 @@ paths:
 components:
   securitySchemes:
     openId:
-      description: |
-        OAuth2.0 Client Credentials authentication.
-      type: openIdConnect
-      openIdConnectUrl: "/.well-known/openid-configuration"
+      $ref: "../../auth/openapi.yaml#/components/securitySchemes/camaraOAuth"
   parameters:
     x-correlator:
       name: x-correlator
