@@ -3005,6 +3005,22 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     scoped, so an indented `openapi:` mention in a description isn't matched) +
     `is_openapi_3_version` validator (no YAML dep) are unit-covered so the contract
     can't pass vacuously. Verified true (all `3.0.3`) across all mounted specs.
+  - a local-component-ref-resolution contract test (`src/registry.rs`
+    `local_component_refs_resolve_within_their_own_spec`) asserts every
+    *intra-document* `$ref` a mounted spec makes — a local pointer
+    `#/components/<section>/<Name>` (empty file half) — points at a component that
+    same document **defines**. The complementary half of the shared-error-ref test:
+    that dereferences a spec's *cross-file* pointers into the shared error fragment;
+    this dereferences a spec's *own* local pointers against its own `components:`.
+    Catches the copy-paste drift where a pasted `$ref: '#/components/schemas/Foo'`
+    names a schema/response/parameter/header this document never declares (renamed
+    after the copy, or only ever in the sibling) → a dangling pointer that leaves
+    the served spec unresolvable — invisible to the shared-error-ref test (it skips
+    local refs) and the identity/wiring tests. Reuses the unit-covered `ref_targets`
+    + `component_pointers` helpers; restricted to exact 2-segment component
+    pointers (the granularity `component_pointers` resolves; every local ref these
+    specs make has that shape). Verified true (0 dangling local refs across all 57
+    mounted specs) before asserting.
   Full response-vs-schema validation still TODO (would need a YAML/JSON-Schema
   validator — a dependency trade-off, deferred).
 
@@ -3014,6 +3030,33 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-11 — contract-harness: added a **local-component-ref-resolution** contract
+  test (`src/registry.rs` `local_component_refs_resolve_within_their_own_spec`)
+  asserting every intra-document `$ref` a mounted spec makes (a local pointer
+  `#/components/<section>/<Name>`, empty file half) points at a component that same
+  document defines. Complements `shared_error_refs_resolve_to_defined_components`,
+  which dereferences a spec's *cross-file* pointers into the shared error fragment;
+  this dereferences a spec's *own* local pointers against its own `components:`
+  block. The feature-API backlog stays effectively exhausted (remaining `[ ]` leaves
+  are the `https://` sink-TLS cases needing a multi-MB rustls client vs the
+  small-binary directive, and open-ended state streams with no live worker), so this
+  advanced the cross-cutting contract-test harness. Closes a drift no existing test
+  sees: a new endpoint's spec is drafted by copy-pasting an operation (with its
+  `$ref`s) from a sibling, so a pasted `$ref: '#/components/schemas/Foo'` can name a
+  schema/response/parameter/header this document never declares (renamed after the
+  copy, or only ever in the sibling) → both `$ref` halves look right yet resolve to
+  nothing, leaving the served spec unresolvable for any Redoc/Swagger/codegen client
+  that follows it. The shared-error-ref test skips local refs (empty file half); the
+  mount-path/version/parity/operationId/security tests check a spec's identity or
+  wiring, never that its own local pointers resolve. Reuses the unit-covered
+  `ref_targets` + `component_pointers` helpers (no new helper, no YAML dep);
+  restricted to exact 2-segment component pointers — the granularity
+  `component_pointers` resolves, and every local ref these specs make has that shape
+  (verified: all local targets are `section/name`, no deeper pointers). Verified the
+  invariant already holds (0 dangling local refs across all 57 mounted specs) before
+  asserting. Tests: +1 registry contract. `cargo test` 2138 green (was 2137),
+  `cargo build --release` warning-clean. No new dep; binary unchanged
+  (`#[cfg(test)]`-only). — binary: 3.7M (3851880 B, +0 B)
 - 2026-08-11 — contract-harness: added an **openapi-root-version** contract test
   (`src/registry.rs` `every_spec_declares_a_valid_openapi_3_version`) asserting every
   mounted vendored spec declares, at its root, a valid `openapi:` version of the

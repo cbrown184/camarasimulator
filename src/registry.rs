@@ -1043,6 +1043,77 @@ mod tests {
     }
 
     #[test]
+    fn local_component_refs_resolve_within_their_own_spec() {
+        // Contract-harness invariant (OpenAPI 3 structural rule): every
+        // *intra-document* `$ref` a mounted spec makes — one whose target is a
+        // local JSON-pointer `#/components/<section>/<Name>` (empty file half) —
+        // MUST point at a component that same document DEFINES. This is the
+        // complementary half of `shared_error_refs_resolve_to_defined_components`:
+        // that test dereferences a spec's *cross-file* pointers into the shared
+        // error fragment; this one dereferences a spec's *own* local pointers
+        // against its own `components:` block.
+        //
+        // The break this catches: a new endpoint's spec is usually drafted by
+        // copy-pasting an operation (with its `$ref`s) from a sibling API, so a
+        // pasted `$ref: '#/components/schemas/Foo'` can name a schema/response/
+        // parameter/header this document never declares — a component renamed after
+        // the copy, or one that only ever existed in the sibling. Both halves then
+        // look right (correct local form, plausible name) yet resolve to nothing, so
+        // any client (Redoc/Swagger/codegen) that follows the ref gets a dangling
+        // pointer and the served spec is unresolvable. No existing contract test
+        // sees this: the shared-error-ref test only dereferences cross-file pointers
+        // (it skips local refs, whose file half is empty), and the mount-path/
+        // version/parity/operationId/security tests all check a spec's identity or
+        // wiring, never that its own local pointers resolve.
+        //
+        // Only exact `#/components/<section>/<Name>` targets are checked — every
+        // local `$ref` these specs make has that 2-segment shape (a top-level
+        // component object), which is exactly what `component_pointers` collects. A
+        // deeper pointer into a component's internals (e.g. `.../Foo/properties/bar`)
+        // would sit below that granularity, so it is skipped rather than
+        // false-flagged; none exist today, and the sibling extraction-rule unit tests
+        // pin the helpers so this can't pass vacuously.
+        for api in APIS {
+            let defined = component_pointers(api.body);
+            // Non-vacuous floor: every business spec defines at least its shared
+            // `x-correlator`/`XCorrelator` header or a handful of schemas, so a spec
+            // that references local components must define some.
+            for target in ref_targets(api.body) {
+                let Some((file, pointer)) = target.split_once('#') else {
+                    continue;
+                };
+                // Only local intra-document refs (empty file half). Cross-file refs
+                // into shared/auth fragments are covered by their own tests.
+                if !file.is_empty() {
+                    continue;
+                }
+                let pointer = format!("#{pointer}");
+                // Restrict to top-level component pointers `#/components/<sec>/<name>`
+                // (exactly 4 slash-separated segments incl. the leading empty one),
+                // the granularity `component_pointers` resolves.
+                if pointer.split('/').count() != 4
+                    || !pointer.starts_with("#/components/")
+                {
+                    continue;
+                }
+                assert!(
+                    defined.contains(&pointer),
+                    "{} spec has a local $ref `{}`, but the document defines no such \
+                     component — it resolves to a dangling pointer when the spec is \
+                     served. Defined components: {:?}",
+                    api.name,
+                    target,
+                    {
+                        let mut v: Vec<&String> = defined.iter().collect();
+                        v.sort();
+                        v
+                    }
+                );
+            }
+        }
+    }
+
+    #[test]
     fn every_security_requirement_references_a_defined_scheme() {
         // Contract-harness invariant (CAMARA canonical auth + DESIGN §8/§9): every
         // `security` requirement an operation declares MUST name a security scheme
