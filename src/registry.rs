@@ -384,6 +384,28 @@ mod tests {
             .collect()
     }
 
+    /// Extract every `$ref` target string declared in an embedded OpenAPI body,
+    /// in document order, without a YAML dep.
+    ///
+    /// A `$ref` is an OpenAPI reference object (`$ref: "<target>"`). A line is
+    /// taken as a declaration when — after trimming leading whitespace — it begins
+    /// with the `$ref:` key; the unquoted scalar target is returned. Prose that
+    /// merely *mentions* `$ref` never begins with the key, so it is not matched.
+    fn ref_targets(body: &str) -> Vec<String> {
+        body.lines()
+            .filter_map(|line| {
+                // `$ref` appears both as a mapping key (`$ref: "…"`) and as a YAML
+                // sequence item (`- $ref: "…"`, e.g. in a `parameters:` list), so
+                // strip an optional leading `- ` sequence marker before the key.
+                let trimmed = line.trim_start();
+                let after_dash = trimmed.strip_prefix("- ").unwrap_or(trimmed);
+                let rest = after_dash.strip_prefix("$ref:")?;
+                let v = rest.trim().trim_matches('"').trim_matches('\'');
+                (!v.is_empty()).then(|| v.to_string())
+            })
+            .collect()
+    }
+
     /// Count the `x-camarasim-scenarios:` blocks declared in an embedded OpenAPI
     /// body, without a YAML dep.
     ///
@@ -673,6 +695,87 @@ mod tests {
                 api.name
             );
         }
+    }
+
+    #[test]
+    fn shared_fragment_refs_use_the_canonical_relative_path() {
+        // Contract-harness invariant (DESIGN §8/§9 + `apis::openapi` serving): a
+        // spec's cross-file `$ref`s to the two shared fragments — the error model
+        // (`shared/errors.yaml`) and the auth scheme (`auth/openapi.yaml`) — MUST
+        // use the canonical relative path from a spec's own location,
+        // `specs/<name>/<version>/openapi.yaml`: `../../shared/errors.yaml` and
+        // `../../auth/openapi.yaml`. That is the ONLY form that resolves, because
+        // the server serves those fragments at `/shared/errors.yaml` and
+        // `/auth/openapi.yaml`, and a `$ref` in a spec served at
+        // `/{name}/{version}/openapi.yaml` is resolved *relative to that URL* — so
+        // only `../../shared/errors.yaml` climbs back to `/shared/errors.yaml`.
+        //
+        // A bare `errors.yaml#…` (a copy-paste from a CAMARA template, where the
+        // error file sits beside the spec) resolves to
+        // `/{name}/{version}/errors.yaml`, which the server never serves → a 404
+        // for any client (Redoc/Swagger/codegen) that follows the ref, leaving the
+        // served spec unresolvable. No existing contract test sees this: the
+        // camaraOAuth-scheme test only checks the `openId` *securityScheme* `$ref`,
+        // and the mount-path/version/parity/operationId/functional-cases tests all
+        // check a spec's identity or its documented behaviour, never that its
+        // cross-file `$ref`s point at a path the server actually serves.
+        //
+        // Local intra-document refs (`#/components/…`) carry neither fragment name,
+        // so a spec that legitimately inlines its own error responses is unaffected.
+        for api in APIS {
+            for target in ref_targets(api.body) {
+                if target.contains("errors.yaml") {
+                    assert!(
+                        target.contains("../../shared/errors.yaml"),
+                        "{} spec has a $ref to the shared error model by a \
+                         non-canonical path `{}` — it will not resolve when the \
+                         spec is served (expected `../../shared/errors.yaml#…`, the \
+                         only path that reaches the served /shared/errors.yaml)",
+                        api.name,
+                        target
+                    );
+                }
+                if target.contains("auth/openapi.yaml") {
+                    assert!(
+                        target.contains("../../auth/openapi.yaml"),
+                        "{} spec has a $ref to the shared auth spec by a \
+                         non-canonical path `{}` — it will not resolve when the \
+                         spec is served (expected `../../auth/openapi.yaml#…`, the \
+                         only path that reaches the served /auth/openapi.yaml)",
+                        api.name,
+                        target
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn ref_target_extraction_rules() {
+        // Unit-cover the `ref_targets` extractor so the contract test above can't
+        // pass vacuously (an extractor that never found a ref would make the
+        // per-ref assertions unreachable) and so its quote-stripping and
+        // prose-skipping are pinned.
+        let body = "responses:\n  '400':\n    $ref: \"../../shared/errors.yaml#/x\"\n\
+                        '401':\n      $ref: '#/components/responses/Local'\n\
+                    security:\n  - $ref: \"../../auth/openapi.yaml#/y\"\n";
+        assert_eq!(
+            ref_targets(body),
+            vec![
+                "../../shared/errors.yaml#/x",
+                "#/components/responses/Local",
+                "../../auth/openapi.yaml#/y",
+            ]
+        );
+        // A description that merely mentions `$ref` is not a declaration (it does
+        // not begin with the `$ref:` key after trimming).
+        let prose = "      description: |\n        see the $ref above for details.\n";
+        assert!(ref_targets(prose).is_empty());
+        // The broken bare form the contract test rejects is still *extracted* (so
+        // the assertion can catch it), and it fails the canonical-path check.
+        let broken = "    $ref: \"errors.yaml#/components/responses/NotFound\"\n";
+        assert_eq!(ref_targets(broken), vec!["errors.yaml#/components/responses/NotFound"]);
+        assert!(!ref_targets(broken)[0].contains("../../shared/errors.yaml"));
     }
 
     #[test]

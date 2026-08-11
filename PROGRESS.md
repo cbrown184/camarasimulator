@@ -2931,6 +2931,29 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     Closed the one gap the test surfaced in the same pass: `iot-sim-fraud-prevention/
     vwip` (its `query`/`bindDeviceImei`/`unBindDeviceImei` operations) now carry
     structured scenarios blocks matching their 56 siblings.
+  - a canonical-shared-ref contract test (`src/registry.rs`
+    `shared_fragment_refs_use_the_canonical_relative_path`) asserts every
+    cross-file `$ref` a mounted spec makes to the two shared fragments — the
+    error model (`shared/errors.yaml`) and the auth scheme (`auth/openapi.yaml`)
+    — uses the canonical relative path `../../shared/errors.yaml` /
+    `../../auth/openapi.yaml`. That is the only form that resolves once the spec
+    is served: a spec at `/{name}/{version}/openapi.yaml` resolves its `$ref`s
+    relative to that URL, and the server serves the fragments only at
+    `/shared/errors.yaml` and `/auth/openapi.yaml`. A bare `errors.yaml#…`
+    (a CAMARA-template copy-paste, where the error file sits beside the spec)
+    resolves to `/{name}/{version}/errors.yaml` → a 404 for any Redoc/Swagger/
+    codegen client that follows the ref, leaving the served spec unresolvable —
+    a drift no existing test saw (the camaraOAuth-scheme test checks only the
+    `openId` *securityScheme* `$ref`, and the identity/behaviour tests never
+    check that cross-file `$ref`s point at a served path). Local intra-document
+    refs (`#/components/…`) carry neither fragment name, so a spec that inlines
+    its own error responses is unaffected. Fixed the one real drift the survey
+    found in the same pass: `number-verification/v1` (the first business API
+    vendored) referenced the error model by a bare `errors.yaml#…` in all 18 of
+    its response `$ref`s — converged onto `../../shared/errors.yaml#…` like its
+    54 siblings. A pure `ref_targets` extractor (no YAML dep; handles both
+    `$ref:` mapping keys and `- $ref:` sequence items, skips prose) is
+    unit-covered so the contract can't pass vacuously.
   Full response-vs-schema validation still TODO (would need a YAML/JSON-Schema
   validator — a dependency trade-off, deferred).
 
@@ -2940,6 +2963,36 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-11 — contract-harness: added a **canonical-shared-ref** contract test
+  (`src/registry.rs` `shared_fragment_refs_use_the_canonical_relative_path`)
+  asserting every cross-file `$ref` a mounted spec makes to the two shared
+  fragments (`shared/errors.yaml`, `auth/openapi.yaml`) uses the canonical
+  relative path (`../../shared/errors.yaml` / `../../auth/openapi.yaml`) — the
+  only form that resolves once the spec is served (a spec at
+  `/{api}/v{n}/openapi.yaml` resolves `$ref`s relative to that URL, and the
+  fragments are served only at `/shared/errors.yaml` + `/auth/openapi.yaml`).
+  The feature-API backlog stays effectively exhausted (remaining `[ ]` leaves
+  are the `https://` sink-TLS cases needing a multi-MB rustls client vs the
+  small-binary directive, and open-ended state streams with no live worker), so
+  this advanced the cross-cutting **contract-test harness** item. Surfaced and
+  fixed a **real served-spec bug** in the same pass: `number-verification/v1`
+  (the first business API vendored) referenced the error model by a bare
+  `errors.yaml#…` in all 18 of its response `$ref`s — resolving to
+  `/number-verification/v1/errors.yaml`, which the server never serves, so a
+  Redoc/Swagger/codegen client following the refs got a 404 and the served spec
+  was unresolvable (contradicting `apis::openapi`'s documented "every served
+  spec is fully resolvable" invariant). Converged all 18 onto
+  `../../shared/errors.yaml#…` like its 54 siblings; the served bytes now
+  resolve. This drift was invisible to every prior contract test (the
+  camaraOAuth-scheme test checks only the `openId` securityScheme `$ref`; the
+  mount-path/version/parity/operationId/functional-cases tests check a spec's
+  identity or behaviour, never that its cross-file `$ref`s point at a served
+  path). A pure `ref_targets` extractor (no YAML dep; handles both `$ref:`
+  mapping keys and `- $ref:` sequence items, skips prose mentions) is
+  unit-covered so the contract can't pass vacuously. Tests: +2 registry (1
+  contract + 1 helper unit). `cargo test` 2131 green (was 2129), `cargo build
+  --release` warning-clean. No new dep; binary grew by the widened embedded
+  `$ref` path bytes only. — binary: 3.7M (3851880 B, +256 B)
 - 2026-08-11 — contract-harness: added a **functional-cases** contract test
   (`src/registry.rs` `every_spec_documents_functional_cases`) asserting every
   mounted vendored spec declares ≥1 structured `x-camarasim-scenarios` block —

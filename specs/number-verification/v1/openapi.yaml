@@ -92,23 +92,23 @@ paths:
                   value:
                     devicePhoneNumberVerified: false
         "400":
-          $ref: "errors.yaml#/components/responses/InvalidArgument"
+          $ref: "../../shared/errors.yaml#/components/responses/InvalidArgument"
         "401":
-          $ref: "errors.yaml#/components/responses/Unauthenticated"
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
         "403":
-          $ref: "errors.yaml#/components/responses/PermissionDenied"
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
         "404":
-          $ref: "errors.yaml#/components/responses/NotFound"
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
         "409":
-          $ref: "errors.yaml#/components/responses/Conflict"
+          $ref: "../../shared/errors.yaml#/components/responses/Conflict"
         "422":
-          $ref: "errors.yaml#/components/responses/ServiceNotApplicable"
+          $ref: "../../shared/errors.yaml#/components/responses/ServiceNotApplicable"
         "429":
-          $ref: "errors.yaml#/components/responses/TooManyRequests"
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
         "500":
-          $ref: "errors.yaml#/components/responses/Internal"
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
         "503":
-          $ref: "errors.yaml#/components/responses/Unavailable"
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
       x-camarasim-scenarios:
         description: >-
           Result selected from the submitted `phoneNumber` (docs/DESIGN.md §7).
@@ -166,23 +166,23 @@ paths:
                   value:
                     devicePhoneNumber: "+123456789012"
         "400":
-          $ref: "errors.yaml#/components/responses/InvalidArgument"
+          $ref: "../../shared/errors.yaml#/components/responses/InvalidArgument"
         "401":
-          $ref: "errors.yaml#/components/responses/Unauthenticated"
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
         "403":
-          $ref: "errors.yaml#/components/responses/PermissionDenied"
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
         "404":
-          $ref: "errors.yaml#/components/responses/NotFound"
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
         "409":
-          $ref: "errors.yaml#/components/responses/Conflict"
+          $ref: "../../shared/errors.yaml#/components/responses/Conflict"
         "422":
-          $ref: "errors.yaml#/components/responses/ServiceNotApplicable"
+          $ref: "../../shared/errors.yaml#/components/responses/ServiceNotApplicable"
         "429":
-          $ref: "errors.yaml#/components/responses/TooManyRequests"
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
         "500":
-          $ref: "errors.yaml#/components/responses/Internal"
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
         "503":
-          $ref: "errors.yaml#/components/responses/Unavailable"
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
       x-camarasim-scenarios:
         description: >-
           Result selected from the access token subject (docs/DESIGN.md §7).
