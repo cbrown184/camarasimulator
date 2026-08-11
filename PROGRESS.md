@@ -3039,6 +3039,23 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     (`path_parameter_extraction_rules`) so the contract can't pass vacuously.
     Verified true across all 19 path-templating specs (every variable declared,
     every path param used) before asserting.
+  - a required-`responses` contract test (`src/registry.rs`
+    `every_operation_declares_a_responses_object`) asserts every operation a
+    mounted spec declares carries a `responses` object — the **single REQUIRED
+    field** of an OpenAPI Operation Object (summary/operationId/parameters are all
+    optional), so an operation without one is an invalid document (a Redoc/Swagger/
+    codegen client is handed an operation with no declared outcome). Catches the
+    copy-paste drift where a pasted/edited operation block loses or dedents its
+    `responses:` — a break the identity/wiring/path-templating/`$ref` tests never
+    see (they check a spec's identity, wiring, or path variables, never that each
+    operation declares its responses). A pure `operations_without_responses`
+    extractor (no YAML dep; scopes method keys to under a `paths:` path item so an
+    HTTP verb used as a schema property name isn't mistaken for an operation, and
+    credits a `responses:` only to the operation whose indented block it sits in)
+    is unit-covered (`operations_without_responses_extraction_rules`, incl. a
+    non-vacuous floor over all specs) so the contract can't pass vacuously.
+    Verified true (142 operations across all mounted specs, none missing) before
+    asserting.
   Full response-vs-schema validation still TODO (would need a YAML/JSON-Schema
   validator — a dependency trade-off, deferred).
 
@@ -3048,6 +3065,30 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-11 — contract-harness: added a **required-`responses`** contract test
+  (`src/registry.rs` `every_operation_declares_a_responses_object`) asserting every
+  operation a mounted spec declares carries a `responses` object — the single
+  REQUIRED field of an OpenAPI Operation Object (summary/operationId/parameters are
+  all optional), so an operation without one is an invalid document a Redoc/Swagger/
+  codegen client can't render (no declared outcome to bind). Feature-API backlog
+  stays effectively exhausted (remaining `[ ]` leaves are the `https://` sink-TLS
+  cases needing a multi-MB rustls client vs the small-binary directive, and
+  open-ended state streams with no live worker), so this advanced the cross-cutting
+  **contract-test harness** item. Closes a drift no existing test sees: a new
+  endpoint's spec is drafted by copy-pasting an operation from a sibling, so a
+  pasted/edited operation block can lose or dedent its `responses:` — the
+  mount-path/version/parity/operationId/path-templating/`$ref` tests all check a
+  spec's identity, wiring, or path variables, never that each operation declares its
+  responses. One pure helper `operations_without_responses` (no YAML dep; scopes
+  4-space method keys to under a `paths:` path item so an HTTP verb used as a schema
+  property name isn't mistaken for an operation, and credits a 6-space `responses:`
+  only to the operation whose indented block it sits in) is unit-covered
+  (`operations_without_responses_extraction_rules`, incl. a non-vacuous floor over
+  all specs) so the contract can't pass vacuously. Verified true (142 operations
+  across all mounted specs, none missing) before asserting. Tests: +2 registry
+  (1 contract + 1 helper unit). `cargo test` 2144 green (was 2142), `cargo build
+  --release` warning-clean. No new dep; binary unchanged (`#[cfg(test)]`-only). —
+  binary: 3.7M (3851880 B, +0 B)
 - 2026-08-11 — contract-harness: added a **required-`info.title`** contract test
   (`src/registry.rs` `every_spec_declares_a_non_empty_info_title`) asserting every
   mounted vendored spec declares a non-empty `info.title`. With `info.version`,

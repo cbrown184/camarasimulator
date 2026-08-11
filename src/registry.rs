@@ -794,6 +794,78 @@ mod tests {
         out
     }
 
+    /// Extract the labels (`METHOD /path`) of every operation a spec declares
+    /// that is **missing** a `responses:` object — without a YAML dep.
+    ///
+    /// `responses` is the single REQUIRED field of an OpenAPI Operation Object
+    /// (a summary/operationId/parameters are all optional), so an operation with
+    /// none is an invalid document: a client/codegen tool has no declared
+    /// outcomes to bind. This scans the `paths:` section, treating a 2-space key
+    /// beginning with `/` as a path item and a 4-space HTTP-method key
+    /// (`get`/`put`/`post`/`delete`/`patch`/`options`/`head`/`trace`) under it as
+    /// an operation, then looks within the operation's block (lines indented past
+    /// the 4-space method key, until a dedent back to ≤4 spaces) for a 6-space
+    /// `responses:` key. Method keys only count under a path item, so an HTTP verb
+    /// appearing as a schema property name elsewhere is never mistaken for an
+    /// operation.
+    fn operations_without_responses(body: &str) -> Vec<String> {
+        const METHODS: [&str; 8] =
+            ["get", "put", "post", "delete", "patch", "options", "head", "trace"];
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let mut out = Vec::new();
+        let mut in_paths = false;
+        let mut path: Option<String> = None;
+        for (i, line) in lines.iter().enumerate() {
+            let is_top_level_key =
+                !line.is_empty() && !line.starts_with(char::is_whitespace);
+            if is_top_level_key {
+                in_paths = line.trim_end() == "paths:";
+                path = None;
+                continue;
+            }
+            if !in_paths {
+                continue;
+            }
+            // A 2-space direct child of `paths:` beginning with `/` is a path item.
+            if let Some(rest) = line.strip_prefix("  ") {
+                if !rest.starts_with(char::is_whitespace) && rest.starts_with('/') {
+                    let key = rest.trim_end().strip_suffix(':').unwrap_or(rest.trim_end());
+                    path = Some(key.to_string());
+                    continue;
+                }
+            }
+            let Some(current_path) = path.as_deref() else { continue };
+            // A 4-space method key under a path item is an operation.
+            if indent(line) != 4 {
+                continue;
+            }
+            let key = line.trim_start();
+            let Some(name) = key.strip_suffix(':') else { continue };
+            if name.contains(char::is_whitespace) || !METHODS.contains(&name) {
+                continue;
+            }
+            // Scan the operation's block for a 6-space `responses:` key.
+            let mut has_responses = false;
+            for l in &lines[i + 1..] {
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) <= 4 {
+                    break; // dedented out of this operation
+                }
+                if indent(l) == 6 && l.trim_start().strip_suffix(':') == Some("responses") {
+                    has_responses = true;
+                    break;
+                }
+            }
+            if !has_responses {
+                out.push(format!("{} {}", name.to_uppercase(), current_path));
+            }
+        }
+        out
+    }
+
     #[test]
     fn registry_is_non_empty() {
         // Guards a broken/emptied list: both the catalog and the served specs are
@@ -1773,5 +1845,92 @@ components:
                 api.name
             );
         }
+    }
+
+    #[test]
+    fn every_operation_declares_a_responses_object() {
+        // Contract-harness invariant (OpenAPI structural rule): every operation a
+        // mounted spec declares MUST carry a `responses` object — it is the single
+        // REQUIRED field of an Operation Object (summary/operationId/parameters are
+        // all optional), so an operation without one is an invalid document: a
+        // Redoc/Swagger/codegen client is handed an operation with no declared
+        // outcome to render or bind. This is a live copy-paste hazard — a new
+        // endpoint's spec is drafted from a sibling, so an operation block can be
+        // pasted or edited with its `responses:` accidentally dropped or dedented
+        // out of the operation — a drift no existing contract test sees: the
+        // mount-path/version/parity/operationId/path-templating/`$ref` tests all
+        // check a spec's identity, wiring, or path variables, never that each
+        // operation declares its responses. Verified true (142 operations across
+        // all mounted specs, none missing) before asserting.
+        for api in APIS {
+            let missing = operations_without_responses(api.body);
+            assert!(
+                missing.is_empty(),
+                "{} spec has operation(s) with no `responses` object (the single \
+                 REQUIRED field of an OpenAPI Operation Object): {:?}",
+                api.name,
+                missing
+            );
+        }
+    }
+
+    #[test]
+    fn operations_without_responses_extraction_rules() {
+        // Unit-cover the `operations_without_responses` extractor so the contract
+        // test above can't pass vacuously (an extractor that returned an empty Vec
+        // for every body would make its assertion meaningless) and so the
+        // scoping/indentation rules are pinned: a `responses:` is credited only to
+        // the operation whose block it sits in; an HTTP verb appearing as a schema
+        // property name (not under a path item) is not an operation; and a bare
+        // dedent ends an operation's block before a sibling path's `responses`.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+    post:
+      operationId: postA
+      summary: no responses here
+  /b/{id}:
+    delete:
+      operationId: delB
+      responses:
+        '204':
+          description: gone
+components:
+  schemas:
+    Widget:
+      type: object
+      properties:
+        get:
+          type: string
+";
+        // `POST /a` is the only operation missing a `responses` block. `GET /a`
+        // and `DELETE /b/{id}` each declare one; the `get` schema *property* under
+        // `components.schemas.Widget` is not under `paths:`, so it is not an
+        // operation and never counted.
+        assert_eq!(operations_without_responses(body), vec!["POST /a".to_string()]);
+
+        // Non-vacuous floor: across every registered spec, no operation is missing
+        // its `responses` object (the invariant the contract test asserts) — and
+        // the extractor sees a non-trivial number of operations overall, so a
+        // broken extractor can't hide behind an empty scan.
+        let mut total_ops = 0usize;
+        for api in APIS {
+            assert!(
+                operations_without_responses(api.body).is_empty(),
+                "{}: every operation must declare a `responses` object",
+                api.name
+            );
+            total_ops += operation_ids(api.body).len();
+        }
+        assert!(total_ops >= 100, "expected many operations across specs, got {total_ops}");
     }
 }
