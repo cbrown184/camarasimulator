@@ -363,6 +363,27 @@ mod tests {
         None
     }
 
+    /// Extract every `operationId` value declared in an embedded OpenAPI body,
+    /// in document order, without a YAML dep.
+    ///
+    /// `operationId` is an OpenAPI *operation-object* field — the canonical,
+    /// document-unique name of an operation, which the server keys each handler
+    /// to. It appears once per operation, conventionally at the 6-space indent of
+    /// an operation field (`paths:` → `/path:` → `<method>:` → `operationId:`). A
+    /// line is taken as a declaration when — after trimming leading whitespace —
+    /// it begins with the `operationId:` key; its unquoted scalar is returned.
+    /// Prose that merely *mentions* `operationId` (e.g. "(operationId `foo`)"
+    /// inside a description) never begins with the key, so it is not matched.
+    fn operation_ids(body: &str) -> Vec<String> {
+        body.lines()
+            .filter_map(|line| {
+                let rest = line.trim_start().strip_prefix("operationId:")?;
+                let v = rest.trim().trim_matches('"').trim_matches('\'');
+                (!v.is_empty()).then(|| v.to_string())
+            })
+            .collect()
+    }
+
     /// Does the spec's declared `info.version` agree with the version segment the
     /// API is mounted at in the URL (DESIGN §9 canonical URL versioning)?
     ///
@@ -541,6 +562,63 @@ mod tests {
             missing.is_empty(),
             "registered API(s) with no vendored spec file on disk: {missing:?}"
         );
+    }
+
+    #[test]
+    fn operation_ids_are_unique_within_each_spec() {
+        // Contract-harness invariant (OpenAPI structural + DESIGN §9): within a
+        // single OpenAPI document every operation's `operationId` MUST be unique —
+        // it is the operation's canonical name, and the simulator keys each
+        // handler/scope narrative to it. A new endpoint's spec is usually drafted
+        // by copy-pasting an operation from a sibling API, so it is easy to leave
+        // the pasted `operationId` unchanged and end up with two operations
+        // sharing an id — an invalid document that no existing contract test sees
+        // (they check a spec's mount path, declared version, and registry parity,
+        // never that its operation *names* are well-formed). This asserts every
+        // mounted spec declares at least one operationId and none repeats within
+        // it. Uniqueness is scoped per spec on purpose: the *same* operationId
+        // (e.g. `createSubscription`, `retrieveSessionsByDevice`) legitimately
+        // recurs across different APIs — only within one document is it a defect.
+        for api in APIS {
+            let ids = operation_ids(api.body);
+            assert!(
+                !ids.is_empty(),
+                "{} spec declares no operationId (every mounted API has operations)",
+                api.name
+            );
+            let mut seen = HashSet::new();
+            for id in &ids {
+                assert!(
+                    seen.insert(id.as_str()),
+                    "{} spec declares operationId `{}` more than once \
+                     (operationIds must be unique within an OpenAPI document)",
+                    api.name,
+                    id
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn operation_id_extraction_rules() {
+        // Unit-cover the `operation_ids` extractor so the contract test above
+        // can't pass vacuously (an extractor that never found an id would make
+        // "no duplicates within a spec" trivially true) and so its quote-stripping
+        // and prose-skipping are pinned.
+        let body = "paths:\n  /a:\n    get:\n      operationId: doA\n\
+                        post:\n      operationId: \"doB\"\n  /c:\n    get:\n\
+                          operationId: 'doC'\n";
+        assert_eq!(operation_ids(body), vec!["doA", "doB", "doC"]);
+        // A description that merely mentions the word must not be picked up as a
+        // declaration (it does not begin with the `operationId:` key after trim).
+        let prose = "      description: |\n        Retrieve a status (operationId `getStatus`).\n";
+        assert!(operation_ids(prose).is_empty());
+        // A body with no operations yields an empty list.
+        assert!(operation_ids("openapi: 3.0.3\npaths: {}\n").is_empty());
+        // A duplicate id is surfaced verbatim (the contract test turns a repeat
+        // within one spec into a failure).
+        let dup = "    get:\n      operationId: same\n    post:\n      operationId: same\n";
+        assert_eq!(operation_ids(dup), vec!["same", "same"]);
     }
 
     #[test]

@@ -2898,6 +2898,18 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     file is missing (registry→file); a spec vendored on disk but never added to
     `APIS` compiles fine and is silently never mounted or served. Now both
     directions fail CI.
+  - an operationId-uniqueness contract test (`src/registry.rs`
+    `operation_ids_are_unique_within_each_spec`) asserts every mounted spec
+    declares ≥1 `operationId` and none repeats *within* that document — the
+    OpenAPI structural rule that an operation's canonical name is unique per
+    doc. A new endpoint's spec is usually drafted by copy-pasting an operation
+    from a sibling API, so a pasted `operationId` left unrenamed yields two
+    operations sharing an id — an invalid document the mount-path/version/parity
+    tests can't see (they check a spec's identity, never that its operation
+    *names* are well-formed). Uniqueness is scoped per spec (the same id, e.g.
+    `createSubscription`, legitimately recurs across APIs). A pure `operation_ids`
+    extractor (no YAML dep; scans for the `operationId:` key, skips prose that
+    merely mentions it) is unit-covered so the contract can't pass vacuously.
   Full response-vs-schema validation still TODO (would need a YAML/JSON-Schema
   validator — a dependency trade-off, deferred).
 
@@ -2907,6 +2919,29 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-11 — contract-harness: added an **operationId-uniqueness** contract test
+  (`src/registry.rs` `operation_ids_are_unique_within_each_spec`) asserting every
+  mounted vendored spec declares ≥1 `operationId` and none repeats within that
+  document — the OpenAPI rule that an operation's canonical name is unique per
+  doc, which the simulator keys handlers/scope narrative to. The feature-API
+  backlog stays effectively exhausted (remaining `[ ]` leaves are the `https://`
+  sink-TLS cases needing a multi-MB rustls client vs the small-binary directive,
+  and open-ended state streams with no live worker), so this advanced the
+  cross-cutting **contract-test harness** item. Closes a real drift the existing
+  tests can't see: the mount-path / info.version / specs↔registry-parity tests
+  check a spec's *identity*, never that its operation *names* are well-formed —
+  and a new endpoint's spec is usually drafted by copy-pasting an operation from a
+  sibling API, so a pasted `operationId` left unrenamed yields two operations
+  sharing an id, an invalid document that all pass today. Uniqueness is scoped
+  per spec on purpose (the same id, e.g. `createSubscription`, legitimately
+  recurs across different APIs). Verified the invariant already holds across all
+  57 mounted specs (142 operationIds, 0 within-spec dups) before asserting it. A
+  pure `operation_ids` extractor (test-only; no YAML dep — scans for the
+  `operationId:` key, strips quotes, skips prose that merely mentions the word) is
+  unit-covered (`operation_id_extraction_rules`) so the contract can't pass
+  vacuously. Tests: +2 registry (1 contract + 1 helper unit). `cargo test` 2126
+  green (was 2124), `cargo build --release` warning-clean. No new dep; binary
+  unchanged (`#[cfg(test)]`-only). — binary: 3.7M (3845736 B, +0 B)
 - 2026-08-11 — contract-harness: added a **specs↔registry parity** contract test
   (`src/registry.rs` `every_vendored_spec_on_disk_is_registered`) that walks the
   on-disk `specs/` tree and asserts the set of vendored
