@@ -2851,13 +2851,14 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Cross-cutting (do alongside the item that needs it)
 - [~] `errors.rs`: base CAMARA error model done (`src/errors.rs`, `specs/shared/errors.yaml`); per-version catalogs still TODO (DESIGN §8)
-- [~] `registry.rs`: canonical URL versioning + `/` catalog wiring (DESIGN §9).
-  All three §9 discovery endpoints now served: `GET /` (catalog), `GET
-  /{api}/v{n}/openapi.yaml` (spec), and — new — `GET /{api}/v{n}/docs`
-  (human-readable Redoc page per spec, `src/apis/openapi.rs`; a `catalog_apis_
-  serve_html_docs` test ties each catalogued `base_path`'s `/docs` to the served
-  set). Still TODO: a single `registry.rs` module so the `/` catalog and the
-  served-spec table stop being two hand-maintained parallel lists.
+- [x] `registry.rs`: canonical URL versioning + `/` catalog wiring (DESIGN §9).
+  All three §9 discovery endpoints served: `GET /` (catalog), `GET
+  /{api}/v{n}/openapi.yaml` (spec), `GET /{api}/v{n}/docs` (human-readable Redoc
+  page per spec). **The two hand-maintained parallel lists are now one**:
+  `src/registry.rs` holds `APIS` (name/version/embedded spec body) as the single
+  source of truth, and both the `/` catalog (`main::catalog`) and the spec-serving
+  routes (`apis::openapi`) are derived from it, so they cannot drift. Adding an API
+  is now one registry entry (+ its `routes()` merge) instead of two lockstep edits.
 - [~] `specs/…`: vendor + annotate OpenAPI per API/version, serve at `/{api}/v{n}/openapi.yaml`
   — **serving done** (`src/apis/openapi.rs`: every mounted API's spec at
   `/{api}/v{n}/openapi.yaml`, plus `/auth/openapi.yaml` + `/shared/errors.yaml` so
@@ -2879,6 +2880,28 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-11 — registry: collapsed the **two hand-maintained parallel API lists**
+  into one source of truth, completing the cross-cutting `registry.rs` §9 item.
+  New `src/registry.rs` holds `APIS: &[ApiSpec{name, version, body}]` (each `body`
+  an `include_str!` of the vendored spec); `base_path`/`spec_url` are derived. Both
+  consumers now derive from it: `main::catalog` builds its `apis` array by iterating
+  `registry::APIS` (the ~340-line `json!` catalog literal is gone), and
+  `apis::openapi` builds its spec/`docs` routes + `api_spec_urls()` from the same
+  registry (the ~230-line `SPECS` const shrinks to a 2-entry `FRAGMENTS` const for
+  the `auth`/`shared` `$ref` targets only). So a newly mounted API is one registry
+  entry instead of two lockstep edits to `main.rs` **and** `openapi.rs`. Feature-API
+  backlog remains effectively exhausted (only the `https://` sink-TLS cases — a
+  multi-MB rustls client vs the small-binary directive — and open-ended state
+  streams with no live worker are left `[ ]`), so this advanced the cross-cutting
+  registry item. Pure refactor — the served surface (catalog JSON + every spec/docs
+  byte) is unchanged, proven by the existing catalog↔served contract tests
+  (`catalog_lists_mounted_apis`, `catalog_spec_urls_match_served_specs_and_resolve`,
+  `serves_every_mounted_api_spec`, `serves_docs_for_every_mounted_api`) — so no
+  vendored CAMARA spec changes. Tests: +4 registry unit tests (non-empty, no
+  duplicate base_path, derived-path consistency, bodies are OpenAPI docs). `cargo
+  test` 2120 green (was 2116), `cargo build --release` warning-clean. No new dep;
+  binary **shrank** (dropped the big catalog literal). — binary: 3.7M (3845736 B,
+  −37144 B)
 - 2026-08-11 — openapi/docs: implemented DESIGN §9's third (and last unbuilt)
   discovery endpoint, `GET /{api}/v{n}/docs` — a human-readable docs page per
   served spec. The feature-API backlog is effectively exhausted (remaining `[ ]`

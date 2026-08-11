@@ -54,241 +54,17 @@ const YAML_CONTENT_TYPE: &str = "application/yaml";
 /// The media type the human-readable `…/docs` pages are served with.
 const HTML_CONTENT_TYPE: &str = "text/html; charset=utf-8";
 
-/// `(url path, embedded spec body)` for every vendored spec CamaraSim serves.
+/// The shared `$ref` fragment specs every API spec references by relative path
+/// (`../../auth/openapi.yaml`, `../../shared/errors.yaml`). Served alongside the
+/// API specs so those `$ref`s resolve, but they are serving infrastructure — not
+/// catalogued CAMARA business APIs — so [`api_spec_urls`] excludes them and the
+/// `/` catalog does not list them.
 ///
-/// The API entries mirror each mounted API's base path with `/openapi.yaml`
-/// appended; `auth`/`shared` are the fragments the API specs `$ref`. Bodies are
-/// embedded from `specs/…` at compile time so the served copy can never drift
-/// from the file the agent maintains.
-const SPECS: &[(&str, &str)] = &[
-    (
-        "/number-verification/v1/openapi.yaml",
-        include_str!("../../specs/number-verification/v1/openapi.yaml"),
-    ),
-    (
-        "/sim-swap/v2/openapi.yaml",
-        include_str!("../../specs/sim-swap/v2/openapi.yaml"),
-    ),
-    (
-        "/kyc-match/v0.3/openapi.yaml",
-        include_str!("../../specs/kyc-match/v0.3/openapi.yaml"),
-    ),
-    (
-        "/device-reachability-status/v1/openapi.yaml",
-        include_str!("../../specs/device-reachability-status/v1/openapi.yaml"),
-    ),
-    (
-        "/device-roaming-status/v1/openapi.yaml",
-        include_str!("../../specs/device-roaming-status/v1/openapi.yaml"),
-    ),
-    (
-        "/device-identifier/v0.3/openapi.yaml",
-        include_str!("../../specs/device-identifier/v0.3/openapi.yaml"),
-    ),
-    (
-        "/one-time-password-sms/v1/openapi.yaml",
-        include_str!("../../specs/one-time-password-sms/v1/openapi.yaml"),
-    ),
-    (
-        "/quality-on-demand/v1/openapi.yaml",
-        include_str!("../../specs/quality-on-demand/v1/openapi.yaml"),
-    ),
-    (
-        "/location-verification/v3/openapi.yaml",
-        include_str!("../../specs/location-verification/v3/openapi.yaml"),
-    ),
-    (
-        "/location-retrieval/v0.4/openapi.yaml",
-        include_str!("../../specs/location-retrieval/v0.4/openapi.yaml"),
-    ),
-    (
-        "/geofencing-subscriptions/v0.4/openapi.yaml",
-        include_str!("../../specs/geofencing-subscriptions/v0.4/openapi.yaml"),
-    ),
-    (
-        "/carrier-billing/v0.5/openapi.yaml",
-        include_str!("../../specs/carrier-billing/v0.5/openapi.yaml"),
-    ),
-    (
-        "/call-forwarding-signal/v0.4/openapi.yaml",
-        include_str!("../../specs/call-forwarding-signal/v0.4/openapi.yaml"),
-    ),
-    (
-        "/number-recycling/v0.2/openapi.yaml",
-        include_str!("../../specs/number-recycling/v0.2/openapi.yaml"),
-    ),
-    (
-        "/kyc-age-verification/v0.1/openapi.yaml",
-        include_str!("../../specs/kyc-age-verification/v0.1/openapi.yaml"),
-    ),
-    (
-        "/device-swap/v1/openapi.yaml",
-        include_str!("../../specs/device-swap/v1/openapi.yaml"),
-    ),
-    (
-        "/kyc-fill-in/v0.3/openapi.yaml",
-        include_str!("../../specs/kyc-fill-in/v0.3/openapi.yaml"),
-    ),
-    (
-        "/home-devices-qod/v0.4/openapi.yaml",
-        include_str!("../../specs/home-devices-qod/v0.4/openapi.yaml"),
-    ),
-    (
-        "/qos-profiles/v1/openapi.yaml",
-        include_str!("../../specs/qos-profiles/v1/openapi.yaml"),
-    ),
-    (
-        "/kyc-tenure/v0.2/openapi.yaml",
-        include_str!("../../specs/kyc-tenure/v0.2/openapi.yaml"),
-    ),
-    (
-        "/blockchain-public-address/v0.3/openapi.yaml",
-        include_str!("../../specs/blockchain-public-address/v0.3/openapi.yaml"),
-    ),
-    (
-        "/simple-edge-discovery/v2/openapi.yaml",
-        include_str!("../../specs/simple-edge-discovery/v2/openapi.yaml"),
-    ),
-    (
-        "/customer-insights/v0.2/openapi.yaml",
-        include_str!("../../specs/customer-insights/v0.2/openapi.yaml"),
-    ),
-    (
-        "/connected-network-type/v0.2/openapi.yaml",
-        include_str!("../../specs/connected-network-type/v0.2/openapi.yaml"),
-    ),
-    (
-        "/device-data-volume/vwip/openapi.yaml",
-        include_str!("../../specs/device-data-volume/vwip/openapi.yaml"),
-    ),
-    (
-        "/connectivity-insights/v0.6/openapi.yaml",
-        include_str!("../../specs/connectivity-insights/v0.6/openapi.yaml"),
-    ),
-    (
-        "/region-device-count/v0.2/openapi.yaml",
-        include_str!("../../specs/region-device-count/v0.2/openapi.yaml"),
-    ),
-    (
-        "/device-visit-location/vwip/openapi.yaml",
-        include_str!("../../specs/device-visit-location/vwip/openapi.yaml"),
-    ),
-    (
-        "/population-density-data/vwip/openapi.yaml",
-        include_str!("../../specs/population-density-data/vwip/openapi.yaml"),
-    ),
-    (
-        "/qos-provisioning/v0.3/openapi.yaml",
-        include_str!("../../specs/qos-provisioning/v0.3/openapi.yaml"),
-    ),
-    (
-        "/qos-booking/vwip/openapi.yaml",
-        include_str!("../../specs/qos-booking/vwip/openapi.yaml"),
-    ),
-    (
-        "/media-streaming-rate/vwip/openapi.yaml",
-        include_str!("../../specs/media-streaming-rate/vwip/openapi.yaml"),
-    ),
-    (
-        "/network-health-assessment/vwip/openapi.yaml",
-        include_str!("../../specs/network-health-assessment/vwip/openapi.yaml"),
-    ),
-    (
-        "/network-traffic-analysis/vwip/openapi.yaml",
-        include_str!("../../specs/network-traffic-analysis/vwip/openapi.yaml"),
-    ),
-    (
-        "/optimal-edge-discovery/vwip/openapi.yaml",
-        include_str!("../../specs/optimal-edge-discovery/vwip/openapi.yaml"),
-    ),
-    (
-        "/verified-caller/vwip/openapi.yaml",
-        include_str!("../../specs/verified-caller/vwip/openapi.yaml"),
-    ),
-    (
-        "/application-profiles/vwip/openapi.yaml",
-        include_str!("../../specs/application-profiles/vwip/openapi.yaml"),
-    ),
-    (
-        "/subscription-status/vwip/openapi.yaml",
-        include_str!("../../specs/subscription-status/vwip/openapi.yaml"),
-    ),
-    (
-        "/device-authenticity/vwip/openapi.yaml",
-        include_str!("../../specs/device-authenticity/vwip/openapi.yaml"),
-    ),
-    (
-        "/session-insights/vwip/openapi.yaml",
-        include_str!("../../specs/session-insights/vwip/openapi.yaml"),
-    ),
-    (
-        "/consent-info/vwip/openapi.yaml",
-        include_str!("../../specs/consent-info/vwip/openapi.yaml"),
-    ),
-    (
-        "/iot-sim-fraud-prevention/vwip/openapi.yaml",
-        include_str!("../../specs/iot-sim-fraud-prevention/vwip/openapi.yaml"),
-    ),
-    (
-        "/sponsored-data/vwip/openapi.yaml",
-        include_str!("../../specs/sponsored-data/vwip/openapi.yaml"),
-    ),
-    (
-        "/click-to-dial/vwip/openapi.yaml",
-        include_str!("../../specs/click-to-dial/vwip/openapi.yaml"),
-    ),
-    (
-        "/most-frequent-location/vwip/openapi.yaml",
-        include_str!("../../specs/most-frequent-location/vwip/openapi.yaml"),
-    ),
-    (
-        "/traffic-influence/vwip/openapi.yaml",
-        include_str!("../../specs/traffic-influence/vwip/openapi.yaml"),
-    ),
-    (
-        "/application-endpoint-discovery/vwip/openapi.yaml",
-        include_str!("../../specs/application-endpoint-discovery/vwip/openapi.yaml"),
-    ),
-    (
-        "/application-endpoint-registration/vwip/openapi.yaml",
-        include_str!("../../specs/application-endpoint-registration/vwip/openapi.yaml"),
-    ),
-    (
-        "/predictive-connectivity-data/vwip/openapi.yaml",
-        include_str!("../../specs/predictive-connectivity-data/vwip/openapi.yaml"),
-    ),
-    (
-        "/network-access-devices/vwip/openapi.yaml",
-        include_str!("../../specs/network-access-devices/vwip/openapi.yaml"),
-    ),
-    (
-        "/sms/v0alpha1/openapi.yaml",
-        include_str!("../../specs/sms/v0alpha1/openapi.yaml"),
-    ),
-    (
-        "/capabilities-and-restrictions/vwip/openapi.yaml",
-        include_str!("../../specs/capabilities-and-restrictions/vwip/openapi.yaml"),
-    ),
-    (
-        "/dedicated-network-profiles/vwip/openapi.yaml",
-        include_str!("../../specs/dedicated-network-profiles/vwip/openapi.yaml"),
-    ),
-    (
-        "/dedicated-network/vwip/openapi.yaml",
-        include_str!("../../specs/dedicated-network/vwip/openapi.yaml"),
-    ),
-    (
-        "/dedicated-network-accesses/vwip/openapi.yaml",
-        include_str!("../../specs/dedicated-network-accesses/vwip/openapi.yaml"),
-    ),
-    (
-        "/dedicated-network-areas/vwip/openapi.yaml",
-        include_str!("../../specs/dedicated-network-areas/vwip/openapi.yaml"),
-    ),
-    (
-        "/edge-application-management/vwip/openapi.yaml",
-        include_str!("../../specs/edge-application-management/vwip/openapi.yaml"),
-    ),
+/// Bodies are embedded from `specs/…` at compile time so the served copy can
+/// never drift from the file the agent maintains. The mounted **APIs** themselves
+/// live in the shared [`crate::registry::APIS`] source of truth, from which both
+/// this module's routes and the `/` catalog are derived.
+const FRAGMENTS: &[(&str, &str)] = &[
     (
         "/auth/openapi.yaml",
         include_str!("../../specs/auth/openapi.yaml"),
@@ -299,21 +75,19 @@ const SPECS: &[(&str, &str)] = &[
     ),
 ];
 
-/// The URL paths of every **API** OpenAPI spec served — every entry in [`SPECS`]
-/// except the shared `/auth` and `/shared` `$ref` fragments (which are serving
-/// infrastructure, not catalogued business APIs).
+/// The URL paths of every **API** OpenAPI spec served — one per entry in the
+/// shared [`crate::registry::APIS`] source of truth (the `/auth` and `/shared`
+/// `$ref` fragments are serving infrastructure, not catalogued business APIs, so
+/// they are excluded).
 ///
-/// Exposed as the single source of truth so the `/` catalog can be checked
-/// against the specs actually served: the two hand-maintained lists must agree
-/// (docs/DESIGN.md §9 — every mounted API is catalogued and its `spec_url`
-/// resolves), and a test asserts the sets are equal. Test-support only — it has
-/// no role on the request path, so it is compiled only under `cfg(test)`.
+/// Exposed so the `/` catalog can be checked against the specs actually served:
+/// both are now derived from the same registry, and a test asserts the sets are
+/// equal (docs/DESIGN.md §9 — every mounted API is catalogued and its `spec_url`
+/// resolves). Test-support only — it has no role on the request path, so it is
+/// compiled only under `cfg(test)`.
 #[cfg(test)]
-pub fn api_spec_urls() -> impl Iterator<Item = &'static str> {
-    SPECS
-        .iter()
-        .map(|&(path, _)| path)
-        .filter(|path| !path.starts_with("/auth/") && !path.starts_with("/shared/"))
+pub fn api_spec_urls() -> impl Iterator<Item = String> {
+    crate::registry::APIS.iter().map(|api| api.spec_url())
 }
 
 /// Build the human-readable docs page for the spec served at `spec_url`.
@@ -345,9 +119,15 @@ fn docs_page(title: &str, spec_url: &str) -> String {
 /// DESIGN §9's `/{api}/v{n}/openapi.yaml` + `/{api}/v{n}/docs` discovery pair.
 pub fn routes() -> Router {
     let mut router = Router::new();
-    for &(path, body) in SPECS {
+    // Every mounted API's vendored spec comes from the shared registry; the two
+    // shared `$ref` fragments (auth full spec + errors fragment) follow.
+    let api_specs = crate::registry::APIS
+        .iter()
+        .map(|api| (api.spec_url(), api.body));
+    let fragments = FRAGMENTS.iter().map(|&(path, body)| (path.to_string(), body));
+    for (path, body) in api_specs.chain(fragments) {
         router = router.route(
-            path,
+            &path,
             get(move || async move { ([(header::CONTENT_TYPE, YAML_CONTENT_TYPE)], body) }),
         );
         // Every full API/auth spec (`…/openapi.yaml`) gets a docs page at its
@@ -356,7 +136,7 @@ pub fn routes() -> Router {
         if let Some(base) = path.strip_suffix("/openapi.yaml") {
             let docs_path = format!("{base}/docs");
             let title = base.trim_start_matches('/').to_string();
-            let page = docs_page(&title, path);
+            let page = docs_page(&title, &path);
             router = router.route(
                 &docs_path,
                 get(move || async move { ([(header::CONTENT_TYPE, HTML_CONTENT_TYPE)], page) }),
@@ -411,7 +191,7 @@ mod tests {
         let mut count = 0;
         for path in api_spec_urls() {
             count += 1;
-            let (status, content_type, body) = fetch(path).await;
+            let (status, content_type, body) = fetch(&path).await;
             assert_eq!(status, StatusCode::OK, "spec {path} should be served");
             assert_eq!(content_type, YAML_CONTENT_TYPE, "spec {path} content-type");
             assert!(body.starts_with("#") || body.contains("openapi:"), "spec {path} is YAML");
@@ -468,7 +248,7 @@ mod tests {
             let (status, content_type, body) = fetch(&docs).await;
             assert_eq!(status, StatusCode::OK, "docs {docs} should be served");
             assert!(content_type.starts_with("text/html"), "docs {docs} content-type");
-            assert!(body.contains(spec), "docs {docs} should reference its spec {spec}");
+            assert!(body.contains(&spec), "docs {docs} should reference its spec {spec}");
         }
         assert!(count >= 28, "expected the full API docs catalog, got {count}");
     }
