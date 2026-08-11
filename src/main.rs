@@ -626,6 +626,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn catalog_apis_serve_html_docs() {
+        // DESIGN §9's third discovery endpoint: every catalogued API also serves
+        // a human-readable docs page at `{base_path}/docs` (the sibling of its
+        // `{base_path}/openapi.yaml`). Driving this off the catalog's `base_path`
+        // ties the docs pages to the catalog exactly as the spec_urls are —
+        // catalog↔served wiring, no separate hand-maintained list.
+        let response = app()
+            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        let apis = body["apis"].as_array().unwrap();
+
+        for api in apis {
+            let base = api["base_path"].as_str().expect("base_path is a string");
+            let docs = format!("{base}/docs");
+            let resp = app()
+                .oneshot(Request::builder().uri(docs.as_str()).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK, "docs page {docs} must resolve");
+            let ct = resp
+                .headers()
+                .get(axum::http::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("");
+            assert!(ct.starts_with("text/html"), "docs page {docs} served as HTML, got {ct}");
+        }
+    }
+
+    #[tokio::test]
+    async fn docs_page_is_reachable_through_the_app() {
+        let response = app()
+            .oneshot(
+                Request::builder()
+                    .uri("/number-verification/v1/docs")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(response
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .starts_with("text/html"));
+    }
+
+    #[tokio::test]
     async fn openapi_spec_is_reachable_through_the_app() {
         let response = app()
             .oneshot(

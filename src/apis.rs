@@ -62,7 +62,8 @@
 //! - **Edge Application Management vwip** — `/edge-application-management/vwip/…`.
 //!
 //! Plus [`openapi`], which serves each mounted API's vendored OpenAPI spec at
-//! `/{api}/v{n}/openapi.yaml` (docs/DESIGN.md §9).
+//! `/{api}/v{n}/openapi.yaml` and a human-readable docs page at
+//! `/{api}/v{n}/docs` (docs/DESIGN.md §9).
 
 pub mod application_endpoint_discovery;
 pub mod application_endpoint_registration;

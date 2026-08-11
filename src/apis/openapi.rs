@@ -12,6 +12,8 @@
 //!
 //! - `/{api}/v{n}/openapi.yaml` — one per mounted API/version, mirroring the
 //!   API's own base path (e.g. `/number-verification/v1/openapi.yaml`).
+//! - `/{api}/v{n}/docs` — the **human-readable docs** page for that version
+//!   (DESIGN §9's third discovery endpoint), one per full spec above.
 //! - `/auth/openapi.yaml` — the authored authorization-server spec.
 //! - `/shared/errors.yaml` — the shared CAMARA error-model / scenario fragment.
 //!
@@ -20,6 +22,16 @@
 //! resolved against an API's `…/v{n}/openapi.yaml` URL those land exactly on the
 //! two URLs above, so a client that follows the `$ref`s finds them and every
 //! served spec is fully resolvable.
+//!
+//! ## Docs pages
+//!
+//! Each `…/docs` page is a tiny static HTML shell that renders the sibling
+//! `openapi.yaml` with [Redoc](https://redocly.com/redoc) (loaded from its CDN
+//! in the viewer's browser). The page itself is an in-memory `String` built at
+//! startup — no filesystem read or network call on the *server's* request path
+//! (non-blocking, DESIGN §11) — and adds no Rust dependency. A `<noscript>`
+//! fallback links straight to the raw spec, so the machine-readable contract is
+//! reachable even with JavaScript disabled.
 //!
 //! ## Simulator constraints
 //!
@@ -38,6 +50,9 @@ use axum::{http::header, routing::get, Router};
 /// content-type-agnostic; `application/yaml` is the widely-understood generic
 /// YAML type (Swagger UI / Redoc / most codegen accept it).
 const YAML_CONTENT_TYPE: &str = "application/yaml";
+
+/// The media type the human-readable `…/docs` pages are served with.
+const HTML_CONTENT_TYPE: &str = "text/html; charset=utf-8";
 
 /// `(url path, embedded spec body)` for every vendored spec CamaraSim serves.
 ///
@@ -301,8 +316,33 @@ pub fn api_spec_urls() -> impl Iterator<Item = &'static str> {
         .filter(|path| !path.starts_with("/auth/") && !path.starts_with("/shared/"))
 }
 
-/// A `GET` route for every vendored spec, each returning its embedded YAML with
-/// `Content-Type: application/yaml`.
+/// Build the human-readable docs page for the spec served at `spec_url`.
+///
+/// A minimal HTML shell that renders the spec with Redoc; `title` names the
+/// browser tab (the API's base path, e.g. `number-verification/v1`). See the
+/// module docs for why this is a static string with a `<noscript>` fallback.
+fn docs_page(title: &str, spec_url: &str) -> String {
+    format!(
+        "<!DOCTYPE html>\n\
+<html lang=\"en\">\n\
+<head>\n\
+<meta charset=\"utf-8\"/>\n\
+<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"/>\n\
+<title>{title} — CamaraSim API docs</title>\n\
+<style>body {{ margin: 0; padding: 0; }}</style>\n\
+</head>\n\
+<body>\n\
+<redoc spec-url=\"{spec_url}\"></redoc>\n\
+<noscript>These docs render the OpenAPI spec at <a href=\"{spec_url}\">{spec_url}</a>.</noscript>\n\
+<script src=\"https://cdn.redoc.ly/redoc/latest/bundles/redoc.standalone.js\"></script>\n\
+</body>\n\
+</html>\n"
+    )
+}
+
+/// A `GET` route for every vendored spec (embedded YAML, `application/yaml`) and,
+/// for every full spec, a sibling `…/docs` page (static HTML, `text/html`) —
+/// DESIGN §9's `/{api}/v{n}/openapi.yaml` + `/{api}/v{n}/docs` discovery pair.
 pub fn routes() -> Router {
     let mut router = Router::new();
     for &(path, body) in SPECS {
@@ -310,6 +350,18 @@ pub fn routes() -> Router {
             path,
             get(move || async move { ([(header::CONTENT_TYPE, YAML_CONTENT_TYPE)], body) }),
         );
+        // Every full API/auth spec (`…/openapi.yaml`) gets a docs page at its
+        // `…/docs` sibling. The `/shared/errors.yaml` fragment is not a
+        // standalone document, so it has no docs page.
+        if let Some(base) = path.strip_suffix("/openapi.yaml") {
+            let docs_path = format!("{base}/docs");
+            let title = base.trim_start_matches('/').to_string();
+            let page = docs_page(&title, path);
+            router = router.route(
+                &docs_path,
+                get(move || async move { ([(header::CONTENT_TYPE, HTML_CONTENT_TYPE)], page) }),
+            );
+        }
     }
     router
 }
@@ -386,6 +438,62 @@ mod tests {
     #[tokio::test]
     async fn unknown_spec_path_is_404() {
         let (status, _, _) = fetch("/no-such-api/v9/openapi.yaml").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn serves_a_docs_page_as_html() {
+        let (status, content_type, body) = fetch("/number-verification/v1/docs").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(content_type.starts_with("text/html"), "docs content-type: {content_type}");
+        // The page renders with Redoc and points it at the spec this same app
+        // serves at the sibling URL.
+        assert!(body.contains("<redoc"));
+        assert!(body.contains("spec-url=\"/number-verification/v1/openapi.yaml\""));
+        // The no-JS fallback still surfaces the raw spec URL.
+        assert!(body.contains("<noscript>"));
+        assert!(body.contains("href=\"/number-verification/v1/openapi.yaml\""));
+    }
+
+    #[tokio::test]
+    async fn serves_docs_for_every_mounted_api() {
+        // Driven by [`api_spec_urls`] (the single source of truth), so a newly
+        // served API automatically gets its docs page checked here too — the
+        // `…/docs` sibling of each `…/openapi.yaml` resolves as HTML and names
+        // its own spec.
+        let mut count = 0;
+        for spec in api_spec_urls() {
+            count += 1;
+            let docs = format!("{}/docs", spec.strip_suffix("/openapi.yaml").unwrap());
+            let (status, content_type, body) = fetch(&docs).await;
+            assert_eq!(status, StatusCode::OK, "docs {docs} should be served");
+            assert!(content_type.starts_with("text/html"), "docs {docs} content-type");
+            assert!(body.contains(spec), "docs {docs} should reference its spec {spec}");
+        }
+        assert!(count >= 28, "expected the full API docs catalog, got {count}");
+    }
+
+    #[tokio::test]
+    async fn serves_a_docs_page_for_the_auth_spec_too() {
+        // The auth spec is a full document, so it gets a docs page like the APIs;
+        // the `/shared/errors.yaml` fragment does not (below).
+        let (status, content_type, body) = fetch("/auth/docs").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(content_type.starts_with("text/html"));
+        assert!(body.contains("spec-url=\"/auth/openapi.yaml\""));
+    }
+
+    #[tokio::test]
+    async fn shared_fragment_has_no_docs_page() {
+        // `/shared/errors.yaml` is a `$ref` target, not a standalone spec, so
+        // there is no `/shared/docs`.
+        let (status, _, _) = fetch("/shared/docs").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn unknown_docs_path_is_404() {
+        let (status, _, _) = fetch("/no-such-api/v9/docs").await;
         assert_eq!(status, StatusCode::NOT_FOUND);
     }
 }

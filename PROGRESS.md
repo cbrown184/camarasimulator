@@ -2851,7 +2851,13 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Cross-cutting (do alongside the item that needs it)
 - [~] `errors.rs`: base CAMARA error model done (`src/errors.rs`, `specs/shared/errors.yaml`); per-version catalogs still TODO (DESIGN §8)
-- [ ] `registry.rs`: canonical URL versioning + `/` catalog wiring (DESIGN §9)
+- [~] `registry.rs`: canonical URL versioning + `/` catalog wiring (DESIGN §9).
+  All three §9 discovery endpoints now served: `GET /` (catalog), `GET
+  /{api}/v{n}/openapi.yaml` (spec), and — new — `GET /{api}/v{n}/docs`
+  (human-readable Redoc page per spec, `src/apis/openapi.rs`; a `catalog_apis_
+  serve_html_docs` test ties each catalogued `base_path`'s `/docs` to the served
+  set). Still TODO: a single `registry.rs` module so the `/` catalog and the
+  served-spec table stop being two hand-maintained parallel lists.
 - [~] `specs/…`: vendor + annotate OpenAPI per API/version, serve at `/{api}/v{n}/openapi.yaml`
   — **serving done** (`src/apis/openapi.rs`: every mounted API's spec at
   `/{api}/v{n}/openapi.yaml`, plus `/auth/openapi.yaml` + `/shared/errors.yaml` so
@@ -2873,6 +2879,26 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-11 — openapi/docs: implemented DESIGN §9's third (and last unbuilt)
+  discovery endpoint, `GET /{api}/v{n}/docs` — a human-readable docs page per
+  served spec. The feature-API backlog is effectively exhausted (remaining `[ ]`
+  leaves are the `https://` sink-TLS cases needing a multi-MB rustls client vs
+  the small-binary directive, and open-ended state streams with no live worker),
+  so this pass advanced the cross-cutting §9 catalog-wiring item instead. Each
+  `…/docs` is a tiny static HTML shell (built at startup, in-memory `String`, no
+  request-path I/O) that renders the sibling `…/openapi.yaml` with Redoc (CDN in
+  the viewer's browser) and carries a `<noscript>` fallback linking the raw spec;
+  no Rust dependency. Routes are generated from the existing `SPECS` table (one
+  `/docs` per full `…/openapi.yaml`, incl. `/auth/docs`; the `/shared/errors.yaml`
+  `$ref` fragment gets none). These are simulator meta-endpoints (they publish the
+  contracts), so — like the `openapi.yaml`-serving routes — they have no vendored
+  CAMARA spec to update. Tests: +7 (docs page is HTML + points Redoc at its spec
+  + `<noscript>` fallback; every API spec has a resolvable `/docs` driven off the
+  `api_spec_urls` source of truth; auth docs; `/shared/docs` 404; unknown `/docs`
+  404; reachable through the full app; and a `catalog_apis_serve_html_docs`
+  wiring test tying each catalogued `base_path`'s `/docs` to the served set).
+  `cargo test` 2116 green (was 2109), `cargo build --release` warning-clean. No
+  new dep. — binary: 3.8M (3882880 B, +3232 B)
 - 2026-08-11 — dedicated-network-areas: added the **collection query**,
   `POST /dedicated-network-areas/vwip/retrieve-service-areas`
   (`retrieveNetworkServiceAreas`, scope `dedicated-network-areas:areas:read`) —
