@@ -3076,6 +3076,24 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     incl. a non-vacuous floor over all specs) so the contract can't pass vacuously.
     Verified true (every operation across all 57 mounted specs carries an
     operationId) before asserting.
+  - a slash-prefixed-path-items contract test (`src/registry.rs`
+    `every_paths_object_declares_slash_prefixed_path_items`) asserts every mounted
+    spec declares **≥1 path item** and that **every `paths:` key begins with `/`**
+    — a `paths` object maps URL path *templates* (resolved relative to the server
+    url) to Path Item Objects, so a non-slash key is an invalid document a
+    client/codegen tool can't bind. Closes two vacuous-pass gaps: every
+    operation-scoped test (`operations_without_responses`,
+    `operations_without_operation_id`, `path_template_params_…`) treats only a
+    2-space key that *already* starts with `/` as a path item, so a path key that
+    lost its leading slash (copy-paste/edit) contributes zero operations and every
+    one of them passes it silently; and no test asserted a spec declares any path
+    at all (an empty `paths:` block described nothing yet sailed through). A pure
+    `path_item_keys` extractor (no YAML dep; 2-space direct children of the
+    top-level `paths:` block, unquoting a `"/foo":` key and excluding `x-`
+    Paths-Object extensions) is unit-covered (`path_item_key_extraction_rules`,
+    incl. a non-vacuous floor over all specs) so the contract can't pass vacuously.
+    Verified true (114 path items across all 57 mounted specs, all slash-prefixed)
+    before asserting.
   Full response-vs-schema validation still TODO (would need a YAML/JSON-Schema
   validator — a dependency trade-off, deferred).
 
@@ -3085,6 +3103,33 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-11 — contract-harness: added a **slash-prefixed-path-items** contract
+  test (`src/registry.rs` `every_paths_object_declares_slash_prefixed_path_items`)
+  asserting every mounted spec declares ≥1 path item and that every `paths:` key
+  begins with `/` — a `paths` object maps URL path *templates* (resolved relative
+  to the server url) to Path Item Objects, so a key without a leading slash is an
+  invalid document a Redoc/Swagger/codegen client can't bind. Feature-API backlog
+  stays effectively exhausted (remaining `[ ]` leaves are `https://` sink-TLS cases
+  needing a multi-MB rustls client vs the small-binary directive, and open-ended
+  state streams with no live worker), so this advanced the cross-cutting
+  **contract-test harness** item. Closes two vacuous-pass gaps no existing test
+  sees: every operation-scoped test (`operations_without_responses`,
+  `operations_without_operation_id`, `path_template_params_…`) treats only a
+  2-space key that *already* starts with `/` as a path item, so a path key that
+  lost its leading slash in a copy-paste/edit contributes zero operations and each
+  of those tests passes it silently (no ops found → nothing missing); and nothing
+  asserted a spec declares any path at all, so an empty `paths:` block describing
+  nothing would sail through the whole harness. One pure helper `path_item_keys`
+  (no YAML dep; 2-space direct children of the top-level `paths:` block, unquotes a
+  `"/foo":` key, excludes `x-` Paths-Object extensions, and — mirroring
+  `path_template_params`' scoping — never mistakes a deeper method key or a
+  `/`-looking schema property for a path item) is unit-covered
+  (`path_item_key_extraction_rules`, incl. a non-vacuous floor over all specs) so
+  the contract can't pass vacuously. Verified true (114 path items across all 57
+  mounted specs, all slash-prefixed, each spec ≥1) before asserting. Tests: +2
+  registry (1 contract + 1 helper unit). `cargo test` 2148 green (was 2146),
+  `cargo build --release` warning-clean. No new dep; binary unchanged
+  (`#[cfg(test)]`-only). — binary: 3.7M (3851880 B, +0 B)
 - 2026-08-11 — contract-harness: added an **every-operation-has-an-`operationId`**
   contract test (`src/registry.rs` `every_operation_declares_an_operation_id`)
   asserting every operation a mounted spec declares carries an `operationId`.

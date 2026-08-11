@@ -709,6 +709,49 @@ mod tests {
         out
     }
 
+    /// Extract the key of every path item a spec declares under `paths:` — the
+    /// full path-template string (e.g. `/sessions/{sessionId}`) — without a YAML
+    /// dep.
+    ///
+    /// A path item is a 2-space *direct child* of the top-level `paths:` block
+    /// (non-space at column 3); deeper lines (methods, parameters, responses)
+    /// sit inside an item and are skipped, and a `/`-looking key elsewhere (a
+    /// schema property, a description) is not under `paths:` so is never seen.
+    /// OpenAPI also permits `x-` specification extensions as direct children of
+    /// the Paths Object; such a key is not a Path Item (its value need not be a
+    /// slash-prefixed template) and is excluded. A quoted key
+    /// (`"/foo":`) is unquoted so the returned template is the bare path.
+    /// Mirrors `path_template_params`' `paths:`-scoping.
+    fn path_item_keys(body: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut in_paths = false;
+        for line in body.lines() {
+            let is_top_level_key =
+                !line.is_empty() && !line.starts_with(char::is_whitespace);
+            if is_top_level_key {
+                in_paths = line.trim_end() == "paths:";
+                continue;
+            }
+            if !in_paths {
+                continue;
+            }
+            if let Some(rest) = line.strip_prefix("  ") {
+                if rest.starts_with(char::is_whitespace) {
+                    continue; // deeper than a direct child of `paths:`
+                }
+                let key = rest.trim_end();
+                let key = key.strip_suffix(':').unwrap_or(key);
+                let key = key.trim_matches('"').trim_matches('\'');
+                // An `x-` Paths-Object extension is not a Path Item; exclude it.
+                if key.is_empty() || key.starts_with("x-") {
+                    continue;
+                }
+                out.push(key.to_string());
+            }
+        }
+        out
+    }
+
     /// Extract the set of path-parameter names a spec *declares* — the `name` of
     /// every parameter object marked `in: path` — without a YAML dep.
     ///
@@ -2096,5 +2139,117 @@ components:
             total_ops += operation_ids(api.body).len();
         }
         assert!(total_ops >= 100, "expected many operations across specs, got {total_ops}");
+    }
+
+    #[test]
+    fn every_paths_object_declares_slash_prefixed_path_items() {
+        // Contract-harness invariant (OpenAPI structural rule): a document's
+        // `paths` object maps *path templates* to Path Item Objects, and every
+        // such key MUST begin with a forward slash — it is a URL path resolved
+        // relative to the API's server URL. A spec must also declare at least
+        // one path item: a `paths:` block with none describes no operation, so
+        // it is not a usable API document.
+        //
+        // Both halves are drifts no existing contract test sees. A new
+        // endpoint's spec is drafted by copy-pasting a sibling's path block, so
+        // a path key can be pasted or edited with its leading `/` dropped
+        // (`sessions:` instead of `/sessions:`). Every operation-scoped test —
+        // `operations_without_responses`, `operations_without_operation_id`,
+        // `path_template_params_match_declared_path_parameters` — treats only a
+        // 2-space key that *already* begins with `/` as a path item, so a
+        // non-slash key contributes zero operations and every one of those tests
+        // passes it *vacuously* (no operations found → nothing missing). And no
+        // test asserts a spec declares any path at all — a spec whose only path
+        // key lost its slash, or that carries an empty `paths:` block, would
+        // otherwise sail through the whole harness describing nothing. Verified
+        // true across all mounted specs before asserting.
+        for api in APIS {
+            let keys = path_item_keys(api.body);
+            assert!(
+                !keys.is_empty(),
+                "{} spec declares no path items under `paths:` — a document \
+                 that describes no operation is not a usable API spec",
+                api.name
+            );
+            for key in &keys {
+                assert!(
+                    key.starts_with('/'),
+                    "{} spec has a `paths:` key `{}` that does not begin with \
+                     `/` — an OpenAPI path template must be slash-prefixed \
+                     (resolved relative to the server URL); a client/codegen \
+                     tool cannot bind a non-slash path, and every \
+                     operation-scoped contract test skips it silently",
+                    api.name,
+                    key
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn path_item_key_extraction_rules() {
+        // Unit-cover the `path_item_keys` extractor so the contract test above
+        // can't pass vacuously (an extractor returning an empty Vec for every
+        // body would make its assertion meaningless) and so its scoping is
+        // pinned: only 2-space direct children of the top-level `paths:` block
+        // are path items; deeper method/parameter keys are not; an `x-`
+        // Paths-Object extension is excluded; and a `/`-looking key elsewhere (a
+        // schema property under `components:`) is not under `paths:`.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /sessions:
+    post:
+      operationId: create
+      responses:
+        '201':
+          description: made
+  /sessions/{id}:
+    get:
+      operationId: read
+      responses:
+        '200':
+          description: ok
+  x-paths-note: not a path item
+components:
+  schemas:
+    Thing:
+      type: object
+      properties:
+        /weird:
+          type: string
+";
+        // The two `/…` path items are extracted; the `x-paths-note` Paths-Object
+        // extension and the `/weird` schema *property* (a deeper child of
+        // `components`, not under `paths:`) are excluded.
+        let mut keys = path_item_keys(body);
+        keys.sort();
+        assert_eq!(
+            keys,
+            vec!["/sessions".to_string(), "/sessions/{id}".to_string()]
+        );
+
+        // Non-vacuous floor: across every registered spec, every path item key
+        // is slash-prefixed and each spec declares at least one — the invariant
+        // the contract test asserts — and the extractor sees many keys overall,
+        // so a broken extractor can't hide behind an empty scan.
+        let mut total = 0usize;
+        for api in APIS {
+            let ks = path_item_keys(api.body);
+            assert!(!ks.is_empty(), "{}: expected ≥1 path item", api.name);
+            for k in &ks {
+                assert!(
+                    k.starts_with('/'),
+                    "{}: path key `{}` is not slash-prefixed",
+                    api.name,
+                    k
+                );
+            }
+            total += ks.len();
+        }
+        assert!(total >= 100, "expected many path items across specs, got {total}");
     }
 }
