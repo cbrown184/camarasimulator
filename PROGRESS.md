@@ -2662,7 +2662,7 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
           Body validation → 400 before store → 404. **Completes the
           `/devices…` sub-resources** (`dedicated-network-areas` remains). No new
           dep. `x-correlator` echoed.
-    - [~] **Dedicated Network — Areas vwip** (`/dedicated-network-areas/vwip`;
+    - [x] **Dedicated Network — Areas vwip** (`/dedicated-network-areas/vwip`;
       read-only, two-legged **service-area catalog** — the geographical sibling
       of Network Profiles; the `area` is a fixed CIRCLE, so the "spatial" surface
       is trivial data, not computed geometry):
@@ -2677,9 +2677,19 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
         `ServiceArea` carries a CIRCLE `area` (center + radius) and **either**
         `qosProfiles` **or** `networkProfiles` (the either/or constraint); the
         requested id is echoed as `id`. `x-correlator` echoed. No new dep.
-      - [ ] `POST /retrieve-service-areas` (`retrieveNetworkServiceAreas`) — the
-        collection query with spatial `atLocation`/`overlappingArea`/`coveringArea`
-        filters — later.
+      - [x] `POST /retrieve-service-areas` (`retrieveNetworkServiceAreas`) — the
+        collection query. Lists the fixed catalog narrowed by the request body's
+        optional filters, ANDed (DESIGN §7): spatial CIRCLE-only geometry —
+        `atLocation` (point in area), `overlappingArea` (circles intersect),
+        `coveringArea` (area contains circle), computed with a self-contained
+        haversine (no geo dep) — and attribute (`byName`/`byNetworkProfileId`/
+        `byQosProfileName`, exact match). No identifier → no reserved-error plane;
+        a list never 404s (over-narrow filter → `[]`). Each returned area carries
+        its stable canonical `id` (round-trips to `readNetworkServiceArea`). Bad
+        body / non-CIRCLE query area / schema-violating filter → 400
+        INVALID_ARGUMENT; out-of-range coordinate or radius < 1 → 400 OUT_OF_RANGE.
+        POLYGON query areas a documented cut. **Completes Dedicated Network — Areas
+        vwip.**
 - [~] Other CAMARA APIs as capacity allows
   - [~] Edge Application Management vwip (`/edge-application-management/vwip`;
     CAMARA EdgeApplicationManagement `wip` — no released version, mounted at its
@@ -2863,6 +2873,34 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-11 — dedicated-network-areas: added the **collection query**,
+  `POST /dedicated-network-areas/vwip/retrieve-service-areas`
+  (`retrieveNetworkServiceAreas`, scope `dedicated-network-areas:areas:read`) —
+  the topmost unclaimed *actionable* `[ ]` leaf and the natural continuation of
+  last pass's single-area read, **completing Dedicated Network — Areas vwip**.
+  (The strictly-topmost `[ ]` items remain the `https://` sink-TLS cases needing
+  a multi-MB rustls client vs the small-binary directive, and open-ended state
+  streams with no live worker.) Verified against the authoritative CAMARA
+  DedicatedNetworks `dedicated-network-areas.yaml` (`wip`): optional filters
+  `atLocation`(Point)/`overlappingArea`(Area)/`coveringArea`(Area)/`byName`/
+  `byNetworkProfileId`/`byQosProfileName`, 200 array of `ServiceArea`, 400/401/403.
+  Lists the fixed 4-entry catalog narrowed by the request body's optional filters,
+  ANDed (DESIGN §7): spatial geometry (CIRCLE-only) — point-in-circle, circle
+  intersection, circle containment — computed with a **self-contained haversine**
+  (no geospatial dep), plus exact-match attribute filters. No identifier → no
+  reserved-error plane; a list never 404s (over-narrow filter → `[]`). Each
+  returned area now carries its **stable canonical id** (`template_id` un-gated
+  from `#[cfg(test)]`), so ids round-trip back through `readNetworkServiceArea`.
+  Validation: bad body / non-CIRCLE query area / schema-violating filter → 400
+  INVALID_ARGUMENT; out-of-range coordinate or radius < 1 → 400 OUT_OF_RANGE.
+  POLYGON query areas a documented cut. Refactored `service_area` to share a
+  `render_area` helper. Spec: authored the `/retrieve-service-areas` POST op +
+  `RetrieveServiceAreasRequest` schema + description/`x-camarasim-scenarios`;
+  header comment updated. 23 new tests (whole-catalog, each filter incl. AND
+  combination + empty-result, id round-trip, 400/OUT_OF_RANGE cases, scope 403,
+  missing-token 401, x-correlator, + pure haversine/qos-name units). `cargo test`
+  2109 green (was 2086), `cargo build --release` warning-clean. No new dep. —
+  binary: 3.8M (3879648 B, +25104 B)
 - 2026-08-11 — dedicated-network-areas: mounted a new CAMARA API,
   `GET /dedicated-network-areas/vwip/areas/{areaId}` (`readNetworkServiceArea`,
   scope `dedicated-network-areas:areas:read`) — the last unstarted sibling of the

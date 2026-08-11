@@ -8,10 +8,12 @@
 # cases (docs/DESIGN.md §7, §9). Backed by
 # `src/apis/dedicated_network_areas/vwip.rs`; spec and code must not drift.
 #
-# This slice serves the single-area lookup `GET /areas/{areaId}`
-# (`readNetworkServiceArea`). The collection query `POST /retrieve-service-areas`
-# (`retrieveNetworkServiceAreas`, with its spatial `atLocation`/`overlappingArea`
-# /`coveringArea` filters) is left for a later pass.
+# This spec serves both read operations: the single-area lookup
+# `GET /areas/{areaId}` (`readNetworkServiceArea`) and the collection query
+# `POST /retrieve-service-areas` (`retrieveNetworkServiceAreas`), the latter
+# narrowing the fixed catalog by the request body's optional filters — spatial
+# (`atLocation`/`overlappingArea`/`coveringArea`, CIRCLE-only) and attribute
+# (`byName`/`byNetworkProfileId`/`byQosProfileName`).
 openapi: 3.0.3
 info:
   title: Dedicated Network - Areas
@@ -25,8 +27,10 @@ info:
     the same Dedicated-Networks family.
 
     This is the CamaraSim reference double for CAMARA Dedicated Network - Areas
-    (`wip`). The `/areas/{areaId}` lookup requires the
-    `dedicated-network-areas:areas:read` scope.
+    (`wip`). Both read operations require the
+    `dedicated-network-areas:areas:read` scope: the single-area lookup
+    `GET /areas/{areaId}` (`readNetworkServiceArea`) and the collection query
+    `POST /retrieve-service-areas` (`retrieveNetworkServiceAreas`).
 
     ## Two-legged catalog query
 
@@ -60,6 +64,30 @@ info:
     CamaraSim exposes the full shared reserved-error set here so every reserved
     suffix is reachable; canonical Dedicated Network - Areas declares a subset for
     this operation (400/401/403/404).
+
+    ## Collection query — the request body is the control plane
+
+    `POST /retrieve-service-areas` returns the catalog narrowed by the request
+    body's optional filters, ANDed together (DESIGN §7). It has no identifier and
+    — like every CAMARA list — never `404`s: an over-narrow filter simply yields
+    `[]`, so there is no reserved-identifier error plane. Each returned area
+    carries its stable canonical `id`, so a client can re-address it through
+    `readNetworkServiceArea`.
+
+    - **`atLocation`** (a `Point`) — the area whose `CIRCLE` contains the point
+      (great-circle distance from the centre ≤ radius).
+    - **`overlappingArea`** (a CIRCLE `Area`) — areas whose circle intersects the
+      given circle (centre distance ≤ sum of radii).
+    - **`coveringArea`** (a CIRCLE `Area`) — areas whose circle fully contains the
+      given circle (centre distance + given radius ≤ area radius).
+    - **`byName`** — exact-match on the service-area name.
+    - **`byNetworkProfileId`** — areas offering that network profile (UUID).
+    - **`byQosProfileName`** — areas offering that QoS profile (name).
+
+    CamaraSim filters over `CIRCLE` areas only (its fixed catalog is all CIRCLE);
+    a non-`CIRCLE` query `areaType` (e.g. `POLYGON`) is a documented cut → `400
+    INVALID_ARGUMENT`. Out-of-range coordinates or a sub-minimum radius → `400
+    OUT_OF_RANGE`.
   version: "wip"
   license:
     name: Apache-2.0
@@ -170,6 +198,137 @@ paths:
             result: "200 with the (d % N) service-area template, id echoing the request"
           - input: a well-formed areaId with fewer than three digits
             result: "200 with the first service-area template (tail treated as 000)"
+
+  /retrieve-service-areas:
+    post:
+      operationId: retrieveNetworkServiceAreas
+      summary: Retrieve network service areas matching search criteria
+      description: |
+        Returns the network service areas matching the search criteria in the
+        request body — location, area overlap/coverage, name, or supported
+        profiles. All filters are optional and combine with AND. In CamaraSim the
+        catalog is fixed and the request body is the control plane (see the API
+        description): a body with no filters returns the whole catalog; each
+        filter narrows it; an over-narrow filter returns an empty array (a list
+        never `404`s). Each returned area carries its stable canonical `id`.
+      security:
+        - openId:
+            - dedicated-network-areas:areas:read
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RetrieveServiceAreasRequest"
+            examples:
+              noFilters:
+                summary: No filters — the whole catalog
+                value: {}
+              byQosProfile:
+                summary: Areas offering a given QoS profile
+                value:
+                  byQosProfileName: QOS_M
+              atLocation:
+                summary: The area covering a point
+                value:
+                  atLocation:
+                    latitude: 51.5074
+                    longitude: -0.1278
+      responses:
+        "200":
+          description: The list of matching network service areas (possibly empty).
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                type: array
+                maxItems: 100000000
+                items:
+                  $ref: "#/components/schemas/ServiceArea"
+              examples:
+                catalog:
+                  summary: Two service areas
+                  value:
+                    - id: "00000000-0000-4000-8000-000000000000"
+                      name: london-city
+                      description: Central London coverage cell.
+                      area:
+                        areaType: CIRCLE
+                        center:
+                          latitude: 51.5074
+                          longitude: -0.1278
+                        radius: 5000
+                      qosProfiles:
+                        - QOS_L
+                        - QOS_M
+                    - id: "00000000-0000-4000-8000-000000000002"
+                      name: port-of-felixstowe
+                      description: Felixstowe port private-network zone.
+                      area:
+                        areaType: CIRCLE
+                        center:
+                          latitude: 51.9542
+                          longitude: 1.3464
+                        radius: 3000
+                      networkProfiles:
+                        - "00000000-0000-4000-8000-000000000000"
+                        - "00000000-0000-4000-8000-000000000001"
+        "400":
+          description: |
+            400 — invalid request. CamaraSim returns `INVALID_ARGUMENT` for a
+            malformed body, a non-`CIRCLE` query area, or a filter value violating
+            its schema, and `OUT_OF_RANGE` for out-of-range coordinates or a
+            sub-minimum radius.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ServiceAreasError"
+              examples:
+                invalidArgument:
+                  summary: Unsupported (non-CIRCLE) query area
+                  value:
+                    status: 400
+                    code: INVALID_ARGUMENT
+                    message: "Only `areaType: CIRCLE` query areas are supported."
+                outOfRange:
+                  summary: Out-of-range coordinate
+                  value:
+                    status: 400
+                    code: OUT_OF_RANGE
+                    message: "`latitude` must be in [-90, 90] and `longitude` in [-180, 180]."
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+      x-camarasim-scenarios:
+        description: >-
+          Result selected from the request body's optional filters (docs/DESIGN.md
+          §7), ANDed together over the fixed catalog. There is no identifier, so no
+          reserved-error plane; the list never 404s — an over-narrow filter yields
+          an empty array. Spatial filters are CIRCLE-only.
+        cases:
+          - input: empty body (or {})
+            result: "200 with the whole service-area catalog, each area carrying its canonical id"
+          - input: "byName matching a catalog area exactly"
+            result: "200 with just that area"
+          - input: "byQosProfileName / byNetworkProfileId offered by some areas"
+            result: "200 with the areas offering that profile"
+          - input: "atLocation inside an area's CIRCLE"
+            result: "200 with the area(s) whose circle contains the point"
+          - input: "overlappingArea = a CIRCLE intersecting some areas"
+            result: "200 with the areas whose circle intersects it (centre distance <= sum of radii)"
+          - input: "coveringArea = a CIRCLE some area fully contains"
+            result: "200 with the areas whose circle contains it (centre distance + radius <= area radius)"
+          - input: a filter matching no area
+            result: "200 with an empty array (a list never 404s)"
+          - input: a non-CIRCLE query area, or a schema-violating filter value
+            result: "400 INVALID_ARGUMENT"
+          - input: out-of-range coordinates or a radius < 1
+            result: "400 OUT_OF_RANGE"
 
 components:
   securitySchemes:
@@ -291,6 +450,48 @@ components:
             minLength: 3
             maxLength: 256
             pattern: "^[a-zA-Z0-9_.-]+$"
+
+    RetrieveServiceAreasRequest:
+      type: object
+      description: >-
+        Optional search filters for `retrieveNetworkServiceAreas`. Every field is
+        optional; present fields combine with AND. CamaraSim models CIRCLE query
+        areas only (its catalog is all CIRCLE); a non-CIRCLE `overlappingArea`/
+        `coveringArea` → `400 INVALID_ARGUMENT` (a documented cut vs. canonical,
+        which also admits POLYGON).
+      properties:
+        atLocation:
+          description: >-
+            Return the service area(s) whose `area` contains this point (great-circle
+            distance from the CIRCLE centre ≤ radius).
+          $ref: "#/components/schemas/Point"
+        overlappingArea:
+          description: >-
+            Return the service area(s) whose `area` intersects this area (CIRCLE
+            only; centre distance ≤ sum of radii).
+          $ref: "#/components/schemas/Area"
+        coveringArea:
+          description: >-
+            Return the service area(s) whose `area` fully contains this area
+            (CIRCLE only; centre distance + this radius ≤ area radius).
+          $ref: "#/components/schemas/Area"
+        byName:
+          type: string
+          maxLength: 1024
+          description: Return only the service area whose `name` matches exactly.
+          example: london-city
+        byNetworkProfileId:
+          type: string
+          format: uuid
+          maxLength: 36
+          description: Return only service areas offering this network profile.
+        byQosProfileName:
+          type: string
+          minLength: 3
+          maxLength: 256
+          pattern: "^[a-zA-Z0-9_.-]+$"
+          description: Return only service areas offering this QoS profile.
+          example: QOS_M
 
     ServiceAreasError:
       description: >-
