@@ -2974,6 +2974,24 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     specs use — the `CamaraError` schema + the 9 canonical responses — are
     defined). The helper is unit-covered (`component_pointer_extraction_rules`) so
     the contract can't pass vacuously.
+  - a security-requirement↔definition contract test (`src/registry.rs`
+    `every_security_requirement_references_a_defined_scheme`) asserts every
+    `security` requirement an operation declares names a scheme the spec
+    **defines** under `components.securitySchemes` (in this sim, `openId`), and
+    that every spec both defines `openId` and carries ≥1 requirement (every
+    business op is OAuth-protected). Complements the shared-security-scheme test,
+    which checks only how `openId` is *defined* (the shared `$ref`) — this checks
+    that operations *reference* a defined scheme, catching a copy-pasted CAMARA-
+    template requirement that kept a scheme name the spec never declares
+    (`oAuth2ClientCredentials`, `three_legged`, a typo'd `openID`) → a dangling,
+    unresolvable requirement invisible to the identity/wiring tests. Two pure
+    helpers — `defined_security_schemes` (reuses `component_pointers`, filtered to
+    the `securitySchemes` section) and `security_requirement_schemes` (scans each
+    indentation-tracked `security:` block, taking sequence items that are mapping
+    keys `- openId:` and skipping scope scalars `- api:scope` by the colon-suffix
+    rule) — are unit-covered (`security_scheme_extraction_rules`) so the contract
+    can't pass vacuously. Verified true across all 57 mounted specs (143
+    requirements, all `openId`) before asserting.
   Full response-vs-schema validation still TODO (would need a YAML/JSON-Schema
   validator — a dependency trade-off, deferred).
 
@@ -2983,6 +3001,37 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-11 — contract-harness: added a **security-requirement↔definition** contract
+  test (`src/registry.rs` `every_security_requirement_references_a_defined_scheme`)
+  asserting every `security` requirement a mounted spec's operations declare names a
+  security scheme the spec **defines** under `components.securitySchemes` — in this
+  simulator the shared `openId` scheme — and that every spec both defines `openId` and
+  carries ≥1 requirement (every CAMARA business op is OAuth-protected). The feature-API
+  backlog stays effectively exhausted (remaining `[ ]` leaves are the `https://`
+  sink-TLS cases needing a multi-MB rustls client vs the small-binary directive, and
+  open-ended state streams with no live worker), so this advanced the cross-cutting
+  **contract-test harness** item. Closes a drift no existing test sees: the
+  shared-security-scheme test checks only how `openId` is *defined* (that its
+  definition is the shared `$ref`), never that operations *reference* a defined
+  scheme; the mount-path/version/parity/operationId/functional-cases tests all check a
+  spec's identity or behaviour. A new endpoint's spec is usually drafted by
+  copy-pasting an operation from a CAMARA template or sibling, so a pasted `security`
+  requirement can keep a scheme name the spec never declares
+  (`oAuth2ClientCredentials`, `three_legged`, a typo'd `openID`) → a dangling,
+  unresolvable requirement (an operation demands a scheme its own `securitySchemes`
+  omits, so a client can't tell what auth it needs and codegen breaks). Verified the
+  invariant already holds across all 57 mounted specs (143 requirements, all `openId`;
+  every spec defines exactly `openId`) before asserting. Two pure helpers —
+  `defined_security_schemes` (reuses the unit-covered `component_pointers`, filtered to
+  the `securitySchemes` section, so it needs no new parser) and
+  `security_requirement_schemes` (scans each indentation-tracked `security:` block —
+  so a sibling `parameters:` list's `- name:`/`- in:` items are never mistaken for
+  scheme refs — and within it takes sequence items that are mapping keys `- openId:`
+  while skipping scope scalars `- api:scope` by the colon-suffix rule) — are
+  unit-covered (`security_scheme_extraction_rules`) so the contract can't pass
+  vacuously. Tests: +2 registry (1 contract + 1 helper unit). `cargo test` 2135 green
+  (was 2133), `cargo build --release` warning-clean. No new dep; binary unchanged
+  (`#[cfg(test)]`-only). — binary: 3.7M (3851880 B, +0 B)
 - 2026-08-11 — contract-harness: added a **shared-error-ref-target** contract test
   (`src/registry.rs` `shared_error_refs_resolve_to_defined_components`) asserting
   every cross-file `$ref` a mounted spec makes into the shared error model

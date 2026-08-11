@@ -479,6 +479,87 @@ mod tests {
         out
     }
 
+    /// Extract the set of security schemes a spec *defines* under
+    /// `components.securitySchemes:`, by their scheme name (e.g. `openId`).
+    ///
+    /// Reuses `component_pointers` (which already collects every
+    /// `#/components/<section>/<Name>` a spec declares) and keeps only the
+    /// `securitySchemes` section, stripping back to the bare scheme name. The
+    /// scheme's *definition body* (a `$ref` into the shared `auth/openapi.yaml`,
+    /// or inline fields) sits deeper and is not collected — only the scheme
+    /// object's own key. Used to prove every `security` *requirement* a spec makes
+    /// names a scheme the spec actually defines.
+    fn defined_security_schemes(body: &str) -> HashSet<String> {
+        component_pointers(body)
+            .iter()
+            .filter_map(|p| {
+                p.strip_prefix("#/components/securitySchemes/")
+                    .map(str::to_string)
+            })
+            .collect()
+    }
+
+    /// Extract every security-scheme name *referenced* by a `security` requirement
+    /// in an embedded OpenAPI body, in document order, without a YAML dep.
+    ///
+    /// A `security` requirement is a list of `{ <schemeName>: [scopes] }` maps
+    /// (`security:` → `- <schemeName>:` → `- <scope>`). This scans each `security:`
+    /// block — tracked by indentation, so `- name:`/`- in:` items of a sibling
+    /// `parameters:` list are never mistaken for scheme references — and, within
+    /// it, collects each sequence item that is a *mapping key* (`- openId:` or
+    /// `- openId: []`), i.e. where the first `:` ends the token or is followed by
+    /// whitespace. A scope entry (`- number-verification:verify`) is a plain
+    /// scalar — its `:` is followed by a non-space — so it is skipped, even though
+    /// it sits inside the same block.
+    fn security_requirement_schemes(body: &str) -> Vec<String> {
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let mut out = Vec::new();
+        // `Some(n)` while inside a `security:` block whose key sits at indent `n`.
+        let mut security_indent: Option<usize> = None;
+        for line in body.lines() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let ind = indent(line);
+            if let Some(sec) = security_indent {
+                if ind <= sec {
+                    // Dedent to at-or-above the `security:` key ends the block; fall
+                    // through so this same line can open a new `security:` block.
+                    security_indent = None;
+                } else {
+                    if let Some(name) = requirement_scheme_name(line) {
+                        out.push(name);
+                    }
+                    continue;
+                }
+            }
+            if line.trim() == "security:" {
+                security_indent = Some(ind);
+            }
+        }
+        out
+    }
+
+    /// If `line` is a security-requirement sequence item naming a scheme
+    /// (`- openId:` / `- openId: []`), return the scheme name; otherwise `None`.
+    ///
+    /// The discriminator is YAML mapping-key syntax: the first `:` must end the
+    /// token or be followed by whitespace. That accepts `- openId:` (scheme) and
+    /// rejects a scope scalar like `- number-verification:verify`, whose `:` is
+    /// followed by a non-space character.
+    fn requirement_scheme_name(line: &str) -> Option<String> {
+        let rest = line.trim_start().strip_prefix("- ")?;
+        let colon = rest.find(':')?;
+        let after = &rest[colon + 1..];
+        if after.is_empty() || after.starts_with(char::is_whitespace) {
+            let name = rest[..colon].trim();
+            if !name.is_empty() && !name.contains(char::is_whitespace) {
+                return Some(name.to_string());
+            }
+        }
+        None
+    }
+
     /// Does the spec's declared `info.version` agree with the version segment the
     /// API is mounted at in the URL (DESIGN §9 canonical URL versioning)?
     ///
@@ -875,6 +956,73 @@ mod tests {
     }
 
     #[test]
+    fn every_security_requirement_references_a_defined_scheme() {
+        // Contract-harness invariant (CAMARA canonical auth + DESIGN §8/§9): every
+        // `security` requirement an operation declares MUST name a security scheme
+        // the spec DEFINES under `components.securitySchemes`. In this simulator
+        // that scheme is `openId` (a `$ref` to the shared `camaraOAuth`), and every
+        // CAMARA business operation is OAuth-protected, so every spec both defines
+        // `openId` and references it from each operation's `security` block.
+        //
+        // The break this catches: a new endpoint's spec is usually drafted by
+        // copy-pasting an operation from a CAMARA template or sibling API, and the
+        // pasted `security` requirement can keep a scheme name the spec never
+        // defines — a template leftover (`oAuth2ClientCredentials`, `three_legged`),
+        // a typo (`openID`), or a name renamed away from `openId`. The requirement
+        // then dangles: an OpenAPI document where an operation demands a scheme its
+        // own `securitySchemes` never declares, so a client cannot tell what auth
+        // the operation needs and codegen breaks. No existing contract test sees it:
+        // the camaraOAuth-scheme test checks only how `openId` is *defined* (the
+        // shared `$ref`), never that operations *reference* a defined scheme; the
+        // mount-path/version/parity/operationId/functional-cases tests all check a
+        // spec's identity or documented behaviour. Verified true across all mounted
+        // specs before asserting.
+        for api in APIS {
+            let defined = defined_security_schemes(api.body);
+            // Non-vacuous floor: every business spec defines the shared `openId`
+            // scheme, so an extractor that silently found none can't hide here.
+            assert!(
+                defined.contains("openId"),
+                "{} spec defines no `openId` scheme under components.securitySchemes \
+                 (defines {:?})",
+                api.name,
+                {
+                    let mut v: Vec<&String> = defined.iter().collect();
+                    v.sort();
+                    v
+                }
+            );
+            let requirements = security_requirement_schemes(api.body);
+            // Non-vacuous floor: every business operation is OAuth-protected, so a
+            // spec with zero `security` requirements would make the per-ref loop
+            // below unreachable — that is itself a drift worth failing on.
+            assert!(
+                !requirements.is_empty(),
+                "{} spec declares no `security` requirement (every CAMARA business \
+                 operation is OAuth-protected — a missing requirement leaves an \
+                 operation unsecured)",
+                api.name
+            );
+            for scheme in requirements {
+                assert!(
+                    defined.contains(&scheme),
+                    "{} spec has a `security` requirement referencing scheme `{}`, but \
+                     its components.securitySchemes defines no such scheme (defines \
+                     {:?}) — a dangling, unresolvable requirement (likely a \
+                     copy-pasted CAMARA-template scheme name never renamed to `openId`)",
+                    api.name,
+                    scheme,
+                    {
+                        let mut v: Vec<&String> = defined.iter().collect();
+                        v.sort();
+                        v
+                    }
+                );
+            }
+        }
+    }
+
+    #[test]
     fn component_pointer_extraction_rules() {
         // Unit-cover the `component_pointers` extractor so the contract test above
         // can't pass vacuously (an extractor that found no components would make its
@@ -911,6 +1059,63 @@ paths: {}
         // The real shared fragment defines the CamaraError schema + 9 responses.
         let shared = component_pointers(include_str!("../specs/shared/errors.yaml"));
         assert_eq!(shared.len(), 10, "shared components: {shared:?}");
+    }
+
+    #[test]
+    fn security_scheme_extraction_rules() {
+        // Unit-cover both security helpers so the contract test above can't pass
+        // vacuously (a requirement extractor that always returned nothing, or a
+        // definition extractor that returned everything, would make its per-ref
+        // assertions unreachable) and so their scheme-vs-scope and
+        // block-vs-sibling-list discrimination is pinned.
+        let body = "\
+openapi: 3.0.3
+paths:
+  /verify:
+    post:
+      operationId: doVerify
+      security:
+        - openId:
+            - number-verification:verify
+      parameters:
+        - name: x-correlator
+          in: header
+components:
+  securitySchemes:
+    openId:
+      $ref: \"../../auth/openapi.yaml#/components/securitySchemes/camaraOAuth\"
+";
+        // The defined set is exactly the scheme object key — not its `$ref` body.
+        let defined = defined_security_schemes(body);
+        assert!(defined.contains("openId"));
+        assert_eq!(defined.len(), 1, "defined {defined:?}");
+        // The requirement names `openId` — never the scope scalar
+        // (`number-verification:verify`, whose `:` is followed by a non-space) and
+        // never the sibling `parameters:` list's `- name:` / `- in:` items (they
+        // sit outside the `security:` block, which ends at the dedent to
+        // `parameters:`).
+        assert_eq!(security_requirement_schemes(body), vec!["openId"]);
+        // The inline empty-scopes form is still a scheme reference.
+        assert_eq!(
+            security_requirement_schemes("      security:\n        - openId: []\n"),
+            vec!["openId"]
+        );
+        // An undefined scheme name is surfaced verbatim (the contract test turns
+        // that into a failure).
+        let drift = "      security:\n        - three_legged:\n            - scope:read\n";
+        assert_eq!(security_requirement_schemes(drift), vec!["three_legged"]);
+        // A body with no `security:` block yields no requirements, and one with no
+        // `components:` yields no defined schemes.
+        assert!(security_requirement_schemes("openapi: 3.0.3\npaths: {}\n").is_empty());
+        assert!(defined_security_schemes("openapi: 3.0.3\npaths: {}\n").is_empty());
+        // The real vendored spec defines exactly the shared `openId` scheme and
+        // references it from its operations.
+        let real = include_str!("../specs/number-verification/v1/openapi.yaml");
+        assert_eq!(defined_security_schemes(real).len(), 1);
+        assert!(defined_security_schemes(real).contains("openId"));
+        assert!(security_requirement_schemes(real)
+            .iter()
+            .all(|s| s == "openId"));
     }
 
     #[test]
