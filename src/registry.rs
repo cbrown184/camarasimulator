@@ -1189,6 +1189,109 @@ mod tests {
         out
     }
 
+    /// Enumerate every key under an operation's `responses:` block that is **not** a
+    /// valid Responses Object key, as `"<METHOD> <path> <key>"` (document order),
+    /// without a YAML dep.
+    ///
+    /// A Responses Object maps keys to Response Objects, and OpenAPI restricts those
+    /// keys to: an explicit HTTP status code (`"200"`), an `NXX` wildcard range
+    /// (`"1XX"`..`"5XX"`), the `default` key, or an `x-` specification extension —
+    /// nothing else. This mirrors [`responses_missing_description`]'s
+    /// path-item/method scoping to reach each 8-space response-entry key, then flags
+    /// any that is none of those forms — a status code typo'd into an invalid token
+    /// (`"4O4"` with a letter O, an out-of-range `"600"`, a truncated `"20"`) from a
+    /// copy-paste/edit. Quotes around a key are stripped before the check.
+    ///
+    /// Note the complement to [`responses_missing_description`]: *that* helper's
+    /// `is_status_key` filter is used to *find* responses to description-check, so a
+    /// key it rejects is silently skipped there; here the same rejection is the
+    /// finding, so the two together cover both "is a response and lacks a
+    /// description" and "is under `responses:` but is not a valid response key".
+    fn responses_with_invalid_status_key(body: &str) -> Vec<String> {
+        const METHODS: [&str; 8] =
+            ["get", "put", "post", "delete", "patch", "options", "head", "trace"];
+        // Valid non-extension Responses Object keys: an explicit HTTP status code, an
+        // `NXX` wildcard range (`1XX`..`5XX`), or `default` — the exact shape the
+        // description test uses to *recognise* a response. (An `x-` specification
+        // extension is a permitted key too; it is admitted separately below.)
+        let is_status_key = |key: &str| -> bool {
+            key == "default"
+                || (key.len() == 3
+                    && matches!(key.as_bytes()[0], b'1'..=b'5')
+                    && key.as_bytes()[1..]
+                        .iter()
+                        .all(|&c| c.is_ascii_digit() || c == b'X'))
+        };
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let mut out = Vec::new();
+        let mut in_paths = false;
+        let mut path: Option<String> = None;
+        for (i, line) in lines.iter().enumerate() {
+            let is_top_level_key =
+                !line.is_empty() && !line.starts_with(char::is_whitespace);
+            if is_top_level_key {
+                in_paths = line.trim_end() == "paths:";
+                path = None;
+                continue;
+            }
+            if !in_paths {
+                continue;
+            }
+            if let Some(rest) = line.strip_prefix("  ") {
+                if !rest.starts_with(char::is_whitespace) && rest.starts_with('/') {
+                    let key = rest.trim_end().strip_suffix(':').unwrap_or(rest.trim_end());
+                    path = Some(key.to_string());
+                    continue;
+                }
+            }
+            let Some(current_path) = path.as_deref() else { continue };
+            if indent(line) != 4 {
+                continue;
+            }
+            let key = line.trim_start();
+            let Some(name) = key.strip_suffix(':') else { continue };
+            if name.contains(char::is_whitespace) || !METHODS.contains(&name) {
+                continue;
+            }
+            // Within this operation's block, find the 6-space `responses:` key, then
+            // inspect each 8-space response-entry key under it.
+            let mut in_responses = false;
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                let li = indent(l);
+                if li <= 4 {
+                    break; // dedented out of this operation
+                }
+                if li == 6 {
+                    in_responses = l.trim_start().strip_suffix(':') == Some("responses");
+                    j += 1;
+                    continue;
+                }
+                if in_responses && li == 8 {
+                    if let Some(k) = l.trim_start().strip_suffix(':') {
+                        let status = k.trim_matches(|c| c == '"' || c == '\'');
+                        if !is_status_key(status) && !status.starts_with("x-") {
+                            out.push(format!(
+                                "{} {} {}",
+                                name.to_uppercase(),
+                                current_path,
+                                status
+                            ));
+                        }
+                    }
+                }
+                j += 1;
+            }
+        }
+        out
+    }
+
     #[test]
     fn registry_is_non_empty() {
         // Guards a broken/emptied list: both the catalog and the served specs are
@@ -2685,6 +2788,110 @@ components:
             assert!(
                 responses_missing_description(api.body).is_empty(),
                 "{}: every declared response must carry a `description` or be a `$ref`",
+                api.name
+            );
+            total_ops += operation_ids(api.body).len();
+        }
+        assert!(total_ops >= 100, "expected many operations across specs, got {total_ops}");
+    }
+
+    #[test]
+    fn every_responses_object_key_is_a_valid_status() {
+        // Contract-harness invariant (OpenAPI structural rule): every key of an
+        // operation's `responses:` map MUST be an HTTP status code (`"200"`), an
+        // `NXX` wildcard range (`"1XX"`..`"5XX"`), the `default` key, or an `x-`
+        // specification extension — the Responses Object admits nothing else. A key
+        // that is none of those is an invalid document: a Redoc/Swagger/codegen
+        // client has no outcome to bind a non-status key to.
+        //
+        // This closes the gap the sibling `every_declared_response_has_a_description`
+        // leaves. That test *finds* the responses it checks through the same
+        // `is_status_key` filter, so a key it does not recognise is silently skipped
+        // there — and it is exactly such an unrecognised key that this test catches: a
+        // status code typo'd into an invalid token (`"4O4"` with a letter O, an
+        // out-of-range `"600"`, a truncated `"20"`), all live copy-paste/edit hazards.
+        // No other contract test sees it either: the responses/operationId/
+        // path-templating/version/parity/`$ref` tests check the operation's own
+        // required fields, path variables, identity, or wiring, never that each
+        // `responses:` key is itself a well-formed status. Verified true across all
+        // mounted specs before asserting.
+        for api in APIS {
+            let invalid = responses_with_invalid_status_key(api.body);
+            assert!(
+                invalid.is_empty(),
+                "{} spec has `responses:` key(s) that are not a valid HTTP status \
+                 code / `NXX` range / `default` / `x-` extension: {:?}",
+                api.name,
+                invalid
+            );
+        }
+    }
+
+    #[test]
+    fn responses_invalid_status_key_extraction_rules() {
+        // Unit-cover the `responses_with_invalid_status_key` extractor so the
+        // contract test above can't pass vacuously and its scoping is pinned: only an
+        // 8-space key directly under an operation's `responses:` is judged; a valid
+        // status code, an `NXX` wildcard, `default`, and an `x-` extension are all
+        // allowed; an invalid token (a letter, out-of-range, truncated) is flagged;
+        // and a status-looking key outside `paths:` is never a response.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+        '2XX':
+          description: range ok
+        default:
+          description: fallback
+        x-vendor-note:
+          description: an extension key, allowed
+    post:
+      operationId: postA
+      responses:
+        '4O4':
+          description: typo, a letter O not a zero
+        '600':
+          description: out of range
+        '20':
+          description: truncated
+components:
+  schemas:
+    Widget:
+      type: object
+      properties:
+        '200':
+          type: string
+";
+        // Flagged: the three invalid POST /a keys, in document order. Not flagged:
+        // every GET /a key (a valid code, an `NXX` wildcard, `default`, an `x-`
+        // extension). The `'200'` *property* under components.schemas.Widget is not
+        // under `paths:`, so it is never a response key.
+        assert_eq!(
+            responses_with_invalid_status_key(body),
+            vec![
+                "POST /a 4O4".to_string(),
+                "POST /a 600".to_string(),
+                "POST /a 20".to_string()
+            ]
+        );
+
+        // Non-vacuous floor: across every registered spec, no `responses:` key is
+        // invalid (the invariant the contract test asserts), and the corpus carries
+        // many operations, so a broken extractor can't hide behind an empty scan.
+        let mut total_ops = 0usize;
+        for api in APIS {
+            assert!(
+                responses_with_invalid_status_key(api.body).is_empty(),
+                "{}: every `responses:` key must be a valid status code, `NXX`, \
+                 `default`, or `x-` extension",
                 api.name
             );
             total_ops += operation_ids(api.body).len();

@@ -3148,6 +3148,34 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-11 — contract-harness: added a **valid-`responses:`-key** contract test
+  (`src/registry.rs` `every_responses_object_key_is_a_valid_status`) asserting every
+  key of an operation's `responses:` map is an HTTP status code (`"200"`), an `NXX`
+  wildcard range (`"1XX"`..`"5XX"`), the `default` key, or an `x-` specification
+  extension — the only forms the OpenAPI Responses Object admits. Feature-API backlog
+  stays effectively exhausted (remaining `[ ]` leaves are `https://` sink-TLS cases
+  needing a multi-MB rustls client vs the small-binary directive, and open-ended state
+  streams with no live worker), so this advanced the cross-cutting **contract-test
+  harness** item. Closes the exact complement of the sibling
+  `every_declared_response_has_a_description`: that test *finds* the responses it
+  description-checks through an `is_status_key` filter, so a key it does not recognise
+  is silently skipped there — and such an unrecognised key is what this catches, a
+  status code typo'd into an invalid token (`"4O4"` with a letter O, an out-of-range
+  `"600"`, a truncated `"20"`), a live copy-paste/edit hazard no other test sees (the
+  responses/operationId/path-templating/version/parity/`$ref` tests check an
+  operation's own required fields, path variables, identity, or wiring, never that
+  each `responses:` key is a well-formed status). One pure helper
+  `responses_with_invalid_status_key` (no YAML dep; mirrors
+  `responses_missing_description`'s path-item/method scoping to reach each 8-space
+  response-entry key, allows an `x-` extension, strips key quotes) is unit-covered
+  (`responses_invalid_status_key_extraction_rules`: valid code/`NXX`/`default`/`x-`
+  accepted, invalid letter/out-of-range/truncated flagged in document order, a
+  status-looking key outside `paths:` ignored, plus a non-vacuous floor over all
+  specs) so the contract can't pass vacuously. Verified true (every `responses:` key
+  across all 57 mounted specs is a valid status) before asserting. Tests: +2 registry
+  (1 contract + 1 helper unit). `cargo test` 2154 green (was 2152), `cargo build
+  --release` warning-clean. No new dep; binary unchanged (`#[cfg(test)]`-only). —
+  binary: 3.7M (3851880 B, +0 B)
 - 2026-08-11 — contract-harness: added a **path-parameter-`required: true`**
   contract test (`src/registry.rs` `every_path_parameter_declares_required_true`)
   asserting every `in: path` parameter a mounted spec declares carries
