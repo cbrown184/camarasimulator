@@ -334,6 +334,59 @@ mod tests {
     use super::*;
     use std::collections::HashSet;
 
+    /// Extract `info.version` from an embedded OpenAPI body without a YAML dep.
+    ///
+    /// Scans the top-level `info:` block (every line until the next unindented
+    /// key) for its direct-child `version:` entry (2-space indent, the CAMARA
+    /// convention) and returns the unquoted scalar. Scoping to the `info:` block
+    /// keeps a coincidental `version:` line elsewhere (e.g. inside a description
+    /// block scalar or a component schema property) from being mistaken for it.
+    fn info_version(body: &str) -> Option<String> {
+        let mut in_info = false;
+        for line in body.lines() {
+            let is_top_level_key =
+                !line.is_empty() && !line.starts_with(char::is_whitespace);
+            if is_top_level_key {
+                in_info = line.trim_end() == "info:";
+                continue;
+            }
+            if in_info {
+                // `strip_prefix` matches exactly the 2-space indent of an `info:`
+                // direct child, so a deeper `version:` (e.g. a 4-space component
+                // property) never matches here.
+                if let Some(rest) = line.strip_prefix("  version:") {
+                    let v = rest.trim().trim_matches('"').trim_matches('\'');
+                    return Some(v.to_string());
+                }
+            }
+        }
+        None
+    }
+
+    /// Does the spec's declared `info.version` agree with the version segment the
+    /// API is mounted at in the URL (DESIGN §9 canonical URL versioning)?
+    ///
+    /// - `vwip` ↔ `info.version == "wip"` (work-in-progress).
+    /// - a pre-release URL segment (`…alpha…`/`…rc…`, e.g. `v0alpha1`) ↔ a
+    ///   pre-release `info.version` (contains `alpha`/`rc`).
+    /// - `v0.N` (initial 0.x scheme) ↔ `info.version` starts with `0.N.`.
+    /// - `vN` (stable major, N≥1) ↔ `info.version` starts with `N.`.
+    fn url_version_agrees(mounted: &str, info_version: &str) -> bool {
+        if mounted == "vwip" {
+            return info_version == "wip";
+        }
+        let rest = mounted.strip_prefix('v').unwrap_or(mounted);
+        if rest.contains("alpha") || rest.contains("rc") {
+            return info_version.contains("alpha") || info_version.contains("rc");
+        }
+        match rest.split_once('.') {
+            // `v0.N` → the 0.x initial-version scheme.
+            Some((major, minor)) => info_version.starts_with(&format!("{major}.{minor}.")),
+            // `vN` → a stable major.
+            None => info_version.starts_with(&format!("{rest}.")),
+        }
+    }
+
     #[test]
     fn registry_is_non_empty() {
         // Guards a broken/emptied list: both the catalog and the served specs are
@@ -399,5 +452,58 @@ mod tests {
                 expected
             );
         }
+    }
+
+    #[test]
+    fn spec_info_version_matches_mounted_url_version() {
+        // Contract-harness invariant (DESIGN §9): the semantic version each
+        // vendored spec declares in `info.version` must agree with the version
+        // segment the API is mounted at in the URL. This catches a distinct
+        // drift the `servers[].url` test can't: a spec vendored (or copy-pasted
+        // from a sibling) with a stale/mismatched `info.version` — e.g. a spec
+        // bumped upstream to a new major while still mounted at the old `v{n}`,
+        // or an initial-version spec whose `0.N` minor disagrees with its mount.
+        // The `servers[].url` check only proves the spec *names* its mount path;
+        // this proves the spec's declared version *is* that version.
+        for api in APIS {
+            let iv = info_version(api.body).unwrap_or_else(|| {
+                panic!("{} spec has no info.version", api.name)
+            });
+            assert!(
+                url_version_agrees(api.version, &iv),
+                "{} is mounted at `{}` but its spec declares info.version `{}` \
+                 (URL version segment and spec version disagree — DESIGN §9)",
+                api.name,
+                api.version,
+                iv
+            );
+        }
+    }
+
+    #[test]
+    fn info_version_extraction_and_agreement_rules() {
+        // Unit-cover the two pure helpers so the contract test above can't pass
+        // vacuously (e.g. a broken extractor returning the same string for all).
+        let body = "openapi: 3.0.3\n\
+                    info:\n  title: X\n  description: |\n    a version: 9.9.9 line inside prose\n  version: \"1.2.3\"\n\
+                    paths:\n  /x:\n    get: {}\n";
+        assert_eq!(info_version(body).as_deref(), Some("1.2.3"));
+        // A `version:` inside the description block scalar must not be picked up,
+        // and a top-level-only body returns None.
+        assert_eq!(info_version("openapi: 3.0.3\npaths: {}\n"), None);
+
+        // Agreement rules across every URL-versioning shape in the registry.
+        assert!(url_version_agrees("vwip", "wip"));
+        assert!(!url_version_agrees("vwip", "1.0.0"));
+        assert!(url_version_agrees("v1", "1.0.0"));
+        assert!(url_version_agrees("v1", "1.1.1"));
+        assert!(!url_version_agrees("v1", "2.0.0"));
+        assert!(url_version_agrees("v2", "2.0.1"));
+        assert!(url_version_agrees("v3", "3.0.0"));
+        assert!(url_version_agrees("v0.3", "0.3.0"));
+        assert!(!url_version_agrees("v0.3", "0.4.0"));
+        assert!(!url_version_agrees("v0.3", "1.3.0"));
+        assert!(url_version_agrees("v0alpha1", "0.1.0-alpha.1"));
+        assert!(!url_version_agrees("v0alpha1", "1.0.0"));
     }
 }

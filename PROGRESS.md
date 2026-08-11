@@ -2879,6 +2879,16 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     entry mounted at a version its own spec doesn't declare — fails CI (the served
     contract must name the path it is served at). Complements the catalog↔served
     test above, which checks *which* specs serve, not that each names its own path.
+  - a spec-version↔URL-version contract test (`src/registry.rs`
+    `spec_info_version_matches_mounted_url_version`) asserts every embedded spec's
+    declared `info.version` agrees with the version segment it is mounted at
+    (`vwip`↔`wip`; `v0.N`↔`0.N.*`; `vN`↔`N.*`; a pre-release `…alpha…`/`…rc…`
+    segment↔a pre-release version), so a spec vendored/copy-pasted with a stale
+    `info.version` — or bumped upstream to a new major while still mounted at the
+    old `v{n}` — fails CI. Complements the `servers[].url` test: that proves a
+    spec *names* its mount path, this proves its declared version *is* that
+    version. Two pure helpers (`info_version` extractor, `url_version_agrees`) are
+    unit-covered so the contract test can't pass vacuously.
   Full response-vs-schema validation still TODO (would need a YAML/JSON-Schema
   validator — a dependency trade-off, deferred).
 
@@ -2888,6 +2898,27 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-11 — contract-harness: added a **spec-version↔URL-version** contract
+  test (`src/registry.rs` `spec_info_version_matches_mounted_url_version`)
+  asserting every embedded vendored spec's declared `info.version` agrees with the
+  version segment the API is mounted at (`vwip`↔`wip`; `v0.N`↔`0.N.*`; `vN`↔`N.*`;
+  a pre-release `…alpha…`/`…rc…` segment↔a pre-release version). The feature-API
+  backlog stays effectively exhausted (remaining `[ ]` leaves are the `https://`
+  sink-TLS cases needing a multi-MB rustls client vs the small-binary directive,
+  and open-ended state streams with no live worker), so this advanced the
+  cross-cutting **contract-test harness** item. Closes a real drift the existing
+  tests can't see: the catalog↔served test checks *which* specs serve, the
+  `servers[].url` test checks a spec *names* its mount path — neither checks the
+  spec's declared semantic version *is* the version it is mounted at, so a spec
+  vendored/copy-pasted with a stale `info.version`, or bumped upstream to a new
+  major while still mounted at the old `v{n}`, would pass today. Verified the
+  invariant already holds across all 57 mounted specs before asserting it. Two
+  pure helpers (`info_version` extractor — scoped to the `info:` block, no YAML
+  dep — and `url_version_agrees`) are unit-covered so the contract test can't pass
+  vacuously (test-only; no vendored spec or server-code change, so no
+  behaviour/spec drift). Tests: +2 registry (1 contract + 1 helper unit).
+  `cargo test` 2123 green (was 2121), `cargo build --release` warning-clean. No
+  new dep; binary unchanged (`#[cfg(test)]`-only). — binary: 3.7M (3845736 B, +0 B)
 - 2026-08-11 — contract-harness: added a **spec↔mount-path** contract test
   (`src/registry.rs` `spec_server_url_matches_mounted_base_path`) asserting every
   embedded vendored spec advertises its base path in `servers[].url` as
