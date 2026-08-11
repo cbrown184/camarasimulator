@@ -1,0 +1,317 @@
+# CamaraSim — Dedicated Network - Areas, API version vwip (CAMARA
+# DedicatedNetworks, work-in-progress).
+#
+# Vendored from the CAMARA DedicatedNetworks API family
+# (dedicated-network-areas.yaml, version `wip`, whose canonical base path is
+# `dedicated-network-areas/vwip`, so CamaraSim mounts it there, honouring the
+# version in the URL) and annotated with CamaraSim's parameter-driven functional
+# cases (docs/DESIGN.md §7, §9). Backed by
+# `src/apis/dedicated_network_areas/vwip.rs`; spec and code must not drift.
+#
+# This slice serves the single-area lookup `GET /areas/{areaId}`
+# (`readNetworkServiceArea`). The collection query `POST /retrieve-service-areas`
+# (`retrieveNetworkServiceAreas`, with its spatial `atLocation`/`overlappingArea`
+# /`coveringArea` filters) is left for a later pass.
+openapi: 3.0.3
+info:
+  title: Dedicated Network - Areas
+  description: |
+    Discover the **service areas** a dedicated network can be provisioned over. A
+    service area is a named, operator-published geographical region (an `area`,
+    here a WGS-84 `CIRCLE`) together with the network/QoS profiles available
+    within it. A client consults this read-only catalog before booking a
+    dedicated network, to learn where — and with which profiles — coverage
+    exists. It is the geographical sibling of the **Network Profiles** catalog in
+    the same Dedicated-Networks family.
+
+    This is the CamaraSim reference double for CAMARA Dedicated Network - Areas
+    (`wip`). The `/areas/{areaId}` lookup requires the
+    `dedicated-network-areas:areas:read` scope.
+
+    ## Two-legged catalog query
+
+    Service areas exist independently of any subscriber, so — like Network
+    Profiles — this is a two-legged (`client_credentials`) service query: there
+    is no device/line identifier and no three-legged dance.
+
+    ## Fixed catalog
+
+    CamaraSim serves a **fixed catalog** of service areas (there is no upstream
+    network to query — DESIGN §7). The single-area lookup returns the service
+    area the requested `areaId` maps to, echoing that id back as the body's `id`.
+
+    ## Functional cases — the input is the control plane (docs/DESIGN.md §7)
+
+    The `areaId` path parameter is the sole control plane, in three layers:
+
+    - **Malformed id.** An `areaId` that is not UUID-shaped (`format: uuid`,
+      `maxLength: 36`) → `400 INVALID_ARGUMENT`.
+    - **Reserved error suffix (identifier).** A UUID contains digits, so the
+      shared reserved-error convention applies unchanged (see the referenced
+      `errors.yaml`): if the id's trailing three digits name a reserved CAMARA
+      status (`…400`, `…401`, `…403`, `…404`, `…409`, `…422`, `…429`, `…500`,
+      `…503`) the endpoint answers with that canonical CAMARA error — e.g.
+      `…-000000000404` → `404 NOT_FOUND` (no such service area).
+    - **Service-area selection.** Otherwise the id's trailing three digits `d`
+      (`000`–`999`, or `0` when the id has fewer than three digits) select one of
+      a fixed set of service-area templates (`d % N`), so the returned area is a
+      genuine second plane. The returned `id` echoes the requested `areaId`.
+
+    CamaraSim exposes the full shared reserved-error set here so every reserved
+    suffix is reachable; canonical Dedicated Network - Areas declares a subset for
+    this operation (400/401/403/404).
+  version: "wip"
+  license:
+    name: Apache-2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0.html
+
+servers:
+  - url: "{apiRoot}/dedicated-network-areas/vwip"
+    variables:
+      apiRoot:
+        default: http://localhost:8080
+        description: API root, e.g. the CamaraSim base URL.
+
+paths:
+  /areas/{areaId}:
+    get:
+      operationId: readNetworkServiceArea
+      summary: Retrieve a network service area by id
+      description: |
+        Returns the network service area identified by `areaId`. In CamaraSim the
+        catalog is fixed and the answer is derived from `areaId` — see the API
+        description for the parameter-driven functional cases (a malformed id →
+        `400`; a reserved trailing suffix → the matching canonical error;
+        otherwise the trailing digits select a fixed service-area template and the
+        requested id is echoed back).
+      security:
+        - openId:
+            - dedicated-network-areas:areas:read
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+        - name: areaId
+          in: path
+          required: true
+          description: The identifier of the network service area to retrieve (UUID).
+          schema:
+            type: string
+            format: uuid
+            maxLength: 36
+      responses:
+        "200":
+          description: The network service area.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ServiceArea"
+              examples:
+                cityCentre:
+                  summary: A city-centre service area with QoS profiles
+                  value:
+                    id: "00000000-0000-4000-8000-000000000001"
+                    name: london-city
+                    description: Central London coverage cell.
+                    area:
+                      areaType: CIRCLE
+                      center:
+                        latitude: 51.5074
+                        longitude: -0.1278
+                      radius: 5000
+                    qosProfiles:
+                      - QOS_L
+                      - QOS_M
+        "400":
+          description: |
+            400 — invalid request. CamaraSim returns `INVALID_ARGUMENT` for an
+            `areaId` that is not UUID-shaped.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ServiceAreasError"
+              examples:
+                invalidArgument:
+                  summary: Malformed areaId
+                  value:
+                    status: 400
+                    code: INVALID_ARGUMENT
+                    message: "`areaId` must be a UUID."
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "409":
+          $ref: "../../shared/errors.yaml#/components/responses/Conflict"
+        "422":
+          $ref: "../../shared/errors.yaml#/components/responses/ServiceNotApplicable"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          Result selected from the `areaId` path parameter (docs/DESIGN.md §7). A
+          malformed id → 400; a reserved trailing suffix → the matching canonical
+          CAMARA error; otherwise the trailing three digits select a fixed
+          service-area template and the requested id is echoed back. Reserved
+          error suffixes come from the shared convention in errors.yaml.
+        cases:
+          - input: an areaId that is not UUID-shaped
+            result: "400 INVALID_ARGUMENT"
+          - input: areaId whose trailing digits are a reserved suffix (e.g. …404)
+            result: the canonical CAMARA error for that status (…404 = no such service area)
+          - input: "a well-formed areaId with a non-reserved tail d"
+            result: "200 with the (d % N) service-area template, id echoing the request"
+          - input: a well-formed areaId with fewer than three digits
+            result: "200 with the first service-area template (tail treated as 000)"
+
+components:
+  securitySchemes:
+    openId:
+      $ref: "../../auth/openapi.yaml#/components/securitySchemes/camaraOAuth"
+
+  parameters:
+    XCorrelator:
+      name: x-correlator
+      in: header
+      required: false
+      description: Correlation id for the request, echoed back on the response.
+      schema:
+        type: string
+
+  headers:
+    XCorrelator:
+      description: The `x-correlator` from the request, echoed if one was sent.
+      required: false
+      schema:
+        type: string
+
+  schemas:
+    Point:
+      type: object
+      description: A WGS-84 point (decimal degrees).
+      required:
+        - latitude
+        - longitude
+      properties:
+        latitude:
+          type: number
+          format: double
+          minimum: -90
+          maximum: 90
+          example: 51.5074
+        longitude:
+          type: number
+          format: double
+          minimum: -180
+          maximum: 180
+          example: -0.1278
+
+    Area:
+      type: object
+      description: >-
+        A geographical area. The discriminator is `areaType`; CamaraSim's fixed
+        service-area catalog renders every area as a `CIRCLE` (a `center` point
+        and a `radius` in metres). Canonical Dedicated Network - Areas refs the
+        shared `CAMARA_common.yaml` `Area` (which also admits `POLYGON`); CamaraSim
+        inlines the `CIRCLE` branch it serves.
+      required:
+        - areaType
+      discriminator:
+        propertyName: areaType
+      properties:
+        areaType:
+          type: string
+          description: The kind of area. CamaraSim's catalog serves `CIRCLE`.
+          enum:
+            - CIRCLE
+        center:
+          $ref: "#/components/schemas/Point"
+        radius:
+          type: number
+          format: double
+          minimum: 1
+          description: Circle radius in metres.
+          example: 5000
+
+    ServiceArea:
+      type: object
+      description: |
+        A named geographical region a dedicated network can be provisioned over,
+        together with the network and/or QoS profiles available within it.
+      required:
+        - id
+        - area
+      properties:
+        id:
+          type: string
+          format: uuid
+          maxLength: 36
+          description: The service area's identifier.
+        name:
+          type: string
+          maxLength: 1024
+          description: A human-readable name for the service area.
+          example: london-city
+        description:
+          type: string
+          maxLength: 4096
+          description: A human-readable description of the service area.
+        area:
+          $ref: "#/components/schemas/Area"
+        networkProfiles:
+          type: array
+          description: >-
+            The network profiles available in this area (UUIDs). Present when the
+            area is expressed in terms of network profiles rather than QoS
+            profiles. A service area carries either `networkProfiles` or
+            `qosProfiles`.
+          minItems: 1
+          maxItems: 1024
+          items:
+            type: string
+            format: uuid
+            maxLength: 36
+        qosProfiles:
+          type: array
+          description: >-
+            The QoS profiles available in this area (names). Present when the area
+            is expressed in terms of QoS profiles rather than network profiles. A
+            service area carries either `networkProfiles` or `qosProfiles`.
+          minItems: 1
+          maxItems: 1024
+          items:
+            type: string
+            minLength: 3
+            maxLength: 256
+            pattern: "^[a-zA-Z0-9_.-]+$"
+
+    ServiceAreasError:
+      description: >-
+        The CAMARA error body for this API — the shared `CamaraError` shape with
+        this operation's `code` set.
+      allOf:
+        - $ref: "../../shared/errors.yaml#/components/schemas/CamaraError"
+        - type: object
+          properties:
+            code:
+              type: string
+              enum:
+                - INVALID_ARGUMENT
+                - OUT_OF_RANGE
+                - UNAUTHENTICATED
+                - PERMISSION_DENIED
+                - INVALID_TOKEN_CONTEXT
+                - NOT_FOUND
+                - IDENTIFIER_NOT_FOUND
+                - CONFLICT
+                - SERVICE_NOT_APPLICABLE
+                - TOO_MANY_REQUESTS
+                - INTERNAL
+                - UNAVAILABLE

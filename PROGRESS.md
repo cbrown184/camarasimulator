@@ -2662,7 +2662,24 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
           Body validation → 400 before store → 404. **Completes the
           `/devices…` sub-resources** (`dedicated-network-areas` remains). No new
           dep. `x-correlator` echoed.
-    - [ ] `dedicated-network-areas` (spatial) — later.
+    - [~] **Dedicated Network — Areas vwip** (`/dedicated-network-areas/vwip`;
+      read-only, two-legged **service-area catalog** — the geographical sibling
+      of Network Profiles; the `area` is a fixed CIRCLE, so the "spatial" surface
+      is trivial data, not computed geometry):
+      - [x] `GET /areas/{areaId}` (`readNetworkServiceArea`,
+        `dedicated-network-areas:areas:read`) — single service-area lookup over a
+        fixed 4-entry catalog (no upstream backend), mirroring
+        `readNetworkProfile`. The `areaId` path param is the sole control plane in
+        three layers (DESIGN §7): not UUID-shaped → 400 INVALID_ARGUMENT; reserved
+        trailing-digit suffix → canonical CAMARA error (`…404` → 404 no-such-area);
+        else trailing three digits `d` select a template (`d % 4`; `…000`/no-digits
+        → template 0), so the returned area is a genuine second plane. Each
+        `ServiceArea` carries a CIRCLE `area` (center + radius) and **either**
+        `qosProfiles` **or** `networkProfiles` (the either/or constraint); the
+        requested id is echoed as `id`. `x-correlator` echoed. No new dep.
+      - [ ] `POST /retrieve-service-areas` (`retrieveNetworkServiceAreas`) — the
+        collection query with spatial `atLocation`/`overlappingArea`/`coveringArea`
+        filters — later.
 - [~] Other CAMARA APIs as capacity allows
   - [~] Edge Application Management vwip (`/edge-application-management/vwip`;
     CAMARA EdgeApplicationManagement `wip` — no released version, mounted at its
@@ -2846,6 +2863,37 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-11 — dedicated-network-areas: mounted a new CAMARA API,
+  `GET /dedicated-network-areas/vwip/areas/{areaId}` (`readNetworkServiceArea`,
+  scope `dedicated-network-areas:areas:read`) — the last unstarted sibling of the
+  DedicatedNetworks family (Networks/Accesses/Profiles were done; the topmost
+  actionable `[ ]` leaf was `dedicated-network-areas`, all other remaining leaves
+  being the `https://` sink-TLS cases needing a multi-MB rustls client vs the
+  small-binary directive, or open-ended state streams with no live worker).
+  Verified against the **authoritative** CAMARA DedicatedNetworks
+  `dedicated-network-areas.yaml` (`wip`): it has two read ops
+  (`readNetworkServiceArea` GET `/areas/{areaId}`, `retrieveNetworkServiceAreas`
+  POST `/retrieve-service-areas`); scoped this pass to the **single-area read
+  leg** only (the collection query, with its spatial `atLocation`/`overlappingArea`
+  /`coveringArea` filters, left `[ ]` for later). A read-only, two-legged
+  service-area **catalog** — the geographical sibling of Network Profiles, mirroring
+  `readNetworkProfile` almost exactly. Serves a fixed 4-entry catalog (no upstream
+  backend); the `areaId` is the sole control plane in three layers (DESIGN §7): not
+  UUID-shaped → 400 INVALID_ARGUMENT; reserved trailing-digit suffix → canonical
+  CAMARA error (`…404` → 404 no-such-area); else trailing three digits `d` select a
+  template (`d % 4`, `…000`/no-digits → t0), the returned area a genuine second
+  plane. Each `ServiceArea` carries a fixed CIRCLE `area` (center + radius) and
+  **either** `qosProfiles` **or** `networkProfiles` (the schema either/or); the
+  requested id is echoed as `id`. New `src/apis/dedicated_network_areas{,.rs}`
+  (entry + `vwip.rs`), router + catalog + openapi-serving wiring. Spec: authored
+  `specs/dedicated-network-areas/vwip/openapi.yaml` (the GET op + ServiceArea/Area/
+  Point/error schemas + `x-camarasim-scenarios`, inlining the CIRCLE branch of the
+  common `Area`). 13 new tests (happy path + both profile branches, distinct-id
+  selection, no-digits → t0, reserved-suffix errors, malformed 400, scope 403,
+  missing-token 401, x-correlator on 200+404, and pure units incl. every-template-
+  valid + id round-trip). `cargo test` 2086 green (was 2073), `cargo build
+  --release` warning-clean (`template_id` gated `#[cfg(test)]`). No new dep. —
+  binary: 3.7M (3854544 B, +19560 B)
 - 2026-08-11 — edge-application-management: added the deployment **patch leg**,
   `PATCH /edge-application-management/vwip/deployments/{appDeploymentId}`
   (`updateAppDeployment`, scope `…:deployments:update`) — the topmost unclaimed

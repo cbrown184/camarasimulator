@@ -370,6 +370,12 @@ async fn catalog() -> Json<Value> {
                 "spec_url": "/dedicated-network-accesses/vwip/openapi.yaml",
             },
             {
+                "name": "dedicated-network-areas",
+                "version": "vwip",
+                "base_path": "/dedicated-network-areas/vwip",
+                "spec_url": "/dedicated-network-areas/vwip/openapi.yaml",
+            },
+            {
                 "name": "edge-application-management",
                 "version": "vwip",
                 "base_path": "/edge-application-management/vwip",

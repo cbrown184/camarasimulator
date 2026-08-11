@@ -78,6 +78,7 @@ pub mod consent_info;
 pub mod customer_insights;
 pub mod dedicated_network;
 pub mod dedicated_network_accesses;
+pub mod dedicated_network_areas;
 pub mod dedicated_network_profiles;
 pub mod device_authenticity;
 pub mod device_data_volume;
@@ -182,6 +183,7 @@ pub fn routes() -> Router {
         .merge(dedicated_network_profiles::routes())
         .merge(dedicated_network::routes())
         .merge(dedicated_network_accesses::routes())
+        .merge(dedicated_network_areas::routes())
         .merge(edge_application_management::routes())
         .merge(openapi::routes())
 }
