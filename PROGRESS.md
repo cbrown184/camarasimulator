@@ -2921,10 +2921,18 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     operationId tests can't see (they check a spec's identity, never how it wires
     auth). Converged the one remaining inline spec (`iot-sim-fraud-prevention/vwip`)
     onto the shared `$ref` in the same pass so the invariant holds across all specs.
+  - a functional-cases contract test (`src/registry.rs`
+    `every_spec_documents_functional_cases`) asserts every mounted spec declares
+    ≥1 `x-camarasim-scenarios` block, so a newly vendored spec drafted from a
+    CAMARA template can't ship with its parameter-driven behaviour documented in
+    prose only (DESIGN §7, §9) — a drift the identity/wiring tests can't see. A
+    pure `scenario_blocks` counter (no YAML dep; matches the key at any indent,
+    skips prose mentions) is unit-covered so the contract can't pass vacuously.
+    Closed the one gap the test surfaced in the same pass: `iot-sim-fraud-prevention/
+    vwip` (its `query`/`bindDeviceImei`/`unBindDeviceImei` operations) now carry
+    structured scenarios blocks matching their 56 siblings.
   Full response-vs-schema validation still TODO (would need a YAML/JSON-Schema
-  validator — a dependency trade-off, deferred). Noted gap: `iot-sim-fraud-prevention/
-  vwip` is also the sole spec documenting functional cases in prose only (no
-  structured `x-camarasim-scenarios` block) — a candidate for a future pass.
+  validator — a dependency trade-off, deferred).
 
 ---
 
@@ -2932,6 +2940,28 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-11 — contract-harness: added a **functional-cases** contract test
+  (`src/registry.rs` `every_spec_documents_functional_cases`) asserting every
+  mounted vendored spec declares ≥1 structured `x-camarasim-scenarios` block —
+  the machine-readable record of each API's parameter-driven behaviour (DESIGN
+  §7, §9), a drift the identity/wiring tests (mount-path/version/parity/
+  operationId/oauth) can't see. The feature-API backlog stays effectively
+  exhausted (remaining `[ ]` leaves are the `https://` sink-TLS cases needing a
+  multi-MB rustls client vs the small-binary directive, and open-ended state
+  streams with no live worker), so this advanced the cross-cutting **contract-test
+  harness** item. Closed the one gap it surfaced in the same pass: 56/57 mounted
+  specs carried the block, but `iot-sim-fraud-prevention/vwip` documented its
+  functional cases in prose only. Added structured scenarios to all three of its
+  operations (`query`, `bindDeviceImei`, `unBindDeviceImei`), transcribed from the
+  verified handler behaviour (identifier resolution + reserved-error + store +
+  trailing-digit-parity planes across the IMEIBIND/AREALIMIT facets). Fixed a
+  stale module-header doc-comment in `src/apis/iot_sim_fraud_prevention/vwip.rs`
+  that still claimed `AREALIMIT` bind/unbind was deferred/rejected 400 while the
+  code (and per-symbol docs + spec) fully implement both facets — no behaviour
+  change. A pure `scenario_blocks` counter is unit-covered so the contract can't
+  pass vacuously. Tests: +2 (1 contract, 1 unit). `cargo test` 2129 green (was
+  2127), `cargo build --release` warning-clean. No new dep; binary grew by the
+  embedded scenario-block bytes only. — binary: 3.7M (3851624 B, +5952 B)
 - 2026-08-11 — contract-harness: added a **shared-security-scheme** contract test
   (`src/registry.rs` `every_spec_refs_the_shared_camara_oauth_scheme`) asserting
   every mounted vendored spec defines its `openId` security scheme by `$ref`-ing the

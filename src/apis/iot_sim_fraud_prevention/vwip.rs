@@ -10,16 +10,17 @@
 //!   (operationId `unBindDeviceImei`, scope `iot-sim-fraud-prevention:unbind`).
 //!
 //! The upstream CAMARA API also defines a second bind/query type `AREALIMIT`
-//! (a geographic area restriction). `POST /query` now supports it: an
-//! `AREALIMIT` query reports the device's area-restriction status
-//! (`{ "areaLimit": { "areaLimitStatus": "RESTRICTED"|"UNRESTRICTED",
-//! "limitArea"?: <Circle> } }`), derived statelessly from the identifier (see
-//! [`area_limit`]). The **`AREALIMIT` bind/unbind** pair — which would *set* and
-//! *clear* a stored restriction with a caller-supplied `Circle` — is still
-//! **deferred** (spatial, lower priority than the non-spatial IMEIBIND slice;
-//! docs/DESIGN.md §12), so the `bindType`/`unBindType` enums stay trimmed to
-//! `[IMEIBIND]` and an `AREALIMIT` bind/unbind is rejected `400 INVALID_ARGUMENT`.
-//! The spec never claims behaviour the server does not implement.
+//! (a geographic area restriction), now fully supported across all three
+//! operations. An `AREALIMIT` **query** reports the device's area-restriction
+//! status (`{ "areaLimit": { "areaLimitStatus": "RESTRICTED"|"UNRESTRICTED",
+//! "limitArea"?: <Circle> } }`); an `AREALIMIT` **bind** marks the SIM
+//! restricted to its network-provisioned area (the upstream request carries no
+//! geometry — the allowed `Circle` is deterministic from the identifier, see
+//! [`area_limit`]) and an `AREALIMIT` **unbind** clears it (or
+//! `422 UNNECESSARY_UNBIND_AREALIMIT` when nothing is restricted). The
+//! `queryType`/`bindType`/`unBindType` enums therefore carry both `IMEIBIND` and
+//! `AREALIMIT`; any other value is rejected `400 INVALID_ARGUMENT`. The spec
+//! never claims behaviour the server does not implement.
 //!
 //! ## What it does
 //!

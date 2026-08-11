@@ -251,6 +251,39 @@ paths:
       security:
         - openId:
             - "iot-sim-fraud-prevention:query"
+      x-camarasim-scenarios:
+        description: >-
+          Result selected from the resolved line identifier and `queryType`
+          (docs/DESIGN.md §7). The identifier is the first present identifier of
+          the submitted `device` (phoneNumber → networkAccessIdentifier → the
+          IPv4 publicAddress → ipv6Address) or, when no `device` is supplied, the
+          three-legged token subject. A stored binding (set by `POST /bind`,
+          cleared by `POST /unbind`) wins; absent one the status is a stateless
+          default keyed off the identifier's trailing-three-digit parity.
+          Reserved error suffixes come from the shared convention in errors.yaml.
+        cases:
+          - input: identifier ending in a reserved error suffix (e.g. …404)
+            result: the canonical CAMARA error for that status
+          - input: "queryType IMEIBIND, identifier with a stored IMEI binding"
+            result: '200 { imeiBind: { bindStatus: "BOUND", bindImei: <stored 15-digit IMEI> } }'
+          - input: "queryType IMEIBIND, no stored binding, odd trailing digits"
+            result: '200 { imeiBind: { bindStatus: "BOUND", bindImei: <synthesised 15-digit IMEI> } }'
+          - input: "queryType IMEIBIND, no stored binding, even/…000/no trailing digits"
+            result: '200 { imeiBind: { bindStatus: "UNBOUND" } } (no bindImei)'
+          - input: "queryType AREALIMIT, identifier with a stored area restriction"
+            result: '200 { areaLimit: { areaLimitStatus: "RESTRICTED", limitArea: <Circle> } }'
+          - input: "queryType AREALIMIT, no stored restriction, odd trailing digits"
+            result: '200 { areaLimit: { areaLimitStatus: "RESTRICTED", limitArea: <deterministic Circle> } }'
+          - input: "queryType AREALIMIT, no stored restriction, even/…000/no trailing digits"
+            result: '200 { areaLimit: { areaLimitStatus: "UNRESTRICTED" } } (no limitArea)'
+          - input: no device, an E.164 token subject (three-legged)
+            result: same cases, driven by the subject's trailing three digits
+          - input: device submitted on a three-legged line token
+            result: "422 UNNECESSARY_IDENTIFIER"
+          - input: no device and a non-line token subject
+            result: "422 MISSING_IDENTIFIER"
+          - input: missing or unknown queryType (neither IMEIBIND nor AREALIMIT)
+            result: "400 INVALID_ARGUMENT"
 
   /bind:
     post:
@@ -347,6 +380,29 @@ paths:
       security:
         - openId:
             - "iot-sim-fraud-prevention:bind"
+      x-camarasim-scenarios:
+        description: >-
+          Result selected from the resolved line identifier and `bindType`
+          (docs/DESIGN.md §7). Same identifier resolution and two-/three-legged
+          rule as `POST /query`. After the shared reserved-error-suffix plane a
+          bind records the binding in the in-memory store and answers
+          `{ "bound": true }`; both bind types are idempotent. Reserved error
+          suffixes come from the shared convention in errors.yaml.
+        cases:
+          - input: identifier ending in a reserved error suffix (e.g. …404)
+            result: the canonical CAMARA error for that status
+          - input: "bindType IMEIBIND"
+            result: '200 { bound: true } — records the SIM↔IMEI binding (thereafter query IMEIBIND reports BOUND with that IMEI); idempotent'
+          - input: "bindType AREALIMIT"
+            result: '200 { bound: true } — marks the SIM area-restricted (thereafter query AREALIMIT reports RESTRICTED); idempotent'
+          - input: no device, an E.164 token subject (three-legged)
+            result: same cases, driven by the subject's trailing three digits
+          - input: device submitted on a three-legged line token
+            result: "422 UNNECESSARY_IDENTIFIER"
+          - input: no device and a non-line token subject
+            result: "422 MISSING_IDENTIFIER"
+          - input: missing or unknown bindType (neither IMEIBIND nor AREALIMIT)
+            result: "400 INVALID_ARGUMENT"
 
   /unbind:
     post:
@@ -431,6 +487,36 @@ paths:
       security:
         - openId:
             - "iot-sim-fraud-prevention:unbind"
+      x-camarasim-scenarios:
+        description: >-
+          Result selected from the resolved line identifier and `unBindType`
+          (docs/DESIGN.md §7). Same identifier resolution and two-/three-legged
+          rule as `POST /bind`. After the shared reserved-error-suffix plane the
+          operation is keyed on the in-memory store: an existing binding of that
+          type is removed, otherwise there is nothing to unbind. The IMEIBIND and
+          AREALIMIT bindings are independent. Reserved error suffixes come from
+          the shared convention in errors.yaml.
+        cases:
+          - input: identifier ending in a reserved error suffix (e.g. …404)
+            result: the canonical CAMARA error for that status
+          - input: "unBindType IMEIBIND, device with an existing IMEI binding"
+            result: '200 { unbound: true } — the binding is removed (query returns to its stateless default)'
+          - input: "unBindType IMEIBIND, device with no IMEI binding"
+            result: "422 UNNECESSARY_UNBIND_IMEI"
+          - input: "unBindType AREALIMIT, device with an existing area restriction"
+            result: '200 { unbound: true } — the restriction is cleared'
+          - input: "unBindType AREALIMIT, device with no area restriction"
+            result: "422 UNNECESSARY_UNBIND_AREALIMIT"
+          - input: an IMEIBIND unbind on a device that also has an AREALIMIT restriction
+            result: the AREALIMIT restriction stays in force (the two bindings are independent), and vice versa
+          - input: no device, an E.164 token subject (three-legged)
+            result: same cases, driven by the subject's trailing three digits
+          - input: device submitted on a three-legged line token
+            result: "422 UNNECESSARY_IDENTIFIER"
+          - input: no device and a non-line token subject
+            result: "422 MISSING_IDENTIFIER"
+          - input: missing or unknown unBindType (neither IMEIBIND nor AREALIMIT)
+            result: "400 INVALID_ARGUMENT"
 
 components:
   securitySchemes:

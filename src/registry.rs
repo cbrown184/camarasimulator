@@ -384,6 +384,23 @@ mod tests {
             .collect()
     }
 
+    /// Count the `x-camarasim-scenarios:` blocks declared in an embedded OpenAPI
+    /// body, without a YAML dep.
+    ///
+    /// `x-camarasim-scenarios` is the simulator's OpenAPI vendor extension that
+    /// documents an operation's parameter-driven functional cases in the spec
+    /// (docs/DESIGN.md §7, §9) — the structured counterpart to the prose in the
+    /// operation `description`. It is an operation-object field (`paths:` →
+    /// `/path:` → `<method>:` → `x-camarasim-scenarios:`). A line is counted as a
+    /// declaration when — after trimming leading whitespace — it begins with the
+    /// `x-camarasim-scenarios:` key, so prose that merely mentions the name is not
+    /// matched.
+    fn scenario_blocks(body: &str) -> usize {
+        body.lines()
+            .filter(|line| line.trim_start().starts_with("x-camarasim-scenarios:"))
+            .count()
+    }
+
     /// Does the spec's declared `info.version` agree with the version segment the
     /// API is mounted at in the URL (DESIGN §9 canonical URL versioning)?
     ///
@@ -631,6 +648,49 @@ mod tests {
                 SHARED_OAUTH_REF
             );
         }
+    }
+
+    #[test]
+    fn every_spec_documents_functional_cases() {
+        // Contract-harness invariant (DESIGN §7, §9): every mounted API is driven
+        // by its input (the reserved-identifier convention + per-parameter control
+        // planes), and that behaviour MUST be documented in the spec as a
+        // structured `x-camarasim-scenarios` block, not prose alone — so the
+        // vendored spec is a faithful, machine-readable record of what the server
+        // does. A newly vendored spec drafted from a CAMARA template carries no
+        // such block until the agent adds one; leaving it out lets spec and
+        // behaviour drift silently (the mount-path/version/parity/operationId/oauth
+        // tests all check a spec's identity or wiring, never that it documents its
+        // functional cases). This asserts every mounted spec declares at least one
+        // `x-camarasim-scenarios` block. Verified true across all mounted specs
+        // before asserting.
+        for api in APIS {
+            assert!(
+                scenario_blocks(api.body) >= 1,
+                "{} spec declares no x-camarasim-scenarios block \
+                 (every mounted API documents its parameter-driven functional \
+                 cases in the spec — DESIGN §7, §9)",
+                api.name
+            );
+        }
+    }
+
+    #[test]
+    fn scenario_block_extraction_rules() {
+        // Unit-cover the `scenario_blocks` counter so the contract test above
+        // can't pass vacuously (a counter that always returned 0 would make the
+        // assertion unreachable) and so its key-vs-prose discrimination is pinned.
+        let body = "paths:\n  /a:\n    post:\n      operationId: doA\n\
+                    \x20     x-camarasim-scenarios:\n        cases: []\n\
+                    \x20 /b:\n    post:\n      x-camarasim-scenarios:\n        cases: []\n";
+        assert_eq!(scenario_blocks(body), 2);
+        // A description that merely mentions the extension name is not a
+        // declaration (it does not begin with the key after trimming).
+        let prose = "      description: |\n        cases live in x-camarasim-scenarios.\n";
+        assert_eq!(scenario_blocks(prose), 0);
+        // A spec with no scenarios block counts zero (the contract test turns that
+        // into a failure).
+        assert_eq!(scenario_blocks("openapi: 3.0.3\npaths: {}\n"), 0);
     }
 
     #[test]
