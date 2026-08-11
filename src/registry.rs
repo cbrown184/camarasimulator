@@ -630,6 +630,135 @@ mod tests {
         }
     }
 
+    /// Extract every path-template parameter name a spec declares in its `paths:`
+    /// keys — the `{name}` tokens of a templated path like `/sessions/{sessionId}`
+    /// — without a YAML dep.
+    ///
+    /// Scans the top-level `paths:` block. A direct 2-space child key that begins
+    /// with `/` is a path item (`  /sessions/{sessionId}:`); each `{…}` span in
+    /// that key is one path-template parameter. Scoping to `paths:` keeps a `{…}`
+    /// that appears elsewhere (a description, an example) from being mistaken for a
+    /// path parameter.
+    fn path_template_params(body: &str) -> HashSet<String> {
+        let mut out = HashSet::new();
+        let mut in_paths = false;
+        for line in body.lines() {
+            let is_top_level_key =
+                !line.is_empty() && !line.starts_with(char::is_whitespace);
+            if is_top_level_key {
+                in_paths = line.trim_end() == "paths:";
+                continue;
+            }
+            if !in_paths {
+                continue;
+            }
+            // A 2-space direct child of `paths:` (non-space at column 3) whose key
+            // begins with `/` is a path item; deeper lines (methods, parameters,
+            // responses) sit inside an item and are skipped.
+            if let Some(rest) = line.strip_prefix("  ") {
+                if !rest.starts_with(char::is_whitespace) && rest.starts_with('/') {
+                    let key = rest.trim_end();
+                    let key = key.strip_suffix(':').unwrap_or(key);
+                    let mut s = key;
+                    while let Some(open) = s.find('{') {
+                        let Some(close) = s[open + 1..].find('}') else { break };
+                        let name = &s[open + 1..open + 1 + close];
+                        if !name.is_empty() {
+                            out.insert(name.to_string());
+                        }
+                        s = &s[open + 1 + close + 1..];
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// Extract the set of path-parameter names a spec *declares* — the `name` of
+    /// every parameter object marked `in: path` — without a YAML dep.
+    ///
+    /// A path parameter is an OpenAPI parameter object carrying `in: path`. Its
+    /// `name` is a sibling key of that `in:` within the same object: a bare
+    /// `name: X` at the same indentation, or — when the object is a `parameters:`
+    /// sequence item whose first key is `name` — a `- name: X` opener two columns
+    /// shallower. For each `in: path` line this scans the object it belongs to (up
+    /// first, since CAMARA specs list `name` before `in`, then down), bounded by
+    /// the object's edges — a dedent out of it, or the `- ` opener of a *different*
+    /// sequence item — so an adjacent sibling parameter's `name` is never
+    /// miscredited. Both the mapping form (a `components.parameters` object,
+    /// `$ref`-able) and the inline sequence form are handled.
+    fn declared_path_parameter_names(body: &str) -> HashSet<String> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        // If `l` is the parameter object's `name` key relative to an `in:` key at
+        // indentation `ind` — a bare `name: X` at `ind`, or a `- name: X` sequence
+        // opener at `ind`-2 — return the unquoted name.
+        let name_key = |l: &str, ind: usize| -> Option<String> {
+            let li = indent(l);
+            if li != ind && li + 2 != ind {
+                return None;
+            }
+            let t = l.trim_start();
+            let t = t.strip_prefix("- ").unwrap_or(t);
+            let v = t
+                .strip_prefix("name:")?
+                .trim()
+                .trim_matches('"')
+                .trim_matches('\'');
+            (!v.is_empty() && !v.contains(char::is_whitespace)).then(|| v.to_string())
+        };
+        let mut out = HashSet::new();
+        for (i, line) in lines.iter().enumerate() {
+            // An `in: path` key, whether a bare mapping key (`in: path`) or the
+            // first key of a sequence item (`- in: path`).
+            let bare = line.trim_start();
+            let key = bare.strip_prefix("- ").unwrap_or(bare);
+            if key.trim() != "in: path" {
+                continue;
+            }
+            // Indentation of the `in:` key itself (past a `- ` opener, if any).
+            let ind = indent(line) + if bare.len() != key.len() { 2 } else { 0 };
+            let mut found: Option<String> = None;
+            'dir: for step in [-1i64, 1] {
+                let mut j = i as i64;
+                loop {
+                    j += step;
+                    if j < 0 || j as usize >= lines.len() {
+                        break;
+                    }
+                    let l = lines[j as usize];
+                    if l.trim().is_empty() {
+                        break;
+                    }
+                    let li = indent(l);
+                    if li + 2 < ind {
+                        break; // dedented out of this parameter object
+                    }
+                    let is_item_opener =
+                        li + 2 == ind && l.trim_start().starts_with("- ");
+                    // Going *down*, a `- ` opener is always the next (different)
+                    // sequence item, so it bounds the object before any name check.
+                    if step == 1 && is_item_opener {
+                        break;
+                    }
+                    if let Some(n) = name_key(l, ind) {
+                        found = Some(n);
+                        break 'dir;
+                    }
+                    // Going *up*, a `- ` opener that was not this object's own
+                    // `name` marks the object's start — stop before leaving it.
+                    if step == -1 && is_item_opener {
+                        break;
+                    }
+                }
+            }
+            if let Some(n) = found {
+                out.insert(n);
+            }
+        }
+        out
+    }
+
     #[test]
     fn registry_is_non_empty() {
         // Guards a broken/emptied list: both the catalog and the served specs are
@@ -1412,6 +1541,126 @@ components:
             let v = openapi_version(api.body)
                 .expect("registered spec has a root openapi version");
             assert!(is_openapi_3_version(&v), "{}: {}", api.name, v);
+        }
+    }
+
+    #[test]
+    fn path_template_params_match_declared_path_parameters() {
+        // Contract-harness invariant (OpenAPI path templating): every `{name}` a
+        // spec puts in a `paths:` key MUST be declared as an `in: path` parameter,
+        // and — conversely — every `in: path` parameter a spec declares MUST appear
+        // in some path template. Both halves are OpenAPI structural rules: an
+        // undeclared path template variable, or a path parameter that templates no
+        // path, is an invalid document (a client/codegen tool can't bind the URL
+        // variable to a parameter, or is handed a parameter with nowhere to go).
+        // This is a live copy-paste hazard — a new endpoint's spec is drafted from
+        // a sibling, so a pasted path block can keep the sibling's `{sessionId}`
+        // template while its operation declares a `paymentId` path parameter (or a
+        // path is renamed but its parameter is not) — a mismatch no existing
+        // contract test sees: the mount-path/version/parity/operationId/`$ref`
+        // tests all check a spec's identity or wiring, never that its path
+        // *variables* line up with its path *parameters*. Verified true across all
+        // mounted specs before asserting.
+        for api in APIS {
+            let templated = path_template_params(api.body);
+            let declared = declared_path_parameter_names(api.body);
+            for name in &templated {
+                assert!(
+                    declared.contains(name),
+                    "{} spec templates path variable `{{{}}}` but declares no \
+                     matching `in: path` parameter (an undeclared path variable)",
+                    api.name,
+                    name
+                );
+            }
+            for name in &declared {
+                assert!(
+                    templated.contains(name),
+                    "{} spec declares an `in: path` parameter `{}` that appears in \
+                     no path template (a path parameter templating nothing)",
+                    api.name,
+                    name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn path_parameter_extraction_rules() {
+        // Unit-cover the `path_template_params` and `declared_path_parameter_names`
+        // extractors so the contract test above can't pass vacuously (extractors
+        // that returned the same set for every body, or empty sets, would make its
+        // assertions meaningless), and so the scoping/indentation rules are pinned:
+        // a `{…}` in prose is not a path variable; `in: path` is credited its own
+        // object's `name` (name-first and in-first order, dash-sequence and bare
+        // mapping forms) and never an adjacent sibling's; an `in: query` parameter
+        // is not a path parameter.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+  description: >
+    A path like /foo/{notAParam} mentioned in prose must be ignored.
+paths:
+  /sessions:
+    post:
+      operationId: create
+  /sessions/{sessionId}:
+    get:
+      operationId: get
+      parameters:
+        - name: sessionId
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: fields
+          in: query
+  /items/{itemId}/tags/{tagId}:
+    get:
+      operationId: getTag
+      parameters:
+        - in: path
+          name: itemId
+        - name: tagId
+          in: path
+components:
+  parameters:
+    Legacy:
+      name: legacyId
+      in: path
+";
+        let want = |names: &[&str]| {
+            names.iter().map(|s| s.to_string()).collect::<HashSet<_>>()
+        };
+
+        // Templated variables come only from `paths:` keys, across single- and
+        // multi-variable paths; the prose `{notAParam}` under `info:` is excluded.
+        let tp = path_template_params(body);
+        assert_eq!(tp, want(&["sessionId", "itemId", "tagId"]));
+        assert!(!tp.contains("notAParam"));
+
+        // Declared path parameters: `sessionId` (dash item, name-first), `itemId`
+        // (dash item, in-first), `tagId` (dash item, name-first), `legacyId` (a
+        // bare `components.parameters` mapping object) — all `in: path`. `fields`
+        // is `in: query`, so it is not collected; the schema property depth under
+        // `sessionId` never leaks a stray name.
+        let dp = declared_path_parameter_names(body);
+        assert_eq!(dp, want(&["sessionId", "itemId", "tagId", "legacyId"]));
+        assert!(!dp.contains("fields"));
+
+        // Non-vacuous floor: across every registered spec, each templated variable
+        // is a declared path parameter and vice versa (the invariant the contract
+        // test asserts), so a broken extractor can't hide behind an empty loop.
+        for api in APIS {
+            let templated = path_template_params(api.body);
+            let declared = declared_path_parameter_names(api.body);
+            assert_eq!(
+                templated, declared,
+                "{}: path template variables and declared path parameters must match",
+                api.name
+            );
         }
     }
 }

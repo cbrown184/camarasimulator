@@ -3021,6 +3021,24 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     pointers (the granularity `component_pointers` resolves; every local ref these
     specs make has that shape). Verified true (0 dangling local refs across all 57
     mounted specs) before asserting.
+  - a path-templating contract test (`src/registry.rs`
+    `path_template_params_match_declared_path_parameters`) asserts, both ways, that
+    every `{name}` a spec puts in a `paths:` key is declared as an `in: path`
+    parameter, and every `in: path` parameter it declares appears in some path
+    template. Both are OpenAPI structural rules — an undeclared path variable, or a
+    path parameter that templates nothing, is an invalid document — and a live
+    copy-paste drift: a path block pasted from a sibling can keep its `{sessionId}`
+    template while the operation declares a `paymentId` path param (or a path is
+    renamed but its parameter isn't), a mismatch the identity/wiring/`$ref` tests
+    never see. Two pure helpers — `path_template_params` (scans `paths:` keys,
+    pulls `{…}` spans; a `{…}` in prose is excluded) and
+    `declared_path_parameter_names` (credits each `in: path` its own object's
+    `name`, handling name-first/in-first order, dash-sequence and bare
+    `components.parameters` mapping forms, bounded so an adjacent sibling's name is
+    never miscredited) — are unit-covered
+    (`path_parameter_extraction_rules`) so the contract can't pass vacuously.
+    Verified true across all 19 path-templating specs (every variable declared,
+    every path param used) before asserting.
   Full response-vs-schema validation still TODO (would need a YAML/JSON-Schema
   validator — a dependency trade-off, deferred).
 
@@ -3030,6 +3048,29 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-11 — contract-harness: added a **path-templating** contract test
+  (`src/registry.rs` `path_template_params_match_declared_path_parameters`)
+  asserting, both ways, that every `{name}` a mounted spec puts in a `paths:` key
+  is declared as an `in: path` parameter and every `in: path` parameter it declares
+  appears in some path template — the OpenAPI path-templating structural rules, and
+  a live copy-paste drift (a pasted path block keeping a sibling's `{sessionId}`
+  template while its operation declares a `paymentId` path param, or a path renamed
+  without its parameter) that no existing test sees — the mount-path/version/parity/
+  operationId/`$ref` tests all check a spec's identity or wiring, never that its path
+  *variables* line up with its path *parameters*. Feature-API backlog stays
+  effectively exhausted (remaining `[ ]` leaves are `https://` sink-TLS needing a
+  multi-MB rustls client vs the small-binary directive, and open-ended state streams
+  with no live worker), so this advanced the cross-cutting contract-test harness. Two
+  pure helpers — `path_template_params` (scans `paths:` keys, pulls `{…}` spans,
+  excludes a `{…}` in prose) and `declared_path_parameter_names` (credits each
+  `in: path` its own object's `name`; handles name-first/in-first order, dash-sequence
+  and bare `components.parameters` mapping forms; bounded so an adjacent sibling's name
+  is never miscredited) — are unit-covered (`path_parameter_extraction_rules`, incl. a
+  non-vacuous floor over all specs) so the contract can't pass vacuously. Verified true
+  across all 19 path-templating specs before asserting. Tests: +2 registry (1 contract
+  + 1 helper unit). `cargo test` 2140 green (was 2138), `cargo build --release`
+  warning-clean. No new dep; binary unchanged (`#[cfg(test)]`-only). — binary: 3.7M
+  (3851880 B, +0 B)
 - 2026-08-11 — contract-harness: added a **local-component-ref-resolution** contract
   test (`src/registry.rs` `local_component_refs_resolve_within_their_own_spec`)
   asserting every intra-document `$ref` a mounted spec makes (a local pointer
