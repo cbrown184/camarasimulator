@@ -26,7 +26,7 @@
 #   GET    /deployments/{appDeploymentId}      (getAppDeployment)    — read back a deployment
 #   GET    /deployments                        (getAppDeployments)   — list deployments
 #   DELETE /deployments/{appDeploymentId}      (deleteAppDeployment) — delete a deployment
-# The deployment patch leg (updateAppDeployment) is a later pass.
+#   PATCH  /deployments/{appDeploymentId}      (updateAppDeployment) — update a deployment (JSON Merge Patch)
 openapi: 3.0.3
 info:
   title: Edge Application Management
@@ -188,7 +188,33 @@ info:
       already-deleted, *or malformed* id → `404 NOT_FOUND`. Synchronous delete
       (async `202`/`DELETE_REQUESTED` a documented cut, mirroring `deleteAppInstance`).
 
-    The deployment patch leg (`updateAppDeployment`) remains a later pass.
+    ### `updateAppDeployment`
+
+    **`updateAppDeployment`** (`PATCH /deployments/{appDeploymentId}`, scope
+    `edge-application-management:deployments:update`) updates a deployment **in
+    place** using JSON Merge Patch (RFC 7396, `application/merge-patch+json`):
+    only the fields present in the body are changed, and `edgeCloudZones` /
+    `kubernetesClusterRefs` are *replaced* wholesale, never merged element-wise. A
+    field carrying JSON `null` is treated as "no change" (the required
+    `AppDeploymentInfo` fields can't be removed; `kubernetesClusterRefs` isn't
+    persisted). `appId` is immutable (not in the patch schema). Control planes
+    (DESIGN §7):
+
+    - **Request validation** — a supplied `appDeploymentName` breaking the pattern,
+      an empty/oversized/non-UUID `edgeCloudZones`, or a non-UUID/oversized
+      `kubernetesClusterRefs` → `400 INVALID_ARGUMENT`.
+    - **Store state** — an unknown/already-deleted *or malformed* `appDeploymentId`
+      → `404 NOT_FOUND` (malformed path folded into 404, like the read/delete legs).
+    - **Cross-reference** — every *effective* `edgeCloudZones` entry must name a
+      catalog zone → else `404 NOT_FOUND`.
+    - **Identity collision** — the `appDeploymentId` (store key) is left unchanged,
+      but the patched `(appId, appDeploymentName, sorted edgeCloudZones)` identity is
+      re-derived; if it now matches a *different* stored deployment, the update would
+      make two deployments identical → `409 ALREADY_EXISTS` (mirroring
+      `createAppDeployment`).
+
+    On success → `200` with the updated `AppDeploymentInfo`; `appInstances` are
+    re-derived per effective zone so the resource stays self-consistent.
   version: "wip"
   license:
     name: Apache-2.0
@@ -1168,6 +1194,99 @@ paths:
             result: '404 NOT_FOUND'
           - input: a malformed (non-UUID) `appDeploymentId`
             result: '404 NOT_FOUND (the canonical 400 folded into 404)'
+    patch:
+      operationId: updateAppDeployment
+      summary: Update an application deployment
+      description: |
+        Updates an existing application deployment **in place** using JSON Merge
+        Patch semantics (RFC 7396): only the fields present in the body are
+        changed, and the `edgeCloudZones` / `kubernetesClusterRefs` arrays are
+        replaced wholesale (not merged element-wise). `appId` is immutable and is
+        not part of the patch. On success the updated `AppDeploymentInfo` is
+        returned with a `200`.
+
+        See the API description for the parameter-driven functional cases.
+      security:
+        - openId:
+            - edge-application-management:deployments:update
+      parameters:
+        - $ref: "#/components/parameters/AppDeploymentId"
+        - $ref: "#/components/parameters/XCorrelator"
+      requestBody:
+        required: true
+        content:
+          application/merge-patch+json:
+            schema:
+              $ref: "#/components/schemas/UpdateAppDeploymentRequest"
+      responses:
+        "200":
+          description: The updated application deployment.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppDeploymentInfo"
+        "400":
+          $ref: "../../shared/errors.yaml#/components/responses/InvalidArgument"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "409":
+          description: The update would collide with an existing deployment.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "../../shared/errors.yaml#/components/schemas/CamaraError"
+              example:
+                status: 409
+                code: ALREADY_EXISTS
+                message: Deployment already exists
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          `updateAppDeployment` updates a deployment in place via JSON Merge Patch
+          (docs/DESIGN.md §7). The `appDeploymentId` (the resource key) is opaque
+          and simulator-minted, so store state is a control plane, alongside the
+          patched request. Only fields present in the body change; arrays are
+          replaced wholesale; a `null` field is a no-op; `appId` is immutable. Four
+          control planes: request validation → `400 INVALID_ARGUMENT`; unknown *or
+          malformed* id → `404 NOT_FOUND` (malformed path folded into 404, like the
+          read/delete legs); an effective `edgeCloudZones` entry naming no catalog
+          zone → `404 NOT_FOUND`; and a patched `(appId, appDeploymentName, sorted
+          edgeCloudZones)` identity colliding with a *different* stored deployment →
+          `409 ALREADY_EXISTS` (mirroring `createAppDeployment`). On success →
+          `200` with the updated `AppDeploymentInfo` (`appInstances` re-derived per
+          effective zone). Canonical EdgeApplicationManagement declares
+          400/401/403/404/409/500/503 here; CamaraSim additionally folds the
+          malformed-path 400 into 404 (documented deviation).
+        cases:
+          - input: '`{appDeploymentName, edgeCloudZones}` on a known deployment'
+            result: '200 — the updated `AppDeploymentInfo` (name + zones replaced, appInstances re-derived)'
+          - input: 'a partial patch (only `appDeploymentName`) on a known deployment'
+            result: '200 — name replaced, `edgeCloudZones`/`appInstances` unchanged'
+          - input: 'an empty merge patch `{}` on a known deployment'
+            result: '200 — the current `AppDeploymentInfo` (no-op)'
+          - input: 'a supplied `appDeploymentName` breaking the pattern, or empty/non-UUID `edgeCloudZones`, or non-UUID `kubernetesClusterRefs`'
+            result: '400 INVALID_ARGUMENT'
+          - input: 'a well-formed UUID that was never deployed'
+            result: '404 NOT_FOUND'
+          - input: 'a malformed (non-UUID) `appDeploymentId`'
+            result: '404 NOT_FOUND (the canonical 400 folded into 404)'
+          - input: 'an `edgeCloudZones` entry (well-formed UUID) that is not in the catalog'
+            result: '404 NOT_FOUND'
+          - input: 'a patch whose new identity matches a different stored deployment'
+            result: '409 ALREADY_EXISTS'
     delete:
       operationId: deleteAppDeployment
       summary: Delete an application deployment
@@ -1692,6 +1811,37 @@ components:
         kubernetesClusterRefs:
           type: array
           description: Optional references to specific Kubernetes clusters to place onto.
+          maxItems: 100
+          items:
+            $ref: "#/components/schemas/KubernetesClusterRef"
+
+    UpdateAppDeploymentRequest:
+      type: object
+      description: >-
+        A JSON Merge Patch (RFC 7396) over an existing deployment. Every field is
+        optional; only the fields present are changed, and the arrays are replaced
+        wholesale (merge-patch array semantics), never merged element-wise. `appId`
+        is immutable and is not part of the patch. CamaraSim treats a field set to
+        JSON `null` as "no change" (the required `AppDeploymentInfo` fields can't
+        be removed; `kubernetesClusterRefs` isn't persisted).
+      properties:
+        appDeploymentName:
+          $ref: "#/components/schemas/AppDeploymentName"
+        edgeCloudZones:
+          type: array
+          description: >-
+            The new set of target edge cloud zones (replaces the current set). Must
+            be non-empty when supplied (CamaraSim invariant, mirroring
+            `createAppDeployment`).
+          minItems: 1
+          maxItems: 100
+          items:
+            $ref: "#/components/schemas/EdgeCloudZoneId"
+        kubernetesClusterRefs:
+          type: array
+          description: >-
+            Optional references to specific Kubernetes clusters. Validated but
+            accepted-not-applied (mirroring `createAppDeployment`).
           maxItems: 100
           items:
             $ref: "#/components/schemas/KubernetesClusterRef"

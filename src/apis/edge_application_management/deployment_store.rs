@@ -4,9 +4,9 @@
 //! `POST /deployments` (`createAppDeployment`) deploys an onboarded application
 //! across one or more edge cloud zones: it mints an `appDeploymentId` and
 //! remembers the rendered `AppDeploymentInfo` so `getAppDeployment` can read it
-//! back (and the later list/delete/patch legs — `getAppDeployments` /
-//! `deleteAppDeployment` / `updateAppDeployment`, future passes — can address
-//! it). This module is that state, kept apart from the *app*
+//! back (and the list/delete/patch legs — `getAppDeployments` /
+//! `deleteAppDeployment` / `updateAppDeployment` — can address it). This module
+//! is that state, kept apart from the *app*
 //! store ([`super::store`]) and the *app-instance* store
 //! ([`super::instance_store`]) so the three resources don't share a keyspace.
 //!
@@ -76,6 +76,45 @@ pub fn all() -> Vec<Value> {
         .values()
         .cloned()
         .collect()
+}
+
+/// The outcome of an in-place [`update`]: the deployment was replaced, the id
+/// named no existing deployment, or the patch's new identity collides with a
+/// *different* already-stored deployment. `updateAppDeployment` maps these to
+/// `200 OK`, `404 NOT_FOUND`, and `409 ALREADY_EXISTS` respectively.
+#[derive(Debug, PartialEq, Eq)]
+pub enum UpdateOutcome {
+    Updated,
+    NotFound,
+    Conflict,
+}
+
+/// Replace the `AppDeploymentInfo` stored under `deployment_id` with `info`,
+/// updating the deployment **in place** (its `appDeploymentId` — the store key —
+/// is unchanged). Backs the `updateAppDeployment` (`PATCH`) leg.
+///
+/// `derived_id` is the identity the *patched* deployment would hash to (see
+/// [`super::vwip::deployment_id`]); when a patch changes the name or zones it can
+/// diverge from `deployment_id`. If that new identity names a *different* stored
+/// deployment, the update would make two deployments identical, so it is refused
+/// as [`UpdateOutcome::Conflict`] (the CAMARA `409` "Deployment already exists"
+/// case) rather than applied. An unknown `deployment_id` →
+/// [`UpdateOutcome::NotFound`].
+///
+/// The whole check-and-replace runs under a single lock hold (never across an
+/// `.await`), so the 404/409/replace decision is atomic.
+pub fn update(deployment_id: &str, derived_id: &str, info: Value) -> UpdateOutcome {
+    let mut map = store()
+        .lock()
+        .expect("edge-application-management deployment store not poisoned");
+    if !map.contains_key(deployment_id) {
+        return UpdateOutcome::NotFound;
+    }
+    if derived_id != deployment_id && map.contains_key(derived_id) {
+        return UpdateOutcome::Conflict;
+    }
+    map.insert(deployment_id.to_string(), info);
+    UpdateOutcome::Updated
 }
 
 /// Evict the app deployment stored under `deployment_id`, returning its

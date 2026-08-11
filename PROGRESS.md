@@ -2809,7 +2809,18 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
         `edge-application-management:deployments:delete`; synchronous delete (async
         `202`/`DELETE_REQUESTED` + `sink` a documented cut). New
         `deployment_store::all`/`remove`; `x-correlator` echoed. No new dep.
-      - [ ] `PATCH /deployments/{appDeploymentId}` (`updateAppDeployment`) — later pass.
+      - [x] `PATCH /deployments/{appDeploymentId}` (`updateAppDeployment`,
+        `edge-application-management:deployments:update`) — in-place update via
+        JSON Merge Patch (RFC 7396, `application/merge-patch+json`): only present
+        fields change, arrays replaced wholesale, `null` = no-op, `appId`
+        immutable. Four control planes (DESIGN §7): request validation → 400
+        INVALID_ARGUMENT; unknown/malformed id → 404 (malformed path folded);
+        effective `edgeCloudZones` cross-ref against the catalog → 404; and the
+        patched `(appId, name, sorted zones)` identity colliding with a *different*
+        stored deployment → 409 ALREADY_EXISTS (mirrors `createAppDeployment`). On
+        success → 200 `AppDeploymentInfo` (appDeploymentId unchanged, appInstances
+        re-derived per effective zone). New `deployment_store::update` (atomic
+        check-and-replace). No new dep. **Completes the deployments resource.**
 
 ## Cross-cutting (do alongside the item that needs it)
 - [~] `errors.rs`: base CAMARA error model done (`src/errors.rs`, `specs/shared/errors.yaml`); per-version catalogs still TODO (DESIGN §8)
@@ -2835,6 +2846,28 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-11 — edge-application-management: added the deployment **patch leg**,
+  `PATCH /edge-application-management/vwip/deployments/{appDeploymentId}`
+  (`updateAppDeployment`, scope `…:deployments:update`) — the topmost unclaimed
+  *actionable* `[ ]` leaf (verified against the authoritative CAMARA
+  `EdgeApplicationManagement` `wip` spec, now in its own repo: PATCH,
+  `application/merge-patch+json`, body `{appDeploymentName?, edgeCloudZones?,
+  kubernetesClusterRefs?}`, 200 `AppDeploymentInfo`, 400/401/403/404/409/500/503).
+  The strictly-topmost `[ ]` items remain the `https://` sink-TLS cases (need a
+  multi-MB rustls client vs the small-binary directive), spatial
+  `dedicated-network-areas`, and open-ended state streams with no live worker.
+  In-place update via JSON Merge Patch (RFC 7396): only present fields change,
+  arrays replaced wholesale, `null` = no-op, `appId` immutable, `appInstances`
+  re-derived per effective zone. Four control planes (DESIGN §7): validation →
+  400, unknown/malformed id → 404 (malformed folded), effective-zone catalog
+  cross-ref → 404, patched-identity collision with a *different* stored
+  deployment → 409 ALREADY_EXISTS. New atomic `deployment_store::update`
+  (check-and-replace under one lock). Spec: PATCH op + `UpdateAppDeploymentRequest`
+  schema + description/scenarios; header comment updated. 8 new tests (full
+  patch, partial/no-op patch, unknown/malformed 404, validation 400, unknown-zone
+  404, identity-collision 409, auth+scope, x-correlator). `cargo test` 2073 green,
+  `cargo build --release` ok. No new dep. Completes the deployments resource
+  (`createAppDeployment`/get/list/delete/patch). — binary: 3.7M (3834984 B)
 - 2026-08-10 — edge-application-management: added the deployment **list + delete
   legs** — `GET /edge-application-management/vwip/deployments` (`getAppDeployments`,
   scope `…:deployments:read`) and `DELETE …/deployments/{appDeploymentId}`

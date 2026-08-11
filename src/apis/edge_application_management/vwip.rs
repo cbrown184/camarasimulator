@@ -39,6 +39,10 @@
 //! - `GET /edge-application-management/vwip/deployments/{appDeploymentId}` — read
 //!   back an application deployment (operationId `getAppDeployment`, scope
 //!   `edge-application-management:deployments:read`). See [`get_app_deployment`].
+//! - `PATCH /edge-application-management/vwip/deployments/{appDeploymentId}` —
+//!   update an application deployment in place via JSON Merge Patch (operationId
+//!   `updateAppDeployment`, scope `edge-application-management:deployments:update`).
+//!   See [`update_app_deployment`].
 //!
 //! ## What it does
 //!
@@ -120,6 +124,9 @@ const DEPLOYMENTS_READ_SCOPE: &str = "edge-application-management:deployments:re
 /// The OAuth2 scope `deleteAppDeployment` requires (CAMARA EdgeApplicationManagement).
 const DEPLOYMENTS_DELETE_SCOPE: &str = "edge-application-management:deployments:delete";
 
+/// The OAuth2 scope `updateAppDeployment` requires (CAMARA EdgeApplicationManagement).
+const DEPLOYMENTS_UPDATE_SCOPE: &str = "edge-application-management:deployments:update";
+
 /// The five CAMARA `AppManifest.packageType` values.
 const PACKAGE_TYPES: [&str; 5] = ["QCOW2", "OVA", "CONTAINER", "HELM", "CSAR"];
 
@@ -156,7 +163,9 @@ pub fn routes() -> Router {
         )
         .route(
             "/edge-application-management/vwip/deployments/:app_deployment_id",
-            get(get_app_deployment).delete(delete_app_deployment),
+            get(get_app_deployment)
+                .patch(update_app_deployment)
+                .delete(delete_app_deployment),
         )
 }
 
@@ -984,6 +993,197 @@ async fn delete_app_deployment(
         Some(_) => with_correlator(StatusCode::NO_CONTENT.into_response(), &correlator),
         None => with_correlator(
             CamaraError::not_found("No application deployment found for the provided appDeploymentId.")
+                .into_response(),
+            &correlator,
+        ),
+    }
+}
+
+/// The CAMARA `updateAppDeployment` request body — a JSON Merge Patch (RFC 7396,
+/// `application/merge-patch+json`). Every field is optional; only the fields
+/// present are changed, and the arrays are *replaced* wholesale (merge-patch
+/// array semantics), never merged element-wise.
+///
+/// A field carrying JSON `null` deserialises to `None` here (indistinguishable
+/// from absent), so it is treated as "no change" — the two required
+/// `AppDeploymentInfo` fields (`appDeploymentName`, `edgeCloudZones`) can't be
+/// removed, and `kubernetesClusterRefs` isn't persisted anyway
+/// (accepted-validated-not-applied, mirroring [`create_app_deployment`]). `appId`
+/// is immutable and not part of the patch schema.
+#[derive(Debug, Deserialize)]
+struct UpdateAppDeployment {
+    #[serde(rename = "appDeploymentName")]
+    app_deployment_name: Option<String>,
+    #[serde(rename = "edgeCloudZones")]
+    edge_cloud_zones: Option<Vec<String>>,
+    #[serde(rename = "kubernetesClusterRefs")]
+    kubernetes_cluster_refs: Option<Vec<String>>,
+}
+
+/// `PATCH /edge-application-management/vwip/deployments/{appDeploymentId}`
+/// (`updateAppDeployment`).
+///
+/// Updates an existing application deployment **in place** using JSON Merge Patch
+/// semantics (RFC 7396): only the fields present in the body are changed, and the
+/// `edgeCloudZones` / `kubernetesClusterRefs` arrays are replaced wholesale (not
+/// merged). Requires the update scope
+/// `edge-application-management:deployments:update`. Returns the updated
+/// `AppDeploymentInfo` with a `200`.
+///
+/// There is no upstream orchestrator, so the outcome is driven by the input plus
+/// the in-memory store (docs/DESIGN.md §7):
+///
+/// 1. **Request validation** — a supplied `appDeploymentName` that breaks the
+///    pattern, an empty/oversized/non-UUID `edgeCloudZones`, or a
+///    non-UUID/oversized `kubernetesClusterRefs` → `400 INVALID_ARGUMENT`.
+/// 2. **Store state** — an unknown/already-deleted *or malformed* `appDeploymentId`
+///    → `404 NOT_FOUND` (the canonical 400 malformed-path case folded into 404,
+///    mirroring [`get_app_deployment`]/[`delete_app_deployment`]).
+/// 3. **Cross-reference** — every *effective* `edgeCloudZones` entry must name a
+///    zone in the fixed catalog → else `404 NOT_FOUND`.
+/// 4. **Identity collision** — the `appDeploymentId` (the resource key) is left
+///    unchanged, but the patched `(appId, appDeploymentName, sorted
+///    edgeCloudZones)` identity is re-derived; if it now matches a *different*
+///    stored deployment, the update would make two deployments identical, so it is
+///    refused with `409 ALREADY_EXISTS` (the CAMARA "Deployment already exists"
+///    conflict, mirroring [`create_app_deployment`]).
+///
+/// `appId` is immutable (not in the patch schema), and `appInstances` are
+/// re-derived per effective zone (the same [`instance_id`] derivation
+/// `createAppInstance`/`createAppDeployment` use), so the resource stays
+/// self-consistent. `x-correlator` is echoed on every response.
+async fn update_app_deployment(
+    claims: Claims,
+    headers: HeaderMap,
+    Path(app_deployment_id): Path<String>,
+    body: Bytes,
+) -> Response {
+    let correlator = headers.get("x-correlator").cloned();
+
+    // Endpoint authorisation: the token must carry this API's deployments update scope.
+    if let Err(e) = claims.require_scope(DEPLOYMENTS_UPDATE_SCOPE) {
+        return with_correlator(e.into_response(), &correlator);
+    }
+
+    // Parse the merge-patch body (malformed JSON / wrong field types → 400).
+    let req: UpdateAppDeployment = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(_) => {
+            return invalid_argument(
+                "the request body is not a valid updateAppDeployment JSON merge-patch object",
+                &correlator,
+            )
+        }
+    };
+
+    // Control plane 1 — validate the supplied (mergeable) fields before the store.
+    if let Some(name) = req.app_deployment_name.as_deref() {
+        if !is_valid_app_name(name) {
+            return invalid_argument(
+                "`appDeploymentName` must match `^[A-Za-z][A-Za-z0-9_]{1,63}$`",
+                &correlator,
+            );
+        }
+    }
+    if let Some(zones) = req.edge_cloud_zones.as_deref() {
+        if zones.is_empty() {
+            return invalid_argument("`edgeCloudZones` must not be empty", &correlator);
+        }
+        if zones.len() > 100 {
+            return invalid_argument("`edgeCloudZones` must hold at most 100 entries", &correlator);
+        }
+        if !zones.iter().all(|id| is_uuid(id)) {
+            return invalid_argument("every `edgeCloudZones` entry must be a UUID", &correlator);
+        }
+    }
+    if let Some(refs) = req.kubernetes_cluster_refs.as_deref() {
+        if refs.len() > 100 {
+            return invalid_argument(
+                "`kubernetesClusterRefs` must hold at most 100 entries",
+                &correlator,
+            );
+        }
+        if !refs.iter().all(|id| is_uuid(id)) {
+            return invalid_argument(
+                "every `kubernetesClusterRefs` entry must be a UUID",
+                &correlator,
+            );
+        }
+    }
+
+    // Control plane 2 — load the current deployment (unknown/malformed id → 404).
+    let current = match deployment_store::get(&app_deployment_id) {
+        Some(c) => c,
+        None => {
+            return with_correlator(
+                CamaraError::not_found(
+                    "No application deployment found for the provided appDeploymentId.",
+                )
+                .into_response(),
+                &correlator,
+            )
+        }
+    };
+
+    // Apply the merge patch: a present field overrides, an absent one is kept.
+    // `appId` is immutable — it always comes from the stored resource.
+    let app_id = current["appId"].as_str().unwrap_or_default().to_string();
+    let name = req
+        .app_deployment_name
+        .unwrap_or_else(|| {
+            current["appDeploymentName"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string()
+        });
+    let zones: Vec<String> = match req.edge_cloud_zones {
+        Some(z) => z,
+        None => current["edgeCloudZones"]
+            .as_array()
+            .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+            .unwrap_or_default(),
+    };
+
+    // Control plane 3 — cross-reference the effective zones against the catalog.
+    // (Newly-supplied zones are the real check; stored ones already passed.)
+    if !zones.iter().all(|id| zone_by_id(id).is_some()) {
+        return with_correlator(
+            CamaraError::not_found(
+                "No edge cloud zone found for one of the provided edgeCloudZones.",
+            )
+            .into_response(),
+            &correlator,
+        );
+    }
+
+    // Re-render the AppDeploymentInfo in place: the appDeploymentId (store key)
+    // is unchanged, appId is immutable, appInstances re-derived per zone.
+    let app_instances: Vec<Value> =
+        zones.iter().map(|z| json!(instance_id(&app_id, z))).collect();
+    let info = json!({
+        "appDeploymentName": name,
+        "appDeploymentId": app_deployment_id,
+        "appId": app_id,
+        "edgeCloudZones": zones,
+        "appInstances": app_instances,
+    });
+
+    // Control plane 4 — identity collision. The patched identity is re-derived;
+    // colliding with a *different* stored deployment → 409.
+    let derived = deployment_id(&app_id, &name, &zones);
+    match deployment_store::update(&app_deployment_id, &derived, info.clone()) {
+        deployment_store::UpdateOutcome::Updated => {
+            with_correlator((StatusCode::OK, Json(info)).into_response(), &correlator)
+        }
+        deployment_store::UpdateOutcome::NotFound => with_correlator(
+            CamaraError::not_found(
+                "No application deployment found for the provided appDeploymentId.",
+            )
+            .into_response(),
+            &correlator,
+        ),
+        deployment_store::UpdateOutcome::Conflict => with_correlator(
+            CamaraError::new(StatusCode::CONFLICT, "ALREADY_EXISTS", "Deployment already exists")
                 .into_response(),
             &correlator,
         ),
@@ -3433,6 +3633,275 @@ mod tests {
         assert_eq!(
             headers.get("x-correlator").and_then(|v| v.to_str().ok()),
             Some("corr-dd-404")
+        );
+    }
+
+    // --- updateAppDeployment (PATCH): integration through the real router ---
+
+    async fn patch_deployment_req(
+        token: Option<&str>,
+        deployment_id: &str,
+        body: &str,
+        correlator: Option<&str>,
+    ) -> (StatusCode, HeaderMap, Value) {
+        let mut builder = Request::builder()
+            .method("PATCH")
+            .uri(format!(
+                "/edge-application-management/vwip/deployments/{deployment_id}"
+            ))
+            .header("host", HOST)
+            .header("content-type", "application/merge-patch+json");
+        if let Some(t) = token {
+            builder = builder.header("authorization", format!("Bearer {t}"));
+        }
+        if let Some(c) = correlator {
+            builder = builder.header("x-correlator", c);
+        }
+        let response = app()
+            .oneshot(builder.body(Body::from(body.to_string())).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let headers = response.headers().clone();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, headers, json)
+    }
+
+    #[tokio::test]
+    async fn update_app_deployment_replaces_name_and_zones_in_place() {
+        let (deployment_id, app_id, _zones) =
+            create_deployment("patch_full_app", "prod").await;
+        let update = mint_token(DEPLOYMENTS_UPDATE_SCOPE).await;
+
+        // Patch both the name and the zone set (a single-zone replacement).
+        let new_zones = vec![active_zone()];
+        let body = json!({ "appDeploymentName": "staging", "edgeCloudZones": new_zones });
+        let (status, _, resp) =
+            patch_deployment_req(Some(&update), &deployment_id, &body.to_string(), None).await;
+
+        assert_eq!(status, StatusCode::OK);
+        // The resource id (store key) is unchanged — update is in place.
+        assert_eq!(resp["appDeploymentId"], json!(deployment_id));
+        // appId is immutable; name + zones took the patch.
+        assert_eq!(resp["appId"], json!(app_id));
+        assert_eq!(resp["appDeploymentName"], "staging");
+        assert_eq!(resp["edgeCloudZones"], json!(new_zones));
+        // appInstances are re-derived per effective zone.
+        assert_eq!(
+            resp["appInstances"],
+            json!([instance_id(&app_id, &new_zones[0])])
+        );
+        // The store reflects the update verbatim.
+        assert_eq!(resp, deployment_store::get(&deployment_id).unwrap());
+    }
+
+    #[tokio::test]
+    async fn update_app_deployment_partial_patch_keeps_unspecified_fields() {
+        let (deployment_id, app_id, zones) =
+            create_deployment("patch_partial_app", "prod").await;
+        let update = mint_token(DEPLOYMENTS_UPDATE_SCOPE).await;
+
+        // Patch only the name — the zones (and their instances) are untouched.
+        let (status, _, resp) = patch_deployment_req(
+            Some(&update),
+            &deployment_id,
+            &json!({ "appDeploymentName": "renamed" }).to_string(),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(resp["appDeploymentName"], "renamed");
+        assert_eq!(resp["edgeCloudZones"], json!(zones));
+        assert_eq!(
+            resp["appInstances"],
+            json!([instance_id(&app_id, &zones[0]), instance_id(&app_id, &zones[1])])
+        );
+
+        // Patch only the zones — the (already-renamed) name is untouched.
+        let one = vec![active_zone()];
+        let (status, _, resp) = patch_deployment_req(
+            Some(&update),
+            &deployment_id,
+            &json!({ "edgeCloudZones": one }).to_string(),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(resp["appDeploymentName"], "renamed");
+        assert_eq!(resp["edgeCloudZones"], json!(one));
+
+        // An empty merge-patch is a no-op that returns the current resource.
+        let (status, _, resp) =
+            patch_deployment_req(Some(&update), &deployment_id, "{}", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(resp["appDeploymentName"], "renamed");
+        assert_eq!(resp["edgeCloudZones"], json!(one));
+    }
+
+    #[tokio::test]
+    async fn update_app_deployment_unknown_or_malformed_id_is_not_found() {
+        let update = mint_token(DEPLOYMENTS_UPDATE_SCOPE).await;
+        let body = json!({ "appDeploymentName": "x_prod" }).to_string();
+
+        // A well-formed UUID that was never created.
+        let (status, _, resp) = patch_deployment_req(
+            Some(&update),
+            "00000000-0000-5000-8000-000000000000",
+            &body,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(resp["code"], "NOT_FOUND");
+        assert_eq!(resp["status"], 404);
+
+        // A non-UUID path segment folds into 404 (mirrors the read/delete legs).
+        let (status, _, resp) =
+            patch_deployment_req(Some(&update), "not-a-uuid", &body, None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(resp["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn update_app_deployment_validates_the_request_body() {
+        let (deployment_id, _, _) = create_deployment("patch_validate_app", "prod").await;
+        let update = mint_token(DEPLOYMENTS_UPDATE_SCOPE).await;
+        let z = active_zone();
+
+        // Each of these patched bodies must be rejected as 400 INVALID_ARGUMENT.
+        let cases = vec![
+            // bad appDeploymentName pattern
+            json!({ "appDeploymentName": "1bad" }),
+            // empty edgeCloudZones
+            json!({ "edgeCloudZones": [] }),
+            // non-UUID zone element
+            json!({ "edgeCloudZones": ["nope"] }),
+            // non-UUID kubernetesClusterRefs element
+            json!({ "edgeCloudZones": [z], "kubernetesClusterRefs": ["nope"] }),
+        ];
+        for body in cases {
+            let (status, _, resp) =
+                patch_deployment_req(Some(&update), &deployment_id, &body.to_string(), None).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "body {body} should be 400");
+            assert_eq!(resp["code"], "INVALID_ARGUMENT", "body {body} code");
+        }
+
+        // A body that is not valid JSON.
+        let (status, _, resp) =
+            patch_deployment_req(Some(&update), &deployment_id, "{not json", None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(resp["code"], "INVALID_ARGUMENT");
+
+        // The rejected patches left the deployment unchanged.
+        assert_eq!(
+            deployment_store::get(&deployment_id).unwrap()["appDeploymentName"],
+            "prod"
+        );
+    }
+
+    #[tokio::test]
+    async fn update_app_deployment_unknown_zone_is_not_found() {
+        let (deployment_id, _, _) = create_deployment("patch_badzone_app", "prod").await;
+        let update = mint_token(DEPLOYMENTS_UPDATE_SCOPE).await;
+        // A well-formed UUID that is not in the fixed zone catalog.
+        let body = json!({
+            "edgeCloudZones": [active_zone(), "00000000-0000-4000-8000-000000000000"]
+        });
+        let (status, _, resp) =
+            patch_deployment_req(Some(&update), &deployment_id, &body.to_string(), None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(resp["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn update_app_deployment_identity_collision_conflicts() {
+        // One onboarded app, two deployments over the same zone set with distinct
+        // names → distinct ids. Patching one's name to the other's makes their
+        // identities collide → 409 ALREADY_EXISTS.
+        let (_, app_id) = submit_and_get_id("patch_conflict_app").await;
+        let write = mint_token(DEPLOYMENTS_WRITE_SCOPE).await;
+        let zones = vec![active_zone(), second_zone()];
+
+        let prod = json!({ "appDeploymentName": "prod", "appId": app_id, "edgeCloudZones": zones });
+        let (s1, _, _) = post_deployment(Some(&write), &prod.to_string(), None).await;
+        assert_eq!(s1, StatusCode::ACCEPTED);
+
+        let staging =
+            json!({ "appDeploymentName": "staging", "appId": app_id, "edgeCloudZones": zones });
+        let (s2, _, r2) = post_deployment(Some(&write), &staging.to_string(), None).await;
+        assert_eq!(s2, StatusCode::ACCEPTED);
+        let staging_id = r2["appDeploymentId"].as_str().unwrap().to_string();
+
+        // Rename staging → prod: same (appId, name, zone set) as the first → 409.
+        let update = mint_token(DEPLOYMENTS_UPDATE_SCOPE).await;
+        let (status, _, resp) = patch_deployment_req(
+            Some(&update),
+            &staging_id,
+            &json!({ "appDeploymentName": "prod" }).to_string(),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(resp["code"], "ALREADY_EXISTS");
+        assert_eq!(resp["status"], 409);
+        // The refused update left staging as it was.
+        assert_eq!(
+            deployment_store::get(&staging_id).unwrap()["appDeploymentName"],
+            "staging"
+        );
+    }
+
+    #[tokio::test]
+    async fn update_app_deployment_requires_authentication_and_scope() {
+        let (deployment_id, _, _) = create_deployment("patch_auth_app", "prod").await;
+        let body = json!({ "appDeploymentName": "staging" }).to_string();
+
+        // No token → 401.
+        let (status, _, _) = patch_deployment_req(None, &deployment_id, &body, None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+        // Wrong scope (read, not update) → 403; the store is untouched.
+        let read = mint_token(DEPLOYMENTS_READ_SCOPE).await;
+        let (status, _, resp) =
+            patch_deployment_req(Some(&read), &deployment_id, &body, None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(resp["code"], "PERMISSION_DENIED");
+        assert_eq!(
+            deployment_store::get(&deployment_id).unwrap()["appDeploymentName"],
+            "prod"
+        );
+    }
+
+    #[tokio::test]
+    async fn update_app_deployment_echoes_x_correlator_on_success_and_error() {
+        let (deployment_id, _, _) = create_deployment("patch_corr_app", "prod").await;
+        let update = mint_token(DEPLOYMENTS_UPDATE_SCOPE).await;
+
+        // Success path.
+        let (status, headers, _) = patch_deployment_req(
+            Some(&update),
+            &deployment_id,
+            &json!({ "appDeploymentName": "staging" }).to_string(),
+            Some("corr-patch-ok"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-patch-ok")
+        );
+
+        // Error path (validation 400).
+        let (status, headers, _) =
+            patch_deployment_req(Some(&update), &deployment_id, "{not json", Some("corr-patch-err"))
+                .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-patch-err")
         );
     }
 }
