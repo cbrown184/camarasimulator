@@ -3425,6 +3425,23 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     floor of ≥100 array-form `required` blocks over all specs) so the contract can't
     pass vacuously. Verified true (no `required` array repeats an entry across all
     mounted specs) before asserting.
+  - a valid-`info.license` contract test (`src/registry.rs`
+    `every_spec_declares_a_valid_info_license`) asserts every mounted spec declares
+    an `info.license` whose `name` is present and non-empty. The `info` object's
+    `license` field is OPTIONAL, but when present the License Object's `name` is its
+    single REQUIRED field, so a licence block with no `name` (or a blank one) is an
+    invalid License Object; every CamaraSim spec carries the CAMARA-template
+    `license: { name: Apache-2.0, url: … }`, which the served `/docs` page and every
+    codegen client read. Extends the `info`-object field series (title/version/
+    description) to `license.name`; catches a spec whose `license:` block was dropped
+    or whose `name:` line was deleted/blanked (leaving only the `url:`) — a drift the
+    identity/wiring/scenario tests never see. A pure `info_license_name` extractor
+    (no YAML dep; mirrors `info_title`'s 2-space `info:`-child scoping, then its
+    4-space `name:` grandchild) reports the missing/no-name/present trichotomy so a
+    failure names the exact drift; it is unit-covered
+    (`info_license_name_extraction_rules`, incl. a non-vacuous floor that every spec
+    declares a non-empty `info.license.name`) so the contract can't pass vacuously.
+    Verified true across all mounted specs before asserting.
   Full response-vs-schema validation still TODO (would need a YAML/JSON-Schema
   validator — a dependency trade-off, deferred).
 
@@ -3433,6 +3450,33 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 ## Scan journal
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
+
+- 2026-08-12 — contract-harness: added a **valid-`info.license`** contract test
+  (`src/registry.rs` `every_spec_declares_a_valid_info_license`) asserting every
+  mounted spec declares an `info.license` whose `name` is present and non-empty.
+  The `info` object's `license` field is OPTIONAL, but when present the License
+  Object's `name` is its single REQUIRED field, so a licence block with no `name`
+  (or a blank one) is an invalid License Object; every CamaraSim spec carries the
+  CAMARA-template `license: { name: Apache-2.0, url: … }` that the served `/docs`
+  page and every codegen client read. Extends the `info`-object field series
+  (title/version/description, all already pinned) to `license.name` — catching a
+  spec whose `license:` block was dropped in an edit or whose `name:` line was
+  deleted/blanked (leaving only the `url:`), a drift the identity/wiring/scenario
+  tests never see because they trust the doc is structurally complete. Chosen
+  because the feature-API backlog is complete (the remaining `[ ]` leaves are the
+  deferred `https://` sink-TLS cases needing a multi-MB rustls client vs the
+  small-binary directive, and open-ended state streams with no live worker), so
+  this advanced the cross-cutting contract-test harness — the same avenue as the
+  last several passes. New pure `info_license_name` extractor (no YAML dep; mirrors
+  `info_title`'s 2-space `info:`-child scoping + a 4-space `name:` grandchild),
+  reporting the missing/no-name/present trichotomy so a failure names the exact
+  drift; unit-covered (`info_license_name_extraction_rules`: name-first/url-first
+  ordering, blank name, sibling-field-ends-block, deeper-component not mistaken,
+  plus a non-vacuous floor that every spec has a non-empty `info.license.name`) so
+  the contract can't pass vacuously. Verified true across all 57 mounted specs
+  before asserting. Tests: +2 (1 contract, 1 extractor unit). `cargo test` 2185
+  green (was 2183); `cargo build --release` warning-clean. No new dep; binary
+  unchanged (`#[cfg(test)]`-only). — binary: 3.7M (3851880 B, +0 B)
 
 - 2026-08-12 — contract-harness: added a **distinct-`required`-entries** contract
   test (`src/registry.rs` `every_required_array_lists_distinct_entries`) asserting no

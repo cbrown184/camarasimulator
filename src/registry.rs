@@ -458,6 +458,67 @@ mod tests {
         None
     }
 
+    /// Extract `info.license.name` from an embedded OpenAPI body, without a YAML
+    /// dep, distinguishing a missing `license` from a present one with no `name`.
+    ///
+    /// The `license` field of the OpenAPI `info` object is OPTIONAL, but when
+    /// present the License Object's `name` is its single REQUIRED field — the
+    /// human licence label (`Apache-2.0`) every Redoc/Swagger/codegen client reads
+    /// and the served `/{api}/v{n}/docs` page renders. Every CamaraSim vendored
+    /// spec carries the CAMARA-template `license: { name: Apache-2.0, url: … }`.
+    ///
+    /// Returns the missing/no-name/present trichotomy — mirroring the shape
+    /// `info_description_present` exposes for the description:
+    ///   * `None` — the `info` object declares no `license:` field at all.
+    ///   * `Some(None)` — `info.license` is present but declares no `name:` child
+    ///     (an invalid License Object).
+    ///   * `Some(Some(name))` — `info.license.name` is present; `name` is its
+    ///     unquoted scalar (possibly empty, which the contract test rejects).
+    ///
+    /// Scoping mirrors `info_title`: only the top-level `info:` block is scanned,
+    /// `license:` is matched at exactly its 2-space direct-child indent and `name:`
+    /// at exactly the 4-space grandchild indent, so a deeper schema `license:`/
+    /// `name:` (a component property, always more than 2/4 spaces in) is never
+    /// mistaken for it. A following non-blank line at indent ≤ 2 (a sibling `info`
+    /// field) ends the licence block, so a `name:` outside it is not credited.
+    fn info_license_name(body: &str) -> Option<Option<String>> {
+        let lines: Vec<&str> = body.lines().collect();
+        let mut in_info = false;
+        for (i, line) in lines.iter().enumerate() {
+            let is_top_level_key =
+                !line.is_empty() && !line.starts_with(char::is_whitespace);
+            if is_top_level_key {
+                in_info = line.trim_end() == "info:";
+                continue;
+            }
+            if !in_info {
+                continue;
+            }
+            // `license:` is a direct child of `info:` at exactly 2 spaces.
+            if line.strip_prefix("  license:").is_none() {
+                continue;
+            }
+            // Scan the licence block for its `name:` grandchild (4-space indent),
+            // stopping at the next non-blank line indented ≤ 2 (a sibling `info`
+            // field), which ends the block.
+            for l in &lines[i + 1..] {
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let indent = l.len() - l.trim_start().len();
+                if indent <= 2 {
+                    break;
+                }
+                if let Some(rest) = l.strip_prefix("    name:") {
+                    let v = rest.trim().trim_matches('"').trim_matches('\'');
+                    return Some(Some(v.to_string()));
+                }
+            }
+            return Some(None);
+        }
+        None
+    }
+
     /// Extract the root `openapi:` version string from an embedded OpenAPI body,
     /// without a YAML dep.
     ///
@@ -2477,6 +2538,52 @@ mod tests {
     }
 
     #[test]
+    fn every_spec_declares_a_valid_info_license() {
+        // Contract-harness invariant (OpenAPI License Object rule + CAMARA-template
+        // uniformity): every mounted vendored spec MUST declare an `info.license`
+        // whose `name` is present and non-empty. The `license` field of the `info`
+        // object is OPTIONAL, but when present its `name` is the License Object's
+        // single REQUIRED field — a licence block with no `name` (or a blank one)
+        // is an invalid License Object. Every CamaraSim spec carries the
+        // CAMARA-template `license: { name: Apache-2.0, url: … }`, so this also
+        // pins that uniformity: the served `/{api}/v{n}/docs` page and every
+        // codegen client read the licence from here.
+        //
+        // Extends the `info`-object field series
+        // (`every_spec_declares_a_non_empty_info_title` / `…_info_description`,
+        // `spec_info_version_matches_mounted_url_version`) to the `license.name`
+        // field. The break it catches: a spec drafted from a CAMARA template whose
+        // `license:` block was dropped in an edit, or whose `name:` line was
+        // deleted/blanked (leaving only the `url:`), still parses as a
+        // structurally valid OpenAPI document — invisible to the identity/wiring/
+        // scenario tests, which trust the doc is complete — yet ships an incomplete
+        // `info` object with no licence label to render. `None` (no `license:` at
+        // all), `Some(None)` (present but no `name:` child), and `Some(Some(""))`
+        // (blank name) are reported distinctly so a failure names the exact drift.
+        // Verified true across every mounted spec before asserting.
+        for api in APIS {
+            match info_license_name(api.body) {
+                Some(Some(name)) => assert!(
+                    !name.is_empty(),
+                    "{} spec declares an empty `info.license.name` — the License \
+                     Object's one REQUIRED field is blank",
+                    api.name
+                ),
+                Some(None) => panic!(
+                    "{} spec declares `info.license` with no `name:` child — an \
+                     invalid License Object (`name` is its one REQUIRED field)",
+                    api.name
+                ),
+                None => panic!(
+                    "{} spec declares no `info.license` — the CAMARA-template \
+                     licence block is absent from the `info` object",
+                    api.name
+                ),
+            }
+        }
+    }
+
+    #[test]
     fn every_vendored_spec_on_disk_is_registered() {
         // Contract-harness invariant (DESIGN §9): the `specs/` tree and the `APIS`
         // registry must agree in BOTH directions. The compile-time `include_str!`
@@ -3261,6 +3368,68 @@ components:
                 info_description_present(api.body),
                 Some(true),
                 "{} spec must declare a non-empty info.description",
+                api.name
+            );
+        }
+    }
+
+    #[test]
+    fn info_license_name_extraction_rules() {
+        // Unit-cover the `info_license_name` extractor so the contract test above
+        // can't pass vacuously and its scoping is pinned: the missing/no-name/
+        // present trichotomy, name-first vs url-first child ordering, a blank name,
+        // a sibling `info` field ending the block before a name, and a deeper
+        // component `license:`/`name:` not being mistaken for the `info` one.
+
+        // Present, name-first (the CAMARA-template form) → the name.
+        assert_eq!(
+            info_license_name(
+                "info:\n  title: t\n  license:\n    name: Apache-2.0\n    url: https://x\n"
+            ),
+            Some(Some("Apache-2.0".to_string()))
+        );
+        // Present, url-first — the `name:` grandchild is still found.
+        assert_eq!(
+            info_license_name("info:\n  license:\n    url: https://x\n    name: MIT\n"),
+            Some(Some("MIT".to_string()))
+        );
+        // Present but only a `url:` child (no `name:`) → an invalid License Object.
+        assert_eq!(
+            info_license_name("info:\n  license:\n    url: https://x\n  version: \"1\"\n"),
+            Some(None)
+        );
+        // Present with a blank `name:` → Some(Some("")), distinct from no-name.
+        assert_eq!(
+            info_license_name("info:\n  license:\n    name:\n"),
+            Some(Some(String::new()))
+        );
+        // No `license:` under `info` at all → None.
+        assert_eq!(
+            info_license_name("info:\n  title: t\n  version: \"1\"\npaths: {}\n"),
+            None
+        );
+        // A sibling `info` field at ≤2-space indent ends the licence block before
+        // any deeper `name:` line → Some(None) (the trailing name is not credited).
+        assert_eq!(
+            info_license_name("info:\n  license:\n  version: \"1\"\n    name: nope\n"),
+            Some(None)
+        );
+        // A deeper `license:`/`name:` inside a component schema (outside `info:`,
+        // more than 2 spaces in) is never mistaken for info's → None.
+        assert_eq!(
+            info_license_name(
+                "info:\n  title: t\npaths: {}\ncomponents:\n  schemas:\n    S:\n      license:\n        name: X\n"
+            ),
+            None
+        );
+
+        // Non-vacuous floor: every registered spec declares a non-empty
+        // info.license.name (all carry the CAMARA-template Apache-2.0 block), so
+        // the contract test asserts over a real, non-empty population.
+        for api in APIS {
+            assert!(
+                matches!(info_license_name(api.body), Some(Some(ref n)) if !n.is_empty()),
+                "{} spec must declare a non-empty info.license.name",
                 api.name
             );
         }
