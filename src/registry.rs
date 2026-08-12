@@ -761,6 +761,120 @@ mod tests {
             .collect()
     }
 
+    /// Return every `$ref` reference object in an embedded OpenAPI body that carries
+    /// a **sibling key** in its own mapping — reported as `"<target> (sibling:
+    /// <key>)"` in document order, without a YAML dep.
+    ///
+    /// In OpenAPI 3.0.x a `$ref` is a Reference Object whose members "other than
+    /// `$ref` SHALL be ignored". So a schema written as
+    /// ```text
+    ///   center:
+    ///     $ref: "#/components/schemas/Point"
+    ///     description: The centre of a CIRCLE area.
+    /// ```
+    /// silently drops the `description` — the annotation the author meant to attach
+    /// never renders (Redoc/Swagger/codegen honour only the referenced schema), a
+    /// lost-intent bug no sibling test sees: the fragment / canonical-path /
+    /// resolution ref tests inspect a ref's *target* (its shape and what it points
+    /// at), never whether the ref object stands alone. The canonical 3.0.x way to
+    /// annotate a reference is to wrap it (`allOf:` with a single `- $ref` item, plus
+    /// the sibling), which moves the `$ref` into its own item so it stands alone.
+    ///
+    /// For each `$ref` key — a bare mapping key (`$ref:`) or the first key of a `- `
+    /// sequence item (`- $ref:`) — at effective indent `ind`, the enclosing mapping's
+    /// other keys sit at indent exactly `ind`. The scan walks both directions,
+    /// bounded by a dedent (`indent < ind`, out of the mapping) and by the next `- `
+    /// sequence item, and flags the first sibling key it meets:
+    /// - a bare `$ref:` may have siblings above **and** below, and — when it is a
+    ///   non-first key of a `- ` item — the opener line at `ind - 2` carries this
+    ///   same item's first key (a genuine sibling), so an upward scan reads it;
+    /// - a sequence-form `- $ref:` is the first line of its item, so no key precedes
+    ///   it *within* the item; only its downward keys are siblings, and a following
+    ///   `- ` at `ind - 2` is the next item (a boundary, never a sibling).
+    ///
+    /// A key indented past `ind` is nested inside a sibling's subtree, not a sibling
+    /// of the `$ref`, so it is never counted; the `$ref` itself is never mistaken for
+    /// a sibling of another `$ref`.
+    fn refs_with_sibling_keys(body: &str) -> Vec<String> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        // The key name a line declares at effective indent `ind` — a bare `key:` at
+        // column `ind`, or the first key of a `- ` sequence item whose content starts
+        // at `ind` — if any, never a `$ref` (that is a reference, not a sibling).
+        let key_at = |l: &str, ind: usize| -> Option<String> {
+            let li = indent(l);
+            let bare = l.trim_start();
+            let (kcol, content) = match bare.strip_prefix("- ") {
+                Some(rest) => (li + 2, rest),
+                None => (li, bare),
+            };
+            if kcol != ind {
+                return None;
+            }
+            let name = content.split(':').next().unwrap_or("").trim();
+            (!name.is_empty() && name != "$ref").then(|| name.to_string())
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let bare = line.trim_start();
+            let after_dash = bare.strip_prefix("- ").unwrap_or(bare);
+            let is_seq = after_dash.len() != bare.len();
+            let Some(rest) = after_dash.strip_prefix("$ref:") else {
+                continue;
+            };
+            let target = rest.trim().trim_matches('"').trim_matches('\'');
+            let ind = indent(line) + if is_seq { 2 } else { 0 };
+            let mut sibling: Option<String> = None;
+            'dir: for step in [-1i64, 1] {
+                // A sequence-form `$ref` is the first line of its item, so nothing
+                // above it belongs to the same mapping — skip the upward scan.
+                if step == -1 && is_seq {
+                    continue;
+                }
+                let mut j = i as i64;
+                loop {
+                    j += step;
+                    if j < 0 || j as usize >= lines.len() {
+                        break;
+                    }
+                    let l = lines[j as usize];
+                    if l.trim().is_empty() {
+                        break;
+                    }
+                    let li = indent(l);
+                    let opener = l.trim_start().starts_with("- ");
+                    if li < ind {
+                        // Dedented out of the mapping. The one exception: scanning
+                        // *up* from a bare `$ref`, a `- ` opener at exactly `ind - 2`
+                        // is this item's own start and carries its first key at
+                        // effective indent `ind` — a genuine sibling.
+                        if step == -1 && !is_seq && li + 2 == ind && opener {
+                            if let Some(k) = key_at(l, ind) {
+                                sibling = Some(k);
+                                break 'dir;
+                            }
+                        }
+                        break;
+                    }
+                    // Going *down*, a `- ` opener at `ind` is the next sequence
+                    // element — the current item's mapping has ended.
+                    if step == 1 && li == ind && opener {
+                        break;
+                    }
+                    if let Some(k) = key_at(l, ind) {
+                        sibling = Some(k);
+                        break 'dir;
+                    }
+                    // li > ind: nested inside a sibling's subtree — keep scanning.
+                }
+            }
+            if let Some(s) = sibling {
+                out.push(format!("{target} (sibling: {s})"));
+            }
+        }
+        out
+    }
+
     /// Count the `x-camarasim-scenarios:` blocks declared in an embedded OpenAPI
     /// body, without a YAML dep.
     ///
@@ -6249,6 +6363,110 @@ paths:
                 missing
             );
         }
+    }
+
+    #[test]
+    fn every_ref_object_stands_alone() {
+        // Contract-harness invariant (OpenAPI 3.0.x Reference Object rule): a `$ref`
+        // object's members "other than `$ref` SHALL be ignored", so a reference
+        // written with a neighbouring key silently drops that key. The break it
+        // catches: a schema property (or a response/parameter) given as a bare `$ref`
+        // plus a `description:` / `example:` / `nullable:` sibling — the natural way
+        // to *try* to annotate a reference — renders only the referenced component,
+        // the annotation lost, with no error any tool reports. Invisible to the three
+        // ref-*target* tests (`every_ref_target_is_a_fragment_pointer`,
+        // `shared_fragment_refs_use_the_canonical_relative_path`, the
+        // resolve-to-defined-component tests): each inspects what a `$ref` points at,
+        // never whether it stands alone in its mapping. The canonical 3.0.x way to
+        // annotate a reference is to wrap it (`allOf:` with a single `- $ref` item
+        // plus the sibling), which the extractor treats as sibling-free (the `$ref`
+        // is then the lone key of its own sequence item). Verified true across all
+        // mounted specs before asserting.
+        for api in APIS {
+            let bad = refs_with_sibling_keys(api.body);
+            assert!(
+                bad.is_empty(),
+                "{} spec declares $ref object(s) carrying a sibling key — OpenAPI \
+                 3.0.x ignores a `$ref`'s siblings, so the neighbouring key is \
+                 silently dropped; wrap the reference in `allOf` to annotate it: {:?}",
+                api.name,
+                bad
+            );
+        }
+    }
+
+    #[test]
+    fn ref_sibling_extraction_rules() {
+        // Unit-cover `refs_with_sibling_keys` so the contract test above can't pass
+        // vacuously and its scoping is pinned: a bare `$ref` with a following or
+        // opener-line sibling is flagged; a reference nested under `items:` whose
+        // `description` sits on the array schema, a lone `$ref`, a `$ref` wrapped in
+        // `allOf`, and a `- $ref` sequence item whose following `- name:` is the next
+        // element are all left alone.
+        let body = "\
+components:
+  schemas:
+    Area:
+      type: object
+      properties:
+        center:
+          $ref: '#/components/schemas/Point'
+          description: The centre of a CIRCLE area.
+        boundary:
+          type: array
+          items:
+            $ref: '#/components/schemas/Point'
+          description: The vertices (array-level sibling of items, not of $ref).
+        good:
+          $ref: '#/components/schemas/Point'
+        wrapped:
+          description: Annotated the canonical 3.0.x way.
+          allOf:
+            - $ref: '#/components/schemas/Point'
+      required:
+        - center
+    Params:
+      parameters:
+        - $ref: '#/components/parameters/A'
+        - name: b
+          in: query
+        - description: a leading sibling within one sequence item
+          $ref: '#/components/schemas/Point'
+";
+        // `center`'s $ref has a following `description` sibling → flagged. The last
+        // `parameters` item pairs a `description` with a `$ref` in one mapping, so
+        // the `$ref` (scanning up to its opener line) has that sibling → flagged.
+        // Not flagged: `boundary` (its `description` is a sibling of `items`/the
+        // array schema, one indent shallower than the nested `$ref`); `good` (a lone
+        // reference); `wrapped` (the `$ref` is the sole key of its `allOf` item — the
+        // `description` sits on the property, outside the reference); the first
+        // `- $ref: …/A` (the following `- name: b` is the next parameter, a separate
+        // sequence item, never a sibling).
+        assert_eq!(
+            refs_with_sibling_keys(body),
+            vec![
+                "#/components/schemas/Point (sibling: description)".to_string(),
+                "#/components/schemas/Point (sibling: description)".to_string(),
+            ]
+        );
+
+        // Non-vacuous floor: every registered spec already satisfies the invariant
+        // (no `$ref` carries a sibling), and the corpus declares many refs, so the
+        // contract test asserts over a real, non-empty population rather than an
+        // empty loop.
+        let mut total_refs = 0usize;
+        for api in APIS {
+            assert!(
+                refs_with_sibling_keys(api.body).is_empty(),
+                "{}: every $ref object must stand alone",
+                api.name
+            );
+            total_refs += ref_targets(api.body).len();
+        }
+        assert!(
+            total_refs >= 100,
+            "expected many $refs across specs, got {total_refs}"
+        );
     }
 
     #[test]

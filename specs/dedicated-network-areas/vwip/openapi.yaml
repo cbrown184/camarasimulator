@@ -464,17 +464,20 @@ components:
           description: >-
             Return the service area(s) whose `area` contains this point (great-circle
             distance from the CIRCLE centre ≤ radius).
-          $ref: "#/components/schemas/Point"
+          allOf:
+            - $ref: "#/components/schemas/Point"
         overlappingArea:
           description: >-
             Return the service area(s) whose `area` intersects this area (CIRCLE
             only; centre distance ≤ sum of radii).
-          $ref: "#/components/schemas/Area"
+          allOf:
+            - $ref: "#/components/schemas/Area"
         coveringArea:
           description: >-
             Return the service area(s) whose `area` fully contains this area
             (CIRCLE only; centre distance + this radius ≤ area radius).
-          $ref: "#/components/schemas/Area"
+          allOf:
+            - $ref: "#/components/schemas/Area"
         byName:
           type: string
           maxLength: 1024

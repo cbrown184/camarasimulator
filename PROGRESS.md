@@ -3520,6 +3520,27 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     (`scopeless_security_extraction_rules`) so the contract can't pass vacuously.
     Verified true across all 57 mounted specs (144 requirements, all scoped) before
     asserting.
+  - a lone-`$ref` contract test (`src/registry.rs` `every_ref_object_stands_alone`)
+    asserts no `$ref` a mounted spec declares carries a **sibling key** — the
+    OpenAPI 3.0.x Reference Object rule that a `$ref`'s other members "SHALL be
+    ignored". A property/response/parameter written as a bare `$ref` plus a
+    `description:` (or `example:`/`nullable:`) sibling — the natural way to *try* to
+    annotate a reference — silently drops that key: only the referenced component
+    renders, the annotation lost, with no error any tool reports. Invisible to the
+    three ref-*target* tests (`every_ref_target_is_a_fragment_pointer`,
+    `shared_fragment_refs_use_the_canonical_relative_path`, the
+    resolve-to-defined-component tests), each of which inspects what a `$ref` points
+    at, never whether it stands alone. A pure `refs_with_sibling_keys` extractor (no
+    YAML dep; for each `$ref` key — bare or a `- ` sequence item — scans its mapping
+    both directions at the ref's own indent, bounded by a dedent and the next `- `
+    element, so a reference nested under `items:` or wrapped in `allOf` is
+    sibling-free) is unit-covered (`ref_sibling_extraction_rules`) so the contract
+    can't pass vacuously. Fixed the 4 real drifts the survey found in the same pass:
+    `qos-booking/vwip` (`Area.center`) and `dedicated-network-areas/vwip`
+    (`atLocation`/`overlappingArea`/`coveringArea`) each paired a `$ref` with a
+    `description` — converged onto the canonical 3.0.x `allOf:` wrapper (a lone
+    `- $ref` item beside the `description`), so the annotation now renders and the
+    reference still resolves.
   Full response-vs-schema validation still TODO (would need a YAML/JSON-Schema
   validator — a dependency trade-off, deferred).
 
@@ -3528,6 +3549,32 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 ## Scan journal
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
+
+- 2026-08-12 — contract-harness: added a **lone-`$ref`** contract test
+  (`src/registry.rs` `every_ref_object_stands_alone`) asserting no `$ref` a mounted
+  spec declares carries a sibling key — the OpenAPI 3.0.x Reference Object rule that
+  a `$ref`'s other members "SHALL be ignored", so a `$ref` paired with a
+  `description:`/`example:` sibling silently drops that annotation (only the
+  referenced component renders), a lost-intent bug the three ref-*target* tests
+  (fragment-shape / canonical-path / resolve-to-defined-component) can't see — each
+  checks what a `$ref` points at, never whether it stands alone. New pure
+  `refs_with_sibling_keys` extractor (no YAML dep): for each `$ref` key (bare mapping
+  key or a `- ` sequence item) it scans that ref's own mapping both directions at the
+  ref's effective indent, bounded by a dedent and by the next `- ` element — and (for
+  a bare `$ref` that is a non-first key of a `- ` item) reads the opener line's own
+  first key as a genuine sibling — so a reference nested under `items:` or wrapped in
+  `allOf` is correctly sibling-free. Unit-covered (`ref_sibling_extraction_rules`:
+  following-sibling + opener-line-sibling flagged; `items:`-nested, lone, `allOf`-
+  wrapped, and next-`- `-element cases left alone; plus a non-vacuous floor of ≥100
+  refs) so the contract can't pass vacuously. Fixed the 4 real drifts the survey
+  found in the same pass — `qos-booking/vwip` (`Area.center`) and
+  `dedicated-network-areas/vwip` (`atLocation`/`overlappingArea`/`coveringArea`) each
+  paired a `$ref` with a `description`; converged onto the canonical 3.0.x `allOf:`
+  wrapper (a lone `- $ref` beside the `description`) so the annotation renders and the
+  ref still resolves. Tests: +2 (1 contract, 1 extractor unit). `cargo test` 2197
+  green (was 2195); `cargo build --release` warning-clean. No new dep; binary +64 B
+  (embedded-spec text growth from the `allOf` wrappers; test code is
+  `#[cfg(test)]`-only). — binary: 3.7M (3851944 B, +64 B)
 
 - 2026-08-12 — contract-harness: added a **security-requirement-declares-a-scope**
   contract test (`src/registry.rs` `every_security_requirement_declares_a_scope`)

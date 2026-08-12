@@ -866,8 +866,9 @@ components:
           enum: [CIRCLE, POLYGON, AREANAME]
           description: The kind of area.
         center:
-          $ref: "#/components/schemas/Point"
           description: The centre of a CIRCLE area.
+          allOf:
+            - $ref: "#/components/schemas/Point"
         radius:
           type: number
           minimum: 1
