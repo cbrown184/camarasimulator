@@ -3511,6 +3511,33 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-12 — contract-harness: added an **array-schema-declares-`items`** contract
+  test (`src/registry.rs` `every_array_schema_declares_items`) asserting every Schema
+  Object a mounted spec types as `array` declares a sibling `items` — the OpenAPI
+  3.0.x rule that `items` is REQUIRED for an array schema (all 59 specs are `openapi:
+  3.0.3`). An array with no `items` is an invalid, under-specified schema whose
+  elements are untyped, so a Redoc/Swagger/codegen client has no element shape to
+  render or generate — a routine paste/refactor hazard (keep `type: array`, lose or
+  dedent the `items:` line) that no existing test sees: `every_media_type_declares_a_
+  schema` proves a payload *has* a schema, never that an array schema is *complete*,
+  and the enum/required/parameter/`$ref` tests check a value list's members, a
+  required list's entries, a parameter's identity, or a ref's target — never an array
+  schema's element type. New pure `array_schemas_missing_items` extractor (no YAML
+  dep): `type: array` occurs only in a Schema Object (no context-scoping needed), and
+  `items` is a same-indent sibling `C`, so for each `type: array` it scans that
+  object's block for an `items:` at indent exactly `C` (down then up, each direction
+  bounded by the first dedent below `C`) — scoping to exactly `C` sidesteps
+  deeper-indented block-scalar `description:` prose, so an `items:` mentioned there is
+  never miscredited. Unit-covered (`array_schema_items_extraction_rules`: items after/
+  before `type`, only-`minItems` flagged, nested array-of-arrays needs items at both
+  levels, a following sibling's items never leaks up, block-scalar prose ignored, a
+  property literally named `type` and `type: object` open no obligation; plus a
+  non-vacuous floor of ≥50 array schemas) so the contract can't pass vacuously.
+  Verified true across all 59 mounted specs before asserting. Tests: +2 (1 contract,
+  1 extractor unit). `cargo test` 2193 green (was 2191); `cargo build --release`
+  warning-clean. No new dep; binary unchanged (`#[cfg(test)]`-only). — binary: 3.7M
+  (3851880 B, +0 B)
+
 - 2026-08-12 — contract-harness: added a **valid-components-section-name** contract
   test (`src/registry.rs` `every_components_section_is_a_valid_field`) asserting
   every direct child key of a mounted spec's top-level `components:` object is one of

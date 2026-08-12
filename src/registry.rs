@@ -6681,4 +6681,229 @@ components:
             "expected many block-form `parameters` arrays across specs, got {param_arrays}"
         );
     }
+
+    /// Extract the 1-based line number of every `type: array` Schema Object a spec
+    /// declares that lacks an `items` sibling — without a YAML dep.
+    ///
+    /// In OpenAPI 3.0.x a Schema Object typed `array` MUST declare `items` (the
+    /// schema each element validates against); an array with no `items` is an
+    /// invalid, under-specified schema whose elements are untyped. `type: array`
+    /// occurs only inside a Schema Object, so no context-scoping is needed. `items`
+    /// is a sibling key of `type` in the same mapping — at the same indentation `C`.
+    /// For each `type: array` line this scans that object's block for an `items:`
+    /// sibling at indent exactly `C`, walking down and then up from the `type` line,
+    /// each direction bounded by the first non-blank line that dedents below `C` (the
+    /// enclosing property key that opened the object, or a shallower following key).
+    /// Lines indented deeper than `C` are the object's nested values — including any
+    /// block-scalar `description:` content, which YAML always indents past its key —
+    /// so scoping the sibling scan to exactly `C` sidesteps them, and an `items:`
+    /// mentioned inside such prose is never miscredited. A `type:` whose value is not
+    /// exactly `array` (`object`, `string`, or an empty value on a property literally
+    /// named `type`) opens no obligation and is skipped.
+    fn array_schemas_missing_items(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        // The scalar value of a `type:` key, inline comment and quotes stripped.
+        fn type_value(l: &str) -> Option<&str> {
+            l.trim_start().strip_prefix("type:").map(|v| {
+                v.split('#')
+                    .next()
+                    .unwrap_or(v)
+                    .trim()
+                    .trim_matches('"')
+                    .trim_matches('\'')
+            })
+        }
+        // True when `l` is a sibling key `items:` at indentation exactly `c`.
+        let is_items_sibling = |l: &str, c: usize| -> bool {
+            indent(l) == c
+                && l.trim_start()
+                    .split_once(':')
+                    .is_some_and(|(k, _)| k.trim() == "items")
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            if type_value(line) != Some("array") {
+                continue;
+            }
+            let c = indent(line);
+            let mut found = false;
+            // Scan down through this object's block for an `items:` sibling.
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) < c {
+                    break; // dedented out of this object
+                }
+                if is_items_sibling(l, c) {
+                    found = true;
+                    break;
+                }
+                j += 1;
+            }
+            // `items` may be declared before `type`; scan up the same block.
+            if !found {
+                let mut k = i;
+                while k > 0 {
+                    k -= 1;
+                    let l = lines[k];
+                    if l.trim().is_empty() {
+                        continue;
+                    }
+                    if indent(l) < c {
+                        break; // reached the key that opened this object
+                    }
+                    if is_items_sibling(l, c) {
+                        found = true;
+                        break;
+                    }
+                }
+            }
+            if !found {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_array_schema_declares_items() {
+        // Contract-harness invariant (OpenAPI 3.0.x structural rule): every Schema
+        // Object a mounted spec types as `array` MUST declare `items` — the schema
+        // its elements validate against. In 3.0.x `items` is REQUIRED for an array
+        // schema; an array with no `items` is invalid, and a Redoc/Swagger/codegen
+        // client handed one has no element shape to render or generate, so the list
+        // payload is untyped at exactly the point a caller reads or builds it.
+        //
+        // A routine hazard in these vendored, scenario-table-heavy specs: an array
+        // schema pasted from a sibling that keeps `type: array` but loses or dedents
+        // its `items:` line, or a refactor that lifts the element schema out and
+        // forgets to leave the `items` ref behind. It is invisible to every existing
+        // test — `every_media_type_declares_a_schema` checks that a payload *has* a
+        // schema, never that an array schema is *complete*; the enum/required/
+        // parameter/`$ref` tests check a value list's members, a required list's
+        // entries, a parameter's identity, or a ref's target, never an array schema's
+        // element type. Verified true across all mounted specs before asserting.
+        for api in APIS {
+            let untyped = array_schemas_missing_items(api.body);
+            assert!(
+                untyped.is_empty(),
+                "{} spec declares `type: array` schema(s) with no `items` sibling \
+                 (an array Schema Object must type its elements) at line(s): {:?}",
+                api.name,
+                untyped
+            );
+        }
+    }
+
+    #[test]
+    fn array_schema_items_extraction_rules() {
+        // Unit-cover the `array_schemas_missing_items` extractor so the contract test
+        // above can't pass vacuously and its detection is pinned: an array is flagged
+        // only when its object carries no `items` sibling; `items` declared after
+        // *or* before `type` satisfies it; a non-`array` `type:` (and a property
+        // literally named `type`) opens no obligation; a nested array-of-arrays needs
+        // `items` at both levels; a following sibling property's `items` never leaks
+        // to the array above it; and an `items:` mentioned inside a block-scalar
+        // `description:` (indented past the key) is not miscredited.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    Good1:
+      type: array
+      items:
+        type: string
+    Good2:
+      description: items listed here
+      items:
+        $ref: '#/components/schemas/Good1'
+      type: array
+    Bad1:
+      type: array
+      minItems: 1
+    Nested:
+      type: array
+      items:
+        type: array
+        items:
+          type: string
+    Obj:
+      type: object
+      properties:
+        type:
+          type: string
+        list:
+          type: array
+          items:
+            type: integer
+    Prose:
+      type: array
+      description: |
+        This mentions
+        items: still just prose
+    Pair:
+      type: object
+      properties:
+        a:
+          type: array
+        b:
+          items:
+            type: string
+          type: array
+";
+        // Flagged, in document order: `Bad1` (only a `minItems` sibling, no `items`),
+        // `Prose` (its `description` block scalar mentions `items:` but only as
+        // deeper-indented prose, so it is not a sibling), and `Pair.a` (the `items`
+        // beneath `Pair.b` belongs to a *following* property, never the array above).
+        // Not flagged: `Good1`/`Good2` (items after / before `type`), both levels of
+        // `Nested`, `Obj.list` (the property literally named `type` and the outer
+        // `type: object` open no obligation), and `Pair.b` (items before `type`).
+        assert_eq!(array_schemas_missing_items(body), vec![24, 42, 50]);
+
+        // Non-vacuous floor: across every registered spec every `type: array` schema
+        // declares `items` (the invariant the contract test asserts), and the corpus
+        // actually declares many array schemas, so a broken extractor can't hide
+        // behind an empty scan. Count `type: array` lines with a detection independent
+        // of the extractor.
+        let mut arrays = 0usize;
+        for api in APIS {
+            assert!(
+                array_schemas_missing_items(api.body).is_empty(),
+                "{}: every `type: array` schema must declare `items`",
+                api.name
+            );
+            for line in api.body.lines() {
+                let v = line.trim_start().strip_prefix("type:").map(|v| {
+                    v.split('#')
+                        .next()
+                        .unwrap_or(v)
+                        .trim()
+                        .trim_matches('"')
+                        .trim_matches('\'')
+                });
+                if v == Some("array") {
+                    arrays += 1;
+                }
+            }
+        }
+        assert!(
+            arrays >= 50,
+            "expected many array schemas across specs, got {arrays}"
+        );
+    }
 }
