@@ -3387,6 +3387,27 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     (`operations_without_summary_extraction_rules`, incl. a non-vacuous floor over
     all specs) so the contract can't pass vacuously. Verified true (all 142
     operations across the 57 mounted specs carry a summary) before asserting.
+  - a shared-**auth**-ref-target contract test (`src/registry.rs`
+    `shared_auth_refs_resolve_to_defined_components`) asserts every cross-file
+    `$ref` a mounted spec makes into the shared auth fragment
+    (`../../auth/openapi.yaml#/components/…`) points at a component that fragment
+    actually **defines** — the auth-fragment complement of
+    `shared_error_refs_resolve_to_defined_components` (which does the same for
+    `shared/errors.yaml`). Together they prove BOTH shared fragments a spec `$ref`s
+    resolve target-for-target, not just that the *file* half uses the served path
+    (the canonical-path test's job). Catches the break where a spec copied the
+    `openId` scheme ref with a stale/typo'd pointer
+    (`…/securitySchemes/camaraOauth`, or a component renamed in the auth fragment
+    after the copy): the file half stays correct yet the JSON-pointer dangles, so a
+    client never finds the security scheme — invisible to
+    `every_spec_refs_the_shared_camara_oauth_scheme` (checks the file half + that a
+    scheme is referenced, never dereferences the pointer) and to the identity/wiring
+    tests. Reuses the unit-covered `component_pointers` + `ref_targets` helpers (no
+    new helper); the allowed set is extracted from the embedded auth fragment
+    itself, so adding a shared auth component widens it automatically. Two
+    non-vacuous floors (the fragment defines `camaraOAuth`; ≥ specs−2 auth refs
+    dereferenced). Verified true — all 57 mounted specs ref exactly
+    `#/components/securitySchemes/camaraOAuth`, which the fragment defines.
   Full response-vs-schema validation still TODO (would need a YAML/JSON-Schema
   validator — a dependency trade-off, deferred).
 
@@ -3396,6 +3417,31 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-12 15:47Z — contract-harness: added a **shared-auth-ref-target** contract
+  test (`src/registry.rs` `shared_auth_refs_resolve_to_defined_components`) asserting
+  every cross-file `$ref` a mounted spec makes into the shared auth fragment
+  (`../../auth/openapi.yaml#/components/…`) points at a component that fragment
+  actually defines — the auth-fragment complement of the existing
+  `shared_error_refs_resolve_to_defined_components` (same, for `shared/errors.yaml`).
+  Chosen because the feature-API backlog is complete (Application Endpoint
+  Registration's lifecycle landed, and the only remaining `[ ]` leaves are deferred
+  `https://` sink-TLS cases needing a multi-MB rustls client vs the small-binary
+  directive, and open-ended state streams with no live worker), so this advanced the
+  cross-cutting contract-test harness — the same avenue as the last several passes.
+  The two shared-fragment ref tests now prove both fragments a spec references
+  resolve **target-for-target**, closing the gap where
+  `every_spec_refs_the_shared_camara_oauth_scheme` checks only the `$ref`'s *file*
+  half + that a scheme is referenced, never dereferencing the JSON-pointer into the
+  auth fragment (so a stale/typo'd `…/securitySchemes/camaraOauth` pointer with a
+  correct file half would dangle undetected). Reuses the unit-covered
+  `component_pointers` + `ref_targets` helpers (no new helper, no new dep); the
+  allowed set is extracted from the embedded auth fragment so it self-widens. Two
+  non-vacuous floors (fragment defines `camaraOAuth`; ≥ specs−2 auth refs actually
+  dereferenced). Verified true first — all 57 specs ref exactly
+  `#/components/securitySchemes/camaraOAuth`, which the fragment defines. Tests: +1
+  registry contract. `cargo test` 2181 green (was 2180); `cargo build --release`
+  warning-clean. No new dep; binary unchanged (`#[cfg(test)]`-only). — binary: 3.7M
+  (3851880 B, +0 B)
 - 2026-08-12 — contract-harness: added an **every-operation-declares-a-`summary`**
   contract test (`src/registry.rs` `every_operation_declares_a_summary`) asserting
   every operation a mounted spec declares carries a `summary` — the RECOMMENDED short

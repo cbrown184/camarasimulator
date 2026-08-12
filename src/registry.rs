@@ -2755,6 +2755,82 @@ mod tests {
     }
 
     #[test]
+    fn shared_auth_refs_resolve_to_defined_components() {
+        // Contract-harness invariant (DESIGN §8/§9 + `apis::openapi` serving): a
+        // spec's cross-file `$ref`s into the shared auth fragment
+        // (`../../auth/openapi.yaml#/components/…`) must point at a component that
+        // fragment actually DEFINES. This is the auth-fragment complement of
+        // `shared_error_refs_resolve_to_defined_components`: that dereferences a
+        // spec's cross-file pointers into `shared/errors.yaml`; this dereferences
+        // the ones into `auth/openapi.yaml`. Together they prove that BOTH shared
+        // fragments a spec `$ref`s resolve target-for-target, not just that the
+        // *file* half uses the served path (the canonical-path test's job).
+        //
+        // The break this catches: `every_spec_refs_the_shared_camara_oauth_scheme`
+        // proves each spec's `openId` securityScheme `$ref`s the shared fragment by
+        // the canonical path, but it never dereferences the JSON-pointer *into* the
+        // fragment. A spec that copied the scheme ref with a stale/typo'd pointer
+        // (`…#/components/securitySchemes/camaraOauth`, or a component renamed in the
+        // auth fragment after the copy) keeps a correct file half yet resolves to a
+        // dangling pointer — a client following it never finds the security scheme.
+        // No existing test sees this (the scheme test checks the file half + that a
+        // scheme is referenced; the identity/wiring tests never dereference
+        // cross-file pointers into the auth fragment).
+        //
+        // The allowed set is extracted from the embedded auth fragment itself (not
+        // hard-coded), so adding a shared auth component automatically widens it and
+        // this test never needs editing when the auth fragment grows.
+        const SHARED_AUTH: &str = include_str!("../specs/auth/openapi.yaml");
+        let defined = component_pointers(SHARED_AUTH);
+        // Non-vacuous floor: the fragment defines the shared camaraOAuth scheme
+        // every business spec references.
+        assert!(
+            defined.contains("#/components/securitySchemes/camaraOAuth"),
+            "auth/openapi.yaml is expected to define the camaraOAuth securityScheme; \
+             extracted {defined:?}"
+        );
+
+        let mut checked = 0usize;
+        for api in APIS {
+            for target in ref_targets(api.body) {
+                let Some((file, pointer)) = target.split_once('#') else {
+                    continue;
+                };
+                // Only cross-file refs into the shared auth fragment. (Local
+                // intra-document refs have an empty `file` half and are resolved
+                // within the spec itself; refs into shared/errors.yaml are the
+                // sibling test's job.)
+                if !file.contains("auth/openapi.yaml") {
+                    continue;
+                }
+                let pointer = format!("#{pointer}");
+                assert!(
+                    defined.contains(&pointer),
+                    "{} spec has a $ref into the shared auth fragment at `{}`, but \
+                     auth/openapi.yaml defines no such component — it resolves to a \
+                     dangling pointer when the spec is served. Defined components: {:?}",
+                    api.name,
+                    target,
+                    {
+                        let mut v: Vec<&String> = defined.iter().collect();
+                        v.sort();
+                        v
+                    }
+                );
+                checked += 1;
+            }
+        }
+        // Non-vacuous floor: every mounted business spec refs the shared scheme, so
+        // the loop must actually have dereferenced auth-fragment pointers.
+        assert!(
+            checked >= APIS.len().saturating_sub(2),
+            "expected almost every mounted spec to $ref the shared auth fragment, \
+             but only {checked} auth-fragment refs were checked across {} specs",
+            APIS.len()
+        );
+    }
+
+    #[test]
     fn local_component_refs_resolve_within_their_own_spec() {
         // Contract-harness invariant (OpenAPI 3 structural rule): every
         // *intra-document* `$ref` a mounted spec makes — one whose target is a
