@@ -3257,6 +3257,26 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     inline-value + schema-property negatives, plus a non-vacuous floor over all
     specs) so the contract can't pass vacuously. Verified true (340 media types, all
     schema-bearing) across all mounted specs before asserting.
+  - a valid-path-item-key contract test (`src/registry.rs`
+    `every_path_item_key_names_a_valid_operation_or_field`) asserts every key a
+    mounted spec declares directly under a Path Item Object is a valid HTTP method,
+    a permitted Path Item field (`$ref`/`summary`/`description`/`servers`/
+    `parameters`), or an `x-` extension. The **exact complement** of the operation
+    tests: `operations_without_responses`, `operations_without_operation_id`,
+    `responses_missing_description`, and the operationId/response tests each
+    enumerate operations from the *valid* method set and `continue` past everything
+    else — so a mistyped verb (`psot:`, `pust:`, an upper-case `POST:`) silently
+    defines a phantom operation that no client routes and *every* sibling skips
+    (its dangling operation is never checked for a responses object, an
+    operationId, or typed responses). This test inspects precisely the keys they
+    skip. A pure `invalid_path_item_keys` extractor (no YAML dep; mirrors
+    `operations_without_responses`' path-item scoping, ignores comment/non-mapping
+    lines, unquotes a key, and passes methods + fixed fields + `x-` extensions) is
+    unit-covered (`path_item_key_validity_extraction_rules`: lower- and upper-case
+    verb typos flagged in document order, fields/extensions/comments/deeper list
+    items exempt, plus a non-vacuous floor over all specs) so the contract can't
+    pass vacuously. Verified true (147 operation keys + `parameters`, no malformed
+    verbs) across all mounted specs before asserting.
   Full response-vs-schema validation still TODO (would need a YAML/JSON-Schema
   validator — a dependency trade-off, deferred).
 
@@ -3266,6 +3286,32 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-12 — contract-harness: added a **valid-path-item-key** contract test
+  (`src/registry.rs` `every_path_item_key_names_a_valid_operation_or_field`)
+  asserting every key a mounted spec declares directly under a Path Item Object is a
+  valid HTTP method, a permitted Path Item field
+  (`$ref`/`summary`/`description`/`servers`/`parameters`), or an `x-` extension. The
+  **exact complement** of the operation tests: `operations_without_responses`,
+  `operations_without_operation_id`, `responses_missing_description`, and the
+  operationId/response tests each enumerate operations from the *valid* method set
+  and `continue` past everything else, so a mistyped verb (`psot:`, `pust:`, an
+  upper-case `POST:`) silently defines a phantom operation that no client routes and
+  every sibling skips — its dangling operation never checked for a responses object,
+  an operationId, or typed responses. This test inspects precisely the keys they
+  skip. One pure helper `invalid_path_item_keys` (no YAML dep; mirrors
+  `operations_without_responses`' path-item scoping, ignores comment/non-mapping
+  lines, unquotes a key, passes methods + fixed fields + `x-` extensions) is
+  unit-covered (`path_item_key_validity_extraction_rules`: lower/upper-case verb
+  typos flagged in document order, fields/extensions/comments/deeper list items
+  exempt, non-vacuous floor over all specs) so the contract can't pass vacuously.
+  Feature-API backlog stays effectively exhausted (remaining `[ ]` leaves are
+  `https://` sink-TLS cases needing a multi-MB rustls client vs the small-binary
+  directive, and open-ended state streams with no live worker), so this advanced the
+  cross-cutting **contract-test harness** item. Verified true (147 operation keys +
+  `parameters`, no malformed verbs) across all mounted specs before asserting.
+  Tests: +2 registry (1 contract + 1 helper unit). `cargo test` 2166 green (was
+  2164), `cargo build --release` warning-clean. No new dep; binary unchanged
+  (`#[cfg(test)]`-only). — binary: 3.7M (3851880 B, +0 B)
 - 2026-08-12 — contract-harness: added a **media-type-declares-a-schema** contract
   test (`src/registry.rs` `every_media_type_declares_a_schema`) asserting every Media
   Type Object a mounted spec declares under a `content:` mapping (request body,

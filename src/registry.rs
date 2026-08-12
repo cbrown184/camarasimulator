@@ -1733,6 +1733,82 @@ mod tests {
         out
     }
 
+    /// Enumerate every key a spec declares directly under a Path Item Object (a
+    /// 4-space child of a 2-space `/…` path item beneath the top-level `paths:`
+    /// block) that is neither a valid HTTP method nor a permitted Path Item field —
+    /// reported as `"<path> <key>"` in document order, without a YAML dep.
+    ///
+    /// Under an OpenAPI 3 Path Item Object the only valid keys are the fixed
+    /// operation verbs (`get`/`put`/`post`/`delete`/`options`/`head`/`patch`/
+    /// `trace`), the fixed non-operation fields (`$ref`/`summary`/`description`/
+    /// `servers`/`parameters`), and `x-` specification extensions. Any other key —
+    /// most commonly a mistyped verb (`psot:`, `pust:`, or an upper-case `POST:`) —
+    /// silently defines a **phantom operation** that no HTTP client routes: every
+    /// sibling operation test (`operations_without_responses`,
+    /// `operations_without_operation_id`, `responses_missing_description`, and the
+    /// operation-id/response tests) enumerates operations from the *valid* method
+    /// set and `continue`s past anything else, so a malformed verb is invisible to
+    /// all of them. This is their exact complement — it inspects the keys they skip.
+    ///
+    /// Scoping mirrors [`operations_without_responses`]: only within `paths:`, only
+    /// a 4-space key under a 2-space `/…` path item. Comment lines and non-mapping
+    /// lines (no `:`) are ignored and a key is unquoted before classification, so
+    /// deeper structure (a `parameters:` list's 6-space `- name:` items, block
+    /// scalars) never reaches the check.
+    fn invalid_path_item_keys(body: &str) -> Vec<String> {
+        const METHODS: [&str; 8] =
+            ["get", "put", "post", "delete", "patch", "options", "head", "trace"];
+        // Fixed non-operation fields of an OpenAPI 3 Path Item Object.
+        const FIELDS: [&str; 5] =
+            ["$ref", "summary", "description", "servers", "parameters"];
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let mut out = Vec::new();
+        let mut in_paths = false;
+        let mut path: Option<String> = None;
+        for line in &lines {
+            let is_top_level_key =
+                !line.is_empty() && !line.starts_with(char::is_whitespace);
+            if is_top_level_key {
+                in_paths = line.trim_end() == "paths:";
+                path = None;
+                continue;
+            }
+            if !in_paths {
+                continue;
+            }
+            if let Some(rest) = line.strip_prefix("  ") {
+                if !rest.starts_with(char::is_whitespace) && rest.starts_with('/') {
+                    let key = rest.trim_end().strip_suffix(':').unwrap_or(rest.trim_end());
+                    path = Some(key.to_string());
+                    continue;
+                }
+            }
+            let Some(current_path) = path.as_deref() else { continue };
+            // A path-item field / operation key sits exactly four spaces in.
+            if indent(line) != 4 {
+                continue;
+            }
+            let trimmed = line.trim_start();
+            if trimmed.starts_with('#') {
+                continue; // a comment, not a key
+            }
+            // The mapping key is the text before the first colon; a line with no
+            // colon (a block-scalar continuation, a `- ` list item) is not a key.
+            let Some((raw_key, _)) = trimmed.split_once(':') else { continue };
+            let key = raw_key.trim().trim_matches(|c| c == '"' || c == '\'');
+            if key.is_empty()
+                || METHODS.contains(&key)
+                || FIELDS.contains(&key)
+                || key.starts_with("x-")
+            {
+                continue;
+            }
+            out.push(format!("{current_path} {key}"));
+        }
+        out
+    }
+
     #[test]
     fn registry_is_non_empty() {
         // Guards a broken/emptied list: both the catalog and the served specs are
@@ -3932,6 +4008,115 @@ components:
         assert!(
             total_media_types >= 100,
             "expected many media types across specs, got {total_media_types}"
+        );
+    }
+
+    #[test]
+    fn every_path_item_key_names_a_valid_operation_or_field() {
+        // Contract-harness invariant (OpenAPI structural rule): every key a mounted
+        // spec declares directly under a Path Item Object MUST be either a valid HTTP
+        // method (`get`/`put`/`post`/`delete`/`options`/`head`/`patch`/`trace`), a
+        // permitted Path Item field (`$ref`/`summary`/`description`/`servers`/
+        // `parameters`), or an `x-` extension. Any other key — nearly always a
+        // mistyped verb (`psot:`, `pust:`, an upper-case `POST:`) — defines a phantom
+        // operation that no HTTP client routes and no tool renders.
+        //
+        // This is the exact complement of the operation tests. `operations_without
+        // _responses`, `operations_without_operation_id`, `responses_missing
+        // _description`, and the operation-id/response-key tests each enumerate
+        // operations from the *valid* method set and `continue` past everything else —
+        // so a malformed verb is invisible to all of them: it is silently skipped, its
+        // (real, dangling) operation never checked for a responses object, an
+        // operationId, or typed responses. This test inspects precisely the keys they
+        // skip. Verified true across all mounted specs before asserting (147 operation
+        // keys + `parameters`, no malformed verbs).
+        for api in APIS {
+            let invalid = invalid_path_item_keys(api.body);
+            assert!(
+                invalid.is_empty(),
+                "{} spec declares path-item key(s) that are neither a valid HTTP \
+                 method nor a permitted Path Item field (a phantom operation no \
+                 client routes): {:?}",
+                api.name,
+                invalid
+            );
+        }
+    }
+
+    #[test]
+    fn path_item_key_validity_extraction_rules() {
+        // Unit-cover the `invalid_path_item_keys` extractor so the contract test above
+        // can't pass vacuously and its detection is pinned: within `paths:`, a 4-space
+        // path-item key is flagged only when it is neither a valid verb nor a permitted
+        // field nor an `x-` extension; the fixed fields (`summary`/`description`/
+        // `parameters`) and extensions pass; a comment line and a `parameters:` list's
+        // deeper `- name:` item are never mistaken for keys; and both a lower-case
+        // typo (`psot`) and an upper-case verb (`POST`) are caught, in document order.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    summary: A path
+    description: desc
+    # a stray comment at operation indent
+    parameters:
+      - name: x-correlator
+        in: header
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+    psot:
+      operationId: typoVerb
+      responses:
+        '200':
+          description: ok
+    x-internal: true
+  /b:
+    POST:
+      operationId: upperVerb
+      responses:
+        '200':
+          description: ok
+";
+        // Flagged, in document order: `/a psot` (a lower-case typo of `post`) and
+        // `/b POST` (an upper-case verb — OpenAPI method keys are lower-case). Not
+        // flagged: `summary`/`description`/`parameters` (fixed fields), `get` (a valid
+        // verb), the `# …` comment, the `x-internal` extension, and the `parameters:`
+        // list's 6-space `- name:` item (deeper than the path-item indent).
+        assert_eq!(
+            invalid_path_item_keys(body),
+            vec!["/a psot".to_string(), "/b POST".to_string()]
+        );
+
+        // Non-vacuous floor: across every registered spec, no path-item key is invalid
+        // (the invariant the contract test asserts), and the corpus actually declares
+        // many operations, so a broken extractor can't hide behind an empty scan. Count
+        // valid method keys with a detection independent of the extractor.
+        let mut total_ops = 0usize;
+        for api in APIS {
+            assert!(
+                invalid_path_item_keys(api.body).is_empty(),
+                "{}: every path-item key must be a valid operation or field",
+                api.name
+            );
+            for line in api.body.lines() {
+                if matches!(
+                    line.trim(),
+                    "get:" | "put:" | "post:" | "delete:" | "patch:" | "options:"
+                        | "head:" | "trace:"
+                ) {
+                    total_ops += 1;
+                }
+            }
+        }
+        assert!(
+            total_ops >= 100,
+            "expected many operations across specs, got {total_ops}"
         );
     }
 }
