@@ -3378,6 +3378,40 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-12 — contract-harness: added a **non-empty-`info.description`** contract
+  test (`src/registry.rs` `every_spec_declares_a_non_empty_info_description`)
+  asserting every mounted vendored spec declares an `info.description` with content.
+  Completes the `info`-object field coverage: the two REQUIRED fields are already
+  pinned (`info.title` by `every_spec_declares_a_non_empty_info_title`, `info.version`
+  by `spec_info_version_matches_mounted_url_version`), and this pins the one
+  RECOMMENDED overview field every CAMARA spec populates — the CommonMark prose Redoc
+  renders as the API introduction on the served `/{api}/v{n}/docs` page, where each
+  spec carries its purpose, its two/three-legged auth model, and its parameter-driven
+  functional cases in human-readable form (DESIGN §7, §9). A spec drafted from a
+  CAMARA template whose `description:` block scalar was dropped, or left with its
+  indented body deleted, still parses as a structurally valid OpenAPI doc — invisible
+  to the identity/wiring/scenario tests, which trust the document is complete — yet
+  renders a blank overview. One pure helper `info_description_present` (no YAML dep;
+  mirrors `info_title`'s exact-2-space `info:`-child scoping so a deeper schema
+  `description:` is never mistaken for it, and understands both an inline scalar and
+  the `description: |`/`>` block form — a block is non-empty iff a following non-blank
+  line is indented deeper than the key) reports the missing/blank/present trichotomy
+  as `None`/`Some(false)`/`Some(true)` so a failure names the exact drift; it is
+  unit-covered (`info_description_extraction_rules`: inline value, block-with-body,
+  body-after-blank-line, opened-but-empty block, blank inline, missing field, and a
+  deeper component `description:` — plus a non-vacuous floor over all specs). All 57
+  vendored specs write it as a `description: |` block scalar; verified true before
+  asserting. Considered — then rejected as not a clean single-pass increment — an
+  `info.license.name` consistency test: 55 specs use the SPDX `Apache-2.0`, 2 use
+  CAMARA's canonical `Apache 2.0` (verified against the upstream Number Verification
+  spec), so converging either way is large/ambiguous and left untouched (the license
+  *url* is already uniform across all 57). Feature-API backlog stays effectively
+  exhausted (remaining `[ ]` leaves are `https://` sink-TLS cases needing a multi-MB
+  rustls client vs the small-binary directive, and open-ended state streams with no
+  live worker), so this advanced the cross-cutting **contract-test harness** item.
+  Tests: +2 registry (1 contract + 1 helper unit). `cargo test` 2178 green (was 2176),
+  `cargo build --release` warning-clean. No new dep; binary unchanged
+  (`#[cfg(test)]`-only). — binary: 3.7M (3851880 B, +0 B)
 - 2026-08-12 — contract-harness: added a **valid-media-type-key** contract test
   (`src/registry.rs` `every_media_type_key_names_a_valid_mime_type`) asserting every
   direct child key of a `content:` Content Object is a well-formed media type

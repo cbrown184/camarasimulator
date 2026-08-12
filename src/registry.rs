@@ -398,6 +398,66 @@ mod tests {
         None
     }
 
+    /// Whether an embedded OpenAPI body declares a **non-empty** `info.description`,
+    /// without a YAML dep. Returns `None` when the `info` object carries no
+    /// `description:` field at all, `Some(false)` when the field is present but
+    /// empty (an empty inline scalar, or a block scalar with no indented body),
+    /// and `Some(true)` when it has content — mirroring the missing/blank/present
+    /// trichotomy `info_title` exposes for the title.
+    ///
+    /// `info.description` is the OpenAPI `info` object's RECOMMENDED overview
+    /// field: the CommonMark prose every Redoc/Swagger client renders as the
+    /// API's introduction, and where each CAMARA spec documents the API's
+    /// purpose, its two/three-legged auth model, and (per docs/DESIGN §7) its
+    /// parameter-driven functional cases in human-readable form. Every CamaraSim
+    /// vendored spec writes it as a literal block scalar (`description: |`), so an
+    /// empty one would render the served docs page with a blank overview.
+    ///
+    /// Scoping mirrors `info_title`: only a line at exactly the 2-space indent of
+    /// an `info:` direct child is considered, so a deeper schema `description:`
+    /// (a component-property field, always more than 2 spaces in) is never
+    /// mistaken for it. Content-detection understands both an inline scalar
+    /// (`description: text`) and a block scalar (`description: |`/`>`, whose body
+    /// is any following non-blank line indented deeper than the key).
+    fn info_description_present(body: &str) -> Option<bool> {
+        let lines: Vec<&str> = body.lines().collect();
+        let mut in_info = false;
+        for (i, line) in lines.iter().enumerate() {
+            let is_top_level_key =
+                !line.is_empty() && !line.starts_with(char::is_whitespace);
+            if is_top_level_key {
+                in_info = line.trim_end() == "info:";
+                continue;
+            }
+            if !in_info {
+                continue;
+            }
+            let rest = match line.strip_prefix("  description:") {
+                Some(r) => r,
+                None => continue,
+            };
+            let inline = rest.trim().trim_matches('"').trim_matches('\'');
+            // A `|`/`>` (with any chomping/indent indicator) opens a block scalar;
+            // otherwise the trimmed remainder is the inline value itself.
+            let is_block = matches!(inline.chars().next(), Some('|') | Some('>'));
+            if !is_block {
+                return Some(!inline.is_empty());
+            }
+            // Block scalar: its body is indented deeper than the 2-space key. The
+            // first non-blank line indented > 2 spaces is content; the first
+            // non-blank line at indent <= 2 (a sibling `info` field) ends it.
+            for l in &lines[i + 1..] {
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let indent = l.len() - l.trim_start().len();
+                return Some(indent > 2);
+            }
+            return Some(false);
+        }
+        None
+    }
+
     /// Extract the root `openapi:` version string from an embedded OpenAPI body,
     /// without a YAML dep.
     ///
@@ -2313,6 +2373,44 @@ mod tests {
     }
 
     #[test]
+    fn every_spec_declares_a_non_empty_info_description() {
+        // Contract-harness invariant (OpenAPI structural rule): every mounted
+        // vendored spec MUST declare a non-empty `info.description`. Together
+        // with `info.title` (asserted above) and `info.version` (pinned by
+        // `spec_info_version_matches_mounted_url_version`), this completes the
+        // `info`-object field coverage for the two REQUIRED fields plus this,
+        // the one RECOMMENDED overview field CAMARA always populates.
+        //
+        // `info.description` is the CommonMark prose Redoc/Swagger renders as
+        // the API's introduction on the served `/{api}/v{n}/docs` page — and
+        // where each CamaraSim spec carries the API's purpose, its two/three-
+        // legged auth model, and its parameter-driven functional cases in
+        // human-readable form (docs/DESIGN §7, §9). A spec drafted from a CAMARA
+        // template whose `description:` block scalar was dropped, or left with
+        // its indented body deleted, still parses as a structurally valid
+        // OpenAPI document — so the identity/wiring/scenario tests (which trust
+        // the doc is complete) never see it — yet renders a blank overview.
+        // `None` (no `description:` at all) and `Some(false)` (present but empty)
+        // are reported distinctly so the failure names the exact drift. Verified
+        // true across every mounted spec before asserting.
+        for api in APIS {
+            match info_description_present(api.body) {
+                Some(true) => {}
+                Some(false) => panic!(
+                    "{} spec declares an empty `info.description` — the API \
+                     overview its /docs page renders is blank",
+                    api.name
+                ),
+                None => panic!(
+                    "{} spec declares no `info.description` — the recommended \
+                     API overview is absent from the `info` object",
+                    api.name
+                ),
+            }
+        }
+    }
+
+    #[test]
     fn every_vendored_spec_on_disk_is_registered() {
         // Contract-harness invariant (DESIGN §9): the `specs/` tree and the `APIS`
         // registry must agree in BOTH directions. The compile-time `include_str!`
@@ -2955,6 +3053,74 @@ components:
         for api in APIS {
             let t = info_title(api.body).expect("registered spec has an info.title");
             assert!(!t.is_empty(), "{}", api.name);
+        }
+    }
+
+    #[test]
+    fn info_description_extraction_rules() {
+        // Unit-cover the `info_description_present` extractor so the contract
+        // test above can't pass vacuously (an extractor that returned `Some(true)`
+        // for every body would make its assertion meaningless), and so the
+        // info-block scoping, inline-vs-block detection, and the
+        // missing/blank/present trichotomy are pinned.
+
+        // A non-empty inline scalar → Some(true).
+        assert_eq!(
+            info_description_present(
+                "info:\n  title: X\n  description: A short overview\n  version: \"1\"\npaths: {}\n"
+            ),
+            Some(true)
+        );
+        // A literal block scalar with an indented body → Some(true); the CAMARA
+        // form every vendored spec uses.
+        assert_eq!(
+            info_description_present(
+                "info:\n  description: |\n    Real overview prose.\n    More prose.\n  version: \"1\"\n"
+            ),
+            Some(true)
+        );
+        // A block scalar whose body begins after a blank line is still content.
+        assert_eq!(
+            info_description_present(
+                "info:\n  description: |\n\n    Prose after a blank line.\n  version: \"1\"\n"
+            ),
+            Some(true)
+        );
+        // A block scalar opened but immediately followed by a sibling `info`
+        // field (no indented body) → Some(false).
+        assert_eq!(
+            info_description_present("info:\n  description: |\n  version: \"1\"\npaths: {}\n"),
+            Some(false)
+        );
+        // A present-but-blank inline `description:` → Some(false), distinct from a
+        // missing field (None).
+        assert_eq!(
+            info_description_present("info:\n  title: X\n  description:\npaths: {}\n"),
+            Some(false)
+        );
+        // No `description:` under `info` at all → None.
+        assert_eq!(
+            info_description_present("info:\n  title: X\n  version: \"1\"\npaths: {}\n"),
+            None
+        );
+        // A deeper `description:` inside a component schema (outside the `info:`
+        // block, and more than 2 spaces in) is never mistaken for info's → None.
+        assert_eq!(
+            info_description_present(
+                "info:\n  title: X\npaths: {}\ncomponents:\n  schemas:\n    Foo:\n      description: nope\n"
+            ),
+            None
+        );
+
+        // Non-vacuous floor: every registered spec declares a non-empty
+        // info.description, so a broken extractor can't hide behind an empty loop.
+        for api in APIS {
+            assert_eq!(
+                info_description_present(api.body),
+                Some(true),
+                "{} spec must declare a non-empty info.description",
+                api.name
+            );
         }
     }
 
