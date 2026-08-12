@@ -965,6 +965,104 @@ mod tests {
         out
     }
 
+    /// Enumerate every parameter object a spec declares that is **missing a
+    /// `name`** — labelled `"<in>@line N"` (document order, 1-based line of its
+    /// `in:` anchor) — without a YAML dep.
+    ///
+    /// `name` and `in` are the two REQUIRED fields of an OpenAPI Parameter
+    /// Object: `in` says where the parameter is carried, `name` says which one.
+    /// The sibling [`parameters_with_invalid_location`] pins the `in` half (every
+    /// parameter's location is a valid enum); this pins the other half (every
+    /// located parameter also names itself). A parameter object with no `name` is
+    /// an invalid document — a Redoc/Swagger/codegen client is handed a slot with
+    /// a location but no identity, so it can't bind or generate it — and a live
+    /// copy-paste hazard: a parameter block pasted from a sibling can lose or
+    /// dedent its `name:` line while keeping its `in:`, a break no other contract
+    /// test sees (the location test only checks the `in` value; the path-parameter
+    /// tests only line up `in: path` variables by name they *assume* present; the
+    /// responses/operationId/`$ref` tests never look at a parameter's identity).
+    ///
+    /// Detection anchors on a parameter's `in:` location line — a mapping key
+    /// (`in: path`) or the first key of a `- ` sequence item (`- in: query`)
+    /// whose inline scalar is one of `query`/`header`/`path`/`cookie` — then
+    /// scans that same parameter object (its sibling keys at the `in:` key's own
+    /// indentation `ind`, plus the `- name:` sequence opener at `ind`-2, bounded
+    /// by a dedent out of the object) for a `name:` key, mirroring the object scan
+    /// in [`path_parameters_missing_required_true`]. A `name:` indented past `ind`
+    /// is a nested child (e.g. a `schema:` property literally named `name`), so it
+    /// never satisfies the parameter's own requirement. A `$ref` parameter
+    /// (`- $ref: …`) carries no inline `in`, so it is never anchored and is thus
+    /// exempt — it inherits `name`/`in` from the referenced component.
+    fn parameters_missing_name(body: &str) -> Vec<String> {
+        const LOCATIONS: [&str; 4] = ["query", "header", "path", "cookie"];
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let bare = line.trim_start();
+            let key = bare.strip_prefix("- ").unwrap_or(bare);
+            let Some(rest) = key.strip_prefix("in:") else { continue };
+            let loc = rest.trim().trim_matches('"').trim_matches('\'');
+            if !LOCATIONS.contains(&loc) {
+                continue;
+            }
+            // Indentation of the `in:` key itself (past a `- ` opener, if any).
+            let is_seq_opener = bare.len() != key.len();
+            let ind = indent(line) + if is_seq_opener { 2 } else { 0 };
+            let mut has_name = false;
+            // When the anchor line is itself the `- ` sequence opener (in-first,
+            // `- in: query`), the object starts here — it has no sibling keys
+            // *above* the anchor, and any same-indent lines above belong to the
+            // previous sibling parameter — so scan downward only. For a mapping
+            // key or a name-first sequence item, the object's opener sits above at
+            // `ind`-2, so an upward scan reads the object's earlier keys (its
+            // `name`, or the `- name:` opener) and stops at that dedent.
+            let steps: &[i64] = if is_seq_opener { &[1] } else { &[-1, 1] };
+            for &step in steps {
+                let mut j = i as i64;
+                loop {
+                    j += step;
+                    if j < 0 || j as usize >= lines.len() {
+                        break;
+                    }
+                    let l = lines[j as usize];
+                    if l.trim().is_empty() {
+                        break;
+                    }
+                    let li = indent(l);
+                    if li < ind {
+                        // Dedented out of this parameter object. A `- name: X`
+                        // sequence-item opener sits at `ind`-2 and carries the
+                        // object's name in its first key — read it before leaving.
+                        if li + 2 == ind {
+                            if let Some(r) = l.trim_start().strip_prefix("- ") {
+                                if let Some(v) = r.strip_prefix("name:") {
+                                    if !v.trim().trim_matches('"').trim_matches('\'').is_empty() {
+                                        has_name = true;
+                                    }
+                                }
+                            }
+                        }
+                        break;
+                    }
+                    if li != ind {
+                        continue; // a nested child (e.g. a `schema:` subtree)
+                    }
+                    let t = l.trim_start().strip_prefix("- ").unwrap_or(l.trim_start());
+                    if let Some(v) = t.strip_prefix("name:") {
+                        if !v.trim().trim_matches('"').trim_matches('\'').is_empty() {
+                            has_name = true;
+                        }
+                    }
+                }
+            }
+            if !has_name {
+                out.push(format!("{}@line {}", loc, i + 1));
+            }
+        }
+        out
+    }
+
     /// Extract the labels (`METHOD /path`) of every operation a spec declares
     /// that is **missing** a `responses:` object — without a YAML dep.
     ///
@@ -3306,6 +3404,127 @@ components:
         assert!(
             total_params >= 50,
             "expected many declared parameters across specs, got {total_params}"
+        );
+    }
+
+    #[test]
+    fn every_parameter_declares_a_name() {
+        // Contract-harness invariant (OpenAPI structural rule): every parameter a
+        // mounted spec declares MUST carry a `name` — the other REQUIRED field of a
+        // Parameter Object alongside `in`. A located parameter with no name is an
+        // invalid document: a Redoc/Swagger/codegen client is handed a slot with a
+        // location but no identity, so it can't bind or generate it.
+        //
+        // This is the exact complement of the sibling
+        // `every_parameter_declares_a_valid_location`: that pins the `in` half of
+        // the two-field contract (every parameter's location is a valid enum), this
+        // pins the `name` half (every located parameter names itself). The break it
+        // catches is a live copy-paste hazard no other test sees — a parameter block
+        // pasted from a sibling that loses or dedents its `name:` line while keeping
+        // its `in:` — invisible to the location test (checks only the `in` value),
+        // the path-parameter tests (line up `in: path` variables by a name they
+        // assume present), and the responses/operationId/version/parity/`$ref` tests
+        // (which check an operation's outcomes, id, identity, or wiring, never a
+        // parameter's identity). Verified true across all mounted specs before
+        // asserting.
+        for api in APIS {
+            let unnamed = parameters_missing_name(api.body);
+            assert!(
+                unnamed.is_empty(),
+                "{} spec declares parameter(s) with a valid `in` location but no \
+                 `name` (the other REQUIRED field of an OpenAPI Parameter Object): \
+                 {:?}",
+                api.name,
+                unnamed
+            );
+        }
+    }
+
+    #[test]
+    fn parameter_name_extraction_rules() {
+        // Unit-cover the `parameters_missing_name` extractor so the contract test
+        // above can't pass vacuously and its detection is pinned: a parameter is
+        // flagged only when its object (anchored on a valid `in:` location) carries
+        // no `name:` sibling — in either the name-first or in-first sequence form
+        // and the mapping (components.parameters) form; a `name` nested inside the
+        // parameter's own `schema:` does NOT satisfy it; a `$ref` parameter (no
+        // inline `in`) is exempt; and an `in:` opening a nested block (a schema
+        // property named `in`) is never anchored.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      parameters:
+        - name: x-correlator
+          in: header
+        - in: path
+          name: id
+          required: true
+        - in: query
+          required: false
+          schema:
+            type: object
+            properties:
+              name:
+                type: string
+        - $ref: '#/components/parameters/Shared'
+      responses:
+        '200':
+          description: ok
+components:
+  parameters:
+    Shared:
+      name: shared
+      in: query
+      schema:
+        type: string
+  schemas:
+    Widget:
+      type: object
+      properties:
+        in:
+          type: string
+";
+        // Flagged: only the third GET /a parameter — an `in: query` whose object's
+        // sole `name:` sits deeper inside its `schema.properties` (not the
+        // parameter's own name). Not flagged: the name-first `header`, the in-first
+        // `path` (its `name: id` sibling), the `$ref` parameter (no inline `in`, so
+        // never anchored), the well-formed mapping `Shared` (`name: shared`), and
+        // the `in:` property of components.schemas.Widget (opens a nested block, no
+        // inline scalar).
+        assert_eq!(parameters_missing_name(body), vec!["query@line 15".to_string()]);
+
+        // Non-vacuous floor: across every registered spec, every located parameter
+        // declares a name (the invariant the contract test asserts), and the corpus
+        // actually declares many parameter objects, so a broken extractor can't hide
+        // behind an empty scan.
+        const LOCATIONS: [&str; 4] = ["query", "header", "path", "cookie"];
+        let mut total_located = 0usize;
+        for api in APIS {
+            assert!(
+                parameters_missing_name(api.body).is_empty(),
+                "{}: every located parameter must declare a `name`",
+                api.name
+            );
+            for line in api.body.lines() {
+                let bare = line.trim_start();
+                let key = bare.strip_prefix("- ").unwrap_or(bare);
+                if let Some(rest) = key.strip_prefix("in:") {
+                    let loc = rest.trim().trim_matches('"').trim_matches('\'');
+                    if LOCATIONS.contains(&loc) {
+                        total_located += 1;
+                    }
+                }
+            }
+        }
+        assert!(
+            total_located >= 50,
+            "expected many located parameters across specs, got {total_located}"
         );
     }
 }

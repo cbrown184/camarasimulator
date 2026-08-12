@@ -3184,6 +3184,32 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     plus a non-vacuous floor over all specs) so the contract can't pass vacuously.
     Verified true (all 131 parameter locations across the mounted specs — 57 header,
     42 path, 32 query — are valid) before asserting.
+  - an every-parameter-declares-a-`name` contract test (`src/registry.rs`
+    `every_parameter_declares_a_name`) asserts every parameter a mounted spec
+    declares carries a `name` — the other REQUIRED field of an OpenAPI Parameter
+    Object alongside `in`. The exact complement of the sibling
+    `every_parameter_declares_a_valid_location`: that pins the `in` half of the
+    two-field contract (every parameter's location is a valid enum), this pins the
+    `name` half (every located parameter names itself). A located parameter with no
+    name is an invalid document — a Redoc/Swagger/codegen client is handed a slot
+    with a location but no identity, so it can't bind or generate it — and a live
+    copy-paste hazard: a parameter block pasted from a sibling that loses or dedents
+    its `name:` line while keeping its `in:`, invisible to the location test (checks
+    only the `in` value), the path-parameter tests (line up `in: path` variables by
+    a name they assume present), and the responses/operationId/version/parity/`$ref`
+    tests (which check an operation's outcomes, id, identity, or wiring, never a
+    parameter's identity). A pure `parameters_missing_name` extractor (no YAML dep;
+    anchors on a parameter's `in:` location line — mapping key or `- ` sequence
+    opener with a valid-enum inline scalar — then scans that same object for a
+    `name:` sibling, mirroring `path_parameters_missing_required_true`'s object
+    scan; a `name` nested inside the parameter's own `schema:` never satisfies it, a
+    `$ref` parameter carries no inline `in` so is exempt, and — the sequence-opener
+    fix — an in-first `- in: query` anchor scans downward only, since its object has
+    no sibling keys above the opener) is unit-covered
+    (`parameter_name_extraction_rules`: name-first/in-first sequence + mapping forms
+    pass, a schema-nested `name` is flagged, a `$ref`/nested-block `in` is never
+    anchored, plus a non-vacuous floor over all specs) so the contract can't pass
+    vacuously. Verified true across all mounted specs before asserting.
   Full response-vs-schema validation still TODO (would need a YAML/JSON-Schema
   validator — a dependency trade-off, deferred).
 
@@ -3193,6 +3219,32 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-12 — contract-harness: added an **every-parameter-declares-a-`name`**
+  contract test (`src/registry.rs` `every_parameter_declares_a_name`) asserting every
+  parameter a mounted spec declares carries a `name` — the other REQUIRED field of an
+  OpenAPI Parameter Object alongside `in`. The exact complement of the sibling
+  `every_parameter_declares_a_valid_location`: that pins the `in` half (every
+  parameter's location is a valid enum), this pins the `name` half (every located
+  parameter names itself). A located parameter with no `name` is an invalid document (a
+  Redoc/Swagger/codegen client is handed a slot with a location but no identity) and a
+  live copy-paste hazard — a parameter block pasted from a sibling that loses/dedents
+  its `name:` line while keeping `in:`, invisible to the location test (checks only the
+  `in` value), the path-parameter tests (assume the name present), and the responses/
+  operationId/version/parity/`$ref` tests. One pure helper `parameters_missing_name`
+  (no YAML dep; anchors on a parameter's valid-enum `in:` line, then scans that object
+  for a `name:` sibling, mirroring `path_parameters_missing_required_true`; a
+  schema-nested `name` never satisfies it, a `$ref` param is exempt; sequence-opener
+  fix — an in-first `- in: query` anchor scans downward only, since its object has no
+  sibling keys above the opener) is unit-covered (`parameter_name_extraction_rules`:
+  name-first/in-first sequence + mapping forms pass, a schema-nested `name` flagged, a
+  `$ref`/nested-block `in` never anchored, plus a non-vacuous floor over all specs) so
+  the contract can't pass vacuously. Feature-API backlog stays effectively exhausted
+  (remaining `[ ]` leaves are `https://` sink-TLS cases needing a multi-MB rustls client
+  vs the small-binary directive, and open-ended state streams with no live worker), so
+  this advanced the cross-cutting **contract-test harness** item. Verified true across
+  all mounted specs before asserting. Tests: +2 registry (1 contract + 1 helper unit).
+  `cargo test` 2160 green (was 2158), `cargo build --release` warning-clean. No new dep;
+  binary unchanged (`#[cfg(test)]`-only). — binary: 3.7M (3851880 B, +0 B)
 - 2026-08-12 — contract-harness: added a **valid-parameter-location** contract test
   (`src/registry.rs` `every_parameter_declares_a_valid_location`) asserting every
   parameter a mounted spec declares carries an `in` whose value is one of the fixed
