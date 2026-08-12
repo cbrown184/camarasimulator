@@ -3286,6 +3286,33 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-12 — contract-harness: added an **every-`$ref`-is-a-fragment-pointer**
+  contract test (`src/registry.rs` `every_ref_target_is_a_fragment_pointer`)
+  asserting every `$ref` a mounted spec declares carries a `#/` JSON-pointer fragment
+  — a local `#/components/…` or a cross-file `<relative-path>#/components/…`. The
+  fragment is the half a Redoc/Swagger/codegen client dereferences to reach the
+  actual schema/response/parameter; a target that lost it points at a document root
+  (`errors.yaml`) or nothing (a bare `CamaraError`), so the ref never resolves to the
+  intended component and the served spec is unusable. The shape-level complement of
+  the two ref-*resolution* tests: both `shared_error_refs_resolve_to_defined_
+  components` and `local_component_refs_resolve_within_their_own_spec` start with
+  `target.split_once('#')` and `continue` when there is no `#`, so a fragmentless ref
+  is silently skipped by both — never checked against any defined component — and the
+  canonical-path test only inspects refs already naming the shared file, so it skips
+  it too. This inspects precisely the malformed targets they all fall through (a
+  copy-paste-dropped `$ref: "errors.yaml"`, a typo'd `$ref: "#components/…"` missing
+  the slash). One pure helper `refs_missing_fragment` (no YAML dep; built on the
+  already-unit-covered `ref_targets`, keeping targets without `#/`) is unit-covered
+  (`ref_fragment_extraction_rules`: local + cross-file pointers pass, whole-file and
+  slash-less-fragment refs flagged in document order, plus a non-vacuous floor over
+  all specs) so the contract can't pass vacuously. Feature-API backlog stays
+  effectively exhausted (remaining `[ ]` leaves are `https://` sink-TLS cases needing
+  a multi-MB rustls client vs the small-binary directive, and open-ended state streams
+  with no live worker), so this advanced the cross-cutting **contract-test harness**
+  item. Verified true (all 2158 `$ref`s across the mounted specs are fragment-bearing)
+  before asserting. Tests: +2 registry (1 contract + 1 helper unit). `cargo test` 2168
+  green (was 2166), `cargo build --release` warning-clean. No new dep; binary unchanged
+  (`#[cfg(test)]`-only). — binary: 3.7M (3851880 B, +0 B)
 - 2026-08-12 — contract-harness: added a **valid-path-item-key** contract test
   (`src/registry.rs` `every_path_item_key_names_a_valid_operation_or_field`)
   asserting every key a mounted spec declares directly under a Path Item Object is a

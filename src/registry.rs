@@ -487,6 +487,25 @@ mod tests {
             .collect()
     }
 
+    /// Return every `$ref` target in an embedded OpenAPI body that carries **no**
+    /// `#/` JSON-pointer fragment, in document order, without a YAML dep.
+    ///
+    /// Every reference these specs make is a *pointer* into a component: a local
+    /// `#/components/…` or a cross-file `<relative-path>#/components/…`. The `#/…`
+    /// fragment is the half a client (Redoc/Swagger/codegen) dereferences to reach
+    /// the schema/response/parameter; a target that lost it — a bare component name
+    /// (`CamaraError`) or a whole-file path (`errors.yaml`) — points at a document
+    /// root, never the intended component, so the served spec is unresolvable.
+    ///
+    /// Built on [`ref_targets`] (already unit-covered), keeping only the targets
+    /// missing a `#/` fragment.
+    fn refs_missing_fragment(body: &str) -> Vec<String> {
+        ref_targets(body)
+            .into_iter()
+            .filter(|t| !t.contains("#/"))
+            .collect()
+    }
+
     /// Count the `x-camarasim-scenarios:` blocks declared in an embedded OpenAPI
     /// body, without a YAML dep.
     ///
@@ -4117,6 +4136,84 @@ paths:
         assert!(
             total_ops >= 100,
             "expected many operations across specs, got {total_ops}"
+        );
+    }
+
+    #[test]
+    fn every_ref_target_is_a_fragment_pointer() {
+        // Contract-harness invariant (OpenAPI reference rule, as these specs use it):
+        // every `$ref` a mounted spec declares MUST carry a `#/` JSON-pointer
+        // fragment — a local `#/components/…` or a cross-file
+        // `<relative-path>#/components/…`. The fragment is the half a client
+        // (Redoc/Swagger/codegen) dereferences to reach the actual
+        // schema/response/parameter; a target that lost it points at a document root
+        // (`errors.yaml`) or nothing (a bare `CamaraError`), so the ref never resolves
+        // to the intended component and the served spec is unusable.
+        //
+        // This is the shape-level complement of the two ref-*resolution* tests. Both
+        // `shared_error_refs_resolve_to_defined_components` and
+        // `local_component_refs_resolve_within_their_own_spec` begin with
+        // `target.split_once('#')` and `continue` when there is no `#` — so a
+        // fragmentless ref is silently skipped by *both*, its target never checked
+        // against any defined component. The canonical-path test
+        // (`shared_fragment_refs_use_the_canonical_relative_path`) only inspects refs
+        // that already name the shared file, so it skips it too. This test inspects
+        // precisely the malformed targets they all fall through: a `$ref` whose
+        // fragment was dropped in a copy-paste (`$ref: "errors.yaml"`) or typo'd away
+        // (`$ref: "#components/schemas/Foo"`, missing the `/`). Verified true across
+        // all mounted specs before asserting (every declared `$ref` is
+        // fragment-bearing).
+        for api in APIS {
+            let missing = refs_missing_fragment(api.body);
+            assert!(
+                missing.is_empty(),
+                "{} spec declares $ref target(s) with no `#/` JSON-pointer fragment \
+                 (they resolve to a document root or nothing, not the intended \
+                 component): {:?}",
+                api.name,
+                missing
+            );
+        }
+    }
+
+    #[test]
+    fn ref_fragment_extraction_rules() {
+        // Unit-cover the `refs_missing_fragment` extractor so the contract test above
+        // can't pass vacuously and its detection is pinned: a local `#/…` pointer and
+        // a cross-file `<path>#/…` pointer are fragment-bearing (not flagged), while a
+        // whole-file ref (`errors.yaml`) and a fragment missing its leading slash
+        // (`#components/…`) carry no `#/` and are flagged, in document order.
+        let body = "\
+responses:
+  '400':
+    $ref: '#/components/responses/Generic400'
+  '404':
+    $ref: '../../shared/errors.yaml#/components/responses/Generic404'
+  '409':
+    $ref: 'errors.yaml'
+  '422':
+    $ref: '#components/responses/BadPointer'
+";
+        assert_eq!(
+            refs_missing_fragment(body),
+            vec!["errors.yaml".to_string(), "#components/responses/BadPointer".to_string()]
+        );
+
+        // Non-vacuous floor: across every registered spec no `$ref` is fragmentless
+        // (the invariant the contract test asserts), and the corpus actually declares
+        // many refs, so a broken extractor can't hide behind an empty scan.
+        let mut total_refs = 0usize;
+        for api in APIS {
+            assert!(
+                refs_missing_fragment(api.body).is_empty(),
+                "{}: every $ref must carry a `#/` fragment",
+                api.name
+            );
+            total_refs += ref_targets(api.body).len();
+        }
+        assert!(
+            total_refs >= 100,
+            "expected many $refs across specs, got {total_refs}"
         );
     }
 }
