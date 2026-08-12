@@ -3502,6 +3502,24 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     section, plus a non-vacuous floor of ≥100 sections over all specs) so the contract
     can't pass vacuously. Verified true (only `schemas`/`responses`/`parameters`/
     `headers`/`securitySchemes` used across all mounted specs) before asserting.
+  - a security-requirement-scope contract test (`src/registry.rs`
+    `every_security_requirement_declares_a_scope`) asserts every operation a mounted
+    spec declares carries a `security` requirement that lists ≥1 **scope**. Every
+    CamaraSim endpoint is gated on a specific scope (`verify::Claims::require_scope`),
+    documented as the requirement's scope list (`- openId:` → `- <scope>`); an empty
+    list (`- openId: []`, or a `- openId:` whose scope line was dropped in a paste)
+    tells a client the endpoint needs only a valid token, silently discarding the
+    authorization it enforces. Complements the scheme-name test
+    (`every_security_requirement_references_a_defined_scheme`), whose helper
+    `security_requirement_schemes` deliberately separates the scheme from its scopes
+    and checks only that the *scheme* is defined, never that the scope list is
+    non-empty. A pure `operations_with_scopeless_security` extractor (no YAML dep;
+    mirrors `operations_without_operation_id`'s path/method scoping, then within an
+    operation's `security:` block flags any scheme requirement with no scope —
+    handling both the inline flow form `[]` and the empty block form) is unit-covered
+    (`scopeless_security_extraction_rules`) so the contract can't pass vacuously.
+    Verified true across all 57 mounted specs (144 requirements, all scoped) before
+    asserting.
   Full response-vs-schema validation still TODO (would need a YAML/JSON-Schema
   validator — a dependency trade-off, deferred).
 
@@ -3510,6 +3528,35 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 ## Scan journal
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
+
+- 2026-08-12 — contract-harness: added a **security-requirement-declares-a-scope**
+  contract test (`src/registry.rs` `every_security_requirement_declares_a_scope`)
+  asserting every operation a mounted spec declares carries a `security` requirement
+  that lists at least one scope. Every CamaraSim endpoint is scope-gated
+  (`verify::Claims::require_scope`) and documents that scope as its requirement's
+  scope list (`- openId:` → `- <scope>`); an empty scope list (`- openId: []`, or a
+  `- openId:` whose scope line was dropped/dedented in a copy-paste) silently tells a
+  client the endpoint needs only a valid token, discarding the authorization it
+  enforces — an OpenAPI-valid document (so the identity/wiring tests never see it)
+  that misstates its own security. No existing test caught it: the scheme-name test
+  (`every_security_requirement_references_a_defined_scheme`) and its helper
+  `security_requirement_schemes` deliberately separate the scheme from its scopes and
+  check only that the *scheme* (`openId`) is defined, never that the scope list is
+  non-empty. New pure `operations_with_scopeless_security` extractor (no YAML dep):
+  mirrors `operations_without_operation_id`'s path/method scoping (a 4-space verb key
+  under a 2-space `/…` path item beneath top-level `paths:`), then within the
+  operation's 6-space `security:` block flags any `- <scheme>:` requirement carrying
+  no scope — the inline flow form (`[]`/`[ ]` empty, `[a]`/`[a, b]` non-empty; any
+  other inline scalar treated non-empty, defensively) and the block form (no
+  `- <scope>` item indented beneath the requirement). Unit-covered
+  (`scopeless_security_extraction_rules`: block-form-with-scope + inline-`[some:read]`
+  pass; inline-`[]` + empty-block flagged in document order; a `required: - openId` /
+  `openId:` schema property outside any `security:` block never mistaken; plus a
+  non-vacuous floor of ≥100 scoped requirements over all specs) so the contract can't
+  pass vacuously. Verified true across all 57 mounted specs (144 requirements, all
+  scoped) before asserting. Tests: +2 (1 contract, 1 extractor unit). `cargo test`
+  2195 green (was 2193); `cargo build --release` warning-clean. No new dep; binary
+  unchanged (`#[cfg(test)]`-only). — binary: 3.7M (3851880 B, +0 B)
 
 - 2026-08-12 — contract-harness: added an **array-schema-declares-`items`** contract
   test (`src/registry.rs` `every_array_schema_declares_items`) asserting every Schema

@@ -1065,6 +1065,136 @@ mod tests {
         None
     }
 
+    /// The `METHOD /path` label of every operation a spec declares whose
+    /// `security` requirement names a scheme but lists **no scope** — the empty
+    /// forms `- openId: []` (inline empty flow sequence) and a `- openId:` with no
+    /// `- <scope>` items beneath it (empty block) — in document order, without a
+    /// YAML dep.
+    ///
+    /// Mirrors [`operations_without_operation_id`]'s scoping (a 4-space HTTP-verb
+    /// key under a 2-space `/…` path item beneath the top-level `paths:` block).
+    /// Within an operation it finds the 6-space `security:` block and, for each
+    /// requirement sequence item that is a scheme mapping key (via
+    /// [`requirement_scheme_name`], so a scope scalar like
+    /// `- number-verification:verify` is skipped), decides whether the scheme
+    /// carries at least one scope: an inline value is a flow sequence (`[]` →
+    /// empty, `[a]`/`[a, b]` → non-empty; any other inline scalar is treated as
+    /// non-empty, defensively), while an empty inline value means the block form,
+    /// whose scopes are the `- <scope>` items indented under the requirement item.
+    /// An operation with any scopeless scheme requirement is flagged.
+    fn operations_with_scopeless_security(body: &str) -> Vec<String> {
+        const METHODS: [&str; 8] =
+            ["get", "put", "post", "delete", "patch", "options", "head", "trace"];
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let mut out = Vec::new();
+        let mut in_paths = false;
+        let mut path: Option<String> = None;
+        for (i, line) in lines.iter().enumerate() {
+            let is_top_level_key =
+                !line.is_empty() && !line.starts_with(char::is_whitespace);
+            if is_top_level_key {
+                in_paths = line.trim_end() == "paths:";
+                path = None;
+                continue;
+            }
+            if !in_paths {
+                continue;
+            }
+            if let Some(rest) = line.strip_prefix("  ") {
+                if !rest.starts_with(char::is_whitespace) && rest.starts_with('/') {
+                    let key = rest.trim_end().strip_suffix(':').unwrap_or(rest.trim_end());
+                    path = Some(key.to_string());
+                    continue;
+                }
+            }
+            let Some(current_path) = path.as_deref() else { continue };
+            if indent(line) != 4 {
+                continue;
+            }
+            let key = line.trim_start();
+            let Some(name) = key.strip_suffix(':') else { continue };
+            if name.contains(char::is_whitespace) || !METHODS.contains(&name) {
+                continue;
+            }
+            // Scan the operation's block (indent > 4) for a 6-space `security:` key,
+            // then inspect each scheme requirement in it for a scope.
+            let mut has_scopeless = false;
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) <= 4 {
+                    break; // dedented out of this operation
+                }
+                let is_security_key = indent(l) == 6
+                    && l.trim_start().split_once(':').map(|(k, _)| k) == Some("security");
+                if !is_security_key {
+                    j += 1;
+                    continue;
+                }
+                // Walk the `security:` block: lines indented past the 6-space key,
+                // until a dedent to at-or-above it ends the block.
+                let mut k = j + 1;
+                while k < lines.len() {
+                    let sl = lines[k];
+                    if sl.trim().is_empty() {
+                        k += 1;
+                        continue;
+                    }
+                    let sind = indent(sl);
+                    if sind <= 6 {
+                        break;
+                    }
+                    if requirement_scheme_name(sl).is_some() {
+                        let rest = sl.trim_start().strip_prefix("- ").unwrap_or(sl.trim_start());
+                        let after = rest[rest.find(':').unwrap() + 1..].trim();
+                        let scopeless = if after.is_empty() {
+                            // Block form: any `- <scope>` item indented past this
+                            // requirement item before the next dedent?
+                            let mut m = k + 1;
+                            let mut has_scope = false;
+                            while m < lines.len() {
+                                let ml = lines[m];
+                                if ml.trim().is_empty() {
+                                    m += 1;
+                                    continue;
+                                }
+                                if indent(ml) <= sind {
+                                    break;
+                                }
+                                if ml.trim_start().starts_with("- ") {
+                                    has_scope = true;
+                                    break;
+                                }
+                                m += 1;
+                            }
+                            !has_scope
+                        } else {
+                            // Inline flow sequence: empty only when `[]` (or `[ ]`).
+                            match after.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+                                Some(inner) => inner.trim().is_empty(),
+                                None => false,
+                            }
+                        };
+                        if scopeless {
+                            has_scopeless = true;
+                        }
+                    }
+                    k += 1;
+                }
+                break; // one `security:` block per operation
+            }
+            if has_scopeless {
+                out.push(format!("{} {}", name.to_uppercase(), current_path));
+            }
+        }
+        out
+    }
+
     /// Does the spec's declared `info.version` agree with the version segment the
     /// API is mounted at in the URL (DESIGN §9 canonical URL versioning)?
     ///
@@ -3516,6 +3646,127 @@ components:
         assert!(security_requirement_schemes(real)
             .iter()
             .all(|s| s == "openId"));
+    }
+
+    #[test]
+    fn every_security_requirement_declares_a_scope() {
+        // Contract-harness invariant (CAMARA canonical auth + DESIGN §8/§9): every
+        // operation a mounted spec declares carries a `security` requirement that
+        // lists at least one **scope**. Every CamaraSim business endpoint is gated
+        // on a specific purpose/technical scope (the resource-server
+        // `verify::Claims::require_scope`), and the spec documents that scope as its
+        // security requirement's scope list (`- openId:` → `- <scope>`).
+        //
+        // The break this catches: an operation's `security` block that names the
+        // scheme but lists **no scope** — the inline `- openId: []` or a
+        // `- openId:` whose scope line was dropped/dedented in a copy-paste. An
+        // empty scope list is a real authorization drift: it tells a client (and
+        // codegen, and the served "try it" panel) the endpoint needs only a valid
+        // token, silently discarding the specific scope the endpoint actually
+        // enforces. No existing contract test sees it — the scheme-name test
+        // (`every_security_requirement_references_a_defined_scheme`) and its helper
+        // `security_requirement_schemes` deliberately separate the scheme from its
+        // scopes and check only that the *scheme* (`openId`) is defined, never that
+        // the scope list is non-empty; the operationId/summary/responses/`$ref`
+        // tests check a spec's identity, wiring, or a payload's presence. Verified
+        // true across all mounted specs before asserting (every operation's `openId`
+        // requirement carries a scope).
+        for api in APIS {
+            let scopeless = operations_with_scopeless_security(api.body);
+            assert!(
+                scopeless.is_empty(),
+                "{} spec has operation(s) whose `security` requirement lists no scope \
+                 (an empty scope list drops the authorization the endpoint enforces — \
+                 likely a copy-pasted `- openId: []` or a dropped `- <scope>` line): {:?}",
+                api.name,
+                scopeless
+            );
+        }
+    }
+
+    #[test]
+    fn scopeless_security_extraction_rules() {
+        // Unit-cover the `operations_with_scopeless_security` extractor so the
+        // contract test above can't pass vacuously (an extractor that returned an
+        // empty Vec for every body would make its assertion meaningless) and so its
+        // block-form / inline-flow / prose discrimination is pinned.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /ok:
+    post:
+      operationId: doOk
+      security:
+        - openId:
+            - some-api:read
+      responses:
+        '200':
+          description: ok
+  /inline-empty:
+    post:
+      operationId: doInlineEmpty
+      security:
+        - openId: []
+      responses:
+        '200':
+          description: ok
+  /block-empty:
+    get:
+      operationId: doBlockEmpty
+      security:
+        - openId:
+      responses:
+        '200':
+          description: ok
+  /inline-full:
+    get:
+      operationId: doInlineFull
+      security:
+        - openId: [some-api:read]
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    Widget:
+      type: object
+      required:
+        - openId
+      properties:
+        openId:
+          type: string
+";
+        // `POST /inline-empty` (`- openId: []`) and `GET /block-empty` (`- openId:`
+        // with no `- <scope>` beneath it) list no scope, so both are flagged, in
+        // document order. `POST /ok` (block form with a scope) and `GET /inline-full`
+        // (`[some-api:read]`) each carry a scope, and the `required: - openId` /
+        // `openId:` property under `components.schemas.Widget` sit outside any
+        // `security:` block, so none is flagged.
+        assert_eq!(
+            operations_with_scopeless_security(body),
+            vec!["POST /inline-empty".to_string(), "GET /block-empty".to_string()]
+        );
+
+        // Non-vacuous floor: across every registered spec, no operation has a
+        // scopeless `security` requirement (the invariant the contract test
+        // asserts), and the corpus actually declares many scoped requirements, so a
+        // broken extractor can't hide behind an empty scan.
+        let mut total_requirements = 0usize;
+        for api in APIS {
+            assert!(
+                operations_with_scopeless_security(api.body).is_empty(),
+                "{}: every operation's `security` requirement must list a scope",
+                api.name
+            );
+            total_requirements += security_requirement_schemes(api.body).len();
+        }
+        assert!(
+            total_requirements >= 100,
+            "expected many scoped security requirements across specs, got {total_requirements}"
+        );
     }
 
     #[test]
