@@ -905,6 +905,85 @@ mod tests {
         out
     }
 
+    /// Extract every direct child *section* key of a top-level `components:` object,
+    /// in document order (e.g. `schemas`, `responses`, `securitySchemes`).
+    ///
+    /// Scopes the scan exactly like `component_pointers` / `components_with_invalid_
+    /// names` — a top-level `components:` block → its 2-space direct-child keys (a
+    /// non-space at column 3; deeper 4-space+ lines are component definitions/bodies)
+    /// — but returns the *section* names themselves rather than the component keys
+    /// nested under them. A quoted key is unquoted; a 2-space child bearing an inline
+    /// scalar (no trailing `:`) or internal whitespace opens no map section and is
+    /// skipped, mirroring how the sibling extractors recognise a section.
+    fn components_section_names(body: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut in_components = false;
+        for line in body.lines() {
+            let is_top_level_key =
+                !line.is_empty() && !line.starts_with(char::is_whitespace);
+            if is_top_level_key {
+                in_components = line.trim_end() == "components:";
+                continue;
+            }
+            if !in_components {
+                continue;
+            }
+            if let Some(rest) = line.strip_prefix("  ") {
+                if !rest.starts_with(char::is_whitespace) {
+                    if let Some(name) = rest.trim_end().strip_suffix(':') {
+                        let unquoted = name
+                            .strip_prefix('"')
+                            .and_then(|n| n.strip_suffix('"'))
+                            .or_else(|| {
+                                name.strip_prefix('\'')
+                                    .and_then(|n| n.strip_suffix('\''))
+                            })
+                            .unwrap_or(name);
+                        if !unquoted.is_empty() && !unquoted.contains(char::is_whitespace)
+                        {
+                            out.push(unquoted.to_string());
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// Extract every `components` section key whose name is not a valid OpenAPI 3
+    /// Components Object field, returned in document order.
+    ///
+    /// The Components Object holds a fixed set of named maps — `schemas`,
+    /// `responses`, `parameters`, `examples`, `requestBodies`, `headers`,
+    /// `securitySchemes`, `links`, `callbacks` (plus `pathItems` in 3.1) — and, like
+    /// every object in the document, permits `x-` Specification Extensions. A 2-space
+    /// child of `components:` bearing any other name (a typo'd `shemas:`, a
+    /// Swagger-2.0 `definitions:` pasted from an old template) is an invalid section:
+    /// every component nested under it is unreachable, because a `$ref` addresses a
+    /// component only through the canonical `#/components/<field>/<Name>` path.
+    /// Filters `components_section_names` by the fixed field set.
+    fn components_with_invalid_section_names(body: &str) -> Vec<String> {
+        fn is_valid_section(name: &str) -> bool {
+            matches!(
+                name,
+                "schemas"
+                    | "responses"
+                    | "parameters"
+                    | "examples"
+                    | "requestBodies"
+                    | "headers"
+                    | "securitySchemes"
+                    | "links"
+                    | "callbacks"
+                    | "pathItems"
+            ) || name.starts_with("x-")
+        }
+        components_section_names(body)
+            .into_iter()
+            .filter(|name| !is_valid_section(name))
+            .collect()
+    }
+
     /// Extract the set of security schemes a spec *defines* under
     /// `components.securitySchemes:`, by their scheme name (e.g. `openId`).
     ///
@@ -5393,6 +5472,117 @@ components:
         assert!(
             total_components >= 50,
             "expected many components across specs, got {total_components}"
+        );
+    }
+
+    #[test]
+    fn every_components_section_is_a_valid_field() {
+        // Contract-harness invariant (OpenAPI structural rule): every direct child
+        // key of a mounted spec's top-level `components:` object MUST be one of the
+        // fixed Components Object fields — `schemas`, `responses`, `parameters`,
+        // `examples`, `requestBodies`, `headers`, `securitySchemes`, `links`,
+        // `callbacks` (plus `pathItems` in 3.1) — or a `x-` Specification Extension.
+        // A section under any other key (a typo'd `shemas:`, a Swagger-2.0
+        // `definitions:` pasted from an old template) is an invalid document: every
+        // component nested under it is unreachable, because a `$ref` addresses a
+        // component only through the canonical `#/components/<field>/<Name>` path.
+        //
+        // This is the section-side complement of `every_component_key_is_a_valid_name`,
+        // which validates the component *keys within* a section but never the section
+        // key itself — and of the ref-resolution tests
+        // (`shared_error_refs_resolve_to_defined_components`,
+        // `local_component_refs_resolve_within_their_own_spec`), which dereference a
+        // spec's `$ref`s: a ref into a mistyped section simply dangles, and the
+        // components under it are still collected by `component_pointers` under the
+        // wrong field, so no sibling notices the section name is wrong. Verified true
+        // across all mounted specs before asserting.
+        for api in APIS {
+            let invalid = components_with_invalid_section_names(api.body);
+            assert!(
+                invalid.is_empty(),
+                "{} spec declares a `components` section that is not a valid OpenAPI 3 \
+                 Components Object field, so its components are unreachable: {:?}",
+                api.name,
+                invalid
+            );
+        }
+    }
+
+    #[test]
+    fn component_section_name_validity_extraction_rules() {
+        // Unit-cover the `components_section_names` / `components_with_invalid_section_
+        // names` extractors so the contract test above can't pass vacuously and their
+        // detection is pinned: only a 2-space direct child of the top-level
+        // `components:` block is treated as a section (in document order); the fixed
+        // Components Object fields and `x-` extensions pass; a typo'd or Swagger-2.0
+        // section is flagged; and no deeper property/field (indent >= 6) — even one
+        // literally named like a section — is ever mistaken for a section key.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    Foo:
+      type: object
+      properties:
+        definitions:
+          type: string
+  definitions:
+    Legacy:
+      type: object
+  shemas:
+    Typo:
+      type: object
+  x-vendor-block:
+    anything: here
+  securitySchemes:
+    openId:
+      type: openIdConnect
+";
+        // Every recognised section, in document order — note the `definitions:`
+        // *property* of `Foo` (indent 8, inside `properties:`) is NOT one.
+        assert_eq!(
+            components_section_names(body),
+            vec![
+                "schemas".to_string(),
+                "definitions".to_string(),
+                "shemas".to_string(),
+                "x-vendor-block".to_string(),
+                "securitySchemes".to_string(),
+            ]
+        );
+        // Flagged: the Swagger-2.0 `definitions` and the typo'd `shemas`. Not
+        // flagged: the standard `schemas`/`securitySchemes` and the `x-` extension.
+        assert_eq!(
+            components_with_invalid_section_names(body),
+            vec!["definitions".to_string(), "shemas".to_string()]
+        );
+
+        // Non-vacuous floor: across every registered spec, every `components` section
+        // is a valid Components Object field (the invariant the contract asserts), and
+        // the corpus actually declares many sections, so a broken extractor can't hide
+        // behind an empty scan.
+        let mut total_sections = 0usize;
+        for api in APIS {
+            assert!(
+                components_with_invalid_section_names(api.body).is_empty(),
+                "{}: every `components` section must be a valid OpenAPI 3 field",
+                api.name
+            );
+            total_sections += components_section_names(api.body).len();
+        }
+        assert!(
+            total_sections >= 100,
+            "expected many components sections across specs, got {total_sections}"
         );
     }
 

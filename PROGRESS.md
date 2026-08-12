@@ -3476,6 +3476,32 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     refs, plus a non-vacuous floor that every spec templates `{apiRoot}`) so the
     contract can't pass vacuously. Verified true across all mounted specs before
     asserting.
+  - a valid-components-section-name contract test (`src/registry.rs`
+    `every_components_section_is_a_valid_field`) asserts every direct child key of a
+    mounted spec's top-level `components:` object is one of the fixed OpenAPI 3
+    Components Object fields (`schemas`/`responses`/`parameters`/`examples`/
+    `requestBodies`/`headers`/`securitySchemes`/`links`/`callbacks`, plus `pathItems`
+    in 3.1) or a `x-` Specification Extension. A section under any other key (a typo'd
+    `shemas:`, a Swagger-2.0 `definitions:` pasted from an old template) is an invalid
+    document: every component nested under it is unreachable, because a `$ref`
+    addresses a component only through the canonical `#/components/<field>/<Name>`
+    path. The **section-side complement** of `every_component_key_is_a_valid_name`,
+    which validates the component *keys within* a section but never the section key
+    itself — and of the ref-resolution tests
+    (`shared_error_refs_resolve_to_defined_components`,
+    `local_component_refs_resolve_within_their_own_spec`): a ref into a mistyped
+    section simply dangles, and the components under it are still collected by
+    `component_pointers` under the wrong field, so no sibling notices the section name
+    is wrong. Two pure helpers (`components_section_names`, scoped exactly like
+    `component_pointers` — a top-level `components:` block → its 2-space direct-child
+    keys, unquoting and skipping inline-scalar/whitespace keys; and
+    `components_with_invalid_section_names`, filtering it by the fixed field set) are
+    unit-covered (`component_section_name_validity_extraction_rules`: a Swagger-2.0
+    `definitions` and typo'd `shemas` flagged in document order, the standard fields +
+    `x-` extension passing, a deeper `definitions` *property* never mistaken for a
+    section, plus a non-vacuous floor of ≥100 sections over all specs) so the contract
+    can't pass vacuously. Verified true (only `schemas`/`responses`/`parameters`/
+    `headers`/`securitySchemes` used across all mounted specs) before asserting.
   Full response-vs-schema validation still TODO (would need a YAML/JSON-Schema
   validator — a dependency trade-off, deferred).
 
@@ -3484,6 +3510,33 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 ## Scan journal
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
+
+- 2026-08-12 — contract-harness: added a **valid-components-section-name** contract
+  test (`src/registry.rs` `every_components_section_is_a_valid_field`) asserting
+  every direct child key of a mounted spec's top-level `components:` object is one of
+  the fixed OpenAPI 3 Components Object fields (`schemas`/`responses`/`parameters`/
+  `examples`/`requestBodies`/`headers`/`securitySchemes`/`links`/`callbacks`, plus
+  `pathItems` in 3.1) or a `x-` Specification Extension. A section under any other key
+  (a typo'd `shemas:`, a Swagger-2.0 `definitions:` pasted from an old template) is an
+  invalid document: every component nested under it is unreachable, because a `$ref`
+  addresses a component only through the canonical `#/components/<field>/<Name>` path.
+  The section-side complement of `every_component_key_is_a_valid_name` (which
+  validates component *keys within* a section but never the section key itself) and of
+  the ref-resolution tests (a ref into a mistyped section dangles, yet the components
+  under it are still collected by `component_pointers` under the wrong field, so no
+  sibling notices). Two pure helpers — `components_section_names` (scoped like
+  `component_pointers`: top-level `components:` → its 2-space direct-child keys,
+  unquoting, skipping inline-scalar/whitespace keys) and
+  `components_with_invalid_section_names` (filters it by the fixed field set) — are
+  unit-covered (`component_section_name_validity_extraction_rules`: Swagger-2.0
+  `definitions` + typo'd `shemas` flagged in document order, standard fields + `x-`
+  extension passing, a deeper `definitions` *property* never mistaken, plus a
+  non-vacuous floor of ≥100 sections over all specs) so the contract can't pass
+  vacuously. Verified true (only `schemas`/`responses`/`parameters`/`headers`/
+  `securitySchemes` used across all mounted specs) before asserting. Tests: +2 (1
+  contract, 1 extractor unit). `cargo test` 2191 green (was 2189); `cargo build
+  --release` warning-clean. No new dep; binary unchanged (`#[cfg(test)]`-only). —
+  binary: 3.7M (3851880 B, +0 B)
 
 - 2026-08-12 — contract-harness: added a **server-url-variable-definition** contract
   test (`src/registry.rs` `every_server_url_variable_is_defined_with_a_default`)
