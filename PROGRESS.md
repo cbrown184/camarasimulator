@@ -3139,6 +3139,29 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     `in: query` cases, plus a non-vacuous floor over all specs) so the contract
     can't pass vacuously. Verified true (all 42 `in: path` parameters across the 19
     path-templating specs) before asserting.
+  - an every-`requestBody`-declares-`content` contract test (`src/registry.rs`
+    `every_request_body_declares_content`) asserts every operation whose
+    `requestBody` is spelled out inline carries a `content` field — the **single
+    REQUIRED field** of an OpenAPI Request Body Object (`description`/`required` are
+    optional), so a `requestBody:` block without it is an invalid document (a
+    Redoc/Swagger/codegen client is handed an operation consuming a body of no
+    declared media type or schema). A `requestBody` given as a `$ref` is exempt (it
+    inherits `content` from the referenced component). The request-side analogue of
+    `every_declared_response_has_a_description` (the required field of a *Response*
+    Object): the CAMARA business operations are almost all POSTs carrying a body, so
+    a `content:` line lost or dedented in the paste that drafts a new operation
+    leaves a bodiless `requestBody` no other contract test inspects (the responses/
+    operationId/path-templating/version/parity/`$ref` tests check the operation's
+    responses, id, path variables, identity, or wiring, never its request body's
+    shape). Only operations that *declare* a `requestBody` are judged (a GET/DELETE
+    with none is fine). A pure `request_bodies_missing_content` extractor (no YAML
+    dep; mirrors `responses_missing_description`'s path-item/method scoping, then
+    scans each 6-space `requestBody:` object for a `content:`/`$ref:` at exactly its
+    own 8-space child indent — so a `content` nested inside a media-type `schema`
+    never satisfies it; an inline `$ref` on the key line is exempt) is unit-covered
+    (`request_bodies_missing_content_extraction_rules`, incl. a non-vacuous floor
+    over all specs) so the contract can't pass vacuously. Verified true (all 95
+    request bodies across the 57 mounted specs carry `content`) before asserting.
   Full response-vs-schema validation still TODO (would need a YAML/JSON-Schema
   validator — a dependency trade-off, deferred).
 
@@ -3148,6 +3171,35 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-12 — contract-harness: added an **every-`requestBody`-declares-`content`**
+  contract test (`src/registry.rs` `every_request_body_declares_content`) asserting
+  every operation whose `requestBody` is spelled out inline carries a `content` field
+  — the single REQUIRED field of an OpenAPI Request Body Object (`description`/
+  `required` optional), so a `requestBody:` block without it is an invalid document (a
+  client is handed an operation consuming a body of no declared media type/schema). A
+  `requestBody` given as a `$ref` is exempt (inherits `content`). This is the
+  request-side analogue of `every_declared_response_has_a_description` (the required
+  field of a *Response* Object); the CAMARA business ops are almost all POSTs with a
+  body, so a `content:` line lost/dedented in the paste that drafts a new one leaves a
+  bodiless `requestBody` no other contract test inspects (responses/operationId/
+  path-templating/version/parity/`$ref` tests check the op's responses, id, path vars,
+  identity, or wiring, never its request body's shape). Only ops that *declare* a
+  requestBody are judged (GET/DELETE with none are fine). One pure helper
+  `request_bodies_missing_content` (no YAML dep; mirrors `responses_missing_description`'s
+  path-item/method scoping, then scans each 6-space `requestBody:` object for a
+  `content:`/`$ref:` at exactly its own 8-space child indent — a `content` nested in a
+  media-type `schema` never satisfies it; an inline `$ref` on the key line is exempt) is
+  unit-covered (`request_bodies_missing_content_extraction_rules`: an 8-space-`content`
+  body passes, a `$ref` body is exempt, a body whose only `content` sits deeper is
+  flagged, a no-body op is skipped, a `components.requestBodies` entry outside `paths:`
+  is never an op's; plus a non-vacuous floor over all specs). Feature-API backlog stays
+  effectively exhausted (remaining `[ ]` leaves are `https://` sink-TLS cases needing a
+  multi-MB rustls client vs the small-binary directive, and open-ended state streams with
+  no live worker), so this advanced the cross-cutting **contract-test harness** item.
+  Verified true (all 95 request bodies across the mounted specs carry `content`) before
+  asserting. Tests: +2 registry (1 contract + 1 helper unit). `cargo test` 2156 green
+  (was 2154), `cargo build --release` warning-clean. No new dep; binary unchanged
+  (`#[cfg(test)]`-only). — binary: 3.7M (3851880 B, +0 B)
 - 2026-08-11 — contract-harness: added a **valid-`responses:`-key** contract test
   (`src/registry.rs` `every_responses_object_key_is_a_valid_status`) asserting every
   key of an operation's `responses:` map is an HTTP status code (`"200"`), an `NXX`

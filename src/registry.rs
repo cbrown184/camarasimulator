@@ -1292,6 +1292,124 @@ mod tests {
         out
     }
 
+    /// The `METHOD /path` label of every operation a spec declares whose
+    /// `requestBody` object carries neither a `content` field nor a `$ref` —
+    /// without a YAML dep.
+    ///
+    /// `content` is the single REQUIRED field of an OpenAPI Request Body Object
+    /// (`description`/`required` are optional), so a `requestBody:` block without
+    /// it is an invalid document: a Redoc/Swagger/codegen client is handed an
+    /// operation that takes a body of no declared media type or schema. A
+    /// `requestBody` supplied as a `$ref` is exempt — it inherits its `content`
+    /// from the referenced component. Only operations that *declare* a
+    /// `requestBody` are inspected (a GET/DELETE with none is not flagged), the
+    /// exact analogue of [`responses_missing_description`], which flags a declared
+    /// response missing `description` without requiring every operation to have
+    /// one. Mirrors [`operations_without_responses`]'s path-item/method scoping (a
+    /// 4-space HTTP-verb key under a 2-space `/…` path item beneath the top-level
+    /// `paths:` block), then within an operation finds the 6-space `requestBody:`
+    /// key and scans its block (lines indented past 6, until a dedent to ≤6) for an
+    /// 8-space `content:` or `$ref:` field. Matching at exactly the request body
+    /// object's own child indent (8) means a `content`/`$ref` nested deeper — a
+    /// `content` under an `application/json` media type's `schema`, say — never
+    /// satisfies it. A `requestBody:` given inline as a `$ref` mapping (`{$ref:
+    /// …}`) or a flow `$ref` on the key line is treated as satisfied.
+    fn request_bodies_missing_content(body: &str) -> Vec<String> {
+        const METHODS: [&str; 8] =
+            ["get", "put", "post", "delete", "patch", "options", "head", "trace"];
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let mut out = Vec::new();
+        let mut in_paths = false;
+        let mut path: Option<String> = None;
+        for (i, line) in lines.iter().enumerate() {
+            let is_top_level_key =
+                !line.is_empty() && !line.starts_with(char::is_whitespace);
+            if is_top_level_key {
+                in_paths = line.trim_end() == "paths:";
+                path = None;
+                continue;
+            }
+            if !in_paths {
+                continue;
+            }
+            if let Some(rest) = line.strip_prefix("  ") {
+                if !rest.starts_with(char::is_whitespace) && rest.starts_with('/') {
+                    let key = rest.trim_end().strip_suffix(':').unwrap_or(rest.trim_end());
+                    path = Some(key.to_string());
+                    continue;
+                }
+            }
+            let Some(current_path) = path.as_deref() else { continue };
+            if indent(line) != 4 {
+                continue;
+            }
+            let key = line.trim_start();
+            let Some(name) = key.strip_suffix(':') else { continue };
+            if name.contains(char::is_whitespace) || !METHODS.contains(&name) {
+                continue;
+            }
+            // Within this operation's block, find the 6-space `requestBody:` key,
+            // then inspect its object for an 8-space `content:` or `$ref:` field.
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                let li = indent(l);
+                if li <= 4 {
+                    break; // dedented out of this operation
+                }
+                if li == 6 {
+                    if let Some((k, v)) = l.trim_start().split_once(':') {
+                        if k == "requestBody" {
+                            // An inline `$ref` value on the key line satisfies it.
+                            let inline = v.trim();
+                            if inline.starts_with("$ref") || inline.starts_with('{') {
+                                j += 1;
+                                continue;
+                            }
+                            // Otherwise scan the request body object's block for an
+                            // 8-space `content:` / `$ref:` field.
+                            let mut satisfied = false;
+                            let mut m = j + 1;
+                            while m < lines.len() {
+                                let e = lines[m];
+                                if e.trim().is_empty() {
+                                    m += 1;
+                                    continue;
+                                }
+                                if indent(e) <= 6 {
+                                    break; // dedented out of this request body
+                                }
+                                if indent(e) == 8 {
+                                    let field =
+                                        e.trim_start().split_once(':').map(|(f, _)| f);
+                                    if field == Some("content") || field == Some("$ref") {
+                                        satisfied = true;
+                                        break;
+                                    }
+                                }
+                                m += 1;
+                            }
+                            if !satisfied {
+                                out.push(format!(
+                                    "{} {}",
+                                    name.to_uppercase(),
+                                    current_path
+                                ));
+                            }
+                        }
+                    }
+                }
+                j += 1;
+            }
+        }
+        out
+    }
+
     #[test]
     fn registry_is_non_empty() {
         // Guards a broken/emptied list: both the catalog and the served specs are
@@ -2892,6 +3010,133 @@ components:
                 responses_with_invalid_status_key(api.body).is_empty(),
                 "{}: every `responses:` key must be a valid status code, `NXX`, \
                  `default`, or `x-` extension",
+                api.name
+            );
+            total_ops += operation_ids(api.body).len();
+        }
+        assert!(total_ops >= 100, "expected many operations across specs, got {total_ops}");
+    }
+
+    #[test]
+    fn every_request_body_declares_content() {
+        // Contract-harness invariant (OpenAPI structural rule): every operation a
+        // mounted spec declares whose `requestBody` object is spelled out inline
+        // MUST carry a `content` field — it is the single REQUIRED field of an
+        // OpenAPI Request Body Object (`description`/`required` are optional), so a
+        // `requestBody:` block without it is an invalid document: a Redoc/Swagger/
+        // codegen client is handed an operation that consumes a body of no declared
+        // media type or schema. A `requestBody` given as a `$ref` is exempt — it
+        // inherits its `content` from the referenced component.
+        //
+        // This is the request-side analogue of the sibling
+        // `every_declared_response_has_a_description` (the required field of a
+        // *Response* Object), and no other contract test sees the break it catches:
+        // the CAMARA business operations are almost all POSTs carrying a request
+        // body, and a new one is routinely drafted by pasting a sibling operation —
+        // so a `content:` line lost or dedented in that paste leaves a bodiless
+        // `requestBody` the responses/operationId/path-templating/version/parity/
+        // `$ref` tests never inspect (they check the operation's responses, id, path
+        // variables, identity, or wiring, never its request body's shape). Only
+        // operations that *declare* a `requestBody` are judged (a GET/DELETE with
+        // none is fine). Verified true (all 95 request bodies across the mounted
+        // specs carry `content`) before asserting.
+        for api in APIS {
+            let missing = request_bodies_missing_content(api.body);
+            assert!(
+                missing.is_empty(),
+                "{} spec has operation(s) whose `requestBody` carries neither a \
+                 `content` (the single REQUIRED field of an OpenAPI Request Body \
+                 Object) nor a `$ref`: {:?}",
+                api.name,
+                missing
+            );
+        }
+    }
+
+    #[test]
+    fn request_bodies_missing_content_extraction_rules() {
+        // Unit-cover the `request_bodies_missing_content` extractor so the contract
+        // test above can't pass vacuously (an extractor returning an empty Vec for
+        // every body would make its assertion meaningless) and its scoping is
+        // pinned: `content`/`$ref` counts only at the Request Body Object's own
+        // child indent (8), so one nested deeper — inside a media type's `schema` —
+        // never satisfies it; a `$ref` request body is exempt; an operation with no
+        // `requestBody` is not flagged; and a `requestBody:` outside `paths:` is not
+        // an operation's.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    post:
+      operationId: postA
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        '200':
+          description: ok
+    put:
+      operationId: putA
+      requestBody:
+        required: true
+        description: a body whose only `content` sits inside the schema below
+        x-note:
+          content:
+            application/json:
+              schema:
+                type: object
+      responses:
+        '200':
+          description: ok
+  /b:
+    post:
+      operationId: postB
+      requestBody:
+        $ref: \"#/components/requestBodies/Shared\"
+      responses:
+        '200':
+          description: ok
+    get:
+      operationId: getB
+      responses:
+        '200':
+          description: ok
+components:
+  requestBodies:
+    Shared:
+      required: true
+      content:
+        application/json:
+          schema:
+            type: object
+";
+        // Flagged: only `PUT /a` — its `requestBody` declares `required`/`description`
+        // but its sole `content:` sits at indent 10 inside an `x-note` block, not at
+        // the request body object's own child indent 8. Not flagged: `POST /a` (an
+        // 8-space `content:`), `POST /b` (a `$ref` request body, exempt), `GET /b`
+        // (no `requestBody`). The `Shared` request body under
+        // `components.requestBodies` is not under `paths:`, so it is never an
+        // operation's request body.
+        assert_eq!(
+            request_bodies_missing_content(body),
+            vec!["PUT /a".to_string()]
+        );
+
+        // Non-vacuous floor: across every registered spec, no declared request body
+        // is missing its `content` (the invariant the contract test asserts), and
+        // the corpus carries many operations, so a broken extractor can't hide
+        // behind an empty scan.
+        let mut total_ops = 0usize;
+        for api in APIS {
+            assert!(
+                request_bodies_missing_content(api.body).is_empty(),
+                "{}: every declared request body must carry `content` or be a `$ref`",
                 api.name
             );
             total_ops += operation_ids(api.body).len();
