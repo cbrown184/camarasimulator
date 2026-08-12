@@ -1625,6 +1625,114 @@ mod tests {
         out
     }
 
+    /// Enumerate every Media Type Object under a `content:` mapping (in a request
+    /// body, a response, or a parameter) that declares no `schema` — nor an inline
+    /// `$ref` — as `"<path> <media-type>"` in document order, without a YAML dep.
+    ///
+    /// Scans within `paths:` only (like [`request_bodies_missing_content`] and
+    /// [`responses_missing_description`]), tracking the current path item for the
+    /// report. Each `content:` key opens a Content mapping; every child key two
+    /// spaces deeper that names a media type — a key containing `/`, e.g.
+    /// `application/json` or `application/problem+json` — opens a Media Type Object,
+    /// which MUST carry a `schema` (or a `$ref` to a shared Schema / Media Type) so a
+    /// Redoc/Swagger/codegen client can bind the payload's shape. Its object block is
+    /// scanned for a `schema:`/`$ref:` field four spaces deeper; none → a finding.
+    ///
+    /// Two disambiguations keep it from mis-flagging:
+    /// - A media type whose value is inline (a flow mapping `{...}` or an inline
+    ///   `$ref`) is treated as satisfied — its shape can't be introspected line-wise.
+    /// - A `content:` key that is actually a schema *property* named `content` (a
+    ///   CloudEvent-style field, say) has no MIME-shaped children (its keys are
+    ///   `type`/`description`/…, none containing `/`), so it contributes nothing.
+    ///
+    /// Only Content mappings reachable via `paths:` are covered; reusable
+    /// `components.requestBodies`/`responses` blocks are out of scope, mirroring the
+    /// sibling helpers.
+    fn media_types_missing_schema(body: &str) -> Vec<String> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let mut out = Vec::new();
+        let mut in_paths = false;
+        let mut path: Option<String> = None;
+        for (i, line) in lines.iter().enumerate() {
+            let is_top_level_key =
+                !line.is_empty() && !line.starts_with(char::is_whitespace);
+            if is_top_level_key {
+                in_paths = line.trim_end() == "paths:";
+                path = None;
+                continue;
+            }
+            if !in_paths {
+                continue;
+            }
+            if let Some(rest) = line.strip_prefix("  ") {
+                if !rest.starts_with(char::is_whitespace) && rest.starts_with('/') {
+                    let key = rest.trim_end().strip_suffix(':').unwrap_or(rest.trim_end());
+                    path = Some(key.to_string());
+                    continue;
+                }
+            }
+            // A `content:` mapping opens here (a key with an empty value).
+            if line.trim() != "content:" {
+                continue;
+            }
+            let Some(current_path) = path.as_deref() else { continue };
+            let c = indent(line);
+            // Walk this Content object's block; each media-type child sits at c+2.
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) <= c {
+                    break; // dedented out of this content object
+                }
+                if indent(l) == c + 2 {
+                    if let Some((k, v)) = l.trim_start().split_once(':') {
+                        // A media type key names a MIME type: it contains a '/'.
+                        if k.contains('/') {
+                            let inline = v.trim();
+                            if inline.starts_with('{') || inline.starts_with("$ref") {
+                                // Inline object / ref — can't introspect; satisfied.
+                                j += 1;
+                                continue;
+                            }
+                            // Scan this media type object for a c+4 `schema:`/`$ref:`.
+                            let mut satisfied = false;
+                            let mut m = j + 1;
+                            while m < lines.len() {
+                                let e = lines[m];
+                                if e.trim().is_empty() {
+                                    m += 1;
+                                    continue;
+                                }
+                                if indent(e) <= c + 2 {
+                                    break; // dedented out of this media type object
+                                }
+                                if indent(e) == c + 4 {
+                                    let field =
+                                        e.trim_start().split_once(':').map(|(f, _)| f);
+                                    if field == Some("schema") || field == Some("$ref") {
+                                        satisfied = true;
+                                        break;
+                                    }
+                                }
+                                m += 1;
+                            }
+                            if !satisfied {
+                                out.push(format!("{current_path} {}", k.trim()));
+                            }
+                        }
+                    }
+                }
+                j += 1;
+            }
+        }
+        out
+    }
+
     #[test]
     fn registry_is_non_empty() {
         // Guards a broken/emptied list: both the catalog and the served specs are
@@ -3700,6 +3808,130 @@ components:
         assert!(
             total_components >= 50,
             "expected many components across specs, got {total_components}"
+        );
+    }
+
+    #[test]
+    fn every_media_type_declares_a_schema() {
+        // Contract-harness invariant (OpenAPI structural rule): every Media Type
+        // Object a mounted spec declares under a `content:` mapping — in a request
+        // body, a response, or a parameter — MUST carry a `schema` (or a `$ref` to
+        // one). A Media Type Object with no schema hands a Redoc/Swagger/codegen
+        // client a payload slot with no shape to bind or generate, so the request or
+        // response body is undocumented at exactly the point a caller needs it.
+        //
+        // This is the finer complement of two sibling tests. `request_bodies_missing
+        // _content` only asserts a request body *has* a `content` object (never that
+        // its media types carry schemas); `every_declared_response_has_a_description`
+        // only asserts a response *describes itself* (never that a body it declares
+        // is typed). A media type block pasted from a sibling that keeps
+        // `application/json:` but loses or dedents its `schema:` line — a routine
+        // copy-paste hazard when vendoring a new endpoint — is invisible to both, and
+        // to the parameter/responses/operationId/version/parity/`$ref` tests (which
+        // check a parameter's identity, a response's key/description, an operation's
+        // id/outcomes, or a spec's identity/wiring, never a payload's type). Verified
+        // true (340 media types, all schema-bearing) across all mounted specs before
+        // asserting.
+        for api in APIS {
+            let untyped = media_types_missing_schema(api.body);
+            assert!(
+                untyped.is_empty(),
+                "{} spec declares media type(s) under `content:` with no `schema` \
+                 (a Media Type Object must type its payload): {:?}",
+                api.name,
+                untyped
+            );
+        }
+    }
+
+    #[test]
+    fn media_types_missing_schema_extraction_rules() {
+        // Unit-cover the `media_types_missing_schema` extractor so the contract test
+        // above can't pass vacuously and its detection is pinned: within `paths:`, a
+        // media type (a `content:` child whose key contains `/`) is flagged only when
+        // its object carries no `schema`/`$ref`; this holds for request-body and
+        // response content alike; an inline `{...}`/`$ref` value is satisfied; and a
+        // schema *property* literally named `content` (whose children are not
+        // MIME-shaped) is never mistaken for a Content mapping.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    post:
+      operationId: postA
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: \"#/components/schemas/Req\"
+          application/merge-patch+json:
+            example: {}
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  content:
+                    type: string
+        '400':
+          description: bad
+          content:
+            application/problem+json:
+              example:
+                code: X
+components:
+  schemas:
+    Req:
+      type: object
+      properties:
+        content:
+          type: string
+";
+        // Flagged, in document order: the request-body `application/merge-patch+json`
+        // (only an `example`, no `schema`) and the `400` response's
+        // `application/problem+json` (likewise). Not flagged: both `application/json`
+        // media types (schema-bearing); the `content` *property* nested inside the
+        // `200` response's inline schema (its child `type:` is not MIME-shaped, so it
+        // opens no media type); and the `content` property under `components.schemas`
+        // (outside `paths:` entirely).
+        assert_eq!(
+            media_types_missing_schema(body),
+            vec![
+                "/a application/merge-patch+json".to_string(),
+                "/a application/problem+json".to_string(),
+            ]
+        );
+
+        // Non-vacuous floor: across every registered spec, every media type carries a
+        // schema (the invariant the contract test asserts), and the corpus actually
+        // declares many media types, so a broken extractor can't hide behind an empty
+        // scan. Count MIME-shaped keys (`<type>/<subtype>:`, never a `/path:` item)
+        // with a detection independent of the extractor.
+        let mut total_media_types = 0usize;
+        for api in APIS {
+            assert!(
+                media_types_missing_schema(api.body).is_empty(),
+                "{}: every media type under `content:` must declare a schema",
+                api.name
+            );
+            for line in api.body.lines() {
+                let t = line.trim();
+                if let Some(key) = t.strip_suffix(':') {
+                    if !key.starts_with('/') && key.contains('/') && !key.contains(' ') {
+                        total_media_types += 1;
+                    }
+                }
+            }
+        }
+        assert!(
+            total_media_types >= 100,
+            "expected many media types across specs, got {total_media_types}"
         );
     }
 }

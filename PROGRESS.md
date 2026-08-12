@@ -3236,6 +3236,27 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     deeper schema *property* is never a component key, plus a non-vacuous floor
     over all specs) so the contract can't pass vacuously. Verified true across all
     mounted specs before asserting.
+  - a media-type-declares-a-schema contract test (`src/registry.rs`
+    `every_media_type_declares_a_schema`) asserts every Media Type Object a mounted
+    spec declares under a `content:` mapping (request body, response, or parameter)
+    carries a `schema` (or a `$ref` to one) — the field a client binds the payload's
+    shape from. A media type with no schema documents *that* a body exists but not
+    *what* it is. The finer complement of `request_bodies_missing_content` (which
+    only checks a request body *has* a `content` object, not that its media types are
+    typed) and `every_declared_response_has_a_description` (which only checks a
+    response describes itself, not that a body it declares is typed): a media-type
+    block pasted from a sibling that keeps `application/json:` but loses/dedents its
+    `schema:` line is invisible to both and to the parameter/response/operationId/
+    version/parity/`$ref` tests. A pure `media_types_missing_schema` extractor (no
+    YAML dep; mirrors `request_bodies_missing_content`'s path-item scoping, anchors
+    on each `content:` mapping and treats a `/`-bearing child key as a media type,
+    then scans its object for a `schema:`/`$ref:` at its own child indent — so a
+    `content` *property* named in a schema, whose children aren't MIME-shaped, opens
+    no media type, and an inline `{...}`/`$ref` value is exempt) is unit-covered
+    (`media_types_missing_schema_extraction_rules`: request- and response-body cases,
+    inline-value + schema-property negatives, plus a non-vacuous floor over all
+    specs) so the contract can't pass vacuously. Verified true (340 media types, all
+    schema-bearing) across all mounted specs before asserting.
   Full response-vs-schema validation still TODO (would need a YAML/JSON-Schema
   validator — a dependency trade-off, deferred).
 
@@ -3245,6 +3266,33 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-12 — contract-harness: added a **media-type-declares-a-schema** contract
+  test (`src/registry.rs` `every_media_type_declares_a_schema`) asserting every Media
+  Type Object a mounted spec declares under a `content:` mapping (request body,
+  response, or parameter) carries a `schema` (or a `$ref` to one) — the field a
+  Redoc/Swagger/codegen client binds a payload's shape from; a media type with no
+  schema documents *that* a body exists but not *what* it is. The finer complement of
+  `request_bodies_missing_content` (checks a request body *has* a `content` object,
+  never that its media types are typed) and `every_declared_response_has_a_description`
+  (checks a response describes itself, never that a body it declares is typed): a
+  media-type block pasted from a sibling that keeps `application/json:` but loses or
+  dedents its `schema:` line is invisible to both and to the parameter/response/
+  operationId/version/parity/`$ref` tests. One pure helper `media_types_missing_schema`
+  (no YAML dep; mirrors `request_bodies_missing_content`'s path-item scoping, anchors
+  on each `content:` mapping, treats a `/`-bearing child key as a media type and scans
+  its object for a `schema:`/`$ref:` at its own child indent — so a `content` schema
+  *property*, whose children aren't MIME-shaped, opens no media type, and an inline
+  `{...}`/`$ref` value is exempt) is unit-covered
+  (`media_types_missing_schema_extraction_rules`: request/response cases, inline-value
+  and schema-property negatives, plus a non-vacuous floor) so the contract can't pass
+  vacuously. Feature-API backlog stays effectively exhausted (remaining `[ ]` leaves
+  are `https://` sink-TLS cases needing a multi-MB rustls client vs the small-binary
+  directive, and open-ended state streams with no live worker), so this advanced the
+  cross-cutting **contract-test harness** item. Verified true (340 media types, all
+  schema-bearing) across all mounted specs before asserting. Tests: +2 registry (1
+  contract + 1 helper unit). `cargo test` 2164 green (was 2162), `cargo build
+  --release` warning-clean. No new dep; binary unchanged (`#[cfg(test)]`-only). —
+  binary: 3.7M (3851880 B, +0 B)
 - 2026-08-12 — contract-harness: added a **valid-component-key** contract test
   (`src/registry.rs` `every_component_key_is_a_valid_name`) asserting every key of a
   `components` sub-object a mounted spec declares matches the OpenAPI 3 Components
