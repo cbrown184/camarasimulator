@@ -1939,6 +1939,132 @@ mod tests {
         out
     }
 
+    /// True when `key` names a syntactically valid media type: a `type/subtype`
+    /// pair (RFC 6838 / RFC 2045), each half a non-empty restricted-name token or
+    /// the `*` range wildcard, with any trailing `;`-introduced parameters ignored.
+    ///
+    /// A restricted-name token is an ASCII-alphanumeric first character followed
+    /// by characters from the registered-name set `[A-Za-z0-9!#$&^_.+-]` — which
+    /// admits the structured-suffix (`+json`), facet (`.`), and vendor (`-`) forms
+    /// CAMARA uses (`application/cloudevents+json`, `application/merge-patch+json`,
+    /// `application/x-www-form-urlencoded`). Exactly one `/` is required: a key with
+    /// none (`applicationjson`), an empty half (`application/`, `/json`), or a
+    /// second slash (`a/b/c`) is rejected.
+    fn is_valid_media_type_key(key: &str) -> bool {
+        // Drop any parameters (`; charset=…`); the media range is what we validate.
+        let base = key.split(';').next().unwrap_or(key).trim();
+        let mut halves = base.split('/');
+        let (Some(ty), Some(sub), None) = (halves.next(), halves.next(), halves.next())
+        else {
+            return false; // not exactly one '/'
+        };
+        let is_token = |t: &str| -> bool {
+            if t == "*" {
+                return true;
+            }
+            let mut chars = t.chars();
+            let Some(first) = chars.next() else {
+                return false; // empty half
+            };
+            first.is_ascii_alphanumeric()
+                && t.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "!#$&^_.+-".contains(c))
+        };
+        is_token(ty) && is_token(sub)
+    }
+
+    /// Enumerate every key a spec declares directly under a **Content Object** (a
+    /// `content:` mapping within `paths:`) that does not name a valid media type —
+    /// reported as `"<path> <key>"` in document order, without a YAML dep.
+    ///
+    /// Under an OpenAPI 3 Content Object every direct child key MUST be a media
+    /// type; a client dispatches request/response bodies by matching that key, so a
+    /// key that is not a well-formed MIME type (a slash dropped in a paste —
+    /// `applicationjson:`; a garbled subtype — `application/:`; a stray second
+    /// slash) names a media type no client selects, silently undocumenting the body.
+    /// This is the complement of [`media_types_missing_schema`], whose scan only
+    /// *acts on* content children that already contain a `/` (so it never sees a
+    /// slash-less malformed key) and only checks that a media type carries a schema
+    /// (never that its key is well-formed); and of the `content:`-media-type sweeps
+    /// generally, none of which validate the key's MIME syntax.
+    ///
+    /// To avoid mistaking a schema **property** literally named `content` (whose
+    /// children are schema fields like `type:`/`properties:`, never MIME-shaped) for
+    /// a Content Object, a `content:` block qualifies only when at least one of its
+    /// direct children is itself MIME-shaped (contains a `/`) — the same signal
+    /// [`media_types_missing_schema`] relies on. Within a qualifying Content Object
+    /// every direct child is then required to be a valid media type. (A hypothetical
+    /// Content Object whose *only* child dropped its slash would not qualify and is
+    /// left to the schema/description sweeps; that trade keeps the property-named-
+    /// `content` false positive out, and is documented here rather than silently.)
+    /// Scoping mirrors [`media_types_missing_schema`]: only within `paths:`, only a
+    /// `c+2` direct child of a `content:` mapping at indent `c`.
+    fn media_types_with_invalid_names(body: &str) -> Vec<String> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let mut out = Vec::new();
+        let mut in_paths = false;
+        let mut path: Option<String> = None;
+        for (i, line) in lines.iter().enumerate() {
+            let is_top_level_key =
+                !line.is_empty() && !line.starts_with(char::is_whitespace);
+            if is_top_level_key {
+                in_paths = line.trim_end() == "paths:";
+                path = None;
+                continue;
+            }
+            if !in_paths {
+                continue;
+            }
+            if let Some(rest) = line.strip_prefix("  ") {
+                if !rest.starts_with(char::is_whitespace) && rest.starts_with('/') {
+                    let key = rest.trim_end().strip_suffix(':').unwrap_or(rest.trim_end());
+                    path = Some(key.to_string());
+                    continue;
+                }
+            }
+            if line.trim() != "content:" {
+                continue;
+            }
+            let Some(current_path) = path.as_deref() else { continue };
+            let c = indent(line);
+            // Collect this block's direct child keys (each media-type slot sits at
+            // c+2), in document order, walking until the block dedents out.
+            let mut children: Vec<&str> = Vec::new();
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) <= c {
+                    break; // dedented out of this content object
+                }
+                if indent(l) == c + 2 {
+                    let trimmed = l.trim_start();
+                    // Skip comments; take a mapping key (the text before its ':').
+                    if !trimmed.starts_with('#') {
+                        if let Some((k, _)) = trimmed.split_once(':') {
+                            children.push(k.trim());
+                        }
+                    }
+                }
+                j += 1;
+            }
+            // Qualify as a Content Object only if a child is MIME-shaped; otherwise
+            // this is a schema property named `content`, not a media-type mapping.
+            if children.iter().any(|k| k.contains('/')) {
+                for k in children {
+                    if !is_valid_media_type_key(k) {
+                        out.push(format!("{current_path} {k}"));
+                    }
+                }
+            }
+        }
+        out
+    }
+
     /// Enumerate every key a spec declares directly under a Path Item Object (a
     /// 4-space child of a 2-space `/…` path item beneath the top-level `paths:`
     /// block) that is neither a valid HTTP method nor a permitted Path Item field —
@@ -4466,6 +4592,150 @@ components:
         assert!(
             total_media_types >= 100,
             "expected many media types across specs, got {total_media_types}"
+        );
+    }
+
+    #[test]
+    fn every_media_type_key_names_a_valid_mime_type() {
+        // Contract-harness invariant (OpenAPI structural rule): every direct child
+        // key of a `content:` Content Object a mounted spec declares MUST be a
+        // well-formed media type (`type/subtype`). A client selects the request- or
+        // response-body slot by matching that key against a MIME type, so a key that
+        // isn't one — a slash dropped in a paste (`applicationjson`), a garbled half
+        // (`application/`), a stray second slash — names a body no client dispatches,
+        // leaving the payload effectively undocumented at that content type.
+        //
+        // This is the key-*validity* complement of the media-type sweeps.
+        // `media_types_missing_schema` (and `every_media_type_declares_a_schema`)
+        // only ever act on a content child that *already* contains a `/`, so a
+        // slash-less malformed key is invisible to them, and even a slash-bearing key
+        // is only checked for a schema, never for MIME syntax. It sits in the same
+        // valid-key series as `every_responses_object_key_is_a_valid_status` and
+        // `every_path_item_key_names_a_valid_operation_or_field`, which pin the shape
+        // of response-status and path-item keys respectively; this pins content keys.
+        // Verified true across all mounted specs before asserting (the corpus uses
+        // only `application/json`, `application/cloudevents+json`,
+        // `application/merge-patch+json`, `application/x-www-form-urlencoded`).
+        for api in APIS {
+            let invalid = media_types_with_invalid_names(api.body);
+            assert!(
+                invalid.is_empty(),
+                "{} spec declares content key(s) that are not valid media types \
+                 (a Content Object's keys must name MIME types): {:?}",
+                api.name,
+                invalid
+            );
+        }
+    }
+
+    #[test]
+    fn media_type_key_validity_extraction_rules() {
+        // Pin the media-type predicate so the contract test above can't drift: the
+        // registered-name forms CAMARA uses pass, and the malformed shapes fail.
+        for ok in [
+            "application/json",
+            "application/cloudevents+json",
+            "application/merge-patch+json",
+            "application/x-www-form-urlencoded",
+            "application/problem+json",
+            "text/plain",
+            "*/*",
+            "application/*",
+            "application/json; charset=utf-8", // parameters ignored
+        ] {
+            assert!(is_valid_media_type_key(ok), "should accept {ok:?}");
+        }
+        for bad in [
+            "applicationjson", // no slash
+            "application/",    // empty subtype
+            "/json",           // empty type
+            "application/json/x", // stray second slash
+            "",                // empty
+            "type",            // schema field, not a media type
+            "properties",      // schema field, not a media type
+        ] {
+            assert!(!is_valid_media_type_key(bad), "should reject {bad:?}");
+        }
+
+        // Unit-cover the `media_types_with_invalid_names` extractor: within `paths:`,
+        // a Content Object's malformed child keys are flagged in document order,
+        // valid ones are not, and a schema *property* literally named `content` (no
+        // MIME-shaped child) is never mistaken for a Content Object.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    post:
+      operationId: postA
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: \"#/components/schemas/Req\"
+          applicationjson:
+            schema:
+              type: string
+      responses:
+        '200':
+          description: ok
+          content:
+            application/merge-patch+json:
+              schema:
+                type: object
+                properties:
+                  content:
+                    type: string
+        '400':
+          description: bad
+          content:
+            application/:
+              schema:
+                type: string
+components:
+  schemas:
+    Req:
+      type: object
+      properties:
+        content:
+          type: string
+";
+        // Flagged, in document order: the request-body `applicationjson` (no slash)
+        // and the `400` response's `application/` (empty subtype). Not flagged: the
+        // two well-formed media types; the `content` *property* nested inside the
+        // `200` response's inline schema (no MIME-shaped child, so it opens no
+        // Content Object); and the `content` property under `components.schemas`
+        // (outside `paths:` entirely).
+        assert_eq!(
+            media_types_with_invalid_names(body),
+            vec![
+                "/a applicationjson".to_string(),
+                "/a application/".to_string(),
+            ]
+        );
+
+        // Non-vacuous floor: across every registered spec, every content key is a
+        // valid media type (the invariant the contract test asserts), and the corpus
+        // actually declares many content objects, so a broken extractor can't hide
+        // behind an empty scan.
+        let mut total_content_objects = 0usize;
+        for api in APIS {
+            assert!(
+                media_types_with_invalid_names(api.body).is_empty(),
+                "{}: every content key must be a valid media type",
+                api.name
+            );
+            for line in api.body.lines() {
+                if line.trim() == "content:" {
+                    total_content_objects += 1;
+                }
+            }
+        }
+        assert!(
+            total_content_objects >= 50,
+            "expected many content objects across specs, got {total_content_objects}"
         );
     }
 

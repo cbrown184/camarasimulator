@@ -3340,6 +3340,35 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     operation left unflagged, plus a non-vacuous floor over all specs) so the
     contract can't pass vacuously. Verified true across all mounted specs before
     asserting.
+  - a valid-media-type-key contract test (`src/registry.rs`
+    `every_media_type_key_names_a_valid_mime_type`) asserts every direct child key
+    of a `content:` Content Object a mounted spec declares is a well-formed media
+    type (`type/subtype`, RFC 6838 restricted-name halves, `*` wildcard, parameters
+    ignored). A client dispatches request/response bodies by matching that key
+    against a MIME type, so a key that isn't one — a slash dropped in a paste
+    (`applicationjson`), a garbled half (`application/`), a stray second slash —
+    names a body no client selects. The **key-validity complement** of the
+    media-type schema sweeps: `media_types_missing_schema` and
+    `every_media_type_declares_a_schema` only ever *act on* a content child that
+    already contains a `/`, so a slash-less malformed key is invisible to them, and
+    a slash-bearing key is only checked for a schema, never for MIME syntax. Sits in
+    the valid-key series beside `every_responses_object_key_is_a_valid_status` and
+    `every_path_item_key_names_a_valid_operation_or_field`. A `content:` block
+    qualifies as a Content Object only when ≥1 direct child is MIME-shaped (the same
+    signal `media_types_missing_schema` relies on), so a schema *property* literally
+    named `content` (children `type:`/`properties:`, no slash) is never mistaken for
+    one — a documented trade that also means a hypothetical Content Object whose
+    *only* child dropped its slash isn't judged here. Two pure helpers
+    (`is_valid_media_type_key` predicate + `media_types_with_invalid_names` extractor,
+    no YAML dep, path-scoped like its sibling) are unit-covered
+    (`media_type_key_validity_extraction_rules`: the four MIME forms CAMARA uses +
+    `*/*`/`application/*`/parameters accepted, no-slash/empty-half/double-slash/schema-
+    field forms rejected, a no-slash and empty-subtype key flagged in document order,
+    a `content`-property never mistaken, plus a non-vacuous floor over all specs) so
+    the contract can't pass vacuously. Verified true across all mounted specs before
+    asserting (the corpus uses only `application/json`,
+    `application/cloudevents+json`, `application/merge-patch+json`,
+    `application/x-www-form-urlencoded`).
   Full response-vs-schema validation still TODO (would need a YAML/JSON-Schema
   validator — a dependency trade-off, deferred).
 
@@ -3349,6 +3378,35 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-12 — contract-harness: added a **valid-media-type-key** contract test
+  (`src/registry.rs` `every_media_type_key_names_a_valid_mime_type`) asserting every
+  direct child key of a `content:` Content Object is a well-formed media type
+  (`type/subtype`, RFC 6838 restricted-name halves, `*` wildcard, `;`-parameters
+  ignored). A client dispatches request/response bodies by matching that key against a
+  MIME type, so a key that isn't one — a slash dropped in a paste (`applicationjson`),
+  a garbled half (`application/`), a stray second slash — names a body no client
+  selects, silently undocumenting it. The **key-validity** complement of the
+  media-type schema sweeps: `media_types_missing_schema` /
+  `every_media_type_declares_a_schema` only ever act on a content child that already
+  contains a `/` (so a slash-less malformed key is invisible to them) and only check
+  for a schema, never MIME syntax; sits in the valid-key series beside the
+  response-status and path-item-key tests. To keep a schema *property* literally named
+  `content` out, a `content:` block qualifies as a Content Object only when ≥1 direct
+  child is MIME-shaped (the same signal the sibling relies on) — documented, along
+  with the trade that a Content Object whose only child dropped its slash isn't judged
+  here. Two pure helpers (`is_valid_media_type_key` predicate +
+  `media_types_with_invalid_names` extractor, no YAML dep, path-scoped like its
+  sibling) are unit-covered (`media_type_key_validity_extraction_rules`: the 4 MIME
+  forms CAMARA uses + `*/*`/`application/*`/parameters accepted, no-slash/empty-half/
+  double-slash/schema-field forms rejected, a no-slash + empty-subtype key flagged in
+  document order, a `content`-property never mistaken, non-vacuous floor ≥50 content
+  objects). Feature-API backlog stays effectively exhausted (remaining `[ ]` leaves
+  are `https://` sink-TLS cases needing a multi-MB rustls client vs the small-binary
+  directive, and open-ended state streams with no live worker), so this advanced the
+  cross-cutting **contract-test harness** item. Verified true across all mounted specs
+  before asserting. Tests: +2 registry (1 contract + 1 helper unit). `cargo test` 2176
+  green (was 2174), `cargo build --release` warning-clean. No new dep; binary unchanged
+  (`#[cfg(test)]`-only). — binary: 3.7M (3851880 B, +0 B)
 - 2026-08-12 — contract-harness: added a **success-response** contract test
   (`src/registry.rs` `every_operation_declares_a_success_response`) asserting every
   operation whose `responses:` object is present documents ≥1 success (`2XX`)
