@@ -1433,6 +1433,72 @@ mod tests {
         out
     }
 
+    /// The `METHOD /path` label of every operation a spec declares that carries no
+    /// `summary` key. Mirrors [`operations_without_operation_id`]'s scoping (a
+    /// 4-space HTTP-verb key under a 2-space `/…` path item beneath the top-level
+    /// `paths:` block) and, like `operationId`, matches a 6-space `summary:` scalar
+    /// key on its key name before the inline-value colon — so a `summary` nested
+    /// deeper (an `examples` entry's `summary`, or a Path Item Object's own 4-space
+    /// `summary`) never satisfies the operation.
+    fn operations_without_summary(body: &str) -> Vec<String> {
+        const METHODS: [&str; 8] =
+            ["get", "put", "post", "delete", "patch", "options", "head", "trace"];
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let mut out = Vec::new();
+        let mut in_paths = false;
+        let mut path: Option<String> = None;
+        for (i, line) in lines.iter().enumerate() {
+            let is_top_level_key =
+                !line.is_empty() && !line.starts_with(char::is_whitespace);
+            if is_top_level_key {
+                in_paths = line.trim_end() == "paths:";
+                path = None;
+                continue;
+            }
+            if !in_paths {
+                continue;
+            }
+            if let Some(rest) = line.strip_prefix("  ") {
+                if !rest.starts_with(char::is_whitespace) && rest.starts_with('/') {
+                    let key = rest.trim_end().strip_suffix(':').unwrap_or(rest.trim_end());
+                    path = Some(key.to_string());
+                    continue;
+                }
+            }
+            let Some(current_path) = path.as_deref() else { continue };
+            if indent(line) != 4 {
+                continue;
+            }
+            let key = line.trim_start();
+            let Some(name) = key.strip_suffix(':') else { continue };
+            if name.contains(char::is_whitespace) || !METHODS.contains(&name) {
+                continue;
+            }
+            // Scan the operation's block for a 6-space `summary:` key (a scalar key
+            // with an inline value, so match on the key name before the colon).
+            let mut has_summary = false;
+            for l in &lines[i + 1..] {
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) <= 4 {
+                    break; // dedented out of this operation
+                }
+                if indent(l) == 6
+                    && l.trim_start().split_once(':').map(|(k, _)| k) == Some("summary")
+                {
+                    has_summary = true;
+                    break;
+                }
+            }
+            if !has_summary {
+                out.push(format!("{} {}", name.to_uppercase(), current_path));
+            }
+        }
+        out
+    }
+
     /// The `METHOD /path <status>` label of every **response entry** a spec
     /// declares whose Response Object carries neither a `description` nor a
     /// `$ref` — without a YAML dep.
@@ -3580,6 +3646,111 @@ components:
             assert!(
                 operations_without_operation_id(api.body).is_empty(),
                 "{}: every operation must declare an `operationId`",
+                api.name
+            );
+            total_ops += operation_ids(api.body).len();
+        }
+        assert!(total_ops >= 100, "expected many operations across specs, got {total_ops}");
+    }
+
+    #[test]
+    fn every_operation_declares_a_summary() {
+        // Contract-harness invariant (CAMARA API Design Guidelines + DESIGN §9):
+        // every operation a mounted spec declares carries a `summary`. OpenAPI marks
+        // it OPTIONAL, but it is the RECOMMENDED short label a Redoc/Swagger client
+        // renders as the operation's name in the navigation sidebar and the codegen
+        // hint many generators prefer over the operationId — every CAMARA operation
+        // populates one. This is the RECOMMENDED-field member of the operation-field
+        // series the sibling tests own: `every_operation_declares_a_responses_object`
+        // pins the single REQUIRED field, `every_operation_declares_an_operation_id`
+        // the CAMARA-mandated canonical name, and this the human-readable label. The
+        // break it catches is a live copy-paste hazard invisible to both: a new
+        // endpoint's spec is drafted from a sibling, so an operation block can be
+        // pasted or edited with its `summary:` line dropped or dedented, leaving an
+        // operation Redoc renders anonymously in its nav. No other contract test sees
+        // it (the responses/operationId tests check the operation's other fields; the
+        // path-templating/version/parity/`$ref` tests check a spec's path variables,
+        // identity, or wiring, never an operation's label). Verified true (every
+        // operation across all mounted specs carries a summary) before asserting.
+        for api in APIS {
+            let missing = operations_without_summary(api.body);
+            assert!(
+                missing.is_empty(),
+                "{} spec has operation(s) with no `summary` (every CAMARA operation \
+                 declares the short label Redoc renders in its nav): {:?}",
+                api.name,
+                missing
+            );
+        }
+    }
+
+    #[test]
+    fn operations_without_summary_extraction_rules() {
+        // Unit-cover the `operations_without_summary` extractor so the contract test
+        // above can't pass vacuously and its scoping/indentation rules are pinned: a
+        // `summary:` is a scalar key with an inline value, credited only to the
+        // operation whose 6-space block it sits in; a Path Item Object's own 4-space
+        // `summary`, and an `examples` entry's deeply-nested `summary`, do not count;
+        // and an HTTP verb used as a schema property name is not an operation.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      summary: Get A
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              examples:
+                ok:
+                  summary: a nested example label, not the operation's
+                  value: {}
+    post:
+      operationId: postA
+      responses:
+        '201':
+          description: created
+  /b/{id}:
+    summary: a path-item summary, not the operation's
+    delete:
+      operationId: deleteB
+      responses:
+        '204':
+          description: gone
+components:
+  schemas:
+    Widget:
+      type: object
+      properties:
+        get:
+          type: string
+        summary:
+          type: string
+";
+        // `GET /a` declares an operation-level summary; its nested example `summary`
+        // is irrelevant. `POST /a` has none. `DELETE /b/{id}` has only the *path
+        // item's* 4-space `summary`, not its own, so it is missing too. The `get`
+        // and `summary` schema *properties* under `components` are not operations.
+        assert_eq!(
+            operations_without_summary(body),
+            vec!["POST /a".to_string(), "DELETE /b/{id}".to_string()]
+        );
+
+        // Non-vacuous floor: across every registered spec, no operation is missing
+        // its `summary` (the invariant the contract test asserts), and the extractor
+        // sees a non-trivial number of operations overall, so a broken extractor
+        // can't hide behind an empty scan.
+        let mut total_ops = 0usize;
+        for api in APIS {
+            assert!(
+                operations_without_summary(api.body).is_empty(),
+                "{}: every operation must declare a `summary`",
                 api.name
             );
             total_ops += operation_ids(api.body).len();

@@ -3369,6 +3369,24 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     asserting (the corpus uses only `application/json`,
     `application/cloudevents+json`, `application/merge-patch+json`,
     `application/x-www-form-urlencoded`).
+  - an every-operation-declares-a-`summary` contract test (`src/registry.rs`
+    `every_operation_declares_a_summary`) asserts every operation a mounted spec
+    declares carries a `summary` — the RECOMMENDED short label a Redoc/Swagger
+    client renders as the operation's name in its navigation sidebar. Completes the
+    operation-field series: `every_operation_declares_a_responses_object` pins the
+    single REQUIRED Operation field, `every_operation_declares_an_operation_id` the
+    CAMARA-mandated canonical name, this the human-readable label. Catches the
+    copy-paste drift where an operation block pasted from a sibling loses/dedents
+    its `summary:` line, leaving an operation Redoc renders anonymously in its nav —
+    invisible to those two (they check the operation's other fields) and to the
+    path-templating/version/parity/`$ref` tests. A pure `operations_without_summary`
+    extractor (no YAML dep; mirrors `operations_without_operation_id`'s
+    path-item/method scoping and matches a 6-space `summary:` scalar key on its key
+    name, so a Path Item Object's own 4-space `summary` and an `examples` entry's
+    deeply-nested `summary` never satisfy the operation) is unit-covered
+    (`operations_without_summary_extraction_rules`, incl. a non-vacuous floor over
+    all specs) so the contract can't pass vacuously. Verified true (all 142
+    operations across the 57 mounted specs carry a summary) before asserting.
   Full response-vs-schema validation still TODO (would need a YAML/JSON-Schema
   validator — a dependency trade-off, deferred).
 
@@ -3378,6 +3396,27 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-12 — contract-harness: added an **every-operation-declares-a-`summary`**
+  contract test (`src/registry.rs` `every_operation_declares_a_summary`) asserting
+  every operation a mounted spec declares carries a `summary` — the RECOMMENDED short
+  label a Redoc/Swagger client renders as the operation's name in its navigation
+  sidebar. Completes the operation-field series: `every_operation_declares_a_responses_
+  object` pins the single REQUIRED field, `every_operation_declares_an_operation_id`
+  the CAMARA-mandated canonical name, and this the human-readable label. Catches the
+  copy-paste drift where an operation block pasted from a sibling loses/dedents its
+  `summary:` line — invisible to those two (they check the operation's other fields)
+  and to the path-templating/version/parity/`$ref` tests. A pure
+  `operations_without_summary` extractor (no YAML dep; mirrors
+  `operations_without_operation_id`'s path-item/method scoping and matches a 6-space
+  `summary:` scalar key on its key name, so a Path Item Object's own 4-space `summary`
+  and an `examples` entry's deeply-nested `summary` never satisfy the operation) is
+  unit-covered (`operations_without_summary_extraction_rules`: operation-level summary
+  credited, missing-summary and path-item-only-summary operations flagged in document
+  order, nested example/schema-property `summary` not mistaken, plus a non-vacuous
+  floor over all specs). All 142 operations across the 57 mounted specs carry one;
+  verified true before asserting. `cargo test` 2180 green (was 2178), `cargo build
+  --release` warning-clean. No new dep; binary unchanged (`#[cfg(test)]`-only). —
+  binary: 3.7M (3851880 B, +0 B)
 - 2026-08-12 — contract-harness: added a **non-empty-`info.description`** contract
   test (`src/registry.rs` `every_spec_declares_a_non_empty_info_description`)
   asserting every mounted vendored spec declares an `info.description` with content.
