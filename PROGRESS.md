@@ -3442,6 +3442,23 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     (`info_license_name_extraction_rules`, incl. a non-vacuous floor that every spec
     declares a non-empty `info.license.name`) so the contract can't pass vacuously.
     Verified true across all mounted specs before asserting.
+  - a distinct-parameter-identity contract test (`src/registry.rs`
+    `every_parameter_array_lists_distinct_name_location_pairs`) asserts no
+    `parameters:` array a mounted spec declares repeats a `(name, location)` pair —
+    the OpenAPI Parameter Object identity rule ("A unique parameter is defined by a
+    combination of a name and location."). Extends the uniqueness family (unique
+    `enum` values, distinct `required` entries) to an operation's parameter list, the
+    third must-be-distinct collection. The key is the *pair*, so the same name in two
+    locations (path vs query) stays legal; scoped to one array so a legitimate
+    path-item→operation override isn't flagged. Catches a parameter block pasted twice
+    into one array — a drift the name/location/schema tests never see (they check a
+    single parameter's three required fields, never two parameters' identity). A pure
+    `parameter_arrays_with_duplicate_name_location` extractor (no YAML dep; walks each
+    block-form `parameters:` array, reads each item's own inline/child `name`+`in`,
+    ignores deeper nested schema subtrees) is unit-covered
+    (`parameter_name_location_duplicate_extraction_rules`, incl. a non-vacuous floor of
+    ≥30 block-form parameter arrays) so the contract can't pass vacuously. Verified
+    true across all mounted specs before asserting.
   Full response-vs-schema validation still TODO (would need a YAML/JSON-Schema
   validator — a dependency trade-off, deferred).
 
@@ -3450,6 +3467,35 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 ## Scan journal
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
+
+- 2026-08-12 — contract-harness: added a **distinct-parameter-identity** contract
+  test (`src/registry.rs` `every_parameter_array_lists_distinct_name_location_pairs`)
+  asserting no `parameters:` array a mounted spec declares repeats a `(name,
+  location)` pair — the OpenAPI Parameter Object identity rule ("A unique parameter is
+  defined by a combination of a name and location."). Extends the active uniqueness
+  family (`every_enum_lists_unique_non_empty_values`, `every_required_array_lists_
+  distinct_entries`) to the third must-be-distinct collection — an operation's
+  parameter list. The key is the *pair*, so the same name in two locations (path vs
+  query) stays legal; the scan is scoped to a single array so a legitimate path-item→
+  operation override isn't flagged, while still catching the real hazard: a parameter
+  block pasted twice into one array (its second entry silently ignored by every codegen
+  client). Invisible to the name/location/schema sibling tests, which check a single
+  parameter's three required fields, never two parameters' identity. Chosen because the
+  feature-API backlog is complete (remaining `[ ]` leaves are the deferred `https://`
+  sink-TLS cases needing a multi-MB rustls client vs the small-binary directive, and
+  open-ended state streams with no live worker), so this advanced the cross-cutting
+  contract-test harness — the same avenue as the last several passes. New pure
+  `parameter_arrays_with_duplicate_name_location` extractor (no YAML dep; anchors on a
+  block-form `parameters:` opener, reads each item's own inline/child-indent `name`+`in`
+  and ignores deeper nested schema subtrees so a property named `in`/`name` isn't
+  mistaken; `$ref` items contribute no pair) is unit-covered
+  (`parameter_name_location_duplicate_extraction_rules`: mixed name-first/in-first dup
+  flagged, same-name-different-location not, cross-array repeat not, nested-schema `in`
+  ignored, `$ref` exempt, plus a non-vacuous floor of ≥30 block-form parameter arrays)
+  so the contract can't pass vacuously. Verified true across all 57 mounted specs before
+  asserting. Tests: +2 (1 contract, 1 extractor unit). `cargo test` 2187 green (was
+  2185); `cargo build --release` warning-clean. No new dep; binary unchanged
+  (`#[cfg(test)]`-only). — binary: 3.7M (3851880 B, +0 B)
 
 - 2026-08-12 — contract-harness: added a **valid-`info.license`** contract test
   (`src/registry.rs` `every_spec_declares_a_valid_info_license`) asserting every

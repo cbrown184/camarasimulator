@@ -1355,6 +1355,106 @@ mod tests {
         out
     }
 
+    /// The `parameters@line N: …` label of every `parameters:` array a spec
+    /// declares that repeats a `(name, location)` pair — the OpenAPI uniqueness
+    /// rule for the Parameter Object ("A unique parameter is defined by a
+    /// combination of a name and location.").
+    ///
+    /// The key is the pair `(name, in)`, so the *same* name in two different
+    /// locations (e.g. `id` in `path` and `id` in `query`) is legitimately
+    /// distinct and never flagged; only a genuine repeat of both fields is. The
+    /// scan is scoped to a single `parameters:` block on purpose: a `(name, in)`
+    /// appearing once at the Path Item level and again at the Operation level is a
+    /// legitimate *override* (the operation's wins), so comparing only within one
+    /// array avoids that false positive while still catching the real hazard — a
+    /// parameter block pasted twice into the same array.
+    ///
+    /// No YAML dep: anchor on a block-form `parameters:` opener (empty value),
+    /// then walk its items. The first `- ` child fixes the item indent; each `- `
+    /// at that indent opens a new parameter object, whose own `name:`/`in:` sit
+    /// inline on the opener or at the item's child indent (opener indent + 2).
+    /// Lines deeper than the child indent are a nested subtree (a `schema:` with
+    /// its own `properties` named `name`/`in`) and are ignored, so only the
+    /// parameter's own two fields are read. A `$ref` item carries neither inline,
+    /// so it contributes no pair and is exempt.
+    fn parameter_arrays_with_duplicate_name_location(body: &str) -> Vec<String> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let unquote = |s: &str| s.trim().trim_matches('"').trim_matches('\'').to_string();
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some(rest) = line.trim_start().strip_prefix("parameters:") else { continue };
+            // Only a block-sequence `parameters:` opener (empty value). Skip a flow
+            // list `parameters: [ … ]` (not used in these specs) and a `parameters`
+            // key that is itself a schema property carrying an inline value.
+            let rest = rest.trim();
+            if !rest.is_empty() && !rest.starts_with('#') {
+                continue;
+            }
+            let params_ind = indent(line);
+            let mut pairs: Vec<(String, String)> = Vec::new();
+            let mut item_ind: Option<usize> = None;
+            let mut cur: Option<(Option<String>, Option<String>)> = None;
+            let flush = |cur: &mut Option<(Option<String>, Option<String>)>,
+                         pairs: &mut Vec<(String, String)>| {
+                if let Some((Some(n), Some(iv))) = cur.take() {
+                    pairs.push((n, iv));
+                }
+            };
+            for l in &lines[i + 1..] {
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li <= params_ind {
+                    break; // dedented out of the parameters block
+                }
+                let bare = l.trim_start();
+                let is_opener = bare.starts_with("- ");
+                if is_opener && item_ind.is_none() {
+                    item_ind = Some(li);
+                }
+                let Some(iind) = item_ind else { continue };
+                if is_opener && li == iind {
+                    flush(&mut cur, &mut pairs);
+                    let after = &bare[2..];
+                    let mut name = None;
+                    let mut inv = None;
+                    if let Some(v) = after.strip_prefix("name:") {
+                        name = Some(unquote(v));
+                    } else if let Some(v) = after.strip_prefix("in:") {
+                        inv = Some(unquote(v));
+                    }
+                    cur = Some((name, inv));
+                } else if li == iind + 2 {
+                    if let Some((ref mut name, ref mut inv)) = cur {
+                        if let Some(v) = bare.strip_prefix("name:") {
+                            *name = Some(unquote(v));
+                        } else if let Some(v) = bare.strip_prefix("in:") {
+                            *inv = Some(unquote(v));
+                        }
+                    }
+                }
+                // Lines deeper than `iind + 2` are a nested subtree — ignored.
+            }
+            flush(&mut cur, &mut pairs);
+            let mut seen: Vec<(String, String)> = Vec::new();
+            for pair in &pairs {
+                if seen.contains(pair) {
+                    out.push(format!(
+                        "parameters@line {}: duplicate parameter (name={}, in={})",
+                        i + 1,
+                        pair.0,
+                        pair.1
+                    ));
+                    break;
+                }
+                seen.push(pair.clone());
+            }
+        }
+        out
+    }
+
     /// Extract the labels (`METHOD /path`) of every operation a spec declares
     /// that is **missing** a `responses:` object — without a YAML dep.
     ///
@@ -6015,6 +6115,137 @@ components:
         assert!(
             array_required >= 100,
             "expected many array-form `required` blocks across specs, got {array_required}"
+        );
+    }
+
+    #[test]
+    fn every_parameter_array_lists_distinct_name_location_pairs() {
+        // Contract-harness invariant (OpenAPI structural rule): within a
+        // `parameters:` array a mounted spec declares, no two parameters MUST share
+        // the same `(name, location)` pair — the Parameter Object's identity rule
+        // ("A unique parameter is defined by a combination of a name and
+        // location."). A repeat is an invalid document whose second entry is
+        // ignored by a Redoc/Swagger/codegen client, so an intended distinct
+        // parameter silently vanishes.
+        //
+        // Extends the active uniqueness family — `every_enum_lists_unique_non_empty_
+        // values` (an enum's values) and `every_required_array_lists_distinct_
+        // entries` (a `required` array's names) — to the third collection whose
+        // members must be distinct: an operation's parameter list. The key is the
+        // *pair*, so the same name in two locations (path vs query) stays legal;
+        // only a genuine both-field repeat — a parameter block pasted twice into
+        // one array — is flagged. No sibling test compares parameters to each
+        // other: the name/location/schema tests check a single parameter's three
+        // required fields, never two parameters' identity. Verified true across all
+        // mounted specs before asserting.
+        for api in APIS {
+            let dups = parameter_arrays_with_duplicate_name_location(api.body);
+            assert!(
+                dups.is_empty(),
+                "{} spec declares a `parameters` array that repeats a (name, \
+                 location) pair (an operation's parameters must be unique by name + \
+                 location): {:?}",
+                api.name,
+                dups
+            );
+        }
+    }
+
+    #[test]
+    fn parameter_name_location_duplicate_extraction_rules() {
+        // Unit-cover the `parameter_arrays_with_duplicate_name_location` extractor so
+        // the contract test above can't pass vacuously and its detection is pinned: a
+        // both-field repeat (name-first and in-first forms mixed) is flagged; the same
+        // name in two different locations is NOT; a name repeated across two separate
+        // `parameters:` arrays is NOT (scoped per array); a `schema` property named
+        // `name`/`in` nested inside a parameter is never mistaken for the parameter's
+        // own fields; and a `$ref` item contributes no pair.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      parameters:
+        - name: x-correlator
+          in: header
+        - in: header
+          name: x-correlator
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: object
+            properties:
+              in:
+                type: string
+        - $ref: '#/components/parameters/Shared'
+      responses:
+        '200':
+          description: ok
+  /b:
+    get:
+      operationId: getB
+      parameters:
+        - name: filter
+          in: query
+        - name: filter
+          in: header
+  /c:
+    get:
+      operationId: getC
+      parameters:
+        - name: page
+          in: query
+components:
+  parameters:
+    Shared:
+      name: shared
+      in: query
+      schema:
+        type: string
+";
+        // Flagged: only GET /a's array — `x-correlator`/`header` appears twice (once
+        // name-first, once in-first). Not flagged inside /a: the `id`/`path` param
+        // (its nested schema property literally named `in` sits deeper than the
+        // item's child indent, so it is ignored) and the `$ref` item (no inline
+        // name/in). Not flagged in /b: `filter` repeats but in different locations
+        // (query vs header) — a distinct pair. Not flagged in /c: single param. The
+        // `filter` name shared across /a…/b lives in separate arrays, so cross-array
+        // repeats are never compared.
+        assert_eq!(
+            parameter_arrays_with_duplicate_name_location(body),
+            vec![
+                "parameters@line 9: duplicate parameter (name=x-correlator, in=header)".to_string(),
+            ]
+        );
+
+        // Non-vacuous floor: across every registered spec no `parameters` array
+        // repeats a (name, location) pair (the invariant the contract test asserts),
+        // and the corpus actually declares many block-form `parameters:` arrays, so a
+        // broken extractor can't hide behind an empty scan.
+        let mut param_arrays = 0usize;
+        for api in APIS {
+            assert!(
+                parameter_arrays_with_duplicate_name_location(api.body).is_empty(),
+                "{}: every `parameters` array must list distinct (name, location) pairs",
+                api.name
+            );
+            for line in api.body.lines() {
+                if line.trim_start().strip_prefix("parameters:").is_some_and(|r| {
+                    let r = r.trim();
+                    r.is_empty() || r.starts_with('#')
+                }) {
+                    param_arrays += 1;
+                }
+            }
+        }
+        assert!(
+            param_arrays >= 30,
+            "expected many block-form `parameters` arrays across specs, got {param_arrays}"
         );
     }
 }
