@@ -3210,6 +3210,32 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     pass, a schema-nested `name` is flagged, a `$ref`/nested-block `in` is never
     anchored, plus a non-vacuous floor over all specs) so the contract can't pass
     vacuously. Verified true across all mounted specs before asserting.
+  - a valid-component-key contract test (`src/registry.rs`
+    `every_component_key_is_a_valid_name`) asserts every key of a `components`
+    sub-object a mounted spec declares — a schema/response/parameter/requestBody/
+    header/securityScheme/example/link/callback name — matches the OpenAPI 3
+    Components Object rule `^[a-zA-Z0-9._-]+$`. A key bearing any other character
+    (a space, `/`, `#`) is an invalid document: it can never be legally `$ref`'d
+    because a JSON Pointer built from it doesn't resolve, so the component is
+    unreachable however correctly its body is defined. The definition-side
+    complement of the ref-resolution tests
+    (`shared_error_refs_resolve_to_defined_components`,
+    `local_component_refs_resolve_within_their_own_spec`): those prove a spec's
+    `$ref`s *point at* a defined component, never that the component definition's
+    own key is a legal name. The break it catches is invisible to every sibling —
+    an invalidly-named component never referenced is not dereferenced at all, and
+    one whose only illegal char is non-whitespace (e.g. `/`) is even collected as
+    "defined" by `component_pointers` so a ref to it resolves there — and no
+    identity/wiring/parameter/response/operationId test inspects a component key's
+    character set. A pure `components_with_invalid_names` extractor (no YAML dep;
+    scopes exactly like `component_pointers` — top-level `components:` → 2-space
+    section → exact-4-space component key — but keeps *every* key including
+    whitespace-bearing ones, unquotes a quoted key, validates the ASCII regex) is
+    unit-covered (`component_name_validity_extraction_rules`: space/slash names
+    flagged across sections in document order, `.`/`-`/`_`/digit names pass, a
+    deeper schema *property* is never a component key, plus a non-vacuous floor
+    over all specs) so the contract can't pass vacuously. Verified true across all
+    mounted specs before asserting.
   Full response-vs-schema validation still TODO (would need a YAML/JSON-Schema
   validator — a dependency trade-off, deferred).
 
@@ -3219,6 +3245,34 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-12 — contract-harness: added a **valid-component-key** contract test
+  (`src/registry.rs` `every_component_key_is_a_valid_name`) asserting every key of a
+  `components` sub-object a mounted spec declares matches the OpenAPI 3 Components
+  Object rule `^[a-zA-Z0-9._-]+$` — a key bearing any other character (a space, `/`,
+  `#`) is an invalid document that can never be legally `$ref`'d (a JSON Pointer built
+  from it doesn't resolve), so the component is unreachable however correctly its body
+  is defined. The definition-side complement of the ref-resolution tests
+  (`shared_error_refs_resolve_to_defined_components`,
+  `local_component_refs_resolve_within_their_own_spec`), which prove a spec's `$ref`s
+  *point at* a defined component but never that a component definition's own key is a
+  legal name — a break invisible to every sibling: a bad-named component never
+  referenced is not dereferenced at all, one whose only illegal char is non-whitespace
+  (e.g. `/`) is even collected as "defined" by `component_pointers` so a ref resolves
+  there, and no identity/wiring/parameter/response/operationId test inspects a key's
+  character set. One pure helper `components_with_invalid_names` (no YAML dep; scopes
+  exactly like `component_pointers` — top-level `components:` → 2-space section →
+  exact-4-space component key — but keeps *every* key incl. whitespace-bearing ones,
+  unquotes a quoted key, validates the ASCII regex) is unit-covered
+  (`component_name_validity_extraction_rules`: space/slash names flagged across sections
+  in document order, `.`/`-`/`_`/digit names pass, a deeper schema *property* is never a
+  component key, plus a non-vacuous floor over all specs) so the contract can't pass
+  vacuously. Feature-API backlog stays effectively exhausted (remaining `[ ]` leaves are
+  `https://` sink-TLS cases needing a multi-MB rustls client vs the small-binary
+  directive, and open-ended state streams with no live worker), so this advanced the
+  cross-cutting **contract-test harness** item. Verified true across all mounted specs
+  before asserting. Tests: +2 registry (1 contract + 1 helper unit). `cargo test` 2162
+  green (was 2160), `cargo build --release` warning-clean. No new dep; binary unchanged
+  (`#[cfg(test)]`-only). — binary: 3.7M (3851880 B, +0 B)
 - 2026-08-12 — contract-harness: added an **every-parameter-declares-a-`name`**
   contract test (`src/registry.rs` `every_parameter_declares_a_name`) asserting every
   parameter a mounted spec declares carries a `name` — the other REQUIRED field of an

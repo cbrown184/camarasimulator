@@ -560,6 +560,77 @@ mod tests {
         out
     }
 
+    /// Extract every component whose *key* — its name under a `components.<section>:`
+    /// map — violates the OpenAPI 3 Components Object key rule, returned as
+    /// `#/components/<section>/<name>` in document order.
+    ///
+    /// OpenAPI 3 requires every key of a `components` sub-object (schemas,
+    /// responses, parameters, examples, requestBodies, headers, securitySchemes,
+    /// links, callbacks) to match `^[a-zA-Z0-9._-]+$`; a key bearing any other
+    /// character (a space, `/`, `#`) is an invalid document that can never be
+    /// legally `$ref`'d, because a JSON Pointer built from it doesn't resolve.
+    /// Scopes exactly like `component_pointers` (top-level `components:` → a
+    /// 2-space section key → an exact-4-space component key), but — unlike it,
+    /// which drops a whitespace-bearing name — keeps *every* component key so an
+    /// invalid one is surfaced rather than silently ignored. Strips a matching
+    /// pair of surrounding quotes before validating (a quoted key's logical name
+    /// still must match).
+    fn components_with_invalid_names(body: &str) -> Vec<String> {
+        fn is_valid_component_name(name: &str) -> bool {
+            !name.is_empty()
+                && name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+        }
+        let mut out = Vec::new();
+        let mut in_components = false;
+        let mut section: Option<String> = None;
+        for line in body.lines() {
+            let is_top_level_key =
+                !line.is_empty() && !line.starts_with(char::is_whitespace);
+            if is_top_level_key {
+                in_components = line.trim_end() == "components:";
+                section = None;
+                continue;
+            }
+            if !in_components {
+                continue;
+            }
+            // A 2-space direct child of `components:` opens a section.
+            if let Some(rest) = line.strip_prefix("  ") {
+                if !rest.starts_with(char::is_whitespace) {
+                    if let Some(name) = rest.trim_end().strip_suffix(':') {
+                        if !name.is_empty() && !name.contains(char::is_whitespace) {
+                            section = Some(name.to_string());
+                        }
+                    }
+                    continue;
+                }
+            }
+            // An exact-4-space child under a section is a component definition key.
+            if let Some(section) = &section {
+                if let Some(rest) = line.strip_prefix("    ") {
+                    if !rest.starts_with(char::is_whitespace) {
+                        if let Some(name) = rest.trim_end().strip_suffix(':') {
+                            let unquoted = name
+                                .strip_prefix('"')
+                                .and_then(|n| n.strip_suffix('"'))
+                                .or_else(|| {
+                                    name.strip_prefix('\'')
+                                        .and_then(|n| n.strip_suffix('\''))
+                                })
+                                .unwrap_or(name);
+                            if !is_valid_component_name(unquoted) {
+                                out.push(format!("#/components/{section}/{name}"));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }
+
     /// Extract the set of security schemes a spec *defines* under
     /// `components.securitySchemes:`, by their scheme name (e.g. `openId`).
     ///
@@ -3525,6 +3596,110 @@ components:
         assert!(
             total_located >= 50,
             "expected many located parameters across specs, got {total_located}"
+        );
+    }
+
+    #[test]
+    fn every_component_key_is_a_valid_name() {
+        // Contract-harness invariant (OpenAPI structural rule): every key of a
+        // `components` sub-object a mounted spec declares — a schema, response,
+        // parameter, requestBody, header, securityScheme, example, link or callback
+        // name — MUST match `^[a-zA-Z0-9._-]+$`. A key bearing any other character
+        // (a space, `/`, `#`) is an invalid document: it can never be legally
+        // `$ref`'d, because a JSON Pointer built from it doesn't resolve, so the
+        // component is unreachable however correctly its body is defined.
+        //
+        // This is the definition-side complement of the ref-resolution tests
+        // (`shared_error_refs_resolve_to_defined_components`,
+        // `local_component_refs_resolve_within_their_own_spec`): those check that a
+        // spec's `$ref`s *point at* a defined component, never that the component
+        // *definition's own key* is a legal name. The break it catches is a
+        // vendoring / copy-paste hazard invisible to every sibling — an
+        // invalidly-named component is unseen by the ref tests (one never referenced
+        // is not dereferenced at all; one whose only illegal char is non-whitespace,
+        // e.g. `/`, is even collected as "defined" by `component_pointers`, so a ref
+        // to it resolves there), and its key's character set is checked by no
+        // identity / wiring / parameter / response / operationId test. Verified true
+        // across all mounted specs before asserting.
+        for api in APIS {
+            let invalid = components_with_invalid_names(api.body);
+            assert!(
+                invalid.is_empty(),
+                "{} spec declares component(s) whose key is not a valid OpenAPI 3 \
+                 component name (`^[A-Za-z0-9._-]+$`), so it can never be `$ref`'d: {:?}",
+                api.name,
+                invalid
+            );
+        }
+    }
+
+    #[test]
+    fn component_name_validity_extraction_rules() {
+        // Unit-cover the `components_with_invalid_names` extractor so the contract
+        // test above can't pass vacuously and its detection is pinned: only an
+        // exact-4-space section-child key (a component name) is judged, in document
+        // order; a space- or slash-bearing name is flagged across sections; the
+        // allowed `.`/`-`/`_`/digits pass; and no deeper property/field of a schema
+        // (at indent >= 6) is ever mistaken for a component key.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    ValidName:
+      type: object
+      properties:
+        bad key:
+          type: string
+    Pet Info:
+      type: object
+    Broken/Name:
+      type: object
+    dotted.name-ok_1:
+      type: object
+  responses:
+    Also Bad:
+      description: x
+";
+        // Flagged in document order: the space-bearing `Pet Info` and slash-bearing
+        // `Broken/Name` under `schemas`, and the space-bearing `Also Bad` under
+        // `responses`. Not flagged: `ValidName`, `dotted.name-ok_1` (`.`/`-`/`_`/
+        // digits all allowed), and — crucially — the `bad key` *property* of
+        // `ValidName` (at indent 8, inside `properties:`, not a component key).
+        assert_eq!(
+            components_with_invalid_names(body),
+            vec![
+                "#/components/schemas/Pet Info".to_string(),
+                "#/components/schemas/Broken/Name".to_string(),
+                "#/components/responses/Also Bad".to_string(),
+            ]
+        );
+
+        // Non-vacuous floor: across every registered spec, every component key is a
+        // valid OpenAPI 3 name (the invariant the contract test asserts), and the
+        // corpus actually declares many components, so a broken extractor can't hide
+        // behind an empty scan.
+        let mut total_components = 0usize;
+        for api in APIS {
+            assert!(
+                components_with_invalid_names(api.body).is_empty(),
+                "{}: every component key must match ^[A-Za-z0-9._-]+$",
+                api.name
+            );
+            total_components += component_pointers(api.body).len();
+        }
+        assert!(
+            total_components >= 50,
+            "expected many components across specs, got {total_components}"
         );
     }
 }
