@@ -919,6 +919,52 @@ mod tests {
         out
     }
 
+    /// Enumerate every parameter `in:` value a spec declares that is **not** a
+    /// valid OpenAPI 3 parameter location, as `"<value>@line N"` (document
+    /// order, 1-based line), without a YAML dep.
+    ///
+    /// `in` is a REQUIRED field of an OpenAPI Parameter Object and its value
+    /// MUST be one of the fixed enum `query` / `header` / `path` / `cookie` —
+    /// where the parameter is carried. Anything else is an invalid document a
+    /// Redoc/Swagger/codegen client rejects (it has no location to bind the
+    /// parameter to). The break it catches is a migration / copy-paste hazard
+    /// the sibling path-parameter tests can't see (they only ever look at
+    /// `in: path`): a Swagger-2.0 parameter location removed in OpenAPI 3 —
+    /// `in: body` / `in: formData` (a request body became `requestBody`, form
+    /// fields became a `content` schema) — pasted from an old template, or a
+    /// location scalar typo'd (`in: quiery`).
+    ///
+    /// Detection mirrors the trusted `in: path` scan in
+    /// [`declared_path_parameter_names`]: a parameter `in` is a mapping key
+    /// (`in: path`) or the first key of a `- ` sequence item (`- in: path`),
+    /// and always carries its value inline. A line is taken as a
+    /// parameter-location declaration when — after trimming leading whitespace
+    /// and an optional `- ` opener — it begins with the exact `in:` key and has
+    /// a non-empty inline scalar. An `in:` with no inline value opens a nested
+    /// block (e.g. a schema property named `in`), which is not a parameter
+    /// location, so it is skipped; `info:` and other keys sharing the `in`
+    /// prefix don't match the exact `in:` key. Quotes around the value are
+    /// stripped before the enum check.
+    fn parameters_with_invalid_location(body: &str) -> Vec<String> {
+        const LOCATIONS: [&str; 4] = ["query", "header", "path", "cookie"];
+        let mut out = Vec::new();
+        for (i, line) in body.lines().enumerate() {
+            let bare = line.trim_start();
+            let key = bare.strip_prefix("- ").unwrap_or(bare);
+            let Some(rest) = key.strip_prefix("in:") else { continue };
+            let v = rest.trim().trim_matches('"').trim_matches('\'');
+            // An `in:` with no inline scalar opens a nested block — not a
+            // parameter location.
+            if v.is_empty() {
+                continue;
+            }
+            if !LOCATIONS.contains(&v) {
+                out.push(format!("{}@line {}", v, i + 1));
+            }
+        }
+        out
+    }
+
     /// Extract the labels (`METHOD /path`) of every operation a spec declares
     /// that is **missing** a `responses:` object — without a YAML dep.
     ///
@@ -3142,5 +3188,124 @@ components:
             total_ops += operation_ids(api.body).len();
         }
         assert!(total_ops >= 100, "expected many operations across specs, got {total_ops}");
+    }
+
+    #[test]
+    fn every_parameter_declares_a_valid_location() {
+        // Contract-harness invariant (OpenAPI structural rule): every parameter a
+        // mounted spec declares MUST carry an `in` whose value is one of the fixed
+        // enum `query` / `header` / `path` / `cookie` — the location the parameter
+        // is passed. Any other value is an invalid document: a Redoc/Swagger/codegen
+        // client has no location to bind the parameter to.
+        //
+        // The break it catches is a migration / copy-paste hazard no sibling test
+        // sees. The parameter tests that exist — `path_template_params_match_declared_
+        // path_parameters` and `every_path_parameter_declares_required_true` — only
+        // ever look at `in: path`, so a parameter whose location is one OpenAPI 3
+        // removed (a Swagger-2.0 `in: body`/`in: formData`, pasted from an old
+        // template) or simply typo'd (`in: quiery`) is invisible to them and to the
+        // responses/operationId/version/parity/`$ref` tests (which check an
+        // operation's outcomes, id, identity, or wiring, never a parameter's
+        // location). Verified true across all mounted specs before asserting.
+        for api in APIS {
+            let invalid = parameters_with_invalid_location(api.body);
+            assert!(
+                invalid.is_empty(),
+                "{} spec declares parameter(s) whose `in` is not a valid OpenAPI 3 \
+                 location (`query`/`header`/`path`/`cookie`): {:?}",
+                api.name,
+                invalid
+            );
+        }
+    }
+
+    #[test]
+    fn parameter_location_extraction_rules() {
+        // Unit-cover the `parameters_with_invalid_location` extractor so the contract
+        // test above can't pass vacuously and its detection is pinned: the four valid
+        // locations pass in both the mapping (`in: path`) and sequence (`- in: query`)
+        // forms and when quoted; the Swagger-2.0 `in: body`/`in: formData` and a
+        // typo'd location are flagged in document order; an `in:` opening a nested
+        // block (a schema property named `in`) is not a location; and `info:` (sharing
+        // the `in` prefix) is never mistaken for one.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      parameters:
+        - name: x-correlator
+          in: header
+        - name: id
+          in: path
+          required: true
+        - name: filter
+          in: \"query\"
+      responses:
+        '200':
+          description: ok
+    post:
+      operationId: postA
+      parameters:
+        - name: legacyBody
+          in: body
+        - name: upload
+          in: formData
+        - name: where
+          in: quiery
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    Widget:
+      type: object
+      properties:
+        in:
+          type: string
+";
+        // Flagged: exactly the three invalid POST /a locations, in document order.
+        // Not flagged: the GET /a `header`/`path`/quoted `query`; the `in:` property
+        // of components.schemas.Widget (it opens a nested `type:` block, so it has no
+        // inline scalar and is not a parameter location); the `info:` key.
+        assert_eq!(
+            parameters_with_invalid_location(body),
+            vec![
+                "body@line 24".to_string(),
+                "formData@line 26".to_string(),
+                "quiery@line 28".to_string()
+            ]
+        );
+
+        // Non-vacuous floor: across every registered spec, no parameter `in` is an
+        // invalid location (the invariant the contract test asserts), and the corpus
+        // actually declares many parameters, so a broken extractor can't hide behind
+        // an empty scan. Count parameter `in:` lines with the same detection the
+        // extractor uses, over the whole corpus.
+        let mut total_params = 0usize;
+        for api in APIS {
+            assert!(
+                parameters_with_invalid_location(api.body).is_empty(),
+                "{}: every parameter `in` must be query/header/path/cookie",
+                api.name
+            );
+            for line in api.body.lines() {
+                let bare = line.trim_start();
+                let key = bare.strip_prefix("- ").unwrap_or(bare);
+                if let Some(rest) = key.strip_prefix("in:") {
+                    if !rest.trim().is_empty() {
+                        total_params += 1;
+                    }
+                }
+            }
+        }
+        assert!(
+            total_params >= 50,
+            "expected many declared parameters across specs, got {total_params}"
+        );
     }
 }

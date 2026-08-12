@@ -3162,6 +3162,28 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     (`request_bodies_missing_content_extraction_rules`, incl. a non-vacuous floor
     over all specs) so the contract can't pass vacuously. Verified true (all 95
     request bodies across the 57 mounted specs carry `content`) before asserting.
+  - a valid-parameter-location contract test (`src/registry.rs`
+    `every_parameter_declares_a_valid_location`) asserts every parameter a mounted
+    spec declares carries an `in` whose value is one of the fixed OpenAPI 3 enum
+    `query`/`header`/`path`/`cookie` — the REQUIRED location field of a Parameter
+    Object; any other value is an invalid document a client/codegen tool can't bind.
+    Catches a migration/copy-paste hazard the two existing parameter tests can't see:
+    `path_template_params_match_declared_path_parameters` and
+    `every_path_parameter_declares_required_true` only ever look at `in: path`, so a
+    Swagger-2.0 location removed in OpenAPI 3 (`in: body`/`in: formData` — bodies
+    became `requestBody`, form fields a `content` schema) pasted from an old template,
+    or a typo'd location (`in: quiery`), is invisible to them and to the
+    responses/operationId/version/parity/`$ref` tests. A pure
+    `parameters_with_invalid_location` extractor (no YAML dep; mirrors the trusted
+    `in: path` scan in `declared_path_parameter_names` — a mapping key `in: path` or a
+    `- in: path` sequence opener, always an inline scalar; an `in:` with no inline
+    value opens a nested block and is skipped, and `info:` doesn't match the exact
+    `in:` key) is unit-covered (`parameter_location_extraction_rules`: the four valid
+    locations in mapping/sequence/quoted forms accepted, `in: body`/`in: formData`/
+    typo flagged in document order, a schema property named `in` and `info:` ignored,
+    plus a non-vacuous floor over all specs) so the contract can't pass vacuously.
+    Verified true (all 131 parameter locations across the mounted specs — 57 header,
+    42 path, 32 query — are valid) before asserting.
   Full response-vs-schema validation still TODO (would need a YAML/JSON-Schema
   validator — a dependency trade-off, deferred).
 
@@ -3171,6 +3193,33 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-12 — contract-harness: added a **valid-parameter-location** contract test
+  (`src/registry.rs` `every_parameter_declares_a_valid_location`) asserting every
+  parameter a mounted spec declares carries an `in` whose value is one of the fixed
+  OpenAPI 3 enum `query`/`header`/`path`/`cookie` — the REQUIRED location field of a
+  Parameter Object; any other value is an invalid document a client/codegen tool can't
+  bind. Feature-API backlog stays effectively exhausted (remaining `[ ]` leaves are
+  `https://` sink-TLS cases needing a multi-MB rustls client vs the small-binary
+  directive, and open-ended state streams with no live worker), so this advanced the
+  cross-cutting **contract-test harness** item. Catches a migration/copy-paste hazard
+  the two existing parameter tests can't see: `path_template_params_match_declared_
+  path_parameters` and `every_path_parameter_declares_required_true` only ever look at
+  `in: path`, so a Swagger-2.0 location removed in OpenAPI 3 (`in: body`/`in: formData`
+  — bodies became `requestBody`, form fields a `content` schema) pasted from an old
+  template, or a typo'd location (`in: quiery`), is invisible to them and to the
+  responses/operationId/version/parity/`$ref` tests. One pure helper
+  `parameters_with_invalid_location` (no YAML dep; mirrors the trusted `in: path` scan
+  in `declared_path_parameter_names` — a mapping key `in: path` or a `- in: path`
+  sequence opener, always an inline scalar; an `in:` with no inline value opens a
+  nested block and is skipped, and `info:` doesn't match the exact `in:` key) is
+  unit-covered (`parameter_location_extraction_rules`: the four valid locations in
+  mapping/sequence/quoted forms accepted, `in: body`/`in: formData`/typo flagged in
+  document order, a schema property named `in` and `info:` ignored, plus a non-vacuous
+  floor over all specs) so the contract can't pass vacuously. Verified true (all 131
+  parameter locations across the mounted specs — 57 header, 42 path, 32 query — are
+  valid) before asserting. Tests: +2 registry (1 contract + 1 helper unit). `cargo
+  test` 2158 green (was 2156), `cargo build --release` warning-clean. No new dep;
+  binary unchanged (`#[cfg(test)]`-only). — binary: 3.7M (3851880 B, +0 B)
 - 2026-08-12 — contract-harness: added an **every-`requestBody`-declares-`content`**
   contract test (`src/registry.rs` `every_request_body_declares_content`) asserting
   every operation whose `requestBody` is spelled out inline carries a `content` field
