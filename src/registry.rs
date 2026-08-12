@@ -5586,4 +5586,266 @@ components:
             "expected many enums across specs, got {total_enums}"
         );
     }
+
+    /// Enumerate every object-schema `required:` array a spec declares that repeats
+    /// a property name — reported as `"[<entries>] (duplicate entry: <name>)"` in
+    /// document order, without a YAML dep.
+    ///
+    /// An OpenAPI / JSON-Schema object schema's `required` array names the
+    /// properties an instance MUST carry, and JSON Schema fixes that the array's
+    /// "elements … MUST be unique". A repeated name is therefore an invalid schema:
+    /// a codegen client that emits one presence constraint per required entry gets a
+    /// redundant, colliding duplicate, and the redundant name usually marks a real
+    /// mistake — a sibling property mistyped or since-renamed, so the schema now
+    /// *requires the same field twice and silently no longer requires the one that
+    /// was meant*. It is a live copy-paste hazard in these specs: a `required:`
+    /// block pasted from a sibling schema and only half-edited keeps a stale name
+    /// that duplicates one already listed — invisible to every sibling test, which
+    /// check a field's identity, a payload's presence, a component key's shape, an
+    /// enum's values, or a `$ref`'s target, never the names a `required` array
+    /// lists.
+    ///
+    /// The scalar `required: true` / `required: false` boolean (a parameter or
+    /// requestBody flag, *not* a schema's property list — already pinned for `path`
+    /// params by `every_path_parameter_declares_required_true`) is skipped: only a
+    /// flow list (`required: [a, b]`, gathered across lines to its `]`) or a block
+    /// list (`required:` then `- name` children at a deeper indent, recognised only
+    /// when its first non-blank child is a `-` item) is read as an array. Names are
+    /// unquoted and a trailing ` #` comment trimmed before comparison. Whole-document
+    /// scan (required arrays live under `components.schemas` as well as inline
+    /// request/response schemas), mirroring the enum / reference tests.
+    fn required_arrays_with_duplicate_entries(body: &str) -> Vec<String> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        // Unquote a scalar and trim a trailing ` # comment`.
+        let norm = |raw: &str| -> String {
+            let mut v = raw.trim();
+            if let Some(pos) = v.find(" #") {
+                v = v[..pos].trim_end();
+            }
+            let v = v.trim();
+            let unq = v
+                .strip_prefix('"')
+                .and_then(|s| s.strip_suffix('"'))
+                .or_else(|| v.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')))
+                .unwrap_or(v);
+            unq.trim().to_string()
+        };
+        // Given one required array's ordered entries, return its duplicate
+        // descriptor, if any. (Empty `required: []` is legal under OpenAPI 3.1 /
+        // JSON-Schema 2020-12, so only the always-invalid duplicate is flagged.)
+        let problem = |values: &[String]| -> Option<String> {
+            let mut seen = std::collections::HashSet::new();
+            for v in values {
+                if !seen.insert(v.as_str()) {
+                    return Some(format!("[{}] (duplicate entry: {})", values.join(", "), v));
+                }
+            }
+            None
+        };
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < lines.len() {
+            let line = lines[i];
+            let t = line.trim_start();
+            if !t.starts_with("required:") {
+                i += 1;
+                continue;
+            }
+            let rest = t["required:".len()..].trim_start();
+            if rest.starts_with('[') {
+                // Flow list — gather across lines until the closing `]`.
+                let mut buf = rest.to_string();
+                let mut k = i;
+                while !buf.contains(']') && k + 1 < lines.len() {
+                    k += 1;
+                    buf.push(' ');
+                    buf.push_str(lines[k].trim());
+                }
+                let open = buf.find('[').map(|x| x + 1).unwrap_or(0);
+                let close = buf.rfind(']').unwrap_or(buf.len());
+                let inner = if close >= open { &buf[open..close] } else { "" };
+                let values: Vec<String> = if inner.trim().is_empty() {
+                    Vec::new()
+                } else {
+                    inner.split(',').map(|s| norm(s)).filter(|v| !v.is_empty()).collect()
+                };
+                if let Some(p) = problem(&values) {
+                    out.push(p);
+                }
+                i = k + 1;
+                continue;
+            }
+            // Block form (empty value or only a trailing comment): collect `- ` items
+            // at a deeper indent — but only when this is genuinely a `required` list
+            // (its first child is a `-` item), never a scalar `required: true`/`false`
+            // (handled below by falling through) or a mapping.
+            if rest.is_empty() || rest.starts_with('#') {
+                let base = indent(line);
+                let mut values: Vec<String> = Vec::new();
+                let mut first_child_seen = false;
+                let mut is_list = false;
+                let mut j = i + 1;
+                while j < lines.len() {
+                    let l = lines[j];
+                    if l.trim().is_empty() || l.trim_start().starts_with('#') {
+                        j += 1;
+                        continue;
+                    }
+                    if indent(l) <= base {
+                        break; // dedented out of the required block
+                    }
+                    let item = l.trim_start();
+                    if !first_child_seen {
+                        first_child_seen = true;
+                        is_list = item.starts_with('-');
+                        if !is_list {
+                            break; // not a required array (e.g. a mapping child)
+                        }
+                    }
+                    if !item.starts_with('-') {
+                        break; // end of the contiguous list
+                    }
+                    let val = norm(item[1..].trim_start());
+                    if !val.is_empty() {
+                        values.push(val);
+                    }
+                    j += 1;
+                }
+                if is_list {
+                    if let Some(p) = problem(&values) {
+                        out.push(p);
+                    }
+                }
+                i = j;
+                continue;
+            }
+            // Scalar `required: true` / `required: false` — a boolean flag, not an
+            // array; nothing to check.
+            i += 1;
+        }
+        out
+    }
+
+    #[test]
+    fn every_required_array_lists_distinct_entries() {
+        // Contract-harness invariant (OpenAPI / JSON-Schema structural rule): every
+        // object-schema `required:` array a mounted spec declares MUST NOT repeat a
+        // property name — JSON Schema fixes that the array's elements are unique. A
+        // duplicate is an invalid schema whose redundant name almost always marks a
+        // real slip: a sibling property mistyped or since-renamed, so the schema now
+        // requires one field twice and silently no longer requires the intended one.
+        //
+        // No sibling test looks *inside* a `required` array: the parameter/response/
+        // media-type/component/enum/ref tests check a field's identity, a payload's
+        // presence, a component key's shape, an enum's values, or a `$ref`'s target —
+        // never the names a `required` array lists. In these scenario-table-heavy
+        // specs a `required:` block pasted from a sibling schema and half-edited is a
+        // live copy-paste hazard. Verified true across all mounted specs before
+        // asserting.
+        for api in APIS {
+            let bad = required_arrays_with_duplicate_entries(api.body);
+            assert!(
+                bad.is_empty(),
+                "{} spec declares `required` array(s) that repeat a property name \
+                 (a schema's required entries must be distinct): {:?}",
+                api.name,
+                bad
+            );
+        }
+    }
+
+    #[test]
+    fn required_array_entries_extraction_rules() {
+        // Unit-cover the `required_arrays_with_duplicate_entries` extractor so the
+        // contract test above can't pass vacuously and its detection is pinned: a
+        // block required array with a repeated entry and a flow required array with a
+        // repeated entry are both flagged (with the offending name), a scalar
+        // `required: true` boolean is never mistaken for an array, and a clean
+        // block/flow required array passes. All in document order.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /x:
+    get:
+      parameters:
+        - name: q
+          in: query
+          required: true
+components:
+  schemas:
+    DupBlock:
+      type: object
+      required:
+        - phoneNumber
+        - amount
+        - phoneNumber
+      properties:
+        phoneNumber:
+          type: string
+    DupFlow:
+      type: object
+      required: [device, device]
+    Clean:
+      type: object
+      required:
+        - a
+        - b
+    CleanFlow:
+      type: object
+      required: [x, y]
+";
+        // Flagged, in document order: `DupBlock` (block array repeats `phoneNumber`)
+        // and `DupFlow` (flow array repeats `device`). Not flagged: the parameter's
+        // scalar `required: true` (a boolean flag, not an array), and `Clean` /
+        // `CleanFlow` (distinct entries).
+        assert_eq!(
+            required_arrays_with_duplicate_entries(body),
+            vec![
+                "[phoneNumber, amount, phoneNumber] (duplicate entry: phoneNumber)".to_string(),
+                "[device, device] (duplicate entry: device)".to_string(),
+            ]
+        );
+
+        // Non-vacuous floor: across every registered spec no `required` array repeats
+        // an entry (the invariant the contract test asserts), and the corpus actually
+        // declares many array-form `required` blocks, so a broken extractor can't hide
+        // behind an empty scan. Count array-form `required:` declarations (flow `[…]`
+        // or a block whose next non-blank line is a `- ` item) independently of the
+        // extractor.
+        let mut array_required = 0usize;
+        for api in APIS {
+            assert!(
+                required_arrays_with_duplicate_entries(api.body).is_empty(),
+                "{}: every `required` array must list distinct entries",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            for (idx, line) in lines.iter().enumerate() {
+                let t = line.trim_start();
+                let Some(rest) = t.strip_prefix("required:") else { continue };
+                let rest = rest.trim_start();
+                if rest.starts_with('[') {
+                    array_required += 1;
+                } else if rest.is_empty() || rest.starts_with('#') {
+                    // Block form: array only if the next non-blank child is a `- ` item.
+                    if lines[idx + 1..]
+                        .iter()
+                        .map(|l| l.trim())
+                        .find(|l| !l.is_empty() && !l.starts_with('#'))
+                        .is_some_and(|l| l.starts_with('-'))
+                    {
+                        array_required += 1;
+                    }
+                }
+            }
+        }
+        assert!(
+            array_required >= 100,
+            "expected many array-form `required` blocks across specs, got {array_required}"
+        );
+    }
 }

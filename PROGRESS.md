@@ -3408,6 +3408,23 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     non-vacuous floors (the fragment defines `camaraOAuth`; ≥ specs−2 auth refs
     dereferenced). Verified true — all 57 mounted specs ref exactly
     `#/components/securitySchemes/camaraOAuth`, which the fragment defines.
+  - a distinct-`required`-entries contract test (`src/registry.rs`
+    `every_required_array_lists_distinct_entries`) asserts no object-schema
+    `required:` array a mounted spec declares repeats a property name — JSON Schema
+    fixes that a `required` array's elements are unique, so a duplicate is an invalid
+    schema whose redundant name almost always marks a real slip (a sibling property
+    mistyped or since-renamed, so the schema now requires one field twice and
+    silently no longer requires the intended one). No sibling test looks *inside* a
+    `required` array — the enum test checks an enum's values, the parameter/response/
+    media-type/component/`$ref` tests check identity/presence/shape/target, never the
+    names a `required` array lists. A pure `required_arrays_with_duplicate_entries`
+    extractor (no YAML dep; mirrors the enum extractor's flow-`[…]`/block-`- item`
+    handling, and skips the scalar `required: true`/`false` parameter/requestBody
+    flag — recognising a block list only when its first child is a `- ` item) is
+    unit-covered (`required_array_entries_extraction_rules`, incl. a non-vacuous
+    floor of ≥100 array-form `required` blocks over all specs) so the contract can't
+    pass vacuously. Verified true (no `required` array repeats an entry across all
+    mounted specs) before asserting.
   Full response-vs-schema validation still TODO (would need a YAML/JSON-Schema
   validator — a dependency trade-off, deferred).
 
@@ -3416,6 +3433,32 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 ## Scan journal
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
+
+- 2026-08-12 — contract-harness: added a **distinct-`required`-entries** contract
+  test (`src/registry.rs` `every_required_array_lists_distinct_entries`) asserting no
+  object-schema `required:` array a mounted spec declares repeats a property name —
+  the JSON-Schema structural rule that a `required` array's elements are unique. A
+  duplicate is an invalid schema whose redundant name almost always marks a real slip
+  (a sibling property mistyped or since-renamed, so the schema requires one field
+  twice and silently no longer requires the intended one) — a live copy-paste hazard
+  in these scenario-table-heavy specs, invisible to every sibling test (the enum test
+  checks an enum's *values*; the parameter/response/media-type/component/`$ref` tests
+  check identity/presence/shape/target — none look *inside* a `required` array). Pure
+  `required_arrays_with_duplicate_entries` extractor (no YAML dep; reuses the enum
+  extractor's flow-`[…]`/block-`- item` parsing, skips the scalar `required: true`/
+  `false` param/requestBody flag by recognising a block list only when its first
+  child is a `- ` item) is unit-covered (`required_array_entries_extraction_rules`,
+  non-vacuous floor ≥100 array-form `required` blocks) so the contract can't pass
+  vacuously. Chosen because the feature-API backlog is complete (remaining `[ ]`
+  leaves are the deferred `https://` sink-TLS cases needing a multi-MB rustls client
+  vs the small-binary directive, and open-ended state streams with no live worker),
+  so this advanced the cross-cutting contract-test harness — the same avenue as the
+  last several passes — closing the gap that no test inspected `required`-array
+  contents (the enum-values test's structural sibling). Verified true first (no
+  `required` array repeats an entry across all mounted specs). Tests: +2 (1 contract,
+  1 extractor unit). `cargo test` 2183 green (was 2181); `cargo build --release`
+  warning-clean. No new dep; binary unchanged (`#[cfg(test)]`-only). — binary: 3.7M
+  (3851880 B, +0 B)
 
 - 2026-08-12 15:47Z — contract-harness: added a **shared-auth-ref-target** contract
   test (`src/registry.rs` `shared_auth_refs_resolve_to_defined_components`) asserting
