@@ -519,6 +519,140 @@ mod tests {
         None
     }
 
+    /// Extract every URL-template variable a spec's `servers[].url` references but
+    /// does **not** back with a Server Variable Object carrying a non-empty
+    /// `default:` — without a YAML dep.
+    ///
+    /// An OpenAPI Server Object's `url` MAY be a template containing `{name}`
+    /// placeholders; each such placeholder MUST be declared in that server's
+    /// `variables:` map, and a Server Variable Object's single REQUIRED field is
+    /// `default` (the value substituted when a client supplies none). CamaraSim's
+    /// every vendored spec templates its base path as `{apiRoot}/…` and declares
+    /// `variables: { apiRoot: { default: http://localhost:8080, … } }`, so the
+    /// served `/{api}/v{n}/docs` "try it" URL and every codegen client can build a
+    /// concrete request URL. A `url` that names an undeclared — or `default`-less —
+    /// variable is an invalid Server Object whose substituted URL keeps a literal
+    /// `{var}`.
+    ///
+    /// Returns the (sorted, de-duplicated) set of offending variable names: those
+    /// named in a `{…}` inside a server `url:` line yet not matched by a
+    /// `variables:` entry declaring a non-empty `default:`. A well-formed spec
+    /// returns an empty vec.
+    ///
+    /// Scoping: only the top-level `servers:` block is scanned (a line == `servers:`
+    /// at column zero, through the next column-zero key), so a deeper `url:`/
+    /// `variables:`/`default:` (a schema example, a description mention) — always
+    /// more indented — is never mistaken for it. References and definitions are
+    /// gathered set-wise across the whole block: CamaraSim specs each declare a
+    /// single server, so a per-server association is unnecessary (documented
+    /// simplification). Only `url:` lines (optionally under a `- ` sequence dash)
+    /// contribute references, so a `{…}` in a sibling `description:` is not read as
+    /// a template variable.
+    fn server_url_undefined_variables(body: &str) -> Vec<String> {
+        let lines: Vec<&str> = body.lines().collect();
+
+        // Isolate the top-level `servers:` block.
+        let start = match lines.iter().position(|l| *l == "servers:") {
+            Some(s) => s,
+            None => return Vec::new(),
+        };
+        let end = lines[start + 1..]
+            .iter()
+            .position(|l| !l.is_empty() && !l.starts_with(char::is_whitespace))
+            .map(|off| start + 1 + off)
+            .unwrap_or(lines.len());
+        let block = &lines[start + 1..end];
+
+        // Template variables named in `{…}` within any server `url:` line.
+        fn brace_vars(s: &str) -> Vec<String> {
+            let mut out = Vec::new();
+            let mut rest = s;
+            while let Some(open) = rest.find('{') {
+                let after = &rest[open + 1..];
+                match after.find('}') {
+                    Some(close) => {
+                        let name = &after[..close];
+                        if !name.is_empty() {
+                            out.push(name.to_string());
+                        }
+                        rest = &after[close + 1..];
+                    }
+                    None => break,
+                }
+            }
+            out
+        }
+        let mut referenced: Vec<String> = Vec::new();
+        for l in block {
+            let t = l.trim_start();
+            let t = t.strip_prefix("- ").unwrap_or(t);
+            if let Some(url) = t.strip_prefix("url:") {
+                referenced.extend(brace_vars(url));
+            }
+        }
+
+        // Variable names declared with a non-empty `default:` under a `variables:`
+        // mapping anywhere in the block.
+        let mut defined: Vec<String> = Vec::new();
+        let mut k = 0;
+        while k < block.len() {
+            if block[k].trim() != "variables:" {
+                k += 1;
+                continue;
+            }
+            let v_indent = block[k].len() - block[k].trim_start().len();
+            let mut child_indent: Option<usize> = None;
+            let mut m = k + 1;
+            while m < block.len() {
+                let l = block[m];
+                if l.trim().is_empty() {
+                    m += 1;
+                    continue;
+                }
+                let indent = l.len() - l.trim_start().len();
+                if indent <= v_indent {
+                    break; // end of the `variables:` mapping
+                }
+                let ci = *child_indent.get_or_insert(indent);
+                if indent == ci {
+                    // A direct-child key of `variables:` is a variable name.
+                    let name = l.trim().split_once(':').map(|(k, _)| k.trim()).unwrap_or("");
+                    // Scan this variable's own sub-block for a non-empty `default:`.
+                    let mut has_default = false;
+                    let mut n = m + 1;
+                    while n < block.len() {
+                        let ll = block[n];
+                        if ll.trim().is_empty() {
+                            n += 1;
+                            continue;
+                        }
+                        let ind = ll.len() - ll.trim_start().len();
+                        if ind <= ci {
+                            break;
+                        }
+                        if let Some(rest) = ll.trim().strip_prefix("default:") {
+                            let val = rest.trim().trim_matches('"').trim_matches('\'');
+                            if !val.is_empty() {
+                                has_default = true;
+                            }
+                        }
+                        n += 1;
+                    }
+                    if has_default && !name.is_empty() {
+                        defined.push(name.to_string());
+                    }
+                }
+                m += 1;
+            }
+            k = m;
+        }
+
+        referenced.retain(|r| !defined.contains(r));
+        referenced.sort();
+        referenced.dedup();
+        referenced
+    }
+
     /// Extract the root `openapi:` version string from an embedded OpenAPI body,
     /// without a YAML dep.
     ///
@@ -2684,6 +2818,40 @@ mod tests {
     }
 
     #[test]
+    fn every_server_url_variable_is_defined_with_a_default() {
+        // Contract-harness invariant (OpenAPI Server Object / Server Variable
+        // Object rule): every `{name}` a spec's `servers[].url` templates MUST be
+        // declared in that server's `variables:` map, and a Server Variable
+        // Object's one REQUIRED field is `default`. CamaraSim's every vendored spec
+        // templates its base path as `{apiRoot}/…` (the exact text pinned to
+        // `{apiRoot}{base_path()}` by `spec_server_url_matches_mounted_base_path`)
+        // and must back `apiRoot` with a `variables.apiRoot.default` — the base URL
+        // the served `/{api}/v{n}/docs` "try it" panel and every codegen client
+        // substitute to build a concrete request URL.
+        //
+        // The break it catches: a spec whose `variables:` block (or its
+        // `apiRoot.default`) was dropped in an edit still parses as a structurally
+        // valid document — so the identity/wiring/scenario tests, which trust the
+        // doc is complete, never see it — yet its substituted request URL renders
+        // with a literal, unresolved `{apiRoot}`. This is invisible to
+        // `spec_server_url_matches_mounted_base_path`, which proves only that the
+        // *url text* names the mount path, never that the template variable it
+        // names resolves. Verified true across every mounted spec before asserting.
+        for api in APIS {
+            let undefined = server_url_undefined_variables(api.body);
+            assert!(
+                undefined.is_empty(),
+                "{} spec's servers url references template variable(s) {:?} not \
+                 declared in `variables:` with a non-empty `default:` — an invalid \
+                 Server Object whose substituted request URL keeps a literal \
+                 `{{var}}`",
+                api.name,
+                undefined
+            );
+        }
+    }
+
+    #[test]
     fn every_vendored_spec_on_disk_is_registered() {
         // Contract-harness invariant (DESIGN §9): the `specs/` tree and the `APIS`
         // registry must agree in BOTH directions. The compile-time `include_str!`
@@ -3530,6 +3698,81 @@ components:
             assert!(
                 matches!(info_license_name(api.body), Some(Some(ref n)) if !n.is_empty()),
                 "{} spec must declare a non-empty info.license.name",
+                api.name
+            );
+        }
+    }
+
+    #[test]
+    fn server_url_undefined_variables_extraction_rules() {
+        // Unit-cover the `server_url_undefined_variables` extractor so the contract
+        // test above can't pass vacuously and its scoping is pinned: a well-formed
+        // server backs its `{apiRoot}` with a `default`; a missing `variables:`
+        // block, a `variables:` entry with no `default:`, and one with a blank
+        // `default:` are each flagged; only the *undefined* variable of several is
+        // flagged; a `{…}` in a sibling `description:` and a deeper (post-block)
+        // `url:` are not read as references.
+
+        // Well-formed (the CAMARA-template form): apiRoot referenced and defined
+        // with a non-empty default → nothing undefined.
+        assert!(server_url_undefined_variables(
+            "openapi: 3.0.3\nservers:\n  - url: \"{apiRoot}/x/v1\"\n    variables:\n      apiRoot:\n        default: http://localhost:8080\n        description: root\npaths: {}\n"
+        )
+        .is_empty());
+
+        // Referenced but no `variables:` block at all → flagged.
+        assert_eq!(
+            server_url_undefined_variables("servers:\n  - url: \"{apiRoot}/x/v1\"\npaths: {}\n"),
+            vec!["apiRoot".to_string()]
+        );
+
+        // Declared but with no `default:` child → flagged (default is REQUIRED).
+        assert_eq!(
+            server_url_undefined_variables(
+                "servers:\n  - url: \"{apiRoot}/x/v1\"\n    variables:\n      apiRoot:\n        description: root\npaths: {}\n"
+            ),
+            vec!["apiRoot".to_string()]
+        );
+
+        // Declared with a blank `default:` → flagged (empty is not a value).
+        assert_eq!(
+            server_url_undefined_variables(
+                "servers:\n  - url: \"{apiRoot}/x/v1\"\n    variables:\n      apiRoot:\n        default: \"\"\npaths: {}\n"
+            ),
+            vec!["apiRoot".to_string()]
+        );
+
+        // Two referenced, one undefined → only the undefined one is flagged.
+        assert_eq!(
+            server_url_undefined_variables(
+                "servers:\n  - url: \"{scheme}://{apiRoot}/x/v1\"\n    variables:\n      apiRoot:\n        default: localhost\npaths: {}\n"
+            ),
+            vec!["scheme".to_string()]
+        );
+
+        // No `servers:` block at all → empty (no false positive).
+        assert!(server_url_undefined_variables("openapi: 3.0.3\npaths: {}\n").is_empty());
+
+        // A `{apiRoot}` mention in a sibling `description:` is not a url reference,
+        // and a `{…}` in a deeper path `description:` after the servers block ends
+        // (a column-zero `paths:` key) is outside the scanned block entirely.
+        assert!(server_url_undefined_variables(
+            "servers:\n  - url: \"{apiRoot}/x/v1\"\n    description: \"root is {unused}\"\n    variables:\n      apiRoot:\n        default: localhost\npaths:\n  /p:\n    get:\n      description: \"see {apiRoot}\"\n"
+        )
+        .is_empty());
+
+        // Non-vacuous floor: every registered spec templates `{apiRoot}` in its
+        // servers url (so the contract asserts over a real, non-empty reference
+        // set) and defines it with a default (so nothing is undefined).
+        for api in APIS {
+            assert!(
+                api.body.contains("url: \"{apiRoot}"),
+                "{} spec must template {{apiRoot}} in its servers url",
+                api.name
+            );
+            assert!(
+                server_url_undefined_variables(api.body).is_empty(),
+                "{} spec has an undefined server url variable",
                 api.name
             );
         }

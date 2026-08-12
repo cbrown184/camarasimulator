@@ -3459,6 +3459,23 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     (`parameter_name_location_duplicate_extraction_rules`, incl. a non-vacuous floor of
     ≥30 block-form parameter arrays) so the contract can't pass vacuously. Verified
     true across all mounted specs before asserting.
+  - a server-url-variable-definition contract test (`src/registry.rs`
+    `every_server_url_variable_is_defined_with_a_default`) asserts every `{name}` a
+    spec's `servers[].url` templates is declared in that server's `variables:` map
+    with a non-empty `default:` — the OpenAPI Server Object rule that a URL-template
+    variable MUST be a Server Variable Object, whose one REQUIRED field is `default`.
+    Complements `spec_server_url_matches_mounted_base_path` (which proves only that
+    the url *text* names the mount path): this proves the `{apiRoot}` it names
+    actually resolves, so the served `/docs` "try it" URL and codegen clients build a
+    concrete URL instead of a literal `{apiRoot}`. A pure
+    `server_url_undefined_variables` extractor (no YAML dep; isolates the top-level
+    `servers:` block, gathers `{…}` refs from `url:` lines and variables backed by a
+    non-empty `default:`, returns the difference) is unit-covered
+    (`server_url_undefined_variables_extraction_rules`: missing/no-default/blank-default
+    flagged, one-of-several, sibling-`description` and post-block `url:` not read as
+    refs, plus a non-vacuous floor that every spec templates `{apiRoot}`) so the
+    contract can't pass vacuously. Verified true across all mounted specs before
+    asserting.
   Full response-vs-schema validation still TODO (would need a YAML/JSON-Schema
   validator — a dependency trade-off, deferred).
 
@@ -3467,6 +3484,33 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 ## Scan journal
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
+
+- 2026-08-12 — contract-harness: added a **server-url-variable-definition** contract
+  test (`src/registry.rs` `every_server_url_variable_is_defined_with_a_default`)
+  asserting every `{name}` a mounted spec's `servers[].url` templates is declared in
+  that server's `variables:` map with a non-empty `default:` — the OpenAPI Server
+  Object rule that a URL-template variable MUST resolve to a Server Variable Object,
+  whose single REQUIRED field is `default`. Every CamaraSim spec templates its base
+  path as `{apiRoot}/…` and backs `apiRoot` with `variables.apiRoot.default:
+  http://localhost:8080`, the base URL the served `/{api}/v{n}/docs` "try it" panel
+  and every codegen client substitute; a spec whose `variables:` block or
+  `apiRoot.default` was dropped in an edit still parses as valid OpenAPI (so the
+  identity/wiring/scenario tests never see it) yet renders a literal, unresolved
+  `{apiRoot}` in its request URL. Complements `spec_server_url_matches_mounted_base_
+  path`, which proves only that the url *text* names the mount path — never that the
+  `{apiRoot}` it names resolves. New pure `server_url_undefined_variables` extractor
+  (no YAML dep; isolates the top-level `servers:` block by column-zero key, gathers
+  `{…}` refs from `url:` lines only — so a `{…}` in a sibling `description:` or a
+  post-block path `description:` isn't read as a ref — and the variables backed by a
+  non-empty `default:`, returning the set difference) is unit-covered
+  (`server_url_undefined_variables_extraction_rules`: well-formed→none;
+  missing-variables/no-default/blank-default each flagged; one-undefined-of-several;
+  no-servers→none; sibling/post-block braces ignored; plus a non-vacuous floor that
+  every mounted spec templates `{apiRoot}` and leaves nothing undefined) so the
+  contract can't pass vacuously. Verified true across all 57 mounted specs before
+  asserting. Tests: +2 (1 contract, 1 extractor unit). `cargo test` 2189 green (was
+  2187); `cargo build --release` warning-clean. No new dep; binary unchanged
+  (`#[cfg(test)]`-only). — binary: 3.7M (3851880 B, +0 B)
 
 - 2026-08-12 — contract-harness: added a **distinct-parameter-identity** contract
   test (`src/registry.rs` `every_parameter_array_lists_distinct_name_location_pairs`)
