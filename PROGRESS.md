@@ -3296,6 +3296,26 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     `content`, a `schema`-less/`content`-less parameter flagged, `$ref` exempt, plus a
     non-vacuous floor over all specs) so the contract can't pass vacuously. Verified
     true across all mounted specs before asserting.
+  - an enum-values contract test (`src/registry.rs`
+    `every_enum_lists_unique_non_empty_values`) asserts every `enum:` a mounted spec
+    declares lists ≥1 value and repeats none — the OpenAPI/JSON-Schema rule that an
+    enum fixes a closed set of *distinct* values. A codegen/validation client emits one
+    variant per value and admits only those, so a duplicate value makes two variants
+    collide (the second silently shadows the first) and an empty list admits nothing
+    (no payload can validate). No sibling test looks *inside* an enum (they check a
+    field's identity, a payload's presence, a component key's shape, or a `$ref`'s
+    target — never an enum's values), so a status/network-type/credential/event-type
+    value block pasted from a sibling and half-edited — a stale value left in place, or
+    an in-progress `[]` — is invisible to all of them. A pure
+    `enums_with_no_values_or_duplicates` extractor (no YAML dep; whole-document scan
+    handling both the flow `enum: [A, B]` and block `enum:`/`- A` forms, treating a
+    block `enum:` as a list only when its first child is a `-` item so a schema property
+    literally named `enum` is never mistaken for one, unquoting values and trimming
+    trailing comments) is unit-covered (`enum_values_extraction_rules`: a block dup, a
+    flow dup, an `enum: []`, clean block/flow enums, and a property named `enum`
+    classified in document order, plus a non-vacuous floor over all specs) so the
+    contract can't pass vacuously. Verified true (215 enum declarations, all non-empty
+    and duplicate-free) across all mounted specs before asserting.
   Full response-vs-schema validation still TODO (would need a YAML/JSON-Schema
   validator — a dependency trade-off, deferred).
 
@@ -3305,6 +3325,33 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-12 — contract-harness: added an **enum-values** contract test
+  (`src/registry.rs` `every_enum_lists_unique_non_empty_values`) asserting every
+  `enum:` a mounted spec declares lists at least one value and repeats none — the
+  OpenAPI/JSON-Schema rule that an enum fixes a closed set of *distinct* values. A
+  codegen/validation client emits one variant per value and admits only those, so a
+  duplicate value makes two variants collide (the second silently shadows the first)
+  and an empty list admits nothing (no payload can validate). No sibling contract test
+  looks *inside* an enum — the parameter/response/media-type/component/`$ref` tests
+  check a field's identity, a payload's presence, a component key's shape, or a ref's
+  target, never the values an enum enumerates — so in these scenario-table-heavy specs
+  a status/network-type/credential/event-type value block pasted from a sibling and
+  half-edited (a stale value left in place, or an in-progress `[]`) is invisible to all
+  of them. One pure helper `enums_with_no_values_or_duplicates` (no YAML dep;
+  whole-document scan handling both the flow `enum: [A, B]` and block `enum:`/`- A`
+  forms, treating a block `enum:` as a list only when its first child is a `-` item so a
+  schema property literally named `enum` is never mistaken for one, unquoting values and
+  trimming trailing comments) is unit-covered (`enum_values_extraction_rules`: a block
+  dup, a flow dup, an `enum: []`, clean block/flow enums, and a property named `enum`
+  classified in document order, plus a non-vacuous floor over all specs) so the contract
+  can't pass vacuously. Feature-API backlog stays effectively exhausted (remaining `[ ]`
+  leaves are `https://` sink-TLS cases needing a multi-MB rustls client vs the
+  small-binary directive, and open-ended state streams with no live worker), so this
+  advanced the cross-cutting **contract-test harness** item. Verified true (215 enum
+  declarations across the mounted specs, all non-empty and duplicate-free) before
+  asserting. Tests: +2 registry (1 contract + 1 helper unit). `cargo test` 2172 green
+  (was 2170), `cargo build --release` warning-clean. No new dep; binary unchanged
+  (`#[cfg(test)]`-only). — binary: 3.7M (3851880 B, +0 B)
 - 2026-08-12 — contract-harness: added a **parameter-value-type** contract test
   (`src/registry.rs` `every_parameter_declares_a_schema_or_content`) asserting every
   parameter a mounted spec declares carries exactly one of `schema` or `content` — the

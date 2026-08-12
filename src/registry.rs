@@ -4413,4 +4413,252 @@ responses:
             "expected many $refs across specs, got {total_refs}"
         );
     }
+
+    /// Enumerate every `enum:` a spec declares whose value list is **empty** or
+    /// contains a **duplicate** value — reported as `"[<values>] (<reason>)"` in
+    /// document order, without a YAML dep.
+    ///
+    /// An OpenAPI / JSON-Schema `enum` fixes the closed set of values a field may
+    /// take: a codegen client emits one variant per value and a validator admits
+    /// only those, so a **duplicate** value makes two variants collide (the second
+    /// silently shadows the first) and an **empty** list admits nothing — no payload
+    /// can ever satisfy it. Both are copy-paste hazards in these scenario-table-heavy
+    /// specs (a status/enum block pasted from a sibling and half-edited keeps a stale
+    /// value, or is left `[]`), invisible to every sibling test — which check a
+    /// field's identity, a payload's presence, a component key's shape, or a `$ref`'s
+    /// target, never the values an enum enumerates.
+    ///
+    /// Both YAML forms are handled: a flow list (`enum: [A, B]`, gathered across
+    /// lines to its `]`) and a block list (`enum:` then `- A` children at a deeper
+    /// indent). To avoid mistaking a schema *property literally named* `enum` (whose
+    /// value is a mapping like `type: string`, not a list) for an enum, a block
+    /// `enum:` is treated as a list only when its first non-blank child is a `-`
+    /// item; anything else is skipped. Values are unquoted and a trailing ` #`
+    /// comment trimmed before comparison. Whole-document scan (enums live under
+    /// `components.schemas` as well as inline), mirroring the reference tests.
+    fn enums_with_no_values_or_duplicates(body: &str) -> Vec<String> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        // Unquote a scalar and trim a trailing ` # comment`.
+        let norm = |raw: &str| -> String {
+            let mut v = raw.trim();
+            if let Some(pos) = v.find(" #") {
+                v = v[..pos].trim_end();
+            }
+            let v = v.trim();
+            let unq = v
+                .strip_prefix('"')
+                .and_then(|s| s.strip_suffix('"'))
+                .or_else(|| v.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')))
+                .unwrap_or(v);
+            unq.trim().to_string()
+        };
+        // Given one enum's ordered values, return its problem descriptor, if any.
+        let problem = |values: &[String]| -> Option<String> {
+            if values.is_empty() {
+                return Some("[] (empty enum)".to_string());
+            }
+            let mut seen = std::collections::HashSet::new();
+            for v in values {
+                if !seen.insert(v.as_str()) {
+                    return Some(format!(
+                        "[{}] (duplicate value: {})",
+                        values.join(", "),
+                        v
+                    ));
+                }
+            }
+            None
+        };
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < lines.len() {
+            let line = lines[i];
+            let t = line.trim_start();
+            if !t.starts_with("enum:") {
+                i += 1;
+                continue;
+            }
+            let rest = t["enum:".len()..].trim_start();
+            if rest.starts_with('[') {
+                // Flow list — gather across lines until the closing `]`.
+                let mut buf = rest.to_string();
+                let mut k = i;
+                while !buf.contains(']') && k + 1 < lines.len() {
+                    k += 1;
+                    buf.push(' ');
+                    buf.push_str(lines[k].trim());
+                }
+                let open = buf.find('[').map(|x| x + 1).unwrap_or(0);
+                let close = buf.rfind(']').unwrap_or(buf.len());
+                let inner = if close >= open { &buf[open..close] } else { "" };
+                let values: Vec<String> = if inner.trim().is_empty() {
+                    Vec::new()
+                } else {
+                    inner.split(',').map(|s| norm(s)).filter(|v| !v.is_empty()).collect()
+                };
+                if let Some(p) = problem(&values) {
+                    out.push(p);
+                }
+                i = k + 1;
+                continue;
+            }
+            // Block form (empty value or only a trailing comment): collect `- ` items
+            // at a deeper indent — but only when this is genuinely an enum list (its
+            // first child is a `-` item, not a property named `enum` whose value is a
+            // mapping).
+            if rest.is_empty() || rest.starts_with('#') {
+                let base = indent(line);
+                let mut values: Vec<String> = Vec::new();
+                let mut first_child_seen = false;
+                let mut is_list = false;
+                let mut j = i + 1;
+                while j < lines.len() {
+                    let l = lines[j];
+                    if l.trim().is_empty() || l.trim_start().starts_with('#') {
+                        j += 1;
+                        continue;
+                    }
+                    if indent(l) <= base {
+                        break; // dedented out of the enum block
+                    }
+                    let item = l.trim_start();
+                    if !first_child_seen {
+                        first_child_seen = true;
+                        is_list = item.starts_with('-');
+                        if !is_list {
+                            break; // a property named `enum`, not an enum list
+                        }
+                    }
+                    if !item.starts_with('-') {
+                        break; // end of the contiguous list
+                    }
+                    let val = norm(item[1..].trim_start());
+                    if !val.is_empty() {
+                        values.push(val);
+                    }
+                    j += 1;
+                }
+                if is_list {
+                    if let Some(p) = problem(&values) {
+                        out.push(p);
+                    }
+                }
+                i = j;
+                continue;
+            }
+            i += 1;
+        }
+        out
+    }
+
+    #[test]
+    fn every_enum_lists_unique_non_empty_values() {
+        // Contract-harness invariant (OpenAPI / JSON-Schema structural rule): every
+        // `enum:` a mounted spec declares MUST list at least one value and MUST NOT
+        // repeat a value. An `enum` fixes the closed set a field may take — a
+        // codegen/validation client emits one variant per value and admits only those
+        // — so a duplicate value makes two variants collide (the second silently
+        // shadows the first) and an empty list admits nothing, so no payload can ever
+        // validate against it.
+        //
+        // No sibling test looks *inside* an enum: the parameter/response/media-type/
+        // component/ref tests check a field's identity, a payload's presence, a
+        // component key's shape, or a `$ref`'s target — never the values an enum
+        // enumerates. In these scenario-table-heavy specs (status enums, network-type
+        // enums, credential-type enums, event-type enums) a value block pasted from a
+        // sibling and half-edited is a live copy-paste hazard: a stale value left in
+        // place duplicates one already listed, or an in-progress block is left `[]`.
+        // Verified true across all mounted specs before asserting.
+        for api in APIS {
+            let bad = enums_with_no_values_or_duplicates(api.body);
+            assert!(
+                bad.is_empty(),
+                "{} spec declares enum(s) that are empty or list a duplicate value \
+                 (an enum must enumerate a non-empty set of distinct values): {:?}",
+                api.name,
+                bad
+            );
+        }
+    }
+
+    #[test]
+    fn enum_values_extraction_rules() {
+        // Unit-cover the `enums_with_no_values_or_duplicates` extractor so the
+        // contract test above can't pass vacuously and its detection is pinned: a
+        // block enum with a repeated item and a flow enum with a repeated value are
+        // both flagged (with the offending value), an `enum: []` is flagged empty, a
+        // clean block/flow enum passes, and a schema *property literally named* `enum`
+        // (whose value is a mapping, not a list) is never mistaken for an enum. All in
+        // document order.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+components:
+  schemas:
+    NetType:
+      type: string
+      enum:
+        - 2G
+        - 3G
+        - 3G
+    Credential:
+      type: string
+      enum: [PLAIN, ACCESSTOKEN, PLAIN]
+    EmptyOne:
+      type: string
+      enum: []
+    Clean:
+      type: string
+      enum:
+        - A
+        - B
+    Media:
+      type: string
+      enum: [\"application/json\"]
+    PropNamedEnum:
+      type: object
+      properties:
+        enum:
+          type: string
+";
+        // Flagged, in document order: `NetType` (block enum repeats `3G`),
+        // `Credential` (flow enum repeats `PLAIN`), and `EmptyOne` (`enum: []`). Not
+        // flagged: `Clean`/`Media` (distinct non-empty values), and the `enum`
+        // *property* under `PropNamedEnum.properties` (its value is a mapping, not a
+        // list, so it opens no enum).
+        assert_eq!(
+            enums_with_no_values_or_duplicates(body),
+            vec![
+                "[2G, 3G, 3G] (duplicate value: 3G)".to_string(),
+                "[PLAIN, ACCESSTOKEN, PLAIN] (duplicate value: PLAIN)".to_string(),
+                "[] (empty enum)".to_string(),
+            ]
+        );
+
+        // Non-vacuous floor: across every registered spec no enum is empty or has a
+        // duplicate value (the invariant the contract test asserts), and the corpus
+        // actually declares many enums, so a broken extractor can't hide behind an
+        // empty scan. Count `enum:` declarations with a detection independent of the
+        // extractor.
+        let mut total_enums = 0usize;
+        for api in APIS {
+            assert!(
+                enums_with_no_values_or_duplicates(api.body).is_empty(),
+                "{}: every enum must list a non-empty set of distinct values",
+                api.name
+            );
+            for line in api.body.lines() {
+                if line.trim_start().starts_with("enum:") {
+                    total_enums += 1;
+                }
+            }
+        }
+        assert!(
+            total_enums >= 100,
+            "expected many enums across specs, got {total_enums}"
+        );
+    }
 }
