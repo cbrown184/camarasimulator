@@ -1608,6 +1608,112 @@ mod tests {
     }
 
     /// The `METHOD /path` label of every operation a spec declares whose
+    /// `responses:` object is present but documents no **success** (`2XX`)
+    /// outcome — without a YAML dep.
+    ///
+    /// Every CAMARA business operation returns a concrete happy-path `2XX`
+    /// (`200`/`201`/`202`/`204`); that entry is the return type a Redoc/Swagger/
+    /// codegen client derives, so an operation declaring only its error branches
+    /// (the shared `errors.yaml` `4XX`/`5XX` `$ref`s) is an incomplete contract. No
+    /// sibling responses test sees the loss: `operations_without_responses` pins the
+    /// *presence* of the `responses:` object, `responses_with_invalid_status_key`
+    /// that each remaining key is a *well-formed* status, and
+    /// `responses_missing_description` that each inline response *describes itself*
+    /// (the `$ref`'d error responses are exempt) — none require a success outcome
+    /// among them.
+    ///
+    /// Mirrors [`responses_with_invalid_status_key`]'s scoping exactly (a 4-space
+    /// HTTP-verb key under a 2-space `/…` path item beneath the top-level `paths:`
+    /// block, then the 8-space keys under that operation's 6-space `responses:`),
+    /// but instead of judging each key it asks, per operation, whether *any* key is
+    /// a success: a 3-char token beginning `2` whose other two chars are each a
+    /// digit or the `X` wildcard — i.e. an explicit `2XX`-range code (`200`..`299`)
+    /// or the `2XX` range itself. Only an operation that *declares* a `responses:`
+    /// block is judged (one missing the object entirely is
+    /// [`operations_without_responses`]' concern), so the two never double-flag the
+    /// same operation.
+    fn operations_without_success_response(body: &str) -> Vec<String> {
+        const METHODS: [&str; 8] =
+            ["get", "put", "post", "delete", "patch", "options", "head", "trace"];
+        let is_success_key = |key: &str| -> bool {
+            key.len() == 3
+                && key.as_bytes()[0] == b'2'
+                && key.as_bytes()[1..].iter().all(|&c| c.is_ascii_digit() || c == b'X')
+        };
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let mut out = Vec::new();
+        let mut in_paths = false;
+        let mut path: Option<String> = None;
+        for (i, line) in lines.iter().enumerate() {
+            let is_top_level_key =
+                !line.is_empty() && !line.starts_with(char::is_whitespace);
+            if is_top_level_key {
+                in_paths = line.trim_end() == "paths:";
+                path = None;
+                continue;
+            }
+            if !in_paths {
+                continue;
+            }
+            if let Some(rest) = line.strip_prefix("  ") {
+                if !rest.starts_with(char::is_whitespace) && rest.starts_with('/') {
+                    let key = rest.trim_end().strip_suffix(':').unwrap_or(rest.trim_end());
+                    path = Some(key.to_string());
+                    continue;
+                }
+            }
+            let Some(current_path) = path.as_deref() else { continue };
+            if indent(line) != 4 {
+                continue;
+            }
+            let key = line.trim_start();
+            let Some(name) = key.strip_suffix(':') else { continue };
+            if name.contains(char::is_whitespace) || !METHODS.contains(&name) {
+                continue;
+            }
+            // Within this operation's block, find the 6-space `responses:` key, then
+            // check each 8-space response-entry key under it for a success code.
+            let mut in_responses = false;
+            let mut saw_responses = false;
+            let mut saw_success = false;
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                let li = indent(l);
+                if li <= 4 {
+                    break; // dedented out of this operation
+                }
+                if li == 6 {
+                    in_responses = l.trim_start().strip_suffix(':') == Some("responses");
+                    if in_responses {
+                        saw_responses = true;
+                    }
+                    j += 1;
+                    continue;
+                }
+                if in_responses && li == 8 {
+                    if let Some(k) = l.trim_start().strip_suffix(':') {
+                        let status = k.trim_matches(|c| c == '"' || c == '\'');
+                        if is_success_key(status) {
+                            saw_success = true;
+                        }
+                    }
+                }
+                j += 1;
+            }
+            if saw_responses && !saw_success {
+                out.push(format!("{} {}", name.to_uppercase(), current_path));
+            }
+        }
+        out
+    }
+
+    /// The `METHOD /path` label of every operation a spec declares whose
     /// `requestBody` object carries neither a `content` field nor a `$ref` —
     /// without a YAML dep.
     ///
@@ -3509,6 +3615,142 @@ components:
                 responses_with_invalid_status_key(api.body).is_empty(),
                 "{}: every `responses:` key must be a valid status code, `NXX`, \
                  `default`, or `x-` extension",
+                api.name
+            );
+            total_ops += operation_ids(api.body).len();
+        }
+        assert!(total_ops >= 100, "expected many operations across specs, got {total_ops}");
+    }
+
+    #[test]
+    fn every_operation_declares_a_success_response() {
+        // Contract-harness invariant (CAMARA convention over the OpenAPI Responses
+        // Object): every operation a mounted spec declares whose `responses:` object
+        // is present MUST document at least one **success** outcome — a `2XX` status
+        // code (or the `2XX` wildcard). Every CAMARA business operation returns a
+        // concrete happy-path `2XX` (`200`/`201`/`202`/`204`); that entry is the
+        // return type a Redoc/Swagger/codegen client derives, so an operation
+        // declaring only its error branches (the shared `errors.yaml` `4XX`/`5XX`
+        // `$ref`s) is an incomplete contract.
+        //
+        // This closes a gap the three sibling responses tests leave open together: a
+        // happy-path `2XX` block lost or dedented in the paste/edit that drafts a new
+        // operation still passes `every_operation_declares_a_responses_object` (the
+        // object is present, full of error entries),
+        // `every_responses_object_key_is_a_valid_status` (every remaining key is a
+        // well-formed status), and `every_declared_response_has_a_description` (the
+        // `$ref`'d error responses are exempt). None of them — nor the operationId/
+        // path-templating/version/parity/`$ref` tests — requires a success outcome to
+        // exist. An operation missing its `responses:` object entirely is
+        // `every_operation_declares_a_responses_object`'s concern (via
+        // `operations_without_responses`), so the two never double-flag. Verified
+        // true across all mounted specs before asserting.
+        for api in APIS {
+            let missing = operations_without_success_response(api.body);
+            assert!(
+                missing.is_empty(),
+                "{} spec has operation(s) whose `responses:` declares no success \
+                 (`2XX`) outcome — an incomplete contract (only error responses \
+                 documented): {:?}",
+                api.name,
+                missing
+            );
+        }
+    }
+
+    #[test]
+    fn operations_without_success_response_extraction_rules() {
+        // Unit-cover the `operations_without_success_response` extractor so the
+        // contract test above can't pass vacuously (an extractor returning an empty
+        // Vec for every body would make its assertion meaningless) and its scoping is
+        // pinned: a success is a `2XX`-range code or the `2XX` wildcard among an
+        // operation's 8-space `responses:` keys; an operation declaring only error
+        // responses is flagged; a `content`/`schema` nested under a `requestBody`
+        // is never a response key; a `2XX`-looking key outside `paths:` (a schema
+        // property literally named `'200'`) is not a response; and an operation with
+        // no `responses:` block is left to the responses-object test (not flagged).
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+        '404':
+          $ref: \"../../shared/errors.yaml#/components/responses/NotFound\"
+    post:
+      operationId: postA
+      responses:
+        '400':
+          $ref: \"../../shared/errors.yaml#/components/responses/BadRequest\"
+        '404':
+          $ref: \"../../shared/errors.yaml#/components/responses/NotFound\"
+  /b:
+    put:
+      operationId: putB
+      responses:
+        '2XX':
+          description: a wildcard success range
+        default:
+          description: fallback
+    delete:
+      operationId: deleteB
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        '204':
+          description: no content
+components:
+  schemas:
+    Widget:
+      type: object
+      properties:
+        '200':
+          type: string
+";
+        // Flagged: only `POST /a` — its `responses:` declares `400`/`404` but no
+        // `2XX`. Not flagged: `GET /a` (`200`), `PUT /b` (`2XX` wildcard),
+        // `DELETE /b` (`204`, past a `requestBody` whose nested `content`/`schema`
+        // keys are not response keys). The `'200'` *property* under
+        // components.schemas.Widget is not under `paths:`, so it is never a response.
+        assert_eq!(
+            operations_without_success_response(body),
+            vec!["POST /a".to_string()]
+        );
+
+        // An operation with no `responses:` block at all is not flagged here (that is
+        // the responses-object test's concern), so the two never double-flag the
+        // same operation.
+        let no_responses = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /c:
+    get:
+      operationId: getC
+      summary: no responses object at all
+";
+        assert!(operations_without_success_response(no_responses).is_empty());
+
+        // Non-vacuous floor: across every registered spec, every operation with a
+        // `responses:` object declares a success outcome (the invariant the contract
+        // test asserts), and the corpus carries many operations, so a broken
+        // extractor can't hide behind an empty scan.
+        let mut total_ops = 0usize;
+        for api in APIS {
+            assert!(
+                operations_without_success_response(api.body).is_empty(),
+                "{}: every operation's `responses:` must declare a success (`2XX`) outcome",
                 api.name
             );
             total_ops += operation_ids(api.body).len();

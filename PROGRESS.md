@@ -3316,6 +3316,30 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     classified in document order, plus a non-vacuous floor over all specs) so the
     contract can't pass vacuously. Verified true (215 enum declarations, all non-empty
     and duplicate-free) across all mounted specs before asserting.
+  - a success-response contract test (`src/registry.rs`
+    `every_operation_declares_a_success_response`) asserts every operation a mounted
+    spec declares whose `responses:` object is present documents ≥1 **success**
+    outcome — a `2XX` status code or the `2XX` wildcard. Every CAMARA business
+    operation returns a concrete happy-path `2XX` (`200`/`201`/`202`/`204`), the
+    return type a Redoc/Swagger/codegen client derives, so an operation declaring
+    only its error branches is an incomplete contract. Closes a gap the three
+    sibling responses tests leave open *together*: a happy-path `2XX` block lost or
+    dedented in the paste/edit that drafts a new operation still passes
+    `every_operation_declares_a_responses_object` (the object is present, full of
+    error entries), `every_responses_object_key_is_a_valid_status` (every remaining
+    key is a well-formed status), and `every_declared_response_has_a_description`
+    (the `$ref`'d error responses are exempt) — none require a success outcome to
+    exist. An operation missing its `responses:` object entirely stays the
+    responses-object test's concern, so the two never double-flag. A pure
+    `operations_without_success_response` extractor (no YAML dep; mirrors
+    `responses_with_invalid_status_key`'s path-item/method scoping, then asks per
+    operation whether any 8-space `responses:` key is a `2`-led 3-char code/wildcard)
+    is unit-covered (`operations_without_success_response_extraction_rules`: an
+    error-only operation flagged, `200`/`2XX`/`204` cases and a `requestBody`-nested
+    `content`/schema-property `'200'` not mistaken for responses, a no-`responses:`
+    operation left unflagged, plus a non-vacuous floor over all specs) so the
+    contract can't pass vacuously. Verified true across all mounted specs before
+    asserting.
   Full response-vs-schema validation still TODO (would need a YAML/JSON-Schema
   validator — a dependency trade-off, deferred).
 
@@ -3325,6 +3349,29 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-12 — contract-harness: added a **success-response** contract test
+  (`src/registry.rs` `every_operation_declares_a_success_response`) asserting every
+  operation whose `responses:` object is present documents ≥1 success (`2XX`)
+  outcome. Every CAMARA business op returns a concrete happy-path `2XX`
+  (`200`/`201`/`202`/`204`) — the return type a codegen client derives — so an
+  operation whose `2XX` block was lost/dedented in a paste, leaving only its
+  `$ref`'d `errors.yaml` error branches, is an incomplete contract that slips past
+  all three sibling responses tests together (`operations_without_responses` sees
+  the object present, `responses_with_invalid_status_key` sees every remaining key
+  well-formed, `responses_missing_description` exempts the `$ref` error responses),
+  and past the operationId/path-templating/version/parity/`$ref` tests. An op
+  missing `responses:` entirely stays the responses-object test's concern (the two
+  never double-flag). One pure helper `operations_without_success_response` (no YAML
+  dep; mirrors `responses_with_invalid_status_key`'s path-item/method scoping, then
+  per op checks whether any 8-space `responses:` key is a `2`-led 3-char
+  code/wildcard) is unit-covered (`operations_without_success_response_extraction_rules`:
+  error-only op flagged; `200`/`2XX`/`204`, a `requestBody`-nested `content`, and a
+  schema property named `'200'` all handled; a no-`responses:` op left unflagged;
+  non-vacuous floor over all specs) so the contract can't pass vacuously. Verified
+  true across all mounted specs before asserting. Tests: +2 registry (1 contract + 1
+  helper unit). `cargo test` 2174 green (was 2172), `cargo build --release`
+  warning-clean. No new dep; binary unchanged (`#[cfg(test)]`-only). — binary: 3.7M
+  (3851880 B, +0 B)
 - 2026-08-12 — contract-harness: added an **enum-values** contract test
   (`src/registry.rs` `every_enum_lists_unique_non_empty_values`) asserting every
   `enum:` a mounted spec declares lists at least one value and repeats none — the
