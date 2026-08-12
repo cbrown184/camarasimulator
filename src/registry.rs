@@ -1153,6 +1153,87 @@ mod tests {
         out
     }
 
+    /// The `location@line` label of every parameter a spec declares whose object
+    /// carries neither a `schema:` nor a `content:` key — the value-type field of an
+    /// OpenAPI Parameter Object.
+    ///
+    /// A Parameter Object MUST declare exactly one of `schema` (the common case: a
+    /// typed value) or `content` (a value described by a media-type map). Alongside
+    /// `in` (location) and `name` (identity), the value-type is REQUIRED: a located,
+    /// named parameter with neither declares no type, so a client/codegen tool cannot
+    /// bind or serialise it — the same class of invalid document the location/name
+    /// tests catch on the other two fields.
+    ///
+    /// Mirrors [`parameters_missing_name`]'s object scan exactly — anchor on a
+    /// parameter's `in:` location line (a mapping key or a `- ` sequence opener whose
+    /// value is one of the four valid locations), then look for a `schema:`/`content:`
+    /// sibling at the parameter object's own child indent (upward for a mapping or
+    /// name-first form whose opener sits above, downward only for an in-first
+    /// `- in: …` opener whose object starts at the anchor). A `schema:` nested inside
+    /// a `content:` media type sits deeper than the parameter's own indent, so it
+    /// never satisfies the check; a `$ref` parameter (no inline `in`) is never
+    /// anchored, so it is exempt (it inherits its type from the referenced component).
+    fn parameters_missing_schema_or_content(body: &str) -> Vec<String> {
+        const LOCATIONS: [&str; 4] = ["query", "header", "path", "cookie"];
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        // A `schema:`/`content:` mapping key at a parameter object's own indent,
+        // whether written as a plain key or (defensively) a `- ` sequence opener.
+        let is_type_key = |trimmed: &str| {
+            let t = trimmed.strip_prefix("- ").unwrap_or(trimmed);
+            t.starts_with("schema:") || t.starts_with("content:")
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let bare = line.trim_start();
+            let key = bare.strip_prefix("- ").unwrap_or(bare);
+            let Some(rest) = key.strip_prefix("in:") else { continue };
+            let loc = rest.trim().trim_matches('"').trim_matches('\'');
+            if !LOCATIONS.contains(&loc) {
+                continue;
+            }
+            let is_seq_opener = bare.len() != key.len();
+            let ind = indent(line) + if is_seq_opener { 2 } else { 0 };
+            let mut has_type = false;
+            // See `parameters_missing_name` for why an in-first `- in: …` opener
+            // scans downward only while a mapping/name-first anchor scans both ways.
+            let steps: &[i64] = if is_seq_opener { &[1] } else { &[-1, 1] };
+            for &step in steps {
+                let mut j = i as i64;
+                loop {
+                    j += step;
+                    if j < 0 || j as usize >= lines.len() {
+                        break;
+                    }
+                    let l = lines[j as usize];
+                    if l.trim().is_empty() {
+                        break;
+                    }
+                    let li = indent(l);
+                    if li < ind {
+                        // Dedented out of this parameter object. A `- schema:`/
+                        // `- content:` sequence-item opener would sit at `ind`-2 —
+                        // read it before leaving (mirrors the name test's opener read).
+                        if li + 2 == ind && is_type_key(l.trim_start()) {
+                            has_type = true;
+                        }
+                        break;
+                    }
+                    if li != ind {
+                        continue; // a nested child (e.g. a `content:` media-type schema)
+                    }
+                    if is_type_key(l.trim_start()) {
+                        has_type = true;
+                    }
+                }
+            }
+            if !has_type {
+                out.push(format!("{}@line {}", loc, i + 1));
+            }
+        }
+        out
+    }
+
     /// Extract the labels (`METHOD /path`) of every operation a spec declares
     /// that is **missing** a `responses:` object — without a YAML dep.
     ///
@@ -3783,6 +3864,122 @@ components:
             assert!(
                 parameters_missing_name(api.body).is_empty(),
                 "{}: every located parameter must declare a `name`",
+                api.name
+            );
+            for line in api.body.lines() {
+                let bare = line.trim_start();
+                let key = bare.strip_prefix("- ").unwrap_or(bare);
+                if let Some(rest) = key.strip_prefix("in:") {
+                    let loc = rest.trim().trim_matches('"').trim_matches('\'');
+                    if LOCATIONS.contains(&loc) {
+                        total_located += 1;
+                    }
+                }
+            }
+        }
+        assert!(
+            total_located >= 50,
+            "expected many located parameters across specs, got {total_located}"
+        );
+    }
+
+    #[test]
+    fn every_parameter_declares_a_schema_or_content() {
+        // Contract-harness invariant (OpenAPI structural rule): every parameter a
+        // mounted spec declares MUST carry exactly one of `schema` or `content` — the
+        // field that types the parameter's value. Alongside `in` (location) and
+        // `name` (identity), a Parameter Object's value-type is REQUIRED: a located,
+        // named parameter with neither `schema` nor `content` declares no type at all,
+        // so a Redoc/Swagger/codegen client cannot bind or serialise it.
+        //
+        // Completes the Parameter Object required-field trio the two sibling tests
+        // begin — `every_parameter_declares_a_valid_location` (the `in` half) and
+        // `every_parameter_declares_a_name` (the `name` half). The break it catches is
+        // a live copy-paste hazard neither sees: a parameter block pasted from a
+        // sibling that keeps `name:`/`in:` but loses or dedents its `schema:` line (or
+        // whose `content:` media-type block was trimmed) — invisible to the
+        // location/name tests (which check a parameter's identity, not its type) and
+        // to the responses/operationId/version/parity/`$ref` tests. Verified true
+        // across all mounted specs before asserting.
+        for api in APIS {
+            let untyped = parameters_missing_schema_or_content(api.body);
+            assert!(
+                untyped.is_empty(),
+                "{} spec declares parameter(s) with a valid `in` location but neither \
+                 a `schema` nor a `content` (an OpenAPI Parameter Object MUST declare \
+                 one): {:?}",
+                api.name,
+                untyped
+            );
+        }
+    }
+
+    #[test]
+    fn parameter_schema_or_content_extraction_rules() {
+        // Unit-cover the `parameters_missing_schema_or_content` extractor so the
+        // contract test above can't pass vacuously and its detection is pinned: a
+        // parameter is flagged only when its object (anchored on a valid `in:`
+        // location) carries neither a `schema:` nor a `content:` sibling — in either
+        // sequence form and the mapping (components.parameters) form; a `schema:`
+        // nested inside a `content:` media type does NOT count as the parameter's own
+        // type, a `content`-typed parameter is accepted, and a `$ref` parameter (no
+        // inline `in`) is exempt.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      parameters:
+        - name: x-correlator
+          in: header
+          schema:
+            type: string
+        - in: query
+          name: filter
+          content:
+            application/json:
+              schema:
+                type: object
+        - name: bare
+          in: query
+          required: true
+        - $ref: '#/components/parameters/Shared'
+      responses:
+        '200':
+          description: ok
+components:
+  parameters:
+    Shared:
+      name: shared
+      in: query
+      schema:
+        type: string
+";
+        // Flagged: only the third GET /a parameter — an `in: query` whose object
+        // carries only `name`/`required` and no `schema:`/`content:`. Not flagged: the
+        // name-first `header` (its `schema:` sibling), the in-first `query` (its
+        // `content:` sibling, whose nested media-type `schema:` sits deeper and is not
+        // the parameter's own), the `$ref` parameter (no inline `in`, never anchored),
+        // and the well-formed mapping `Shared` (`schema:` sibling).
+        assert_eq!(
+            parameters_missing_schema_or_content(body),
+            vec!["query@line 21".to_string()]
+        );
+
+        // Non-vacuous floor: across every registered spec, every located parameter
+        // declares a `schema` or `content` (the invariant the contract test asserts),
+        // and the corpus actually declares many parameter objects, so a broken
+        // extractor can't hide behind an empty scan.
+        const LOCATIONS: [&str; 4] = ["query", "header", "path", "cookie"];
+        let mut total_located = 0usize;
+        for api in APIS {
+            assert!(
+                parameters_missing_schema_or_content(api.body).is_empty(),
+                "{}: every located parameter must declare a `schema` or `content`",
                 api.name
             );
             for line in api.body.lines() {

@@ -3277,6 +3277,25 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     items exempt, plus a non-vacuous floor over all specs) so the contract can't
     pass vacuously. Verified true (147 operation keys + `parameters`, no malformed
     verbs) across all mounted specs before asserting.
+  - a parameter-value-type contract test (`src/registry.rs`
+    `every_parameter_declares_a_schema_or_content`) asserts every parameter a mounted
+    spec declares carries exactly one of `schema` or `content` — the field that types
+    the parameter's value. Completes the Parameter Object required-field trio the two
+    sibling tests begin: `every_parameter_declares_a_valid_location` pins the `in`
+    half, `every_parameter_declares_a_name` the `name` half, this the value-type half.
+    A located, named parameter with neither is an invalid document (a client/codegen
+    tool has no type to bind or serialise), a copy-paste hazard invisible to the
+    location/name tests (which check a parameter's identity, not its type) and to the
+    responses/operationId/version/parity/`$ref` tests. A pure
+    `parameters_missing_schema_or_content` extractor (no YAML dep; mirrors
+    `parameters_missing_name`'s object scan — anchor on a valid `in:` line, look for a
+    `schema:`/`content:` sibling at the parameter's own child indent, so a `schema:`
+    nested inside a `content:` media type never counts; a `$ref` parameter with no
+    inline `in` is exempt) is unit-covered
+    (`parameter_schema_or_content_extraction_rules`: name-first `schema`, in-first
+    `content`, a `schema`-less/`content`-less parameter flagged, `$ref` exempt, plus a
+    non-vacuous floor over all specs) so the contract can't pass vacuously. Verified
+    true across all mounted specs before asserting.
   Full response-vs-schema validation still TODO (would need a YAML/JSON-Schema
   validator — a dependency trade-off, deferred).
 
@@ -3286,6 +3305,32 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-12 — contract-harness: added a **parameter-value-type** contract test
+  (`src/registry.rs` `every_parameter_declares_a_schema_or_content`) asserting every
+  parameter a mounted spec declares carries exactly one of `schema` or `content` — the
+  field that types its value. Completes the OpenAPI Parameter Object required-field
+  trio the two sibling tests begin: `every_parameter_declares_a_valid_location` pins
+  the `in` half and `every_parameter_declares_a_name` the `name` half; this pins the
+  value-type half. A located, named parameter with neither `schema` nor `content` is an
+  invalid document (a Redoc/Swagger/codegen client has no type to bind or serialise) —
+  a copy-paste hazard where a parameter block pasted from a sibling keeps `name:`/`in:`
+  but loses/dedents its `schema:` line (or has its `content:` media-type block
+  trimmed), invisible to the location/name tests (which check identity, not type) and
+  to the responses/operationId/version/parity/`$ref` tests. One pure helper
+  `parameters_missing_schema_or_content` (no YAML dep; mirrors `parameters_missing_
+  name`'s object scan — anchor on a valid `in:` line, scan for a `schema:`/`content:`
+  sibling at the parameter's own child indent so a `schema:` nested inside a `content:`
+  media type never counts; a `$ref` parameter with no inline `in` is exempt) is
+  unit-covered (`parameter_schema_or_content_extraction_rules`: name-first `schema`,
+  in-first `content`, a typeless parameter flagged at its `in` line, `$ref` exempt,
+  plus a non-vacuous floor over all specs) so the contract can't pass vacuously.
+  Feature-API backlog stays effectively exhausted (remaining `[ ]` leaves are
+  `https://` sink-TLS cases needing a multi-MB rustls client vs the small-binary
+  directive, and open-ended state streams with no live worker), so this advanced the
+  cross-cutting **contract-test harness** item. Verified true across all mounted specs
+  before asserting. Tests: +2 registry (1 contract + 1 helper unit). `cargo test` 2170
+  green (was 2168), `cargo build --release` warning-clean. No new dep; binary unchanged
+  (`#[cfg(test)]`-only). — binary: 3.7M (3851880 B, +0 B)
 - 2026-08-12 — contract-harness: added an **every-`$ref`-is-a-fragment-pointer**
   contract test (`src/registry.rs` `every_ref_target_is_a_fragment_pointer`)
   asserting every `$ref` a mounted spec declares carries a `#/` JSON-pointer fragment
