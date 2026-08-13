@@ -3560,6 +3560,24 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     payload, and a following media type's `examples:` are never mistaken) is
     unit-covered (`example_examples_exclusivity_extraction_rules`) so the contract
     can't pass vacuously. Verified true across all mounted specs before asserting.
+  - a discriminator-completeness contract test (`src/registry.rs`
+    `every_discriminator_declares_a_property_name`) asserts every Discriminator
+    Object a mounted spec declares carries `propertyName` — its one **REQUIRED**
+    field in OpenAPI 3.0.x (the payload property whose value selects the concrete
+    schema; `mapping` is optional). CamaraSim uses discriminators for the
+    `Area`/`Device` polymorphic family; a `discriminator:` block that lost/dedented
+    its `propertyName:` line is an invalid document a Redoc/Swagger/codegen client
+    can't switch on, so the polymorphism breaks where a caller reads or builds the
+    payload. Invisible to every existing test — the array/enum/required/`$ref`/
+    example tests check element types, value lists, required entries, ref targets,
+    or example expression, never a discriminator's completeness. A pure
+    `discriminators_missing_property_name` extractor (no YAML dep; for each
+    block-form `discriminator:` scans the object's children, bounded by the dedent
+    that closes it, for a `propertyName:` key — an inline-valued `discriminator:`
+    opens no object and is skipped) is unit-covered
+    (`discriminator_property_name_extraction_rules`, incl. a non-vacuous floor over
+    all specs) so the contract can't pass vacuously. Verified true across all
+    mounted specs before asserting.
   Full response-vs-schema validation still TODO (would need a YAML/JSON-Schema
   validator — a dependency trade-off, deferred).
 
@@ -3568,6 +3586,31 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 ## Scan journal
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
+
+- 2026-08-13 — contract-harness: added a **discriminator-completeness** contract
+  test (`src/registry.rs` `every_discriminator_declares_a_property_name`) asserting
+  every Discriminator Object a mounted spec declares carries `propertyName` — its
+  one REQUIRED field in OpenAPI 3.0.x (the payload property whose value selects the
+  concrete schema; `mapping` is optional). CamaraSim serves discriminators for the
+  polymorphic `Area`/`Device` family (6 across 5 mounted specs — location-
+  verification v3, location-retrieval v0.4, geofencing-subscriptions v0.4,
+  dedicated-network-areas vwip, iot-sim-fraud-prevention vwip); a `discriminator:`
+  block that lost/dedented its `propertyName:` line is an invalid document a
+  Redoc/Swagger/codegen client can't switch on, so the polymorphism breaks where a
+  caller reads/builds the payload — invisible to every existing test (the array/
+  enum/required/`$ref`/example tests check element types, value lists, required
+  entries, ref targets, or example expression, never a discriminator's
+  completeness). New pure `discriminators_missing_property_name` extractor (no YAML
+  dep): for each block-form `discriminator:` (inline-valued ones open no object and
+  are skipped) it scans the object's children, bounded by the dedent that closes it,
+  for a `propertyName:` key at any deeper indent. Unit-covered
+  (`discriminator_property_name_extraction_rules`: lone-`propertyName` and
+  `propertyName`+`mapping` pass; a `mapping`-only block and an empty block flagged in
+  document order; plus a non-vacuous floor of ≥5 block-form discriminators over all
+  specs) so the contract can't pass vacuously. Verified true across all 61 mounted
+  specs (no drift to fix). Tests: +2 (1 contract, 1 extractor unit). `cargo test`
+  2201 green (was 2199); `cargo build --release` warning-clean. No new dep; binary
+  unchanged (`#[cfg(test)]`-only). — binary: 3.7M (3851944 B, +0 B)
 
 - 2026-08-13 — contract-harness: added an **example/examples mutual-exclusivity**
   contract test (`src/registry.rs` `no_object_declares_both_example_and_examples`)

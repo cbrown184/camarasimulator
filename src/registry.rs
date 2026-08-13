@@ -7569,4 +7569,193 @@ components:
             "expected many `examples:` keys across specs, got {examples_plural}"
         );
     }
+
+    /// Extract the 1-based line number of every Discriminator Object a spec
+    /// declares that is **missing its `propertyName`** — without a YAML dep.
+    ///
+    /// In OpenAPI 3.0.x a Discriminator Object has exactly one REQUIRED field,
+    /// `propertyName` — the name of the payload property whose value selects the
+    /// concrete schema (`mapping` is optional). A `discriminator:` block with no
+    /// `propertyName` is invalid: a Redoc/Swagger/codegen client handed a
+    /// polymorphic schema (CAMARA uses discriminators for the `Area`/`Device`/
+    /// `SinkCredential` family) has no property to switch on, so it cannot pick a
+    /// variant to deserialize or generate. It is invisible to every existing test
+    /// — the array/enum/required/`$ref`/example tests check element types, value
+    /// lists, required entries, ref targets, or example expression, never a
+    /// discriminator's completeness.
+    ///
+    /// `discriminator:` names a Discriminator Object only as a block mapping key
+    /// (its value is an object, never an inline scalar), and `propertyName` is one
+    /// of its *children* — indented past the `discriminator:` key, not a sibling.
+    /// For each block-form `discriminator:` at indent `C` this scans the object's
+    /// block (following lines, skipping blanks, bounded by the first non-blank line
+    /// that dedents to `C` or shallower — the sibling key or enclosing dedent that
+    /// closes it) for a `propertyName:` key at any deeper indent. A
+    /// `discriminator:` carrying an inline value opens no object (it would be a
+    /// property literally named `discriminator`, not a Discriminator Object) and is
+    /// skipped; a `propertyName:` never appears anywhere but a discriminator's
+    /// children in these specs, so a deeper-indent match is unambiguous.
+    fn discriminators_missing_property_name(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let key_is = |l: &str, name: &str| -> bool {
+            l.trim_start()
+                .split_once(':')
+                .is_some_and(|(k, _)| k.trim() == name)
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            // A Discriminator Object is a block mapping key: `discriminator:` with
+            // no inline scalar (an inline value would be a property named so).
+            let Some((k, v)) = line.trim_start().split_once(':') else {
+                continue;
+            };
+            if k.trim() != "discriminator"
+                || !v.split('#').next().unwrap_or(v).trim().is_empty()
+            {
+                continue;
+            }
+            let c = indent(line);
+            let mut has_property_name = false;
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) <= c {
+                    break; // dedented out of this discriminator object
+                }
+                if key_is(l, "propertyName") {
+                    has_property_name = true;
+                    break;
+                }
+                j += 1;
+            }
+            if !has_property_name {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_discriminator_declares_a_property_name() {
+        // Contract-harness invariant (OpenAPI 3.0.x structural rule): every
+        // Discriminator Object a mounted spec declares MUST carry `propertyName`,
+        // its one REQUIRED field — the payload property whose value chooses the
+        // concrete schema. A `discriminator:` with no `propertyName` is an invalid
+        // document, and a Redoc/Swagger/codegen client handed a polymorphic schema
+        // (CamaraSim uses discriminators for the `Area`/`Device` family) has
+        // nothing to switch on, so it can't pick a variant to deserialize or
+        // generate — the polymorphism silently breaks at the point a caller reads
+        // or builds the payload.
+        //
+        // A routine hazard in these vendored specs: a discriminator block pasted
+        // from a sibling that keeps `discriminator:` (and its optional `mapping:`)
+        // but loses or dedents the `propertyName:` line. It is invisible to every
+        // existing test — the array/enum/required/`$ref`/example tests check
+        // element types, value lists, required entries, ref targets, or example
+        // expression, never a discriminator's completeness. Verified true across
+        // all mounted specs before asserting.
+        for api in APIS {
+            let incomplete = discriminators_missing_property_name(api.body);
+            assert!(
+                incomplete.is_empty(),
+                "{} spec declares `discriminator` object(s) with no `propertyName` \
+                 (its one REQUIRED field) at line(s): {:?}",
+                api.name,
+                incomplete
+            );
+        }
+    }
+
+    #[test]
+    fn discriminator_property_name_extraction_rules() {
+        // Unit-cover the `discriminators_missing_property_name` extractor so the
+        // contract test above can't pass vacuously and its detection is pinned: a
+        // discriminator is flagged only when its block carries no `propertyName`
+        // child; a `propertyName` alongside an optional `mapping` satisfies it; a
+        // discriminator whose only child is `mapping` (or that opens an empty block
+        // before its sibling key) is flagged; and a discriminator's children are
+        // bounded by the dedent that closes it.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    Good:
+      type: object
+      discriminator:
+        propertyName: kind
+      properties:
+        kind:
+          type: string
+    GoodMapping:
+      type: object
+      discriminator:
+        propertyName: areaType
+        mapping:
+          CIRCLE: '#/components/schemas/Circle'
+      properties:
+        areaType:
+          type: string
+    BadOnlyMapping:
+      type: object
+      discriminator:
+        mapping:
+          CIRCLE: '#/components/schemas/Circle'
+      properties:
+        areaType:
+          type: string
+    BadEmpty:
+      type: object
+      discriminator:
+      properties:
+        x:
+          type: string
+";
+        // Flagged, in document order: `BadOnlyMapping`'s discriminator at line 32
+        // (only a `mapping:` child, no `propertyName`) and `BadEmpty`'s at line 40
+        // (its block dedents straight to the `properties:` sibling — no children at
+        // all). Not flagged: `Good` (a lone `propertyName` child) and `GoodMapping`
+        // (a `propertyName` child ahead of its optional `mapping`).
+        assert_eq!(
+            discriminators_missing_property_name(body),
+            vec![32, 40]
+        );
+
+        // Non-vacuous floor: across every registered spec every discriminator
+        // declares `propertyName` (the invariant the contract test asserts), and
+        // the corpus actually declares discriminators (the `Area`/`Device` family),
+        // so a broken extractor can't hide behind an empty scan. Count block-form
+        // `discriminator:` keys with a detection independent of the extractor.
+        let mut discriminators = 0usize;
+        for api in APIS {
+            assert!(
+                discriminators_missing_property_name(api.body).is_empty(),
+                "{}: every discriminator must declare `propertyName`",
+                api.name
+            );
+            for line in api.body.lines() {
+                if line.trim() == "discriminator:" {
+                    discriminators += 1;
+                }
+            }
+        }
+        assert!(
+            discriminators >= 5,
+            "expected several discriminators across specs, got {discriminators}"
+        );
+    }
 }
