@@ -761,6 +761,47 @@ mod tests {
             .collect()
     }
 
+    /// The two shared fragments the server serves alongside every spec, named by
+    /// the canonical relative path a spec at `specs/<name>/<version>/openapi.yaml`
+    /// must use to reach each once served: `/shared/errors.yaml` via
+    /// `../../shared/errors.yaml`, `/auth/openapi.yaml` via `../../auth/openapi.yaml`.
+    const SERVED_SHARED_FRAGMENTS: [&str; 2] =
+        ["../../shared/errors.yaml", "../../auth/openapi.yaml"];
+
+    /// Return every **cross-file** `$ref` target in an embedded OpenAPI body whose
+    /// file half is not one of the two served shared fragments, in document order,
+    /// without a YAML dep.
+    ///
+    /// A cross-file `$ref` is `<relative-path>#/…` — a target with a non-empty path
+    /// *before* the `#`. When a spec is served at `/{name}/{version}/openapi.yaml` a
+    /// client resolves that path relative to that URL, and the server serves only
+    /// three documents across files: the spec itself (reached by a local `#/…` ref,
+    /// whose file half is empty), `/shared/errors.yaml` (reached by
+    /// `../../shared/errors.yaml`) and `/auth/openapi.yaml` (reached by
+    /// `../../auth/openapi.yaml`). A cross-file ref to any *other* file half — a
+    /// CAMARA-template leftover (`../CAMARA_common.yaml`), a sibling API's spec, or a
+    /// mistyped shared path — resolves to a URL the server never serves, so a client
+    /// (Redoc/Swagger/codegen) that follows it gets a 404 and the served spec is
+    /// unresolvable.
+    ///
+    /// Built on [`ref_targets`] (already unit-covered). A target with no `#` is
+    /// skipped — that fragmentless shape is `refs_missing_fragment`'s contract; a
+    /// target with an empty file half is a local ref (its own resolution test); a
+    /// cross-file target whose file half is a served fragment is allowed.
+    fn cross_file_refs_to_unserved_files(body: &str) -> Vec<String> {
+        ref_targets(body)
+            .into_iter()
+            .filter(|t| match t.split_once('#') {
+                // No `#` fragment at all — a different contract's concern.
+                None => false,
+                // Empty file half → a local `#/…` ref, resolved within the spec.
+                Some((file, _pointer)) => {
+                    !file.is_empty() && !SERVED_SHARED_FRAGMENTS.contains(&file)
+                }
+            })
+            .collect()
+    }
+
     /// Return every `$ref` reference object in an embedded OpenAPI body that carries
     /// a **sibling key** in its own mapping — reported as `"<target> (sibling:
     /// <key>)"` in document order, without a YAML dep.
@@ -3912,6 +3953,57 @@ components:
     }
 
     #[test]
+    fn cross_file_ref_target_extraction_rules() {
+        // Unit-cover the `cross_file_refs_to_unserved_files` classifier so the
+        // contract test below can't pass vacuously and its file-half rules are
+        // pinned: a local `#/…` ref (empty file half) and a cross-file ref into
+        // either served fragment are allowed; a cross-file ref to any other file
+        // half is flagged; a fragmentless target is left to another contract.
+        let body = "\
+components:
+  schemas:
+    A:
+      properties:
+        local:
+          $ref: '#/components/schemas/B'
+        served_err:
+          $ref: '../../shared/errors.yaml#/components/responses/Generic400'
+        served_auth:
+          $ref: '../../auth/openapi.yaml#/components/securitySchemes/camaraOAuth'
+        template_leftover:
+          $ref: '../CAMARA_common.yaml#/components/responses/Generic404'
+        sibling_spec:
+          $ref: './OtherApi.yaml#/components/schemas/Foo'
+        bare_errors:
+          $ref: 'errors.yaml#/components/responses/NotFound'
+        fragmentless:
+          $ref: 'errors.yaml'
+";
+        assert_eq!(
+            cross_file_refs_to_unserved_files(body),
+            vec![
+                "../CAMARA_common.yaml#/components/responses/Generic404",
+                "./OtherApi.yaml#/components/schemas/Foo",
+                "errors.yaml#/components/responses/NotFound",
+            ]
+        );
+        // The two served fragments and a local ref are never flagged.
+        let clean = "\
+    $ref: '#/components/schemas/Local'
+    $ref: '../../shared/errors.yaml#/components/responses/Generic429'
+    $ref: '../../auth/openapi.yaml#/y'
+";
+        assert!(cross_file_refs_to_unserved_files(clean).is_empty());
+        // A `- $ref:` sequence item to an unserved file is still classified (the
+        // underlying extractor handles the sequence form).
+        let seq = "  parameters:\n    - $ref: '../common/params.yaml#/components/parameters/XCorr'\n";
+        assert_eq!(
+            cross_file_refs_to_unserved_files(seq),
+            vec!["../common/params.yaml#/components/parameters/XCorr"]
+        );
+    }
+
+    #[test]
     fn scenario_block_extraction_rules() {
         // Unit-cover the `scenario_blocks` counter so the contract test above
         // can't pass vacuously (a counter that always returned 0 would make the
@@ -6363,6 +6455,67 @@ paths:
                 missing
             );
         }
+    }
+
+    #[test]
+    fn every_cross_file_ref_targets_a_served_fragment() {
+        // Contract-harness invariant (DESIGN §8/§9 + `apis::openapi` serving): every
+        // *cross-file* `$ref` a mounted spec makes — a `<relative-path>#/…` with a
+        // non-empty path before the `#` — MUST target one of the only two shared
+        // fragments the server serves alongside the spec: the error model
+        // (`../../shared/errors.yaml`) or the auth scheme (`../../auth/openapi.yaml`).
+        // A spec served at `/{name}/{version}/openapi.yaml` resolves a cross-file ref
+        // relative to that URL, and the server serves nothing else across files — so a
+        // ref to any other file half resolves to a URL it never serves, and the served
+        // spec is unresolvable for any client (Redoc/Swagger/codegen) that follows it.
+        //
+        // This closes the gap every sibling ref test leaves for a *fragment-bearing*
+        // cross-file ref to an unserved file (a CAMARA-template leftover
+        // `../CAMARA_common.yaml#/…`, a sibling API's spec, a mistyped shared path):
+        // - `every_ref_target_is_a_fragment_pointer` only checks a ref *has* a `#/`
+        //   fragment — this ref has one, so it passes there;
+        // - `shared_fragment_refs_use_the_canonical_relative_path` only inspects refs
+        //   whose target already names one of the two shared files — an unrelated file
+        //   half is never examined;
+        // - `shared_error_refs`/`shared_auth_refs_resolve_to_defined_components` only
+        //   dereference pointers whose file half is one of those two fragments;
+        // - `local_component_refs_resolve_within_their_own_spec` only inspects refs
+        //   with an *empty* file half (local `#/…`).
+        // So a cross-file ref to a third file falls through all of them. (It overlaps
+        // the canonical-path test only on the bare `errors.yaml#/…` form, which both
+        // reject — deliberate defence in depth.)
+        //
+        // Non-vacuous: the classifier must actually be seeing cross-file refs, so we
+        // also tally the *allowed* cross-file refs (into the two served fragments) and
+        // assert a floor — an extractor that found none would make the per-spec
+        // assertions unreachable.
+        let mut served_cross_file = 0usize;
+        for api in APIS {
+            let offenders = cross_file_refs_to_unserved_files(api.body);
+            assert!(
+                offenders.is_empty(),
+                "{} spec makes cross-file $ref(s) to a file the server does not serve \
+                 (only `../../shared/errors.yaml` and `../../auth/openapi.yaml` resolve \
+                 when the spec is served) — they 404 for any client that follows them: \
+                 {:?}",
+                api.name,
+                offenders
+            );
+            for t in ref_targets(api.body) {
+                if let Some((file, _)) = t.split_once('#') {
+                    if SERVED_SHARED_FRAGMENTS.contains(&file) {
+                        served_cross_file += 1;
+                    }
+                }
+            }
+        }
+        assert!(
+            served_cross_file >= 50,
+            "expected the mounted specs to make ≥50 cross-file $refs into the two \
+             served shared fragments (each business op $refs the shared error \
+             responses), got {served_cross_file} — the classifier may not be seeing \
+             cross-file refs, so the contract could pass vacuously"
+        );
     }
 
     #[test]

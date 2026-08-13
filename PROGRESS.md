@@ -3627,6 +3627,31 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     of ≥50 block-form composers over all specs) so the contract can't pass
     vacuously. Verified true (90 block-form composers across all mounted specs, all
     opening a sequence — no drift to fix) before asserting.
+  - a cross-file-`$ref`-targets-a-served-fragment contract test (`src/registry.rs`
+    `every_cross_file_ref_targets_a_served_fragment`) asserts every **cross-file**
+    `$ref` a mounted spec makes (a `<relative-path>#/…` with a non-empty path before
+    the `#`) targets one of the only two shared fragments the server serves across
+    files — the error model (`../../shared/errors.yaml`) or the auth scheme
+    (`../../auth/openapi.yaml`). A spec served at `/{name}/{version}/openapi.yaml`
+    resolves a cross-file ref relative to that URL, and the server serves nothing
+    else across files, so a ref to any other file half resolves to a URL it never
+    serves and the served spec is unresolvable. Closes the gap every sibling ref
+    test leaves for a *fragment-bearing* cross-file ref to an unserved file (a
+    CAMARA-template leftover `../CAMARA_common.yaml#/…`, a sibling API's spec, a
+    mistyped shared path): `every_ref_target_is_a_fragment_pointer` only checks a
+    ref *has* a `#/` fragment (this one does); the canonical-path test only inspects
+    refs already naming the two shared files; the shared-error/auth resolve tests
+    only dereference pointers whose file half is one of those two; and the
+    local-ref test only inspects *empty*-file-half refs. A pure
+    `cross_file_refs_to_unserved_files` classifier (no YAML dep; built on the
+    unit-covered `ref_targets`, keeping only cross-file targets whose file half is
+    not a served fragment) is unit-covered (`cross_file_ref_target_extraction_rules`:
+    a local ref + both served fragments pass, a template leftover / sibling spec /
+    bare `errors.yaml#…` flagged in document order, a fragmentless target skipped,
+    a `- $ref:` sequence form classified) and the contract tallies the *allowed*
+    cross-file refs and asserts a floor (≥50) so it can't pass vacuously. Verified
+    true across all mounted specs (no cross-file ref to an unserved file — no drift
+    to fix) before asserting.
   Full response-vs-schema validation still TODO (would need a YAML/JSON-Schema
   validator — a dependency trade-off, deferred).
 
@@ -3635,6 +3660,27 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 ## Scan journal
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
+
+- 2026-08-13 — contract-harness: added a **cross-file-`$ref`-targets-a-served-
+  fragment** contract test (`src/registry.rs`
+  `every_cross_file_ref_targets_a_served_fragment`) asserting every cross-file
+  `$ref` a mounted spec makes (a `<relative-path>#/…` with a non-empty path before
+  the `#`) targets one of the only two shared fragments the server serves across
+  files (`../../shared/errors.yaml` / `../../auth/openapi.yaml`); any other file
+  half resolves to a URL the server never serves, so the spec is unresolvable when
+  served. Closes the gap every sibling ref test leaves for a *fragment-bearing*
+  cross-file ref to an unserved file (a CAMARA-template leftover, a sibling API's
+  spec, a mistyped shared path): the fragment-pointer test only checks a ref *has*
+  a `#/`, the canonical-path test only inspects refs already naming the two shared
+  files, the resolve tests only dereference pointers into those two, and the
+  local-ref test only inspects empty-file-half refs. New pure
+  `cross_file_refs_to_unserved_files` classifier (no YAML dep; built on the
+  unit-covered `ref_targets`), unit-covered (`cross_file_ref_target_extraction_
+  rules`) + a ≥50 allowed-cross-file-ref floor so it can't pass vacuously. Verified
+  true across all mounted specs (no drift to fix). Tests: +2 (1 contract, 1
+  extractor unit). `cargo test` 2209 green (was 2207); `cargo build --release`
+  warning-clean. No new dep; binary unchanged (`#[cfg(test)]`-only). — binary: 3.7M
+  (3851944 B, +0 B)
 
 - 2026-08-13 — contract-harness: added a **schema-`type`-names-a-valid-type**
   contract test (`src/registry.rs` `every_type_names_a_valid_schema_type`) asserting
