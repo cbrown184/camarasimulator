@@ -3685,6 +3685,30 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-13 — contract-harness: added a **size-bound-domain** contract test
+  (`src/registry.rs` `every_size_bound_is_a_non_negative_integer`) asserting every
+  length/size/count bound a mounted spec declares — `minLength`/`maxLength`,
+  `minItems`/`maxItems`, `minProperties`/`maxProperties` — is a non-negative integer,
+  the JSON-Schema domain rule these keywords carry (they count characters / array
+  elements / object properties, so a negative or fractional value is an invalid,
+  unsatisfiable schema). The domain complement of
+  `every_numeric_bound_is_ordered_low_to_high`: that test only compares a lower bound
+  against its upper sibling (ordering), so a lone `minLength: -1` (no sibling to pair)
+  or a fractional `maxItems: 1.5` slips through untouched; invisible to every other
+  test too (enum/required/array/`$ref`/type check a value list, required entries, an
+  element type, a ref target, or a type name, never a size bound's own value).
+  `minimum`/`maximum` are excluded (a value bound may legitimately be negative or
+  fractional). New pure `size_bounds_out_of_domain` extractor (no YAML dep; parses each
+  keyword's inline scalar after stripping a `#` comment/quotes, flags `<0` / fractional
+  / non-numeric; a float-spelled integer `3.0` passes, a block-opening property named
+  `minItems` carrying no inline value is skipped), unit-covered
+  (`size_bound_domain_extraction_rules`: negative / fractional / non-numeric flagged in
+  document order, `0` and `3.0` and a `minimum: -5` left alone, plus a ≥200 non-vacuous
+  floor of real size bounds). Verified true across all mounted specs (324 size bounds,
+  all non-negative integers — no drift to fix). Tests: +2 (1 contract, 1 extractor
+  unit). `cargo test` 2213 green (was 2211); `cargo build --release` warning-clean. No
+  new dep; binary unchanged (`#[cfg(test)]`-only). — binary: 3.7M (3851944 B, +0 B)
+
 - 2026-08-13 — contract-harness: added a **header-object-value-type** contract test
   (`src/registry.rs` `every_component_header_declares_a_schema_or_content`) asserting
   every Header Object a mounted spec defines under `components.headers:` carries one

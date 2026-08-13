@@ -8049,6 +8049,197 @@ components:
         );
     }
 
+    /// Returns the 1-based line numbers of length/size/count bound keywords whose
+    /// inline scalar value is **not a non-negative integer** — without a YAML dep.
+    ///
+    /// In OpenAPI 3.0.x (JSON Schema) the string-length, array-size and object-
+    /// property-count bounds — `minLength`/`maxLength`, `minItems`/`maxItems`,
+    /// `minProperties`/`maxProperties` — MUST each be a non-negative integer: they
+    /// count characters / elements / properties, so a negative or fractional value
+    /// is an invalid schema a validator rejects and a Redoc/Swagger/codegen client
+    /// cannot honour. (`minimum`/`maximum` are deliberately excluded — those bound a
+    /// numeric *value*, which may legitimately be negative or fractional; their
+    /// ordering, not their domain, is `schema_bounds_inverted`'s concern.)
+    ///
+    /// For each line whose key — leading whitespace stripped, an optional `- `
+    /// sequence marker tolerated — is one of the six keywords and that carries an
+    /// inline scalar (a value on the same line; a bound opening a block has none and
+    /// is a property literally named e.g. `minItems`, so it is skipped), the value
+    /// is parsed as a number after stripping an inline `#` comment and surrounding
+    /// quotes. A value `< 0`, a fractional value, or a non-numeric one is flagged
+    /// (an integer spelled as a float, e.g. `3.0`, has a zero fractional part and
+    /// passes, matching how validators treat the JSON-Schema integer type).
+    fn size_bounds_out_of_domain(body: &str) -> Vec<usize> {
+        const KEYS: [&str; 6] = [
+            "minLength",
+            "maxLength",
+            "minItems",
+            "maxItems",
+            "minProperties",
+            "maxProperties",
+        ];
+        let mut out = Vec::new();
+        for (i, line) in body.lines().enumerate() {
+            let trimmed = line.trim_start();
+            let after_dash = trimmed.strip_prefix("- ").unwrap_or(trimmed);
+            let Some((k, v)) = after_dash.split_once(':') else {
+                continue;
+            };
+            if !KEYS.contains(&k.trim()) {
+                continue;
+            }
+            let v = v
+                .split('#')
+                .next()
+                .unwrap_or(v)
+                .trim()
+                .trim_matches('"')
+                .trim_matches('\'');
+            if v.is_empty() {
+                continue; // opens a block / no inline value — not a scalar bound
+            }
+            let ok = matches!(v.parse::<f64>(), Ok(n) if n >= 0.0 && n.fract() == 0.0);
+            if !ok {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_size_bound_is_a_non_negative_integer() {
+        // Contract-harness invariant (OpenAPI 3.0.x / JSON-Schema structural rule):
+        // the length/size/count bounds a Schema Object declares — `minLength`/
+        // `maxLength`, `minItems`/`maxItems`, `minProperties`/`maxProperties` — MUST
+        // each be a non-negative integer. They count characters, array elements, or
+        // object properties, so a negative bound (`minItems: -1`) or a fractional one
+        // (`maxLength: 2.5`) is an invalid, unsatisfiable schema: a validator rejects
+        // it outright and a Redoc/Swagger/codegen client is handed a constraint it
+        // cannot apply at exactly the point a caller reads or builds the payload.
+        //
+        // This is the domain complement of
+        // `every_numeric_bound_is_ordered_low_to_high`: that test compares a lower
+        // bound against its upper sibling (ordering) but never checks either against
+        // its own domain, so a lone `minLength: -1` (no `maxLength` sibling to pair
+        // with) or a `maxItems: 1.5` passes it untouched. A live hazard in these
+        // scenario-table-heavy specs, where these caps are hand-tuned per API (an
+        // array-size ceiling, an identifier length): a sign typo, or a value pasted
+        // and half-edited into a fraction. It is invisible to every other test too
+        // (the enum/required/array/`$ref`/type tests check a value list, required
+        // entries, an element type, a ref target, or a type name, never a size
+        // bound's value). `minimum`/`maximum` are excluded — those bound a numeric
+        // value, which may be negative or fractional. Verified true across all
+        // mounted specs before asserting.
+        for api in APIS {
+            let bad = size_bounds_out_of_domain(api.body);
+            assert!(
+                bad.is_empty(),
+                "{} spec declares a length/size/count bound that is not a \
+                 non-negative integer (negative, fractional, or non-numeric) at \
+                 line(s): {:?}",
+                api.name,
+                bad
+            );
+        }
+    }
+
+    #[test]
+    fn size_bound_domain_extraction_rules() {
+        // Unit-cover the `size_bounds_out_of_domain` extractor so the contract test
+        // above can't pass vacuously and its detection is pinned: a non-negative
+        // integer bound (incl. `0` and a float-spelled integer `3.0`) passes; a
+        // negative, fractional, or non-numeric value is flagged in document order; a
+        // bound opening a block (a property literally named `minItems`, no inline
+        // value) is skipped; and `minimum`/`maximum` are never inspected.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    Good:
+      type: object
+      minProperties: 0
+      properties:
+        s:
+          type: string
+          minLength: 1
+          maxLength: 30
+        list:
+          type: array
+          minItems: 3
+          maxItems: 3.0
+    BadNeg:
+      type: string
+      minLength: -1
+    BadFrac:
+      type: array
+      maxItems: 2.5
+    BadWord:
+      type: object
+      maxProperties: many
+    Range:
+      type: integer
+      minimum: -5
+      maximum: 10
+    Named:
+      type: object
+      properties:
+        minItems:
+          type: integer
+";
+        // Flagged, in document order: `BadNeg.minLength: -1` (line 28), `BadFrac.
+        // maxItems: 2.5` (line 31) and `BadWord.maxProperties: many` (line 34). Not
+        // flagged: every `Good` bound incl. `minProperties: 0` and the float-spelled
+        // integer `maxItems: 3.0`; `Range.minimum: -5` (a value bound, not a size
+        // bound); and the property literally named `minItems:` under `Named.properties`
+        // (it opens a block, carrying no inline value).
+        assert_eq!(size_bounds_out_of_domain(body), vec![28, 31, 34]);
+
+        // Non-vacuous floor: across every registered spec every size bound is a
+        // non-negative integer (the invariant the contract test asserts), and the
+        // corpus actually declares many such bounds — so the value-parsing path runs
+        // on real data and a broken (always-empty) extractor can't hide behind a
+        // corpus that never declares one. Count with a presence-only detector
+        // independent of the extractor's value parsing.
+        let mut bounds = 0usize;
+        for api in APIS {
+            assert!(
+                size_bounds_out_of_domain(api.body).is_empty(),
+                "{}: every size/length/count bound must be a non-negative integer",
+                api.name
+            );
+            for line in api.body.lines() {
+                if let Some((k, v)) = line.trim_start().split_once(':') {
+                    if matches!(
+                        k.trim(),
+                        "minLength"
+                            | "maxLength"
+                            | "minItems"
+                            | "maxItems"
+                            | "minProperties"
+                            | "maxProperties"
+                    ) && !v.split('#').next().unwrap_or(v).trim().is_empty()
+                    {
+                        bounds += 1;
+                    }
+                }
+            }
+        }
+        assert!(
+            bounds >= 200,
+            "expected many size/length/count bounds across specs, got {bounds}"
+        );
+    }
+
     /// Returns the 1-based line numbers of `example:` keys that share their
     /// object — same parent block, at the same indentation — with an `examples:`
     /// sibling. That pairing is the OpenAPI 3.0.x "the `example` field is
