@@ -3676,6 +3676,29 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     so the contract can't pass vacuously. Verified true across all mounted specs
     (every spec's `XCorrelator` Header Object is schema-typed — no drift to fix)
     before asserting.
+  - a format-vocabulary contract test (`src/registry.rs`
+    `every_format_names_a_recognized_format`) asserts every Schema Object `format:`
+    a mounted spec declares names a recognized format — an OAS 3.0.x Data Type
+    format (`int32`/`int64`/`float`/`double`/`byte`/`binary`/`date`/`date-time`/
+    `password`) or a JSON-Schema-Validation string format (`email`/`hostname`/
+    `ipv4`/`ipv6`/`uri`/`uri-reference`/`uuid`/`regex`/…). Tooling keys real
+    behaviour off the exact string (Redoc's format hint, a codegen concrete type, a
+    validator's matching check), so a typo — `datetime` for `date-time`, `int_32`
+    for `int32`, `uid` for `uuid` — silently drops the constraint wherever a caller
+    reads or builds the payload, a live hazard across 337 hand-authored `format:`
+    keys. Invisible to every existing test: the `type:` test checks the sibling
+    `type` token, never the `format` modifier, and the size/numeric-bound tests
+    inspect bound *values*, never a format string. A pure
+    `format_values_not_recognized` extractor (no YAML dep, mirroring
+    `type_values_not_a_valid_type`) flags a line-leading `format:` whose
+    quote/comment-stripped scalar is outside the recognized vocabulary; skips an
+    empty value (a property literally named `format`) and a `format:` inside an
+    `example:`/`examples:` payload (ancestor-chain walk). Unit-covered
+    (`format_value_extraction_rules`: recognized formats pass, a property named
+    `format` + an example-payload `format:` skipped, top-level and nested typos
+    flagged in document order, plus a ≥200 non-vacuous floor of real `format:`
+    keys) so the contract can't pass vacuously. Verified true across all mounted
+    specs (337 format keys, all recognized — no drift to fix) before asserting.
   Full response-vs-schema validation still TODO (would need a YAML/JSON-Schema
   validator — a dependency trade-off, deferred).
 
@@ -3684,6 +3707,31 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 ## Scan journal
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
+
+- 2026-08-13 — contract-harness: added a **format-vocabulary** contract test
+  (`src/registry.rs` `every_format_names_a_recognized_format`) asserting every
+  Schema Object `format:` a mounted spec declares names a recognized format — an OAS
+  3.0.x Data Type format (`int32`/`int64`/`float`/`double`/`byte`/`binary`/`date`/
+  `date-time`/`password`) or a JSON-Schema-Validation string format (`email`/
+  `hostname`/`ipv4`/`ipv6`/`uri`/`uri-reference`/`uuid`/`regex`/…). Tooling keys real
+  behaviour off the exact string (Redoc's format hint, a codegen concrete type, a
+  validator's matching check), so a typo — `datetime` for `date-time`, `int_32` for
+  `int32`, `uid` for `uuid` — silently degrades the field to unconstrained wherever a
+  caller reads or builds the payload; a live hazard across 337 hand-authored `format:`
+  keys. Invisible to every existing test (the `type:` test checks the sibling `type`
+  token, never the `format` modifier; the size/numeric-bound tests inspect bound
+  *values*, never a format string). New pure `format_values_not_recognized` extractor
+  (no YAML dep, mirroring `type_values_not_a_valid_type`): flags a line-leading
+  `format:` whose quote/comment-stripped scalar is outside the recognized vocabulary;
+  skips an empty value (a property literally named `format`) and a `format:` inside an
+  `example:`/`examples:` payload (ancestor-chain walk). Unit-covered
+  (`format_value_extraction_rules`: recognized `uuid`/`date-time`/`int32` pass, a
+  property named `format` + an example-payload `format:` skipped, top-level and nested
+  typos flagged in document order, plus a ≥200 non-vacuous floor of real `format:`
+  keys). Verified true across all mounted specs (337 format keys, all recognized — no
+  drift to fix). Tests: +2 (1 contract, 1 extractor unit). `cargo test` 2215 green (was
+  2213); `cargo build --release` warning-clean. No new dep; binary unchanged
+  (`#[cfg(test)]`-only). — binary: 3.7M (3851944 B, +0 B)
 
 - 2026-08-13 — contract-harness: added a **size-bound-domain** contract test
   (`src/registry.rs` `every_size_bound_is_a_non_negative_integer`) asserting every

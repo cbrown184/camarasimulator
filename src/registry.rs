@@ -9039,4 +9039,260 @@ components:
             "expected many schema `type:` keys across specs, got {typed}"
         );
     }
+
+    /// The scalar value of every `format:` key a spec declares that names no
+    /// recognized OpenAPI 3.0.x / JSON-Schema-Validation format, returned as
+    /// 1-based line numbers in document order.
+    ///
+    /// In OpenAPI 3.0.x a Schema Object's `format` is a free-text *modifier* on
+    /// its `type` drawn, in practice, from a well-known vocabulary — the OAS Data
+    /// Type formats (`int32`/`int64`/`float`/`double`/`byte`/`binary`/`date`/
+    /// `date-time`/`password`) plus the JSON-Schema-Validation string formats
+    /// (`email`/`hostname`/`ipv4`/`ipv6`/`uri`/`uri-reference`/`uuid`/`regex`/…).
+    /// Tooling keys real behaviour off these strings (Redoc renders a format hint,
+    /// codegen picks a concrete type, a validator applies the matching check), so a
+    /// typo — `datetime` for `date-time`, `int_32` for `int32`, `uid` for `uuid` —
+    /// silently degrades to an unconstrained field wherever a caller reads or
+    /// builds the payload. Every one of CamaraSim's `format:` values is a standard
+    /// format, so any value outside the recognized universe is a slip, not a
+    /// deliberate custom format.
+    ///
+    /// Two contexts are excluded, mirroring `type_values_not_a_valid_type`: a
+    /// `format:` with an *empty* value is a property literally named `format` (its
+    /// value is a schema, not a format keyword), and a `format:` appearing as data
+    /// inside an `example:`/`examples:` payload is example data, detected by walking
+    /// the ancestor chain for an enclosing `example:`/`examples:` key. Only a
+    /// `format:` at the start of its line (after indentation) is inspected.
+    fn format_values_not_recognized(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        // The scalar value of a `format:` key, inline comment and quotes stripped;
+        // `None` when the line is not a `format:` key.
+        fn format_value(l: &str) -> Option<&str> {
+            l.trim_start().strip_prefix("format:").map(|v| {
+                v.split('#')
+                    .next()
+                    .unwrap_or(v)
+                    .trim()
+                    .trim_matches('"')
+                    .trim_matches('\'')
+            })
+        }
+        // True when line `i` (indent `c`) sits inside an `example:`/`examples:`
+        // payload — some enclosing container key up the indent ladder is
+        // `example`/`examples`.
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        // The recognized OpenAPI 3.0.x / JSON-Schema-Validation format vocabulary:
+        // the OAS Data Type formats plus the JSON Schema draft string formats. A
+        // typo of any of these lands in neither and is caught.
+        const RECOGNIZED: [&str; 27] = [
+            // OAS 3.0.x Data Type formats.
+            "int32",
+            "int64",
+            "float",
+            "double",
+            "byte",
+            "binary",
+            "date",
+            "date-time",
+            "password",
+            // JSON-Schema-Validation date/time formats.
+            "time",
+            "duration",
+            // …e-mail / host / network formats.
+            "email",
+            "idn-email",
+            "hostname",
+            "idn-hostname",
+            "ipv4",
+            "ipv6",
+            // …resource-identifier formats.
+            "uri",
+            "uri-reference",
+            "iri",
+            "iri-reference",
+            "uri-template",
+            "uuid",
+            // …JSON-pointer / regex formats.
+            "json-pointer",
+            "relative-json-pointer",
+            "regex",
+            "regexp",
+        ];
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some(v) = format_value(line) else {
+                continue;
+            };
+            if v.is_empty() {
+                continue; // a property named `format`, or a block opener
+            }
+            if RECOGNIZED.contains(&v) {
+                continue;
+            }
+            if inside_example(i, indent(line)) {
+                continue; // example data, not a format keyword
+            }
+            out.push(i + 1);
+        }
+        out
+    }
+
+    #[test]
+    fn every_format_names_a_recognized_format() {
+        // Contract-harness invariant (OpenAPI 3.0.x convention): every Schema
+        // Object `format:` a mounted spec declares MUST name a recognized format —
+        // an OAS Data Type format (`int32`/`int64`/`float`/`double`/`byte`/`binary`/
+        // `date`/`date-time`/`password`) or a JSON-Schema-Validation string format
+        // (`email`/`hostname`/`ipv4`/`ipv6`/`uri`/`uri-reference`/`uuid`/`regex`/…).
+        // Tooling keys behaviour off the exact string (a format hint, a codegen type,
+        // a validation check), so a typo — `datetime`, `int_32`, `uid` — silently
+        // drops the constraint wherever a caller reads or builds the payload. A
+        // property literally *named* `format` (empty value) and a `format:` inside an
+        // `example:`/`examples:` payload are excluded — neither is a format keyword.
+        // It is invisible to every existing test: the `type:` test checks the sibling
+        // `type` token, never the `format` modifier, and the size/numeric-bound tests
+        // inspect bound values, never a format string. Verified true across all
+        // mounted specs before asserting.
+        for api in APIS {
+            let bad = format_values_not_recognized(api.body);
+            assert!(
+                bad.is_empty(),
+                "{} spec declares `format:` value(s) naming no recognized OpenAPI/JSON-Schema \
+                 format (likely a typo of a standard format) at line(s): {:?}",
+                api.name,
+                bad
+            );
+        }
+    }
+
+    #[test]
+    fn format_value_extraction_rules() {
+        // Unit-cover the `format_values_not_recognized` extractor so the contract
+        // test above can't pass vacuously and its detection is pinned: recognized
+        // formats (`uuid`/`date-time`/`int32`) pass; a property literally named
+        // `format` (empty value) and a `format:` inside an `example:` payload are
+        // skipped; a typo in a schema — at the top level *and* nested under
+        // `properties:` — is flagged in document order.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    Good:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        at:
+          type: string
+          format: date-time
+        n:
+          type: integer
+          format: int32
+        format:
+          type: string
+    Event:
+      type: object
+      example:
+        format: not-a-real-format
+        id: abc
+    BadTypo:
+      type: string
+      format: datetime
+    BadInSchema:
+      type: object
+      properties:
+        x:
+          type: string
+          format: uid
+";
+        // Flagged, in document order: `BadTypo`'s `format: datetime` at line 35 and
+        // `BadInSchema.x`'s `format: uid` at line 41. Not flagged: the recognized
+        // `uuid`/`date-time`/`int32`, the property literally named `format` (line 26,
+        // empty value), and the `format: not-a-real-format` inside the `example:`
+        // payload (line 31).
+        assert_eq!(format_values_not_recognized(body), vec![35, 41]);
+
+        // Non-vacuous floor: across every registered spec every `format:` names a
+        // recognized format (the invariant the contract test asserts), and the corpus
+        // declares many `format:` keys, so a broken extractor can't hide behind an
+        // empty scan. Count `format:` lines naming a recognized format with a
+        // detection independent of the extractor.
+        let mut formatted = 0usize;
+        for api in APIS {
+            assert!(
+                format_values_not_recognized(api.body).is_empty(),
+                "{}: every `format:` must name a recognized format",
+                api.name
+            );
+            for line in api.body.lines() {
+                if let Some(v) = line.trim_start().strip_prefix("format:") {
+                    let v = v
+                        .split('#')
+                        .next()
+                        .unwrap_or(v)
+                        .trim()
+                        .trim_matches('"')
+                        .trim_matches('\'');
+                    if matches!(
+                        v,
+                        "int32"
+                            | "int64"
+                            | "float"
+                            | "double"
+                            | "byte"
+                            | "date"
+                            | "date-time"
+                            | "email"
+                            | "ipv4"
+                            | "ipv6"
+                            | "uri"
+                            | "uri-reference"
+                            | "uuid"
+                    ) {
+                        formatted += 1;
+                    }
+                }
+            }
+        }
+        assert!(
+            formatted >= 200,
+            "expected many schema `format:` keys across specs, got {formatted}"
+        );
+    }
 }
