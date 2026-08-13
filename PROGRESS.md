@@ -3699,6 +3699,28 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     flagged in document order, plus a ≥200 non-vacuous floor of real `format:`
     keys) so the contract can't pass vacuously. Verified true across all mounted
     specs (337 format keys, all recognized — no drift to fix) before asserting.
+  - a boolean-keyword contract test (`src/registry.rs`
+    `every_boolean_schema_keyword_carries_a_boolean`) asserts every OpenAPI 3.0.x
+    boolean-valued keyword a mounted spec declares — `nullable`/`readOnly`/
+    `writeOnly`/`deprecated`/`uniqueItems`/`exclusiveMinimum`/`exclusiveMaximum` —
+    carries a JSON boolean (`true`/`false`). The live hazard is the two `exclusive*`
+    keywords: booleans in 3.0.x but *numbers* in 3.1, so a spec drafted/migrated
+    with a 3.1 idiom (`exclusiveMinimum: 5`) — or any of these keywords given a
+    stringified/`yes`-style value — is an invalid 3.0.x document a validator/codegen
+    tool rejects or silently mis-reads. Invisible to every existing test: the
+    `type:`/`format:` vocabulary tests inspect those sibling tokens, and the
+    numeric/size-bound tests inspect a bound's *value*, never a boolean modifier's
+    value. A pure `boolean_keyword_non_boolean_values` extractor (no YAML dep,
+    mirroring `format_values_not_recognized`) flags a line-leading boolean keyword
+    whose quote/comment-stripped scalar is neither `true` nor `false`; skips an empty
+    value (a property literally named for the keyword) and a keyword inside an
+    `example:`/`examples:` payload (ancestor-chain walk). Unit-covered
+    (`boolean_keyword_value_extraction_rules`: boolean values pass, a property named
+    `nullable` + an example-payload `readOnly:` skipped, a `yes` typo and a 3.1-style
+    numeric `exclusiveMinimum` flagged in document order, plus a ≥20 non-vacuous floor
+    of real boolean keywords) so the contract can't pass vacuously. Verified true
+    across all mounted specs (24 boolean keywords — 17 `nullable`, 5 `readOnly`, 2
+    `uniqueItems`, all `true` — no drift to fix) before asserting.
   Full response-vs-schema validation still TODO (would need a YAML/JSON-Schema
   validator — a dependency trade-off, deferred).
 
@@ -3707,6 +3729,29 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 ## Scan journal
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
+
+- 2026-08-13 — contract-harness: added a **boolean-keyword** contract test
+  (`src/registry.rs` `every_boolean_schema_keyword_carries_a_boolean`) asserting every
+  OpenAPI 3.0.x boolean-valued keyword a mounted spec declares — `nullable`/`readOnly`/
+  `writeOnly`/`deprecated`/`uniqueItems`/`exclusiveMinimum`/`exclusiveMaximum` — carries
+  a JSON boolean (`true`/`false`). The live hazard is the two `exclusive*` keywords:
+  booleans in 3.0.x but *numbers* in 3.1, so a spec drafted/migrated with a 3.1 idiom
+  (`exclusiveMinimum: 5`) — or any of these given a stringified/`yes`-style value — is an
+  invalid 3.0.x document a validator/codegen tool rejects or silently mis-reads.
+  Invisible to every existing test (the `type:`/`format:` vocabulary tests check those
+  sibling tokens; the numeric/size-bound tests inspect a bound *value*, never a boolean
+  modifier's value). New pure `boolean_keyword_non_boolean_values` extractor (no YAML
+  dep, mirroring `format_values_not_recognized`): flags a line-leading boolean keyword
+  whose quote/comment-stripped scalar is neither `true` nor `false`; skips an empty value
+  (a property named for the keyword) and a keyword inside an `example:`/`examples:`
+  payload (ancestor-chain walk). Unit-covered (`boolean_keyword_value_extraction_rules`:
+  boolean values pass, a property named `nullable` + an example-payload `readOnly:`
+  skipped, a `yes` typo and a 3.1-style numeric `exclusiveMinimum` flagged in document
+  order, plus a ≥20 non-vacuous floor). Verified true across all mounted specs (24
+  boolean keywords — 17 `nullable`, 5 `readOnly`, 2 `uniqueItems`, all `true` — no drift
+  to fix). Tests: +2 (1 contract, 1 extractor unit). `cargo test` 2217 green (was 2215);
+  `cargo build --release` warning-clean. No new dep; binary unchanged (`#[cfg(test)]`-only).
+  — binary: 3.7M (3851944 B, +0 B)
 
 - 2026-08-13 — contract-harness: added a **format-vocabulary** contract test
   (`src/registry.rs` `every_format_names_a_recognized_format`) asserting every

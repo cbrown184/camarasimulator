@@ -9295,4 +9295,226 @@ components:
             "expected many schema `format:` keys across specs, got {formatted}"
         );
     }
+
+    /// Line numbers (1-based) of OpenAPI 3.0.x boolean-valued keywords whose
+    /// declared value is not a JSON boolean (`true`/`false`).
+    ///
+    /// In OpenAPI 3.0.x these modifier keywords are all boolean-valued —
+    /// `nullable`, `readOnly`, `writeOnly`, `deprecated`, `uniqueItems`, and
+    /// `exclusiveMinimum`/`exclusiveMaximum` (the last two only became *numbers*
+    /// in OpenAPI 3.1 / JSON Schema 2020-12) — so any other scalar (a 3.1-style
+    /// number `exclusiveMinimum: 5`, a stringified `"true"`, a YAML-truthy typo
+    /// `yes`/`on`) is an invalid 3.0.x document a validator/codegen tool rejects
+    /// or silently mis-reads.
+    ///
+    /// Two contexts are excluded, mirroring `format_values_not_recognized`: a
+    /// keyword with an *empty* inline value is a property literally named for the
+    /// keyword (its value opens a schema, not a boolean), and a keyword appearing
+    /// as data inside an `example:`/`examples:` payload is example data, detected
+    /// by walking the ancestor chain for an enclosing `example:`/`examples:` key.
+    /// Only a keyword at the start of its line (after indentation) is inspected.
+    fn boolean_keyword_non_boolean_values(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        // The inline scalar of a boolean-keyword line (inline comment and quotes
+        // stripped); `None` when the line is not one of the boolean keywords. The
+        // `:` must immediately follow the keyword, so a longer key sharing the
+        // prefix (`readOnlyFlag:`) does not match.
+        fn keyword_value(l: &str) -> Option<&str> {
+            const BOOL_KEYWORDS: [&str; 7] = [
+                "nullable",
+                "readOnly",
+                "writeOnly",
+                "deprecated",
+                "uniqueItems",
+                "exclusiveMinimum",
+                "exclusiveMaximum",
+            ];
+            let t = l.trim_start();
+            for kw in BOOL_KEYWORDS {
+                if let Some(rest) = t.strip_prefix(kw) {
+                    if let Some(v) = rest.strip_prefix(':') {
+                        return Some(
+                            v.split('#')
+                                .next()
+                                .unwrap_or(v)
+                                .trim()
+                                .trim_matches('"')
+                                .trim_matches('\''),
+                        );
+                    }
+                }
+            }
+            None
+        }
+        // True when line `i` (indent `c`) sits inside an `example:`/`examples:`
+        // payload — some enclosing container key up the indent ladder is
+        // `example`/`examples`.
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some(v) = keyword_value(line) else {
+                continue;
+            };
+            if v.is_empty() {
+                continue; // a property literally named for the keyword (block opener)
+            }
+            if v == "true" || v == "false" {
+                continue;
+            }
+            if inside_example(i, indent(line)) {
+                continue; // example data, not a boolean keyword
+            }
+            out.push(i + 1);
+        }
+        out
+    }
+
+    #[test]
+    fn every_boolean_schema_keyword_carries_a_boolean() {
+        // Contract-harness invariant (OpenAPI 3.0.x): every boolean-valued keyword
+        // a mounted spec declares — `nullable`/`readOnly`/`writeOnly`/`deprecated`/
+        // `uniqueItems`/`exclusiveMinimum`/`exclusiveMaximum` — MUST carry a JSON
+        // boolean (`true`/`false`). The two `exclusive*` keywords are the live
+        // hazard: they are booleans in 3.0.x but *numbers* in 3.1, so a spec drafted
+        // or migrated with a 3.1 idiom (`exclusiveMinimum: 5`) — or any keyword given
+        // a stringified/`yes`-style value — is an invalid 3.0.x document a
+        // validator/codegen tool rejects or mis-reads. Invisible to every existing
+        // test: the `type:`/`format:` vocabulary tests inspect those sibling tokens,
+        // and the numeric/size-bound tests inspect a bound's *value*, never a boolean
+        // modifier's value. A property literally *named* for a keyword (empty value)
+        // and a keyword inside an `example:`/`examples:` payload are excluded —
+        // neither is a boolean keyword. Verified true across all mounted specs before
+        // asserting.
+        for api in APIS {
+            let bad = boolean_keyword_non_boolean_values(api.body);
+            assert!(
+                bad.is_empty(),
+                "{} spec declares an OpenAPI 3.0.x boolean keyword \
+                 (nullable/readOnly/writeOnly/deprecated/uniqueItems/exclusiveMinimum/\
+                 exclusiveMaximum) with a non-boolean value at line(s): {:?}",
+                api.name,
+                bad
+            );
+        }
+    }
+
+    #[test]
+    fn boolean_keyword_value_extraction_rules() {
+        // Unit-cover the `boolean_keyword_non_boolean_values` extractor so the
+        // contract test above can't pass vacuously and its detection is pinned:
+        // boolean values (`nullable: true`, `readOnly: false`, `uniqueItems: true`)
+        // pass; a property literally named `nullable` (empty value, block opener) and
+        // a `readOnly:` inside an `example:` payload are skipped; a YAML-truthy typo
+        // (`nullable: yes`) and a 3.1-style numeric `exclusiveMinimum: 5` are flagged
+        // in document order.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    Good:
+      type: object
+      properties:
+        id:
+          type: string
+          nullable: true
+        tag:
+          type: string
+          readOnly: false
+        nullable:
+          type: boolean
+      uniqueItems: true
+    Event:
+      type: object
+      example:
+        readOnly: notabool
+        id: abc
+    BadWord:
+      type: string
+      nullable: yes
+    BadNumber:
+      type: object
+      properties:
+        n:
+          type: integer
+          exclusiveMinimum: 5
+";
+        // Flagged, in document order: `BadWord`'s `nullable: yes` at line 33 and
+        // `BadNumber.n`'s `exclusiveMinimum: 5` at line 39. Not flagged: the boolean
+        // `true`/`false` values (lines 19, 22, 25), the property literally named
+        // `nullable` (line 23, empty value), and the `readOnly: notabool` inside the
+        // `example:` payload (line 29).
+        assert_eq!(boolean_keyword_non_boolean_values(body), vec![33, 39]);
+
+        // Non-vacuous floor: across every registered spec every boolean keyword
+        // carries a boolean (the invariant the contract test asserts), and the corpus
+        // declares many such keywords, so a broken extractor can't hide behind an
+        // empty scan. Count boolean-keyword lines carrying a literal `true`/`false`
+        // with a detection independent of the extractor.
+        let mut booleans = 0usize;
+        for api in APIS {
+            assert!(
+                boolean_keyword_non_boolean_values(api.body).is_empty(),
+                "{}: every OpenAPI 3.0.x boolean keyword must carry a boolean",
+                api.name
+            );
+            for line in api.body.lines() {
+                let t = line.trim_start();
+                for kw in [
+                    "nullable:",
+                    "readOnly:",
+                    "writeOnly:",
+                    "deprecated:",
+                    "uniqueItems:",
+                    "exclusiveMinimum:",
+                    "exclusiveMaximum:",
+                ] {
+                    if let Some(v) = t.strip_prefix(kw) {
+                        let v = v.split('#').next().unwrap_or(v).trim();
+                        if v == "true" || v == "false" {
+                            booleans += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            booleans >= 20,
+            "expected many OpenAPI 3.0.x boolean keywords across specs, got {booleans}"
+        );
+    }
 }
