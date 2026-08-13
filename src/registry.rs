@@ -8231,4 +8231,231 @@ components:
             "expected many composer keywords across specs, got {composers}"
         );
     }
+
+    /// Extract the 1-based line number of every Schema Object `type:` a spec
+    /// declares whose scalar value names **no valid OpenAPI 3.0.x type** — without
+    /// a YAML dep.
+    ///
+    /// In OpenAPI 3.0.x a Schema Object's `type` MUST be one of the six JSON Schema
+    /// primitive types — `string`, `number`, `integer`, `boolean`, `array`,
+    /// `object`. (3.0.x, unlike 3.1, does not admit `null` as a type; nullability
+    /// is `nullable: true`.) A value outside that set — a typo (`sting`,
+    /// `interger`, `bool`) or a stray token — is an invalid schema a
+    /// Redoc/Swagger/codegen client can neither validate against nor generate for,
+    /// so it breaks silently at the point a caller reads or builds the payload.
+    ///
+    /// `type:` is not unique to Schema Objects: a Security Scheme Object keys it
+    /// too (`oauth2`/`http`/`apiKey`/`openIdConnect`/`mutualTLS` — CamaraSim's auth
+    /// spec defines an inline `openIdConnect` scheme), so those five tokens are
+    /// accepted as well; a typo still lands in neither set and is caught. Two
+    /// further contexts are excluded: a `type:` with an *empty* value is a property
+    /// literally named `type` (its value is a schema, e.g. a CloudEvent's `type`
+    /// field), not a type declaration; and a `type:` appearing as data inside an
+    /// `example:`/`examples:` payload (CamaraSim's CloudEvent examples carry a
+    /// `type: "org.camaraproject…"` URN) is example data, detected by walking the
+    /// ancestor chain for an enclosing `example:`/`examples:` key. Only a `type:`
+    /// at the start of its line (after indentation) is inspected, so a `type` inside
+    /// a flow mapping (`{ type: string }`) is left to the composer/array tests.
+    fn type_values_not_a_valid_type(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        // The scalar value of a `type:` key, inline comment and quotes stripped;
+        // `None` when the line is not a `type:` key.
+        fn type_value(l: &str) -> Option<&str> {
+            l.trim_start().strip_prefix("type:").map(|v| {
+                v.split('#')
+                    .next()
+                    .unwrap_or(v)
+                    .trim()
+                    .trim_matches('"')
+                    .trim_matches('\'')
+            })
+        }
+        // True when line `i` (indent `c`) sits inside an `example:`/`examples:`
+        // payload — some enclosing container key up the indent ladder is
+        // `example`/`examples`.
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        // The six JSON Schema types plus the five Security Scheme `type` tokens —
+        // both are legitimate `type:` values; a typo falls in neither.
+        const VALID: [&str; 11] = [
+            "string",
+            "number",
+            "integer",
+            "boolean",
+            "array",
+            "object",
+            "oauth2",
+            "http",
+            "apiKey",
+            "openIdConnect",
+            "mutualTLS",
+        ];
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some(v) = type_value(line) else {
+                continue;
+            };
+            if v.is_empty() {
+                continue; // a property named `type`, or a block opener
+            }
+            if VALID.contains(&v) {
+                continue;
+            }
+            if inside_example(i, indent(line)) {
+                continue; // example/CloudEvent data, not a type keyword
+            }
+            out.push(i + 1);
+        }
+        out
+    }
+
+    #[test]
+    fn every_type_names_a_valid_schema_type() {
+        // Contract-harness invariant (OpenAPI 3.0.x structural rule): every Schema
+        // Object `type:` a mounted spec declares MUST name one of the six JSON
+        // Schema primitive types — `string`/`number`/`integer`/`boolean`/`array`/
+        // `object`. (3.0.x, unlike 3.1, does not admit `null` as a type; nullability
+        // is `nullable: true`.) A value outside that set — a typo (`sting`,
+        // `interger`, `bool`) or a stray token — is an invalid schema a
+        // Redoc/Swagger/codegen client can neither validate against nor generate
+        // for, breaking silently at the point a caller reads or builds the payload.
+        //
+        // `type:` is not unique to Schema Objects: a Security Scheme Object keys it
+        // too (`oauth2`/`http`/`apiKey`/`openIdConnect`/`mutualTLS` — CamaraSim's
+        // auth spec defines an inline `openIdConnect` scheme), so those five tokens
+        // are accepted as well; a typo still lands in neither set and is caught. A
+        // property literally *named* `type` (its value a schema) and a `type:`
+        // appearing as data inside an `example:`/`examples:` payload (a CloudEvent
+        // `type` URN) are both excluded — neither is a type keyword. It is invisible
+        // to every existing test, which check an `items` schema, a composer's
+        // sequence-ness, a value list, a discriminator's completeness, or a ref
+        // target, never that a `type` names a real type. Verified true across all
+        // mounted specs before asserting.
+        for api in APIS {
+            let bad = type_values_not_a_valid_type(api.body);
+            assert!(
+                bad.is_empty(),
+                "{} spec declares `type:` value(s) naming no valid OpenAPI type \
+                 (one of string/number/integer/boolean/array/object) at line(s): {:?}",
+                api.name,
+                bad
+            );
+        }
+    }
+
+    #[test]
+    fn schema_type_value_extraction_rules() {
+        // Unit-cover the `type_values_not_a_valid_type` extractor so the contract
+        // test above can't pass vacuously and its detection is pinned: valid schema
+        // types (`object`/`string`/`integer`) and a Security Scheme `type`
+        // (`openIdConnect`) pass; a property literally named `type` (empty value)
+        // and a `type:` inside an `example:` payload are skipped; a typo in a schema
+        // — at the top level *and* nested under `properties:` — is flagged in
+        // document order.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  securitySchemes:
+    oidc:
+      type: openIdConnect
+      openIdConnectUrl: https://example/x
+  schemas:
+    Good:
+      type: object
+      properties:
+        name:
+          type: string
+        count:
+          type: integer
+        type:
+          type: string
+    Event:
+      type: object
+      example:
+        type: \"org.camaraproject.x.v1.thing\"
+        id: abc
+    BadTypo:
+      type: sting
+    BadInSchema:
+      type: object
+      properties:
+        x:
+          type: nonsense
+";
+        // Flagged, in document order: `BadTypo`'s `type: sting` at line 33 and
+        // `BadInSchema.x`'s `type: nonsense` at line 38. Not flagged: the inline
+        // security `openIdConnect` (line 15), every valid schema type, the property
+        // literally named `type` (line 25, empty value), and the CloudEvent
+        // `type: "org.camaraproject…"` inside the `example:` payload (line 30).
+        assert_eq!(type_values_not_a_valid_type(body), vec![33, 38]);
+
+        // Non-vacuous floor: across every registered spec every `type:` names a
+        // valid token (the invariant the contract test asserts), and the corpus
+        // declares many schema `type:` keys, so a broken extractor can't hide behind
+        // an empty scan. Count `type:` lines naming a valid schema type with a
+        // detection independent of the extractor.
+        let mut typed = 0usize;
+        for api in APIS {
+            assert!(
+                type_values_not_a_valid_type(api.body).is_empty(),
+                "{}: every `type:` must name a valid OpenAPI type",
+                api.name
+            );
+            for line in api.body.lines() {
+                if let Some(v) = line.trim_start().strip_prefix("type:") {
+                    let v = v
+                        .split('#')
+                        .next()
+                        .unwrap_or(v)
+                        .trim()
+                        .trim_matches('"')
+                        .trim_matches('\'');
+                    if matches!(
+                        v,
+                        "string" | "number" | "integer" | "boolean" | "array" | "object"
+                    ) {
+                        typed += 1;
+                    }
+                }
+            }
+        }
+        assert!(
+            typed >= 500,
+            "expected many schema `type:` keys across specs, got {typed}"
+        );
+    }
 }

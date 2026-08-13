@@ -3636,6 +3636,33 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-13 — contract-harness: added a **schema-`type`-names-a-valid-type**
+  contract test (`src/registry.rs` `every_type_names_a_valid_schema_type`) asserting
+  every Schema Object `type:` a mounted spec declares names one of the six OpenAPI
+  3.0.x JSON Schema primitive types (`string`/`number`/`integer`/`boolean`/`array`/
+  `object`; 3.0.x, unlike 3.1, admits no `null` type — nullability is `nullable`). A
+  value outside that set — a typo (`sting`/`interger`/`bool`) or stray token — is an
+  invalid schema a Redoc/Swagger/codegen client can neither validate against nor
+  generate for, breaking silently where a caller reads/builds the payload; a live
+  hazard across 1627 hand-authored `type:` keys. Invisible to every existing test
+  (the array-items/composer/enum/discriminator/`$ref` tests check an `items` schema,
+  a composer's sequence-ness, a value list, a discriminator's completeness, or a ref
+  target — never that a `type` names a real type). New pure `type_values_not_a_valid_
+  type` extractor (no YAML dep): flags a line-leading `type:` whose quote/comment-
+  stripped scalar is neither a schema type nor a Security Scheme `type` token
+  (`oauth2`/`http`/`apiKey`/`openIdConnect`/`mutualTLS` — the auth spec's inline
+  `openIdConnect` scheme is legit, and a typo still lands in neither set); skips an
+  empty value (a property literally named `type`) and a `type:` inside an `example:`/
+  `examples:` payload (the CloudEvent `type: "org.camaraproject…"` URN), the latter by
+  walking the ancestor-key chain. Unit-covered (`schema_type_value_extraction_rules`:
+  valid schema types + inline `openIdConnect` + property-named-`type` + example-URN
+  pass; a top-level and a `properties:`-nested typo flagged in document order; plus a
+  non-vacuous floor of ≥500 valid schema `type:` keys) so the contract can't pass
+  vacuously. Verified true across all mounted specs (no drift to fix). Tests: +2 (1
+  contract, 1 extractor unit). `cargo test` 2207 green (was 2205); `cargo build
+  --release` warning-clean. No new dep; binary unchanged (`#[cfg(test)]`-only). —
+  binary: 3.7M (3851944 B, +0 B)
+
 - 2026-08-13 — contract-harness: added a **schema-composition-keyword-is-a-sequence**
   contract test (`src/registry.rs` `every_composer_keyword_declares_a_sequence`)
   asserting every `oneOf`/`anyOf`/`allOf` a mounted spec declares is a sequence (an
