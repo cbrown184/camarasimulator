@@ -3868,6 +3868,26 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     flagged in document order; named-`properties`/example/nested skips; a ≥30
     object-typed-block non-vacuous floor) so the contract can't pass vacuously.
     Verified true across all mounted specs (no drift to fix) before asserting.
+  - an operationId-well-formedness contract test (`src/registry.rs`
+    `every_operation_id_is_a_well_formed_token`) asserts every `operationId` a
+    mounted spec declares is a codegen-safe identifier — begins with an ASCII letter,
+    thereafter only ASCII alphanumerics / `_` / `-`. The operationId is the
+    operation's canonical machine name that a client generator turns into a method
+    name, so a token with whitespace, a leading digit, or unrenderable punctuation
+    (`.`/`/`/`:`/`(`) is mangled or dropped where a caller expects to call it. The
+    *form* complement of the two existing operationId tests
+    (`every_operation_declares_an_operation_id` = presence,
+    `operation_ids_are_unique_within_each_spec` = per-doc uniqueness) — both take the
+    token verbatim and never inspect its characters, so a present, unique-but-
+    malformed id sails through both. New pure `operation_id_is_well_formed` predicate
+    (no regex dep; a hand-rolled ASCII scan) reusing the existing `operation_ids`
+    extractor. CAMARA's own `send-sms` / `KYC_Fill-in` (a `-`/`_` every generator
+    normalises to a word boundary) are deliberately admitted; only unrenderable
+    tokens are rejected. Unit-covered (`operation_id_wellformedness_rules`: camelCase/
+    underscore/hyphen/trailing-digit/all-caps accepted; empty/leading-digit/embedded-
+    whitespace/`.`//`:`(`/non-ASCII rejected; a ≥100 operationId non-vacuous floor)
+    so the contract can't pass vacuously. Verified true across all 143 mounted
+    operationIds (no drift to fix) before asserting.
   Full response-vs-schema validation still TODO (would need a YAML/JSON-Schema
   validator — a dependency trade-off, deferred).
 
@@ -3876,6 +3896,30 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 ## Scan journal
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
+
+- 2026-08-13 — contract-harness: added an **operationId-well-formedness** contract
+  test (`src/registry.rs` `every_operation_id_is_a_well_formed_token`) asserting every
+  `operationId` a mounted spec declares is a codegen-safe identifier — begins with an
+  ASCII letter, thereafter only ASCII alphanumerics / `_` / `-`. An operationId is the
+  operation's canonical machine name that a client generator (OpenAPI Generator,
+  Redocly) renders into a method name, so a token carrying whitespace, a leading
+  digit, or punctuation a code identifier can't hold (`.`/`/`/`:`/`(`) is mangled or
+  dropped exactly where a caller expects to call it. The *form* complement of the two
+  existing operationId contract tests — `every_operation_declares_an_operation_id`
+  (presence) and `operation_ids_are_unique_within_each_spec` (per-document uniqueness):
+  both take the token verbatim and never inspect its characters, so a present,
+  unique-but-malformed id escapes both. New pure `operation_id_is_well_formed`
+  predicate (no regex dep — a hand-rolled ASCII scan) reusing the existing
+  `operation_ids` extractor. CAMARA's own `send-sms` / `KYC_Fill-in` (a `-`/`_` every
+  generator normalises to a word boundary) are deliberately admitted; only genuinely
+  unrenderable tokens are rejected. Unit-covered (`operation_id_wellformedness_rules`:
+  camelCase / underscore / hyphen / trailing-digit / all-caps accepted; empty /
+  leading-digit / embedded-whitespace / `.` / `/` / `:` / `(` / non-ASCII rejected;
+  plus a ≥100 operationId non-vacuous floor) so the contract can't pass vacuously.
+  Verified true across all 143 mounted operationIds (no drift to fix). Tests: +2
+  (1 contract, 1 unit). `cargo test` 2241 green (was 2239); `cargo build --release`
+  succeeds. No new dep; binary unchanged (`#[cfg(test)]`-only). — binary: 3.7M
+  (3851944 B, +0 B)
 
 - 2026-08-13 — contract-harness: added a **facet-keyword↔type-consistency** contract
   test (`src/registry.rs` `every_facet_keyword_sits_on_its_required_type`) asserting

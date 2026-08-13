@@ -720,6 +720,29 @@ mod tests {
             .collect()
     }
 
+    /// Whether an `operationId` token is a codegen-safe identifier: it MUST begin
+    /// with an ASCII letter and thereafter contain only ASCII alphanumerics, `_`,
+    /// or `-`.
+    ///
+    /// An `operationId` is the canonical machine name of an operation — client
+    /// generators (OpenAPI Generator, Redocly, …) turn it into a method/function
+    /// name. A token carrying whitespace, a leading digit, or punctuation a code
+    /// identifier can't hold (`.`/`/`/`:`/`(`) is one no generator can render
+    /// verbatim, so a caller reads or calls a mangled or dropped method exactly
+    /// where the operationId is meant to name it. The `-` (used by CAMARA's own
+    /// `send-sms` / `KYC_Fill-in`) is tolerated: it is not a bare-identifier
+    /// character but every generator normalises it to a word boundary
+    /// (`send-sms` → `sendSms`), so it stays deterministically resolvable — unlike
+    /// whitespace or a leading digit. No regex dep: a hand-rolled ASCII scan.
+    fn operation_id_is_well_formed(id: &str) -> bool {
+        let mut chars = id.chars();
+        match chars.next() {
+            Some(c) if c.is_ascii_alphabetic() => {}
+            _ => return false,
+        }
+        chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    }
+
     /// Extract every `$ref` target string declared in an embedded OpenAPI body,
     /// in document order, without a YAML dep.
     ///
@@ -3472,6 +3495,97 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn every_operation_id_is_a_well_formed_token() {
+        // Contract-harness invariant (OpenAPI structural + DESIGN §9): every
+        // `operationId` a mounted spec declares MUST be a codegen-safe identifier —
+        // it begins with an ASCII letter and thereafter holds only ASCII
+        // alphanumerics, `_`, or `-`. The operationId is the operation's canonical
+        // machine name: a client generator (OpenAPI Generator, Redocly, …) renders
+        // it into a method name, so a token carrying whitespace, a leading digit, or
+        // punctuation a code identifier can't hold (`.`/`/`/`:`/`(`) is mangled or
+        // dropped exactly where a caller expects to call it.
+        //
+        // This is the *form* complement of the two existing operationId contract
+        // tests: `operations_without_operation_id` asserts an operation *declares*
+        // one and `operation_ids_are_unique_within_each_spec` asserts none repeats
+        // within a document — but both take the token verbatim and never inspect its
+        // characters, so a present, unique-but-malformed id (`get status`, a pasted
+        // `2gConnect`, a stray `retrieve.status`) sails through both. A live hazard
+        // in these copy-paste-drafted specs, where an operationId is hand-typed per
+        // endpoint. CAMARA's own `send-sms` / `KYC_Fill-in` (a `-`/`_` normalised to
+        // a word boundary by every generator) are deliberately admitted; only
+        // genuinely unrenderable tokens are rejected. Verified true across all
+        // mounted specs before asserting.
+        for api in APIS {
+            let malformed: Vec<String> = operation_ids(api.body)
+                .into_iter()
+                .filter(|id| !operation_id_is_well_formed(id))
+                .collect();
+            assert!(
+                malformed.is_empty(),
+                "{} spec declares a malformed operationId (must start with a letter \
+                 then hold only alphanumerics/`_`/`-`): {:?}",
+                api.name,
+                malformed
+            );
+        }
+    }
+
+    #[test]
+    fn operation_id_wellformedness_rules() {
+        // Unit-cover the `operation_id_is_well_formed` predicate so the contract
+        // test above can't pass vacuously and its accept/reject boundary is pinned.
+        // Accepted: a plain camelCase id, an underscore/hyphen id (CAMARA's own
+        // `KYC_Fill-in` / `send-sms`), a trailing digit, an all-caps segment.
+        for ok in [
+            "getSession",
+            "retrieveSessionsByDevice",
+            "KYC_Fill-in",
+            "send-sms",
+            "verifyAge2",
+            "POSTThing",
+        ] {
+            assert!(operation_id_is_well_formed(ok), "should accept `{ok}`");
+        }
+        // Rejected: empty; a leading digit; embedded whitespace; and punctuation a
+        // code identifier can't hold (`.`/`/`/`:`/`(`/non-ASCII).
+        for bad in [
+            "",
+            "2gConnect",
+            "get status",
+            "get\tstatus",
+            "retrieve.status",
+            "path/op",
+            "op:read",
+            "call()",
+            "vérifier",
+        ] {
+            assert!(!operation_id_is_well_formed(bad), "should reject `{bad:?}`");
+        }
+
+        // Non-vacuous floor: the corpus declares many operationIds and every one is
+        // well-formed (the invariant the contract test asserts), so the accept path
+        // runs on real data and a broken (always-true) predicate can't hide behind
+        // an empty loop.
+        let mut total = 0usize;
+        for api in APIS {
+            for id in operation_ids(api.body) {
+                assert!(
+                    operation_id_is_well_formed(&id),
+                    "{}: operationId `{}` must be well-formed",
+                    api.name,
+                    id
+                );
+                total += 1;
+            }
+        }
+        assert!(
+            total >= 100,
+            "expected many operationIds across specs, got {total}"
+        );
     }
 
     /// The single `$ref` every mounted spec must use to define its `openId`
