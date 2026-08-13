@@ -3730,6 +3730,31 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-13 — contract-harness: added a **distinct-property-names** contract test
+  (`src/registry.rs` `every_properties_object_lists_distinct_property_names`) asserting no
+  mounted spec repeats a property name within one `properties:` object. A Schema Object's
+  `properties:` is a YAML mapping keyed by property name, so a repeated key is invalid and
+  every parser silently keeps only the **last** occurrence — the earlier property's schema
+  (`type`/`format`/bounds/`description`) is dropped without a trace, so the field a caller
+  reads/generates is whichever copy came last. The routine hazard is a property block grown
+  by pasting a sibling property and leaving it unrenamed. The next sibling in the
+  "no-duplicates" family (required-array / parameter `(name,location)` / enum-value /
+  operationId dup tests), none of which look at property *names*: those check a `required`
+  list, a parameter pair, an enum's values, or an operation's id. New pure
+  `properties_objects_with_duplicate_names` extractor (no YAML dep, mirroring
+  `required_arrays_with_duplicate_entries`): for each block-opening `properties:` at indent
+  `C` it finds the first-child indent `D` and collects the mapping keys at *exactly* `D`
+  (bounded by the dedent to ≤`C` that closes the block), so a property's own deeper schema
+  keywords and a nested `properties:` (scanned as its own block, on its own opener) are never
+  miscounted — a name reused across an outer and an inner block is legitimate. Unit-covered
+  (`properties_object_duplicate_name_extraction_rules`: a repeated name flagged with name +
+  block line, deeper schema keywords not counted, an outer/inner name reuse not a duplicate, a
+  clean block passes; plus a ≥500 direct-property-key floor). Verified true across all mounted
+  specs (over 1300 direct property keys, all distinct — no drift to fix). Tests: +2 (1
+  contract, 1 extractor unit). `cargo test` 2219 green (was 2217); `cargo build --release`
+  warning-clean. No new dep; binary unchanged (`#[cfg(test)]`-only). — binary: 3.7M (3851944
+  B, +0 B)
+
 - 2026-08-13 — contract-harness: added a **boolean-keyword** contract test
   (`src/registry.rs` `every_boolean_schema_keyword_carries_a_boolean`) asserting every
   OpenAPI 3.0.x boolean-valued keyword a mounted spec declares — `nullable`/`readOnly`/

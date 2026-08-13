@@ -9517,4 +9517,226 @@ components:
             "expected many OpenAPI 3.0.x boolean keywords across specs, got {booleans}"
         );
     }
+
+    /// Extract a descriptor for every `properties:` object a spec declares that
+    /// lists the **same property name twice** — without a YAML dep.
+    ///
+    /// A Schema Object's `properties:` is a YAML mapping keyed by property name,
+    /// so the names must be unique: a mapping that repeats a key is invalid, and
+    /// every YAML/JSON parser silently keeps only the **last** occurrence — so the
+    /// earlier property's schema (its `type`, `format`, bounds, `description`) is
+    /// discarded without a trace. The routine hazard in these specs is a property
+    /// block grown by pasting a sibling property and forgetting to rename it, so
+    /// the field a caller reads is governed by whichever copy came last.
+    ///
+    /// For each block-opening `properties:` at indent `C` (an empty value or only a
+    /// trailing `# comment` — a `properties:` with an inline value opens no mapping)
+    /// this finds the first-child indent `D` (the first deeper non-blank line) and
+    /// collects the mapping keys at *exactly* `D`, bounded by the first non-blank
+    /// line that dedents to `C` or shallower (the sibling schema keyword — `required:`,
+    /// `additionalProperties:` — or enclosing dedent that closes the block). Keys
+    /// deeper than `D` are a property's own schema (its `type:`/`description:`, or a
+    /// nested `properties:` handled as its own block on its own opener), never direct
+    /// property names, so they are skipped. A repeated key at `D` is flagged with the
+    /// offending name and the block's line, in document order.
+    fn properties_objects_with_duplicate_names(body: &str) -> Vec<String> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        // Unquote a property-name key.
+        let unquote = |name: &str| -> String {
+            name.strip_prefix('"')
+                .and_then(|s| s.strip_suffix('"'))
+                .or_else(|| name.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')))
+                .unwrap_or(name)
+                .to_string()
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let t = line.trim_start();
+            // A `properties:` mapping opener: the key `properties`, its value empty
+            // or a trailing comment (an inline value would be a scalar/flow, not a
+            // block mapping of property definitions).
+            let Some(rest) = t.strip_prefix("properties:") else { continue };
+            let rest = rest.trim_start();
+            if !(rest.is_empty() || rest.starts_with('#')) {
+                continue;
+            }
+            let c = indent(line);
+            // First-child indent D (first non-blank, non-comment line deeper than C).
+            let mut d: Option<usize> = None;
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                let tl = l.trim();
+                if tl.is_empty() || tl.starts_with('#') {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) <= c {
+                    break; // empty properties block
+                }
+                d = Some(indent(l));
+                break;
+            }
+            let Some(d) = d else { continue };
+            // Collect direct property keys (exactly indent D) until the block closes.
+            let mut seen = HashSet::new();
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                let tl = l.trim();
+                if tl.is_empty() || tl.starts_with('#') {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) <= c {
+                    break; // dedented out of the properties block
+                }
+                if indent(l) == d && !tl.starts_with('-') {
+                    if let Some((k, _)) = tl.split_once(':') {
+                        let name = unquote(k.trim());
+                        if !name.is_empty() && !seen.insert(name.clone()) {
+                            out.push(format!("`{name}` (properties block at line {})", i + 1));
+                        }
+                    }
+                }
+                j += 1;
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_properties_object_lists_distinct_property_names() {
+        // Contract-harness invariant (OpenAPI / YAML structural rule): a Schema
+        // Object's `properties:` is a mapping keyed by property name, so a mounted
+        // spec MUST NOT list the same property name twice in one `properties:`
+        // block. A repeated key is an invalid mapping every parser resolves by
+        // keeping only the last copy — so the earlier property's schema is dropped
+        // silently, and the field a caller reads/generates is whichever definition
+        // came last.
+        //
+        // No sibling "distinct" test looks at property *names*: the required-array,
+        // parameter-array, enum, and operationId duplicate tests check a `required`
+        // list, a `(name, location)` pair, an enum's values, or an operation's id —
+        // never the keys of a `properties:` mapping. In these scenario-table-heavy
+        // specs a property pasted from a sibling schema and left unrenamed is a live
+        // copy-paste hazard. Verified true across all mounted specs before asserting.
+        for api in APIS {
+            let bad = properties_objects_with_duplicate_names(api.body);
+            assert!(
+                bad.is_empty(),
+                "{} spec declares a `properties:` object that repeats a property \
+                 name (a schema's property keys must be distinct): {:?}",
+                api.name,
+                bad
+            );
+        }
+    }
+
+    #[test]
+    fn properties_object_duplicate_name_extraction_rules() {
+        // Unit-cover the `properties_objects_with_duplicate_names` extractor so the
+        // contract test above can't pass vacuously and its detection is pinned: a
+        // `properties:` block that repeats a name is flagged (with the name and the
+        // block's line); a property's own schema keywords (deeper than the property
+        // indent) are never counted as names; a nested `properties:` is scanned as
+        // its own block, so a name reused across the outer and an inner block is not
+        // a duplicate; and a clean block passes. All in document order.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths: {}
+components:
+  schemas:
+    Dup:
+      type: object
+      properties:
+        phoneNumber:
+          type: string
+        amount:
+          type: number
+        phoneNumber:
+          type: string
+    Clean:
+      type: object
+      properties:
+        a:
+          type: string
+        b:
+          type: object
+          properties:
+            a:
+              type: string
+            c:
+              type: string
+";
+        // Flagged, in document order: only `Dup`'s block (line 10) repeats
+        // `phoneNumber`. Not flagged: `Clean`'s outer block (`a`, `b` — the deeper
+        // `type:` keywords are the properties' own schema, not names), and `b`'s
+        // nested block (`a`, `c` — its `a` is a different mapping, so reusing the
+        // outer name `a` is legitimate).
+        assert_eq!(
+            properties_objects_with_duplicate_names(body),
+            vec!["`phoneNumber` (properties block at line 10)".to_string()]
+        );
+
+        // Non-vacuous floor: across every registered spec no `properties:` block
+        // repeats a name (the invariant the contract test asserts), and the corpus
+        // actually declares many direct property keys, so a broken extractor can't
+        // hide behind an empty scan. Count direct property keys (a mapping key at the
+        // first-child indent of a block-opening `properties:`) independently of the
+        // extractor.
+        let mut property_keys = 0usize;
+        for api in APIS {
+            assert!(
+                properties_objects_with_duplicate_names(api.body).is_empty(),
+                "{}: every `properties:` object must list distinct property names",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            for (i, line) in lines.iter().enumerate() {
+                let t = line.trim_start();
+                let Some(rest) = t.strip_prefix("properties:") else { continue };
+                let rest = rest.trim_start();
+                if !(rest.is_empty() || rest.starts_with('#')) {
+                    continue;
+                }
+                let c = indent(line);
+                // First-child indent D.
+                let mut d: Option<usize> = None;
+                for l in &lines[i + 1..] {
+                    let tl = l.trim();
+                    if tl.is_empty() || tl.starts_with('#') {
+                        continue;
+                    }
+                    if indent(l) <= c {
+                        break;
+                    }
+                    d = Some(indent(l));
+                    break;
+                }
+                let Some(d) = d else { continue };
+                for l in &lines[i + 1..] {
+                    let tl = l.trim();
+                    if tl.is_empty() || tl.starts_with('#') {
+                        continue;
+                    }
+                    if indent(l) <= c {
+                        break;
+                    }
+                    if indent(l) == d && !tl.starts_with('-') && tl.contains(':') {
+                        property_keys += 1;
+                    }
+                }
+            }
+        }
+        assert!(
+            property_keys >= 500,
+            "expected many direct property keys across specs, got {property_keys}"
+        );
+    }
 }
