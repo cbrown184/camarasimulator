@@ -11858,4 +11858,336 @@ components:
             "expected many scalar-typed defaults across specs, got {typed_defaults}"
         );
     }
+
+    /// The 1-based line numbers, in document order, of every `properties:` mapping
+    /// opener whose sibling `type:` scalar names a JSON type other than `object` —
+    /// without a YAML dep.
+    ///
+    /// In OpenAPI 3.0.x (JSON Schema) `properties` describes the members of an
+    /// **object**, so a Schema Object that declares a `properties:` mapping must be
+    /// object-typed: either `type: object` or no `type` at all (an implicit object).
+    /// A `properties:` sitting beside a scalar `type:` that is *not* `object` —
+    /// `type: array` (a left-over from a retype where the author swapped `items:` for
+    /// `properties:`), or a scalar `type: string`/`integer`/`number`/`boolean` pasted
+    /// from a sibling — is a self-contradictory schema: JSON-Schema `properties`
+    /// applies only to objects, so a Redoc/Swagger/codegen client renders the wrong
+    /// shape (a scalar/array field, or an object whose members are silently ignored)
+    /// exactly where a caller reads or builds the payload.
+    ///
+    /// Only a `properties:` that (a) opens a mapping — an empty inline value or only a
+    /// trailing `# comment`, mirroring `properties_objects_with_duplicate_names`
+    /// (a `properties:` with an inline scalar/flow value opens no member mapping) — and
+    /// (b) has a `type:` *scalar sibling* in the same Schema Object (same indent,
+    /// scanning down through the object's block then up, dedent-bounded exactly like
+    /// `schema_bounds_inverted` / `format_type_mismatches`) is inspected. A
+    /// `properties:` whose sibling `type:` is absent (an implicit object) or opens a
+    /// block (a property literally named `type`, whose value is its own schema) is
+    /// skipped — nothing conflicting to compare — as is a `properties:` inside an
+    /// `example:`/`examples:` payload (example data, not a schema keyword), detected by
+    /// walking the ancestor chain. A property literally named `properties` (a key in a
+    /// parent `properties:` mapping) opens its own schema block, so its siblings are
+    /// the parent's other property *names*, never a same-indent schema `type:` scalar —
+    /// so it is never mistaken for a mapping opener with a conflicting type.
+    fn properties_openers_with_non_object_type(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        // The inline scalar of a `name:` key (inline comment + surrounding quotes
+        // stripped); `None` when the line is a different key or opens a block.
+        let scalar = |l: &str, name: &str| -> Option<String> {
+            let (k, v) = l.trim_start().split_once(':')?;
+            if k.trim() != name {
+                return None;
+            }
+            let v = v
+                .split('#')
+                .next()
+                .unwrap_or(v)
+                .trim()
+                .trim_matches('"')
+                .trim_matches('\'');
+            if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            }
+        };
+        // True when line `i` (indent `c`) sits inside an `example:`/`examples:`
+        // payload — some enclosing container key up the indent ladder is
+        // `example`/`examples` (mirroring `format_type_mismatches`).
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        // The sibling `type:` scalar in the same object as line `i` (indent `c`):
+        // scan down through the object's block for a same-indent `type`, then up,
+        // dedent-bounded so a nested/following object's `type` never pairs.
+        let sibling_type = |i: usize, c: usize| -> Option<String> {
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c {
+                    if let Some(v) = scalar(l, "type") {
+                        return Some(v);
+                    }
+                }
+                j += 1;
+            }
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c {
+                    if let Some(v) = scalar(l, "type") {
+                        return Some(v);
+                    }
+                }
+            }
+            None
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some(rest) = line.trim_start().strip_prefix("properties:") else {
+                continue;
+            };
+            let rest = rest.trim_start();
+            if !(rest.is_empty() || rest.starts_with('#')) {
+                continue; // an inline value opens no member mapping
+            }
+            let c = indent(line);
+            if inside_example(i, c) {
+                continue;
+            }
+            if let Some(ty) = sibling_type(i, c) {
+                if ty != "object" {
+                    out.push(i + 1);
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_properties_object_is_object_typed() {
+        // Contract-harness invariant (OpenAPI 3.0.x / JSON-Schema structural rule):
+        // `properties` describes the members of an **object**, so wherever a mounted
+        // spec declares a `properties:` mapping beside a scalar `type:`, that type MUST
+        // be `object` (or absent — an implicit object). A `properties:` sitting beside
+        // a non-object scalar type — `type: array`, or a `type: string`/`integer`/
+        // `number`/`boolean` — is a self-contradictory schema: JSON-Schema `properties`
+        // applies only to objects, so a Redoc/Swagger/codegen client renders the wrong
+        // shape (a scalar/array field, or an object whose declared members are silently
+        // dropped) exactly where a caller reads or builds the payload.
+        //
+        // The type-agreement complement of the existing structural-keyword tests, and
+        // invisible to all of them: `every_array_schema_declares_items` proves the
+        // converse for arrays (`type: array` ⟹ has `items`) but never looks at
+        // `properties`; `every_properties_object_lists_distinct_property_names` and
+        // `every_type_names_a_valid_schema_type` check a mapping's *keys* or the `type`
+        // token's spelling, never whether a `properties:` and its sibling `type:`
+        // agree. The routine hazard in these hand-tuned specs: a schema retyped
+        // `object`→`array` (or a scalar) with its `properties:` block left in place, or
+        // a `type: array` pasted from a sibling above a members mapping. Verified true
+        // across all mounted specs before asserting.
+        for api in APIS {
+            let bad = properties_openers_with_non_object_type(api.body);
+            assert!(
+                bad.is_empty(),
+                "{} spec declares a `properties:` mapping beside a non-`object` scalar \
+                 `type:` (a schema with `properties` must be object-typed) at \
+                 `properties:` line(s): {:?}",
+                api.name,
+                bad
+            );
+        }
+    }
+
+    #[test]
+    fn properties_object_type_consistency_extraction_rules() {
+        // Unit-cover `properties_openers_with_non_object_type` so the contract test
+        // above can't pass vacuously and its detection is pinned: a `properties:`
+        // beside `type: object` and one with no sibling type (implicit object) both
+        // pass; a `properties:` beside `type: array` or a scalar `type: string` is
+        // flagged (the sibling type declared before *or* after the mapping); a property
+        // literally named `properties` (whose siblings are the parent's property names,
+        // not a schema `type:`) is skipped; a `properties:` inside an `example:` payload
+        // is skipped; and a nested object's `properties:` is judged against its own
+        // sibling type. All in document order.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    GoodObject:
+      type: object
+      properties:
+        a:
+          type: string
+    ImplicitObject:
+      properties:
+        b:
+          type: string
+    BadArray:
+      type: array
+      properties:
+        c:
+          type: string
+    BadString:
+      type: string
+      properties:
+        d:
+          type: string
+    TypeAfter:
+      properties:
+        e:
+          type: string
+      type: integer
+    NamedProperties:
+      type: object
+      properties:
+        properties:
+          type: string
+    InExample:
+      type: object
+      example:
+        type: array
+        properties:
+          x: 1
+    Nested:
+      type: object
+      properties:
+        inner:
+          type: object
+          properties:
+            f:
+              type: string
+";
+        // Flagged, in document order: line 25 (`BadArray.properties` beside
+        // `type: array`, its sibling declared above), line 30 (`BadString.properties`
+        // beside `type: string`), and line 34 (`TypeAfter.properties` beside a
+        // `type: integer` declared *below* it, found by the down-scan). Not flagged:
+        // `GoodObject` (`type: object`); `ImplicitObject` (no sibling type — an
+        // implicit object); `NamedProperties`' inner `properties:` at line 41, a
+        // property literally *named* `properties` whose only same-indent siblings are
+        // parent property names (no schema `type:` scalar); the `properties:` inside
+        // `InExample`'s `example:` payload (example data); and both `Nested`
+        // `properties:` blocks (each beside its own `type: object`).
+        assert_eq!(
+            properties_openers_with_non_object_type(body),
+            vec![25, 30, 34]
+        );
+
+        // Non-vacuous floor: across every registered spec every `properties:` mapping
+        // is object-typed (the invariant the contract test asserts), and the corpus
+        // actually declares many `properties:` blocks beside a `type: object` — so the
+        // type-comparison path runs on real data and a broken (always-empty) extractor
+        // can't hide behind a corpus that never pairs a mapping with a type. Count
+        // object-typed `properties:` openers with a presence detector independent of
+        // the extractor: a `properties:` block opener whose same-indent object declares
+        // `type: object` (scanning down then up, dedent-bounded).
+        let mut object_typed = 0usize;
+        for api in APIS {
+            assert!(
+                properties_openers_with_non_object_type(api.body).is_empty(),
+                "{}: every `properties:` mapping must be object-typed",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            for (i, l) in lines.iter().enumerate() {
+                let Some(rest) = l.trim_start().strip_prefix("properties:") else {
+                    continue;
+                };
+                let rest = rest.trim_start();
+                if !(rest.is_empty() || rest.starts_with('#')) {
+                    continue;
+                }
+                let c = indent(l);
+                let is_object_type = |x: &str| x.trim_start() == "type: object";
+                let mut has = false;
+                let mut j = i + 1;
+                while j < lines.len() {
+                    let x = lines[j];
+                    if x.trim().is_empty() {
+                        j += 1;
+                        continue;
+                    }
+                    if indent(x) < c {
+                        break;
+                    }
+                    if indent(x) == c && is_object_type(x) {
+                        has = true;
+                        break;
+                    }
+                    j += 1;
+                }
+                if !has {
+                    let mut m = i;
+                    while m > 0 {
+                        m -= 1;
+                        let x = lines[m];
+                        if x.trim().is_empty() {
+                            continue;
+                        }
+                        if indent(x) < c {
+                            break;
+                        }
+                        if indent(x) == c && is_object_type(x) {
+                            has = true;
+                            break;
+                        }
+                    }
+                }
+                if has {
+                    object_typed += 1;
+                }
+            }
+        }
+        assert!(
+            object_typed >= 30,
+            "expected many object-typed properties blocks across specs, got {object_typed}"
+        );
+    }
 }

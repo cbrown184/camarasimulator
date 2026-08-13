@@ -3845,6 +3845,29 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     blocks; a ≥100-block non-vacuous floor over all specs) so the contract can't
     pass vacuously. Verified true across all mounted specs (142 blocks, 864 cases —
     no drift to fix) before asserting.
+  - a properties-object↔type-consistency contract test (`src/registry.rs`
+    `every_properties_object_is_object_typed`) asserts that wherever a mounted spec
+    declares a `properties:` mapping beside a scalar `type:`, that type is `object`
+    (or absent — an implicit object). JSON-Schema `properties` describes the members
+    of an object, so a `properties:` beside a non-object scalar type (`type: array`,
+    or `type: string`/`integer`/`number`/`boolean`) is self-contradictory: a
+    Redoc/Swagger/codegen client renders the wrong shape (a scalar/array field, or an
+    object whose members are silently dropped). The type-agreement complement of
+    `every_array_schema_declares_items` (proves the converse for arrays, `type: array`
+    ⟹ has `items`, but never looks at `properties`) and invisible to the
+    distinct-property-names / valid-type-token tests (which check a mapping's keys or
+    the `type` token's spelling, never that a `properties:` and its sibling `type:`
+    agree). New pure `properties_openers_with_non_object_type` extractor (no YAML dep;
+    reuses `properties_objects_with_duplicate_names`' mapping-opener detection and
+    `format_type_mismatches`' same-indent sibling-`type` scan + `inside_example`
+    walk); a property literally named `properties` opens its own schema block — its
+    siblings are the parent's property *names*, never a same-indent schema `type:`
+    scalar — so it is never mistaken for a conflicting opener. Unit-covered
+    (`properties_object_type_consistency_extraction_rules`: object-typed + implicit
+    pass; `type: array`/`type: string` siblings, before *and* after the mapping,
+    flagged in document order; named-`properties`/example/nested skips; a ≥30
+    object-typed-block non-vacuous floor) so the contract can't pass vacuously.
+    Verified true across all mounted specs (no drift to fix) before asserting.
   Full response-vs-schema validation still TODO (would need a YAML/JSON-Schema
   validator — a dependency trade-off, deferred).
 
@@ -3853,6 +3876,33 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 ## Scan journal
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
+
+- 2026-08-13 — contract-harness: added a **properties-object↔type-consistency**
+  contract test (`src/registry.rs` `every_properties_object_is_object_typed`)
+  asserting that wherever a Schema Object declares a `properties:` mapping beside a
+  scalar `type:`, that type is `object` (or absent — an implicit object). JSON-Schema
+  `properties` describes the members of an object, so a `properties:` beside a
+  non-object scalar type (`type: array` from a swapped-`items:` retype, or a
+  `type: string`/`integer`/`number`/`boolean` pasted from a sibling) is
+  self-contradictory: a Redoc/Swagger/codegen client renders the wrong shape (a
+  scalar/array field, or an object whose declared members are silently dropped). The
+  type-agreement complement of `every_array_schema_declares_items` (proves the
+  converse `type: array` ⟹ has `items`, never looks at `properties`) and invisible to
+  the distinct-property-names / valid-type-token tests (which check a mapping's keys
+  or the `type` token's spelling, never that `properties:` and its sibling `type:`
+  agree). New pure `properties_openers_with_non_object_type` extractor (no YAML dep;
+  reuses the mapping-opener detection of `properties_objects_with_duplicate_names` and
+  the same-indent sibling-`type` scan + `inside_example` ancestor walk of
+  `format_type_mismatches`); a property literally *named* `properties` opens its own
+  schema block, so its siblings are the parent's property names — never a same-indent
+  schema `type:` scalar — and it is never mistaken for a conflicting opener. Unit-
+  covered (`properties_object_type_consistency_extraction_rules`: object-typed +
+  implicit-object pass; `type: array`/`type: string` siblings declared before *and*
+  after the mapping flagged in document order — `[25, 30, 34]`; named-`properties`/
+  example-payload/nested-object skips; a ≥30 object-typed-block non-vacuous floor).
+  Verified true across all mounted specs (no drift to fix). Tests: +2 (1 contract,
+  1 unit). `cargo test` 2237 green (was 2235); `cargo build --release` succeeds. No
+  new dep; binary unchanged (`#[cfg(test)]`-only). — binary: 3.7M (3851944 B, +0 B)
 
 - 2026-08-13 — contract-harness: added a **default↔type-consistency** contract test
   (`src/registry.rs` `every_default_matches_its_schema_type`) asserting that where a Schema
