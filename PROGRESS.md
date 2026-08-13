@@ -3721,6 +3721,22 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     of real boolean keywords) so the contract can't pass vacuously. Verified true
     across all mounted specs (24 boolean keywords — 17 `nullable`, 5 `readOnly`, 2
     `uniqueItems`, all `true` — no drift to fix) before asserting.
+  - a distinct-path-keys contract test (`src/registry.rs`
+    `every_paths_object_lists_distinct_path_keys`) asserts no mounted spec lists the
+    same path template twice under `paths:` — the Paths-Object member of the
+    "no-duplicates" family (required-array / parameter `(name,location)` / enum-value
+    / property-name / operationId). A `paths:` object is a mapping keyed by path
+    template, so a repeated key is invalid and every parser keeps only the *last*
+    Path Item — the earlier item's whole operation set (its `get`/`post`/… + their
+    parameters and responses) is dropped silently, and a client binds whichever
+    block came last. The live hazard: a new path item drafted by pasting a sibling
+    path block and left unrenamed (two `/sessions:` keys), which every
+    operation-scoped test still passes on the surviving copy. Reuses the existing
+    (unit-covered) `path_item_keys` extractor — which preserves duplicates — with a
+    seen-set repeat detector; a new `path_item_key_duplicate_detection_rules` unit
+    pins that the extractor doesn't de-duplicate (else the contract test would be
+    blind) and holds a ≥100 non-vacuous path-key floor. Verified true across all
+    mounted specs (238 on-disk path keys, all distinct — no drift to fix).
   Full response-vs-schema validation still TODO (would need a YAML/JSON-Schema
   validator — a dependency trade-off, deferred).
 
@@ -3729,6 +3745,27 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 ## Scan journal
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
+
+- 2026-08-13 — contract-harness: added a **distinct-path-keys** contract test
+  (`src/registry.rs` `every_paths_object_lists_distinct_path_keys`) asserting no mounted
+  spec repeats a path template within its top-level `paths:` object. A `paths:` object is
+  a YAML mapping keyed by path template, so a duplicate key is invalid and every parser
+  keeps only the **last** Path Item — the earlier item's entire operation set (its
+  `get`/`post`/… with their parameters and responses) is dropped without a trace, and a
+  client/codegen tool binds whichever block came last. The Paths-Object member of the
+  "no-duplicates" family (required-array / parameter `(name,location)` / enum-value /
+  property-name / operationId), none of which look at path keys; the routine hazard is a
+  new path item drafted by pasting a sibling path block and left unrenamed (two
+  `/sessions:` keys), silently erasing one path's operations while every operation-scoped
+  test still passes on the surviving copy. Lean: reuses the existing (unit-covered)
+  `path_item_keys` extractor — which preserves duplicates (`out.push`, no dedup) — with a
+  seen-set repeat detector, so no new extractor. New `path_item_key_duplicate_detection_rules`
+  unit pins that the extractor doesn't de-duplicate (a repeated `/sessions` yields the key
+  twice in document order; a set-collapsing extractor would blind the contract test) and
+  holds a ≥100 non-vacuous path-key floor. Verified true across all mounted specs (238
+  on-disk path keys, all distinct — no drift to fix). Tests: +2 (1 contract, 1 unit).
+  `cargo test` 2221 green (was 2219); `cargo build --release` succeeds. No new dep; binary
+  unchanged (`#[cfg(test)]`-only). — binary: 3.7M (3851944 B, +0 B)
 
 - 2026-08-13 — contract-harness: added a **distinct-property-names** contract test
   (`src/registry.rs` `every_properties_object_lists_distinct_property_names`) asserting no

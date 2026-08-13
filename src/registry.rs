@@ -5090,6 +5090,113 @@ components:
     }
 
     #[test]
+    fn every_paths_object_lists_distinct_path_keys() {
+        // Contract-harness invariant (OpenAPI / YAML structural rule): a document's
+        // `paths` object is a mapping keyed by path template, so a mounted spec MUST
+        // NOT list the same path template twice under `paths:`. A repeated key is an
+        // invalid mapping every YAML/JSON parser resolves by keeping only the *last*
+        // Path Item — so the earlier item's entire operation set (its `get`/`post`/…,
+        // their parameters and responses) is dropped without a trace, and the
+        // endpoints a client/codegen tool binds for that path are whichever block
+        // came last.
+        //
+        // The Paths-Object member of the "no-duplicates" family: the sibling
+        // distinct tests check a `required` list's entries, a parameter array's
+        // `(name, location)` pairs, an enum's values, a `properties:` mapping's
+        // property names, and an operation's id — none looks at the *path* keys. In
+        // these specs a new endpoint's path item is drafted by copy-pasting a
+        // sibling path block, so a template pasted and left unrenamed (two
+        // `/sessions:` keys) is a live hazard that silently erases one path's
+        // operations while every operation-scoped test still passes on the surviving
+        // copy. Verified true across all mounted specs before asserting.
+        for api in APIS {
+            let keys = path_item_keys(api.body);
+            let mut seen = HashSet::new();
+            let dups: Vec<&String> =
+                keys.iter().filter(|k| !seen.insert((*k).clone())).collect();
+            assert!(
+                dups.is_empty(),
+                "{} spec repeats a `paths:` key (path templates must be distinct; a \
+                 duplicate silently drops the earlier path item's operations): {:?}",
+                api.name,
+                dups
+            );
+        }
+    }
+
+    #[test]
+    fn path_item_key_duplicate_detection_rules() {
+        // Unit-cover the duplicate detection the contract test above relies on so it
+        // can't pass vacuously: pin that `path_item_keys` preserves *every*
+        // occurrence of a repeated path template (it does not de-duplicate), and
+        // that a plain seen-set repeat detector — the contract test's logic — flags
+        // exactly the second copy. A set-collapsing extractor would make the
+        // contract test blind to the very drift it guards.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /sessions:
+    post:
+      operationId: create
+      responses:
+        '201':
+          description: made
+  /sessions/{id}:
+    get:
+      operationId: read
+      responses:
+        '200':
+          description: ok
+  /sessions:
+    delete:
+      operationId: drop
+      responses:
+        '204':
+          description: gone
+";
+        // `/sessions` appears twice (the pasted-and-unrenamed hazard) and
+        // `/sessions/{id}` once — the extractor returns all three in document order,
+        // so the repeat is visible to the contract test.
+        assert_eq!(
+            path_item_keys(body),
+            vec![
+                "/sessions".to_string(),
+                "/sessions/{id}".to_string(),
+                "/sessions".to_string(),
+            ]
+        );
+        let keys = path_item_keys(body);
+        let mut seen = HashSet::new();
+        let dups: Vec<&String> =
+            keys.iter().filter(|k| !seen.insert((*k).clone())).collect();
+        assert_eq!(dups, vec![&"/sessions".to_string()]);
+
+        // Non-vacuous floor: across every registered spec no path template repeats
+        // (the invariant the contract test asserts), and the corpus declares many
+        // distinct path keys, so the repeat-detection path runs on real data and a
+        // broken (always-distinct) extractor can't hide behind a corpus with no
+        // paths.
+        let mut total = 0usize;
+        for api in APIS {
+            let keys = path_item_keys(api.body);
+            let mut seen = HashSet::new();
+            for k in &keys {
+                assert!(
+                    seen.insert(k.clone()),
+                    "{}: duplicate path key `{}`",
+                    api.name,
+                    k
+                );
+            }
+            total += keys.len();
+        }
+        assert!(total >= 100, "expected many path keys across specs, got {total}");
+    }
+
+    #[test]
     fn every_declared_response_has_a_description() {
         // Contract-harness invariant (OpenAPI structural rule): every response a
         // mounted spec declares MUST carry a `description` — it is the single
