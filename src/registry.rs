@@ -933,6 +933,72 @@ mod tests {
             .count()
     }
 
+    /// Inspect the *internal* well-formedness of every `x-camarasim-scenarios`
+    /// block and return a one-line reason per malformed block (in document order),
+    /// without a YAML dep.
+    ///
+    /// `scenario_blocks` (above) only counts that a block *exists*; a block that
+    /// exists but documents nothing — a `cases:` sequence that was lost/dedented in
+    /// a copy-paste, an empty `cases:` with no `- input:` item, or a case missing
+    /// its `result:` — records no functional case yet passes the existence check.
+    /// This closes that gap. A block is well-formed when:
+    ///   * it declares a `cases:` key as a direct child (indent = block + 2), and
+    ///   * that `cases:` holds ≥1 `- input:` case, and
+    ///   * every `- input:` case has a `result:` sibling.
+    /// (Every case in these specs is a `{ input, result }` mapping — DESIGN §7, §9.)
+    ///
+    /// The block body is the run of following lines indented deeper than the
+    /// `x-camarasim-scenarios:` key (blank lines skipped). Within it, a `result:`
+    /// is credited to the most recently opened `- input:` case, so a case with two
+    /// results never covers for a later case with none.
+    fn malformed_scenario_blocks(body: &str) -> Vec<String> {
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let lines: Vec<&str> = body.lines().collect();
+        let mut out = Vec::new();
+        let mut ordinal = 0usize;
+        for (i, line) in lines.iter().enumerate() {
+            if !line.trim_start().starts_with("x-camarasim-scenarios:") {
+                continue;
+            }
+            let block_indent = indent(line);
+            ordinal += 1;
+            let mut has_cases = false;
+            let mut case_has_result: Vec<bool> = Vec::new();
+            for l in &lines[i + 1..] {
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let ind = indent(l);
+                if ind <= block_indent {
+                    break; // dedented out of the block
+                }
+                let t = l.trim_start();
+                if ind == block_indent + 2 && t == "cases:" {
+                    has_cases = true;
+                } else if t.starts_with("- input:") {
+                    case_has_result.push(false);
+                } else if t.starts_with("result:") {
+                    if let Some(last) = case_has_result.last_mut() {
+                        *last = true;
+                    }
+                }
+            }
+            let reason = if !has_cases {
+                Some("no `cases:` sequence")
+            } else if case_has_result.is_empty() {
+                Some("`cases:` holds no `- input:` case")
+            } else if case_has_result.iter().any(|&r| !r) {
+                Some("a `- input:` case has no `result:`")
+            } else {
+                None
+            };
+            if let Some(r) = reason {
+                out.push(format!("scenarios block #{ordinal}: {r}"));
+            }
+        }
+        out
+    }
+
     /// Extract the set of component pointers a `components:` fragment *defines*,
     /// as `#/components/<section>/<Name>` strings, without a YAML dep.
     ///
@@ -3468,6 +3534,34 @@ mod tests {
     }
 
     #[test]
+    fn every_scenario_block_is_well_formed() {
+        // Contract-harness invariant (DESIGN §7, §9): the sibling
+        // `every_spec_documents_functional_cases` proves each spec declares ≥1
+        // `x-camarasim-scenarios` block, but never looks *inside* one — a block
+        // whose `cases:` sequence was lost or dedented in the copy-paste that
+        // drafts a new operation, an empty `cases:` with no `- input:` case, or a
+        // case missing its `result:` documents no functional case yet still counts
+        // toward that existence check. Those are exactly the drifts the
+        // existence/identity/wiring tests can't see (they never read a block's body).
+        // This asserts every block declares a `cases:` sequence holding ≥1
+        // `{ input, result }` case, so the vendored spec's machine-readable record
+        // of the server's parameter-driven behaviour is never an empty shell.
+        // Verified true across all mounted specs (142 blocks, 864 cases) before
+        // asserting.
+        for api in APIS {
+            let malformed = malformed_scenario_blocks(api.body);
+            assert!(
+                malformed.is_empty(),
+                "{} spec has malformed x-camarasim-scenarios block(s): {:?} \
+                 (each block documents its functional cases as a non-empty `cases:` \
+                 sequence of `{{ input, result }}` cases — DESIGN §7, §9)",
+                api.name,
+                malformed
+            );
+        }
+    }
+
+    #[test]
     fn shared_fragment_refs_use_the_canonical_relative_path() {
         // Contract-harness invariant (DESIGN §8/§9 + `apis::openapi` serving): a
         // spec's cross-file `$ref`s to the two shared fragments — the error model
@@ -4114,6 +4208,76 @@ components:
         // A spec with no scenarios block counts zero (the contract test turns that
         // into a failure).
         assert_eq!(scenario_blocks("openapi: 3.0.3\npaths: {}\n"), 0);
+    }
+
+    #[test]
+    fn malformed_scenario_block_extraction_rules() {
+        // Unit-cover `malformed_scenario_blocks` so the contract test above can't
+        // pass vacuously (an extractor that always returned `[]` would make
+        // `malformed.is_empty()` trivially true) and so each failure mode is pinned.
+
+        // A well-formed block (a `cases:` with two `{ input, result }` cases) is
+        // never flagged.
+        let ok = "      x-camarasim-scenarios:\n\
+                  \x20       description: text\n\
+                  \x20       cases:\n\
+                  \x20         - input: a\n\
+                  \x20           result: \"200 x\"\n\
+                  \x20         - input: b\n\
+                  \x20           result: \"404 y\"\n";
+        assert!(malformed_scenario_blocks(ok).is_empty());
+
+        // No `cases:` at all → flagged.
+        let no_cases = "      x-camarasim-scenarios:\n\
+                        \x20       description: text only\n";
+        assert_eq!(
+            malformed_scenario_blocks(no_cases),
+            vec!["scenarios block #1: no `cases:` sequence".to_string()]
+        );
+
+        // A `cases:` with no `- input:` case → flagged.
+        let empty_cases = "      x-camarasim-scenarios:\n\
+                           \x20       cases:\n\
+                           \x20 next: dedented\n";
+        assert_eq!(
+            malformed_scenario_blocks(empty_cases),
+            vec!["scenarios block #1: `cases:` holds no `- input:` case".to_string()]
+        );
+
+        // A case missing its `result:` is caught even when a *later* case has one
+        // (a two-result case never covers for a result-less earlier case).
+        let missing_result = "      x-camarasim-scenarios:\n\
+                              \x20       cases:\n\
+                              \x20         - input: a\n\
+                              \x20         - input: b\n\
+                              \x20           result: ok\n";
+        assert_eq!(
+            malformed_scenario_blocks(missing_result),
+            vec!["scenarios block #1: a `- input:` case has no `result:`".to_string()]
+        );
+
+        // Ordinals count blocks in document order; a well-formed first block and a
+        // broken second block report only the second.
+        let two = format!("{ok}{no_cases}");
+        assert_eq!(
+            malformed_scenario_blocks(&two),
+            vec!["scenarios block #2: no `cases:` sequence".to_string()]
+        );
+
+        // Non-vacuous floor: every mounted spec's blocks parse clean, and there are
+        // real blocks to parse (so the clean result is earned, not empty input).
+        let total_blocks: usize = APIS.iter().map(|a| scenario_blocks(a.body)).sum();
+        assert!(
+            total_blocks >= 100,
+            "expected many scenario blocks, got {total_blocks}"
+        );
+        for api in APIS {
+            assert!(
+                malformed_scenario_blocks(api.body).is_empty(),
+                "{} has a malformed scenarios block",
+                api.name
+            );
+        }
     }
 
     #[test]

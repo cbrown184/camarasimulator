@@ -3826,6 +3826,25 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     vacuously. Verified true (255 number keywords across all mounted specs — every
     `minimum`/`maximum` numeric, every `multipleOf` positive — no drift to fix)
     before asserting.
+  - a scenario-block-well-formedness contract test (`src/registry.rs`
+    `every_scenario_block_is_well_formed`) asserts every `x-camarasim-scenarios`
+    block a mounted spec declares is a **non-empty record**: a `cases:` sequence
+    (direct child) holding ≥1 `{ input, result }` case. The complement of the
+    existence check `every_spec_documents_functional_cases`, which only counts that
+    ≥1 block exists per spec and never reads a block's body — so a block whose
+    `cases:` was lost/dedented in the paste that drafts a new operation, an empty
+    `cases:` with no `- input:`, or a case missing its `result:` documents no
+    functional case (DESIGN §7, §9) yet still satisfies that count, a drift no
+    identity/wiring/existence test can see. A pure `malformed_scenario_blocks`
+    extractor (no YAML dep; walks each block's indent-scoped body, requires a
+    block+2 `cases:`, and credits each `result:` to the most recent `- input:` case
+    so a two-result case can't cover for a result-less one) returns a reason per
+    malformed block in document order. Unit-covered
+    (`malformed_scenario_block_extraction_rules`: well-formed pass; no-`cases:`,
+    empty-`cases:`, missing-`result:` each flagged; block ordinals across two
+    blocks; a ≥100-block non-vacuous floor over all specs) so the contract can't
+    pass vacuously. Verified true across all mounted specs (142 blocks, 864 cases —
+    no drift to fix) before asserting.
   Full response-vs-schema validation still TODO (would need a YAML/JSON-Schema
   validator — a dependency trade-off, deferred).
 
@@ -3834,6 +3853,25 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 ## Scan journal
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
+
+- 2026-08-13 18:46Z — contract-harness: added a **scenario-block-well-formedness**
+  contract test (`src/registry.rs` `every_scenario_block_is_well_formed`) that inspects
+  the *inside* of every `x-camarasim-scenarios` block, asserting each declares a `cases:`
+  sequence holding ≥1 `{ input, result }` case. Closes the gap the sibling
+  `every_spec_documents_functional_cases` leaves: that only *counts* that ≥1 block exists
+  per spec, so a block whose `cases:` was lost/dedented in a copy-paste, an empty `cases:`
+  with no `- input:`, or a case missing its `result:` records no functional case yet still
+  satisfies the existence check (DESIGN §7, §9) — a drift no identity/wiring/existence test
+  can see (none reads a block's body). New pure `malformed_scenario_blocks` extractor (no
+  YAML dep; walks each block's indent-scoped body, requires a direct-child `cases:`, and
+  credits each `result:` to the most recent `- input:` case so a two-result case can't cover
+  for a result-less one) returns a reason per malformed block in document order. Unit-covered
+  (`malformed_scenario_block_extraction_rules`: well-formed pass; no-`cases:`, empty-`cases:`,
+  and missing-`result:` each flagged; block ordinals across two blocks; a ≥100-block
+  non-vacuous floor over all specs). Verified true across all mounted specs (142 blocks, 864
+  cases — no drift to fix). Tests: +2 (1 contract, 1 unit). `cargo test` 2233 green (was
+  2231); `cargo build --release` succeeds. No new dep; binary unchanged (`#[cfg(test)]`-only).
+  — binary: 3.7M (3851944 B, +0 B)
 
 - 2026-08-13 — contract-harness: added a **numeric-keyword-value-type** contract test
   (`src/registry.rs` `every_numeric_schema_keyword_carries_a_number`) asserting every
