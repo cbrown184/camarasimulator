@@ -3652,6 +3652,30 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     cross-file refs and asserts a floor (≥50) so it can't pass vacuously. Verified
     true across all mounted specs (no cross-file ref to an unserved file — no drift
     to fix) before asserting.
+  - a header-object-value-type contract test (`src/registry.rs`
+    `every_component_header_declares_a_schema_or_content`) asserts every Header
+    Object a mounted spec defines under `components.headers:` carries one of
+    `schema` or `content` — the value-type field an OpenAPI 3.0.x Header Object
+    MUST declare (it "follows the structure of the Parameter Object"). The
+    response-side analogue of `every_parameter_declares_a_schema_or_content`
+    (the same field on request/path/query parameters): every CamaraSim response
+    echoes `x-correlator` via a `#/components/headers/XCorrelator` Header Object,
+    so a `schema:` line lost/dedented in the paste that vendors a new spec leaves
+    an **untyped** header no other contract test inspects — the parameter tests
+    scope to `in:` parameters, the media-type tests to `content:` mappings, and a
+    `components.headers` Header Object carries neither an `in:` nor a media-type
+    child, so both skip it. A `$ref` header entry is exempt (inherits its type).
+    A pure `component_headers_missing_schema_or_content` extractor (no YAML dep;
+    scopes exactly like `component_pointers` — top-level `components:` → the
+    2-space `headers:` section → an exact-4-space Header Object key — then scans
+    that object's own 6-space direct children for a `schema:`/`content:`/`$ref:`,
+    so a `schema:` nested inside a `content:` media type never satisfies it) is
+    unit-covered (`component_header_schema_or_content_extraction_rules`: a
+    `schema`/`content`/`$ref` header pass, a type-less header flagged, plus a
+    non-vacuous floor of ≥50 `components.headers` Header Objects over all specs)
+    so the contract can't pass vacuously. Verified true across all mounted specs
+    (every spec's `XCorrelator` Header Object is schema-typed — no drift to fix)
+    before asserting.
   Full response-vs-schema validation still TODO (would need a YAML/JSON-Schema
   validator — a dependency trade-off, deferred).
 
@@ -3660,6 +3684,27 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 ## Scan journal
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
+
+- 2026-08-13 — contract-harness: added a **header-object-value-type** contract test
+  (`src/registry.rs` `every_component_header_declares_a_schema_or_content`) asserting
+  every Header Object a mounted spec defines under `components.headers:` carries one
+  of `schema`/`content` — the value-type field an OpenAPI 3.0.x Header Object MUST
+  declare (it follows the Parameter Object structure). The response-side analogue of
+  the parameter `schema`-or-`content` test: every CamaraSim response echoes
+  `x-correlator` via a `#/components/headers/XCorrelator` Header Object, so a
+  `schema:` line lost/dedented in a vendored spec leaves an untyped header the
+  parameter tests (scope `in:` params) and media-type tests (scope `content:` maps)
+  both skip — a `components.headers` Header Object carries neither. `$ref` header
+  exempt (inherits). New pure `component_headers_missing_schema_or_content` extractor
+  (no YAML dep; scoped like `component_pointers` — `components:` → 2-space `headers:`
+  → 4-space Header Object key — scanning its 6-space children for schema/content/$ref,
+  so a nested media-type `schema:` never satisfies it), unit-covered
+  (`component_header_schema_or_content_extraction_rules`, incl. a ≥50 Header-Object
+  floor) so it can't pass vacuously. Verified true across all mounted specs (every
+  spec's `XCorrelator` header is schema-typed — no drift to fix). Tests: +2 (1
+  contract, 1 extractor unit). `cargo test` 2211 green (was 2209); `cargo build
+  --release` warning-clean. No new dep; binary unchanged (`#[cfg(test)]`-only). —
+  binary: 3.7M (3851944 B, +0 B)
 
 - 2026-08-13 — contract-harness: added a **cross-file-`$ref`-targets-a-served-
   fragment** contract test (`src/registry.rs`

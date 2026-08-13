@@ -1139,6 +1139,101 @@ mod tests {
             .collect()
     }
 
+    /// The `#/components/headers/<name>@line N` label of every Header Object a spec
+    /// defines under `components.headers:` whose object carries neither a `schema:`
+    /// nor a `content:` key — the value-type field of an OpenAPI Header Object.
+    ///
+    /// A Header Object "follows the structure of the Parameter Object" (OpenAPI
+    /// 3.0.x), so — exactly like a parameter — it MUST declare one of `schema` (a
+    /// typed value, the common case) or `content` (a media-type-described value) to
+    /// type the header it names; a Header Object with neither declares no type, so a
+    /// Redoc/Swagger/codegen client has nothing to bind or render. The response-side
+    /// analogue of `parameters_missing_schema_or_content`: every CamaraSim response
+    /// echoes `x-correlator` via a `#/components/headers/XCorrelator` Header Object,
+    /// and a `schema:` line lost or dedented in the paste that vendors a new spec
+    /// leaves an untyped header no other contract test inspects (the parameter tests
+    /// scope to `in:` parameters, the media-type tests to `content:` mappings — a
+    /// Header Object under `components.headers` carries neither an `in:` nor a
+    /// media-type child, so both skip it).
+    ///
+    /// A header entry given as a `$ref` (a Reference Object, `$ref:` at the Header
+    /// Object's own child indent) is exempt — it inherits its type from the
+    /// referenced component. Scopes exactly like `component_pointers` (top-level
+    /// `components:` → the 2-space `headers:` section → an exact-4-space Header
+    /// Object key), then scans that object's own 6-space direct children for a
+    /// `schema:`/`content:`/`$ref:`; a `schema:` nested deeper (inside a `content:`
+    /// media type) sits below the object's own indent and never satisfies the check.
+    fn component_headers_missing_schema_or_content(body: &str) -> Vec<String> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let mut out = Vec::new();
+        let mut in_components = false;
+        let mut in_headers = false;
+        for (i, line) in lines.iter().enumerate() {
+            let is_top_level_key =
+                !line.is_empty() && !line.starts_with(char::is_whitespace);
+            if is_top_level_key {
+                in_components = line.trim_end() == "components:";
+                in_headers = false;
+                continue;
+            }
+            if !in_components {
+                continue;
+            }
+            // A 2-space direct child of `components:` opens (or closes) the `headers`
+            // section; any other 2-space section key leaves it.
+            if let Some(rest) = line.strip_prefix("  ") {
+                if !rest.starts_with(char::is_whitespace) {
+                    in_headers = rest.trim_end() == "headers:";
+                    continue;
+                }
+            }
+            if !in_headers {
+                continue;
+            }
+            // An exact-4-space bare `Name:` key (non-space at column 5, nothing after
+            // the colon) is a Header Object definition; a key bearing an inline value
+            // opens no block object and is skipped (mirrors `component_pointers`).
+            let Some(rest) = line.strip_prefix("    ") else { continue };
+            if rest.starts_with(char::is_whitespace) {
+                continue;
+            }
+            let Some(name) = rest.trim_end().strip_suffix(':') else { continue };
+            if name.is_empty() || name.contains(char::is_whitespace) {
+                continue;
+            }
+            // Scan the Header Object's own 6-space direct children until it dedents
+            // (indent <= 4) or a blank line closes it. `$ref:` exempts (inherits);
+            // `schema:`/`content:` types it. Deeper lines (a nested media-type
+            // `schema:`) are ignored — they are not the header's own type field.
+            let mut typed_or_ref = false;
+            for l in &lines[i + 1..] {
+                if l.trim().is_empty() {
+                    break;
+                }
+                let li = indent(l);
+                if li <= 4 {
+                    break;
+                }
+                if li != 6 {
+                    continue;
+                }
+                let t = l.trim_start();
+                if t.starts_with("schema:")
+                    || t.starts_with("content:")
+                    || t.starts_with("$ref:")
+                {
+                    typed_or_ref = true;
+                    break;
+                }
+            }
+            if !typed_or_ref {
+                out.push(format!("#/components/headers/{name}@line {}", i + 1));
+            }
+        }
+        out
+    }
+
     /// Extract the set of security schemes a spec *defines* under
     /// `components.securitySchemes:`, by their scheme name (e.g. `openId`).
     ///
@@ -5825,6 +5920,148 @@ components:
         assert!(
             total_located >= 50,
             "expected many located parameters across specs, got {total_located}"
+        );
+    }
+
+    #[test]
+    fn every_component_header_declares_a_schema_or_content() {
+        // Contract-harness invariant (OpenAPI structural rule): every Header Object a
+        // mounted spec defines under `components.headers:` MUST carry one of `schema`
+        // or `content` — the field that types the header's value. A Header Object
+        // "follows the structure of the Parameter Object" (OpenAPI 3.0.x), so — like a
+        // parameter — an untyped one declares nothing a Redoc/Swagger/codegen client
+        // can bind or render.
+        //
+        // The response-side analogue of `every_parameter_declares_a_schema_or_content`
+        // (which pins the same field on request/path/query parameters): every
+        // CamaraSim response echoes `x-correlator` via a
+        // `#/components/headers/XCorrelator` Header Object, and a `schema:` line lost
+        // or dedented in the paste that vendors a new spec leaves an untyped header no
+        // other contract test inspects — the parameter tests scope to `in:` parameters
+        // and the media-type tests to `content:` mappings, and a Header Object under
+        // `components.headers` carries neither, so both skip it. A `$ref` header entry
+        // is exempt (it inherits its type). Verified true across all mounted specs
+        // before asserting.
+        for api in APIS {
+            let untyped = component_headers_missing_schema_or_content(api.body);
+            assert!(
+                untyped.is_empty(),
+                "{} spec defines a `components.headers` Header Object with neither a \
+                 `schema` nor a `content` (an OpenAPI Header Object MUST declare one): \
+                 {:?}",
+                api.name,
+                untyped
+            );
+        }
+    }
+
+    #[test]
+    fn component_header_schema_or_content_extraction_rules() {
+        // Unit-cover the `component_headers_missing_schema_or_content` extractor so the
+        // contract test above can't pass vacuously and its detection is pinned: a
+        // Header Object under `components.headers` is flagged only when its object
+        // carries none of `schema:`/`content:`/`$ref:` at its own child indent — a
+        // `schema`-typed header and a `content`-typed header pass, a `$ref` header is
+        // exempt (inherits), and a `schema:` nested inside a `content:` media type does
+        // NOT count as the header's own type. Header maps outside `components.headers`
+        // (a response's inline `headers:`, a schema property named `headers`) are not
+        // scanned here — the corpus declares its Header Objects only under
+        // `components.headers`, all via a shared `XCorrelator` definition.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+          headers:
+            x-correlator:
+              $ref: '#/components/headers/XCorrelator'
+components:
+  headers:
+    XCorrelator:
+      description: echoed
+      required: false
+      schema:
+        type: string
+    ContentTyped:
+      description: media-typed value
+      content:
+        application/json:
+          schema:
+            type: object
+    RefHeader:
+      $ref: '#/components/headers/XCorrelator'
+    Broken:
+      description: no type at all
+      required: false
+  schemas:
+    Thing:
+      type: object
+";
+        // Flagged: only `Broken` — its object carries `description`/`required` but no
+        // `schema:`/`content:`/`$ref:`. Not flagged: `XCorrelator` (`schema:`),
+        // `ContentTyped` (`content:`, whose nested media-type `schema:` sits deeper and
+        // is not the header's own), and `RefHeader` (`$ref:`, exempt). The response's
+        // inline `x-correlator` `$ref` under `/a` is outside `components.headers` and
+        // is never scanned.
+        assert_eq!(
+            component_headers_missing_schema_or_content(body),
+            vec!["#/components/headers/Broken@line 30".to_string()]
+        );
+
+        // Non-vacuous floor: across every registered spec, every `components.headers`
+        // Header Object declares a `schema` or `content` (the invariant the contract
+        // test asserts), and the corpus actually defines many such headers (each spec
+        // carries at least its `XCorrelator`), so a broken extractor can't hide behind
+        // an empty scan.
+        let mut total_headers = 0usize;
+        for api in APIS {
+            assert!(
+                component_headers_missing_schema_or_content(api.body).is_empty(),
+                "{}: every `components.headers` Header Object must declare a `schema` \
+                 or `content`",
+                api.name
+            );
+            // Count exact-4-space Header Object keys under a `components.headers`
+            // section, mirroring the extractor's scoping.
+            let mut in_components = false;
+            let mut in_headers = false;
+            for line in api.body.lines() {
+                if !line.is_empty() && !line.starts_with(char::is_whitespace) {
+                    in_components = line.trim_end() == "components:";
+                    in_headers = false;
+                    continue;
+                }
+                if !in_components {
+                    continue;
+                }
+                if let Some(rest) = line.strip_prefix("  ") {
+                    if !rest.starts_with(char::is_whitespace) {
+                        in_headers = rest.trim_end() == "headers:";
+                        continue;
+                    }
+                }
+                if !in_headers {
+                    continue;
+                }
+                if let Some(rest) = line.strip_prefix("    ") {
+                    if !rest.starts_with(char::is_whitespace)
+                        && rest.trim_end().ends_with(':')
+                    {
+                        total_headers += 1;
+                    }
+                }
+            }
+        }
+        assert!(
+            total_headers >= 50,
+            "expected many components.headers Header Objects across specs, got {total_headers}"
         );
     }
 
