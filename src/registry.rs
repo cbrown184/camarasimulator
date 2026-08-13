@@ -9625,6 +9625,174 @@ components:
         );
     }
 
+    /// The path-template key of every Path Item a spec declares under `paths:`
+    /// that is not a well-formed OpenAPI *path template*.
+    ///
+    /// OpenAPI "path templating" lets a `paths:` key embed one or more
+    /// `{parameter}` expressions — `/sessions/{sessionId}` — each of which MUST be
+    /// a balanced `{`…`}` pair enclosing a non-empty parameter name; the key is a
+    /// URL path, so it also carries no whitespace and no query (`?`) or fragment
+    /// (`#`) delimiter (those begin the *other* URL components, not the path). A
+    /// key that breaks templating — an unclosed `/{sessionId` (a paste that lost
+    /// the `}`), a nested `/{a{b}}`, an empty `/{}`, a stray `}`, or a `?`/space
+    /// smuggled in — is an invalid document a Redoc/Swagger/codegen client can't
+    /// bind a route to.
+    ///
+    /// This is invisible to the sibling path tests: `every_paths_object_declares_
+    /// slash_prefixed_path_items` checks only the *leading* `/`,
+    /// `every_paths_object_lists_distinct_path_keys` checks only *uniqueness*, and
+    /// `path_template_params_match_declared_path_parameters` extracts `{…}` *spans*
+    /// and matches their names against declared path parameters — a malformed brace
+    /// simply yields no span, so a `/{id` whose operation also dropped its `id`
+    /// path-parameter declaration matches nothing on either side and sails through.
+    /// None of them inspect the brace structure of the key itself.
+    ///
+    /// Reuses the (unit-covered) `path_item_keys` extractor — which already scopes
+    /// to the top-level `paths:` block, unquotes the key, and excludes `x-`
+    /// Paths-Object extensions — then validates each returned template. Returns the
+    /// offending keys in document order.
+    fn malformed_path_template_keys(body: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        for key in path_item_keys(body) {
+            // `depth`: 0 = outside a `{…}`, 1 = inside one (nesting is illegal, so
+            // it never exceeds 1). `segment_has_name`: whether the current `{…}`
+            // has enclosed at least one character before its `}`.
+            let mut depth = 0usize;
+            let mut segment_has_name = false;
+            let mut ok = true;
+            for c in key.chars() {
+                if c.is_whitespace() || c == '?' || c == '#' {
+                    ok = false;
+                    break;
+                }
+                match c {
+                    '{' => {
+                        if depth > 0 {
+                            ok = false; // a nested `{`
+                            break;
+                        }
+                        depth = 1;
+                        segment_has_name = false;
+                    }
+                    '}' => {
+                        if depth == 0 || !segment_has_name {
+                            ok = false; // a stray `}` or an empty `{}`
+                            break;
+                        }
+                        depth = 0;
+                    }
+                    _ => {
+                        if depth == 1 {
+                            segment_has_name = true;
+                        }
+                    }
+                }
+            }
+            if depth != 0 {
+                ok = false; // an unclosed `{`
+            }
+            if !ok {
+                out.push(key);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_path_template_key_is_well_formed() {
+        // Contract-harness invariant (OpenAPI path-templating structural rule):
+        // every `paths:` key a mounted spec declares MUST be a well-formed path
+        // template — each `{parameter}` a balanced `{`…`}` pair around a non-empty
+        // name, and no whitespace or query (`?`)/fragment (`#`) delimiter in the
+        // path. A key that breaks this — an unclosed `/{sessionId`, a nested
+        // `/{a{b}}`, an empty `/{}`, a stray `}`, a `?`/space — is a document a
+        // client can't bind a route to. It is invisible to every sibling path test:
+        // the slash-prefix test checks only the leading `/`, the distinct-keys test
+        // only uniqueness, and the path-templating test matches `{…}` *spans* by
+        // name (a malformed brace yields no span, so it slips through). Verified true
+        // across all mounted specs before asserting.
+        for api in APIS {
+            let malformed = malformed_path_template_keys(api.body);
+            assert!(
+                malformed.is_empty(),
+                "{} spec declares a `paths:` key that is not a well-formed path template \
+                 (unbalanced/empty `{{}}`, or whitespace/`?`/`#`): {:?}",
+                api.name,
+                malformed
+            );
+        }
+    }
+
+    #[test]
+    fn path_template_key_wellformedness_rules() {
+        // Unit-cover the `malformed_path_template_keys` extractor so the contract
+        // test above can't pass vacuously and its detection is pinned: valid
+        // single- and multi-parameter templates pass; an unclosed brace, an empty
+        // `{}`, a nested `{a{b}}`, a stray `}`, a whitespace, and a query `?` are
+        // each flagged, in document order; an `x-` Paths-Object extension is not a
+        // path item (excluded upstream by `path_item_keys`) so it is never flagged.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /sessions/{sessionId}:
+    get: noop
+  /a/{id}/b/{sub}:
+    get: noop
+  /bad/{id:
+    get: noop
+  /empty/{}:
+    get: noop
+  /nest/{a{b}}:
+    get: noop
+  /stray/}x:
+    get: noop
+  /has space/x:
+    get: noop
+  /query/x?y=1:
+    get: noop
+  x-tension:
+    note: ok
+";
+        // Flagged, in document order: the unclosed `/bad/{id`, the empty `/empty/{}`,
+        // the nested `/nest/{a{b}}`, the stray `/stray/}x`, the whitespace
+        // `/has space/x`, and the query `/query/x?y=1`. Not flagged: the two valid
+        // templates (`/sessions/{sessionId}`, `/a/{id}/b/{sub}`) and the `x-tension`
+        // extension (not a Path Item).
+        assert_eq!(
+            malformed_path_template_keys(body),
+            vec![
+                "/bad/{id".to_string(),
+                "/empty/{}".to_string(),
+                "/nest/{a{b}}".to_string(),
+                "/stray/}x".to_string(),
+                "/has space/x".to_string(),
+                "/query/x?y=1".to_string(),
+            ]
+        );
+
+        // Non-vacuous floor: across every registered spec every `paths:` key is a
+        // well-formed template (the invariant the contract test asserts), and the
+        // corpus declares many path items, so a broken extractor can't hide behind
+        // an empty scan. Count path keys with a detection independent of the
+        // extractor.
+        let mut path_keys = 0usize;
+        for api in APIS {
+            assert!(
+                malformed_path_template_keys(api.body).is_empty(),
+                "{}: every `paths:` key must be a well-formed path template",
+                api.name
+            );
+            path_keys += path_item_keys(api.body).len();
+        }
+        assert!(
+            path_keys >= 100,
+            "expected many path items across specs, got {path_keys}"
+        );
+    }
+
     /// Extract a descriptor for every `properties:` object a spec declares that
     /// lists the **same property name twice** — without a YAML dep.
     ///

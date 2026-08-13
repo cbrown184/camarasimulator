@@ -3737,6 +3737,25 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     pins that the extractor doesn't de-duplicate (else the contract test would be
     blind) and holds a ≥100 non-vacuous path-key floor. Verified true across all
     mounted specs (238 on-disk path keys, all distinct — no drift to fix).
+  - a path-template-well-formedness contract test (`src/registry.rs`
+    `every_path_template_key_is_well_formed`) asserts every `paths:` key a mounted
+    spec declares is a well-formed OpenAPI *path template* — each `{parameter}` a
+    balanced `{`…`}` pair around a non-empty name, and no whitespace or query
+    (`?`)/fragment (`#`) delimiter in the path. A key that breaks templating (an
+    unclosed `/{sessionId`, a nested `/{a{b}}`, an empty `/{}`, a stray `}`, a `?`
+    or space) is a document a Redoc/Swagger/codegen client can't bind a route to.
+    Invisible to the sibling path tests: the slash-prefix test checks only the
+    leading `/`, the distinct-keys test only uniqueness, and
+    `path_template_params_match_declared_path_parameters` matches `{…}` *spans* by
+    name — a malformed brace yields no span, so a `/{id` whose operation also
+    dropped its `id` path-parameter declaration matches nothing on either side and
+    sails through; none inspect the brace structure of the key itself. Reuses the
+    (unit-covered) `path_item_keys` extractor, then validates each template with a
+    single-pass brace/whitespace scanner (no YAML dep). A new
+    `path_template_key_wellformedness_rules` unit flags an unclosed/empty/nested/
+    stray brace, a whitespace, and a query `?` in document order (an `x-` extension
+    excluded), and holds a ≥100 non-vacuous path-key floor. Verified true across all
+    mounted specs (no drift to fix).
   Full response-vs-schema validation still TODO (would need a YAML/JSON-Schema
   validator — a dependency trade-off, deferred).
 
@@ -3745,6 +3764,25 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 ## Scan journal
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
+
+- 2026-08-13 — contract-harness: added a **path-template-well-formedness** contract test
+  (`src/registry.rs` `every_path_template_key_is_well_formed`) asserting every `paths:` key a
+  mounted spec declares is a well-formed OpenAPI path template — each `{parameter}` a balanced
+  `{`…`}` pair around a non-empty name, and no whitespace/`?`/`#` in the path. OpenAPI path
+  templating binds a route from these keys, so a broken one (unclosed `/{sessionId`, nested
+  `/{a{b}}`, empty `/{}`, stray `}`, a `?`/space) is a document a Redoc/Swagger/codegen client
+  can't bind. Invisible to the sibling path tests: slash-prefix checks only the leading `/`,
+  distinct-keys only uniqueness, and `path_template_params_match_declared_path_parameters`
+  matches `{…}` *spans* by name — a malformed brace yields no span, so a `/{id` whose operation
+  also dropped its `id` path-param declaration matches nothing on either side and sails through;
+  none inspect the key's brace structure. Lean: reuses the unit-covered `path_item_keys`
+  extractor (already `paths:`-scoped, unquoting, `x-`-excluding), then validates each template
+  with a single-pass brace/whitespace scanner — no new extractor, no YAML dep. New
+  `path_template_key_wellformedness_rules` unit flags an unclosed/empty/nested/stray brace, a
+  whitespace, and a query `?` in document order, and holds a ≥100 non-vacuous path-key floor.
+  Verified true across all mounted specs (119 path keys, all well-formed — no drift to fix).
+  Tests: +2 (1 contract, 1 unit). `cargo test` 2223 green (was 2221); `cargo build --release`
+  succeeds. No new dep; binary unchanged (`#[cfg(test)]`-only). — binary: 3.7M (3851944 B, +0 B)
 
 - 2026-08-13 — contract-harness: added a **distinct-path-keys** contract test
   (`src/registry.rs` `every_paths_object_lists_distinct_path_keys`) asserting no mounted
