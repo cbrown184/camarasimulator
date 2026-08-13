@@ -9403,6 +9403,360 @@ components:
         );
     }
 
+    /// The 1-based line numbers, in document order, of every schema `format:` whose
+    /// value names a recognized format but whose sibling `type:` names the wrong
+    /// JSON type for that format's family — without a YAML dep.
+    ///
+    /// In OpenAPI 3.0.x a `format` is a modifier on one specific `type`: the
+    /// integer formats `int32`/`int64` require `type: integer`, the numeric formats
+    /// `float`/`double` require `type: number`, and every string format
+    /// (`date`/`date-time`/`time`/`duration`/`byte`/`binary`/`password`/`email`/
+    /// `hostname`/`ipv4`/`ipv6`/`uri`/`uri-reference`/`uuid`/`regex`/…) requires
+    /// `type: string`. A recognized format sitting on the wrong type (`format: uuid`
+    /// under `type: integer`, or a `format: int32` under `type: string`) is a
+    /// self-contradictory schema: the format can never constrain a value of that
+    /// type, so a Redoc/Swagger/codegen client keeps the type and silently drops the
+    /// format hint wherever a caller reads or builds the payload.
+    ///
+    /// Only a `format:` that (a) names a recognized format — an unrecognized value
+    /// is a typo owned by `format_values_not_recognized`, not a type mismatch — and
+    /// (b) has a `type:` *scalar sibling* in the same Schema Object (same indent,
+    /// scanning down through the object's block then up, dedent-bounded exactly like
+    /// `schema_bounds_inverted`) is inspected. A `format` whose `type` is absent
+    /// (inherited via `allOf`/`$ref`, or declared in an outer object) or opens a
+    /// block is skipped — nothing to compare — and a `format:` inside an
+    /// `example:`/`examples:` payload is example data, excluded by walking the
+    /// ancestor chain (mirroring `format_values_not_recognized`). Only a `format:`
+    /// at the start of its line (after indentation) is inspected.
+    fn format_type_mismatches(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        // The inline scalar of a `name:` key (inline comment + surrounding quotes
+        // stripped); `None` when the line is a different key or opens a block (no
+        // inline value).
+        let scalar = |l: &str, name: &str| -> Option<String> {
+            let (k, v) = l.trim_start().split_once(':')?;
+            if k.trim() != name {
+                return None;
+            }
+            let v = v
+                .split('#')
+                .next()
+                .unwrap_or(v)
+                .trim()
+                .trim_matches('"')
+                .trim_matches('\'');
+            if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            }
+        };
+        // The JSON type a recognized format modifies, or `None` when the format is
+        // not recognized (a typo — owned by the recognition test, not this one).
+        fn required_type(fmt: &str) -> Option<&'static str> {
+            Some(match fmt {
+                "int32" | "int64" => "integer",
+                "float" | "double" => "number",
+                "byte" | "binary" | "date" | "date-time" | "password" | "time"
+                | "duration" | "email" | "idn-email" | "hostname" | "idn-hostname"
+                | "ipv4" | "ipv6" | "uri" | "uri-reference" | "iri" | "iri-reference"
+                | "uri-template" | "uuid" | "json-pointer" | "relative-json-pointer"
+                | "regex" | "regexp" => "string",
+                _ => return None,
+            })
+        }
+        // True when line `i` (indent `c`) sits inside an `example:`/`examples:`
+        // payload — some enclosing container key up the indent ladder is
+        // `example`/`examples`.
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        // The sibling `type:` scalar in the same object as line `i` (indent `c`):
+        // scan down through the object's block for a same-indent `type`, then up,
+        // dedent-bounded so a nested/following object's `type` never pairs.
+        let sibling_type = |i: usize, c: usize| -> Option<String> {
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c {
+                    if let Some(v) = scalar(l, "type") {
+                        return Some(v);
+                    }
+                }
+                j += 1;
+            }
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c {
+                    if let Some(v) = scalar(l, "type") {
+                        return Some(v);
+                    }
+                }
+            }
+            None
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some(fmt) = scalar(line, "format") else {
+                continue;
+            };
+            let Some(want) = required_type(&fmt) else {
+                continue; // an unrecognized format is the recognition test's concern
+            };
+            let c = indent(line);
+            if inside_example(i, c) {
+                continue;
+            }
+            if let Some(ty) = sibling_type(i, c) {
+                if ty != want {
+                    out.push(i + 1);
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_format_matches_its_type() {
+        // Contract-harness invariant (OpenAPI 3.0.x / JSON-Schema structural rule):
+        // where a Schema Object declares a recognized `format` as a sibling of a
+        // `type` scalar, the type MUST be the one the format modifies — the integer
+        // formats `int32`/`int64` on `type: integer`, the numeric formats
+        // `float`/`double` on `type: number`, every string format (`date-time`,
+        // `uuid`, `uri`, `ipv4`, `byte`, …) on `type: string`. A recognized format
+        // on the wrong type (`format: uuid` under `type: integer`) is a
+        // self-contradictory schema: the format can never constrain a value of that
+        // type, so a Redoc/Swagger/codegen client keeps the type and silently drops
+        // the format hint wherever a caller reads or builds the payload.
+        //
+        // This is the type-agreement complement of
+        // `every_format_names_a_recognized_format`: that test proves each `format`
+        // string is spelled from the known vocabulary but never looks at the sibling
+        // `type`, so a correctly-spelled `format: int32` left on a `type: string` (a
+        // field retyped without its format updated, or a format pasted from an
+        // integer sibling onto a string one) sails through it. It is invisible to
+        // `every_type_names_a_valid_schema_type` too — that checks the `type` token
+        // is a valid type, never against a sibling format. Only a recognized format
+        // with a `type:` scalar sibling in the same object is inspected (an
+        // inherited/absent type, or an unrecognized format, is skipped). Verified
+        // true across all mounted specs before asserting.
+        for api in APIS {
+            let bad = format_type_mismatches(api.body);
+            assert!(
+                bad.is_empty(),
+                "{} spec declares a recognized `format:` on a `type:` that does not \
+                 match the format's family (e.g. `uuid` off `string`, `int32` off \
+                 `integer`) at line(s): {:?}",
+                api.name,
+                bad
+            );
+        }
+    }
+
+    #[test]
+    fn format_type_consistency_extraction_rules() {
+        // Unit-cover `format_type_mismatches` so the contract test above can't pass
+        // vacuously and its detection is pinned: a recognized format on its correct
+        // type passes (`uuid` on string, `int32` on integer, `double` on number,
+        // whether `type` is declared before or after `format`); a recognized format
+        // on the wrong type is flagged in document order (`uuid` on integer, `int32`
+        // on string); an *unrecognized* format is never flagged here (the
+        // recognition test owns it); a `format` with no sibling `type` scalar (type
+        // inherited/absent) is skipped; a property literally named `format` (empty
+        // value) is skipped; and a `format:` inside an `example:` payload is skipped.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    GoodStr:
+      type: string
+      format: uuid
+    GoodInt:
+      type: integer
+      format: int32
+    GoodNum:
+      format: double
+      type: number
+    BadUuidOnInt:
+      type: integer
+      format: uuid
+    BadInt32OnStr:
+      format: int32
+      type: string
+    UnknownFormat:
+      type: integer
+      format: datetime
+    NoType:
+      format: uuid
+    NamedFormat:
+      type: object
+      properties:
+        format:
+          type: string
+    InExample:
+      type: object
+      example:
+        type: integer
+        format: uuid
+";
+        // Flagged, in document order: BadUuidOnInt's `format: uuid` (line 25, its
+        // sibling `type: integer` wants string) and BadInt32OnStr's `format: int32`
+        // (line 27, its sibling `type: string` wants integer). Not flagged: the
+        // three Good schemas; UnknownFormat (`datetime` is unrecognized — the
+        // recognition test owns it); NoType (no sibling `type` scalar); the property
+        // literally named `format` (line 37, empty value); and the `format: uuid`
+        // inside the `example:` payload (line 43).
+        assert_eq!(format_type_mismatches(body), vec![25, 27]);
+
+        // Non-vacuous floor: across every registered spec every recognized format
+        // sits on its matching type (the invariant the contract test asserts), and
+        // the corpus declares many format+type pairs that actually agree — so the
+        // value-comparison path runs on real data and a broken (always-empty)
+        // extractor can't hide behind a corpus that never pairs a format with a
+        // type. Count agreeing pairs with a presence detector that pairs the same
+        // way but compares for a match rather than a mismatch.
+        let mut agree = 0usize;
+        for api in APIS {
+            assert!(
+                format_type_mismatches(api.body).is_empty(),
+                "{}: every recognized format must sit on its matching type",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            let scalar = |l: &str, name: &str| -> Option<String> {
+                let (k, v) = l.trim_start().split_once(':')?;
+                if k.trim() != name {
+                    return None;
+                }
+                let v = v
+                    .split('#')
+                    .next()
+                    .unwrap_or(v)
+                    .trim()
+                    .trim_matches('"')
+                    .trim_matches('\'');
+                if v.is_empty() {
+                    None
+                } else {
+                    Some(v.to_string())
+                }
+            };
+            let want = |fmt: &str| -> Option<&'static str> {
+                Some(match fmt {
+                    "int32" | "int64" => "integer",
+                    "float" | "double" => "number",
+                    "byte" | "binary" | "date" | "date-time" | "password" | "time"
+                    | "duration" | "email" | "idn-email" | "hostname" | "idn-hostname"
+                    | "ipv4" | "ipv6" | "uri" | "uri-reference" | "iri" | "iri-reference"
+                    | "uri-template" | "uuid" | "json-pointer" | "relative-json-pointer"
+                    | "regex" | "regexp" => "string",
+                    _ => return None,
+                })
+            };
+            for (i, l) in lines.iter().enumerate() {
+                let Some(fmt) = scalar(l, "format") else {
+                    continue;
+                };
+                let Some(w) = want(&fmt) else { continue };
+                let c = indent(l);
+                let mut ty = None;
+                let mut j = i + 1;
+                while j < lines.len() {
+                    let x = lines[j];
+                    if x.trim().is_empty() {
+                        j += 1;
+                        continue;
+                    }
+                    if indent(x) < c {
+                        break;
+                    }
+                    if indent(x) == c {
+                        if let Some(v) = scalar(x, "type") {
+                            ty = Some(v);
+                            break;
+                        }
+                    }
+                    j += 1;
+                }
+                if ty.is_none() {
+                    let mut k = i;
+                    while k > 0 {
+                        k -= 1;
+                        let x = lines[k];
+                        if x.trim().is_empty() {
+                            continue;
+                        }
+                        if indent(x) < c {
+                            break;
+                        }
+                        if indent(x) == c {
+                            if let Some(v) = scalar(x, "type") {
+                                ty = Some(v);
+                                break;
+                            }
+                        }
+                    }
+                }
+                if ty.as_deref() == Some(w) {
+                    agree += 1;
+                }
+            }
+        }
+        assert!(
+            agree >= 100,
+            "expected many agreeing format+type pairs across specs, got {agree}"
+        );
+    }
+
     /// Line numbers (1-based) of OpenAPI 3.0.x boolean-valued keywords whose
     /// declared value is not a JSON boolean (`true`/`false`).
     ///

@@ -3777,6 +3777,28 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     non-pairing, block-default skip) and holds a ≥4 non-vacuous default+enum pair
     floor. Verified true across all mounted specs (every enum-bearing default — the
     `order` param, the status enums — is a member; no drift to fix).
+  - a format↔type-consistency contract test (`src/registry.rs`
+    `every_format_matches_its_type`) asserts that where a Schema Object declares a
+    recognized `format` beside a `type` scalar, the type is the one the format
+    modifies — `int32`/`int64` on `integer`, `float`/`double` on `number`, every
+    string format (`date-time`/`uuid`/`uri`/`ipv4`/`byte`/…) on `string`. A
+    recognized format on the wrong type (`format: uuid` under `type: integer`) is
+    self-contradictory: the format can never constrain a value of that type, so a
+    Redoc/Swagger/codegen client keeps the type and drops the format hint. The
+    type-agreement complement of `every_format_names_a_recognized_format` (which
+    proves the format *string* is spelled from the known vocabulary but never looks
+    at the sibling `type`, so a correctly-spelled `format: int32` left on a
+    `type: string` sails through) and invisible to `every_type_names_a_valid_schema_type`
+    (checks the type token is valid, never against a format). New pure
+    `format_type_mismatches` extractor (no YAML dep) mirrors `schema_bounds_inverted`'s
+    same-indent sibling-pairing (scan down then up, dedent-bounded) to find the
+    format's sibling `type`; a format with no sibling type scalar (inherited via
+    `allOf`/`$ref`), an unrecognized format, or a `format:` inside an `example:`
+    payload is skipped. New `format_type_consistency_extraction_rules` unit pins
+    detection (correct/incorrect type, type-before/after-format, unrecognized-format
+    skip, no-type skip, named-`format` skip, example skip) and holds a ≥100
+    non-vacuous agreeing-pair floor. Verified true across all mounted specs (every
+    recognized format sits on its matching type; no drift to fix).
   Full response-vs-schema validation still TODO (would need a YAML/JSON-Schema
   validator — a dependency trade-off, deferred).
 
@@ -3785,6 +3807,31 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 ## Scan journal
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
+
+- 2026-08-13 — contract-harness: added a **format↔type-consistency** contract test
+  (`src/registry.rs` `every_format_matches_its_type`) asserting that where a Schema Object
+  declares a recognized `format` beside a `type` scalar, the type is the one the format
+  modifies — `int32`/`int64` on `type: integer`, `float`/`double` on `type: number`, and
+  every string format (`date-time`/`uuid`/`uri`/`ipv4`/`byte`/…) on `type: string`. A
+  recognized format on the wrong type (`format: uuid` under `type: integer`, or a
+  correctly-spelled `format: int32` left on a `type: string` after a retype) is a
+  self-contradictory schema: the format can never constrain a value of that type, so a
+  Redoc/Swagger/codegen client keeps the type and silently drops the format hint. The
+  type-agreement complement of `every_format_names_a_recognized_format` (which proves each
+  format string is spelled from the known vocabulary but never looks at the sibling `type`)
+  and invisible to `every_type_names_a_valid_schema_type` (checks the type token is a valid
+  type, never against a format). New pure `format_type_mismatches` extractor (no YAML dep)
+  mirrors `schema_bounds_inverted`'s same-indent sibling-pairing (scan down through the
+  object's block then up, dedent-bounded) to locate the format's sibling `type`; a format
+  with no sibling type scalar (type inherited via `allOf`/`$ref`), an unrecognized format
+  (owned by the recognition test), or a `format:` inside an `example:` payload is skipped.
+  New `format_type_consistency_extraction_rules` unit pins detection (correct/incorrect
+  type, type-before/after-format, unrecognized-format skip, no-type skip, named-`format`
+  skip, example skip) and holds a ≥100 non-vacuous agreeing-pair floor. Verified true
+  across all mounted specs (every recognized format sits on its matching type; no drift to
+  fix). Tests: +2 (1 contract, 1 unit). `cargo test` 2227 green (was 2225);
+  `cargo build --release` succeeds. No new dep; binary unchanged (`#[cfg(test)]`-only). —
+  binary: 3.7M (3851944 B, +0 B)
 
 - 2026-08-13 — contract-harness: added a **default-in-enum** contract test
   (`src/registry.rs` `every_default_is_a_member_of_its_enum`) asserting that wherever a
