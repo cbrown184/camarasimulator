@@ -3601,6 +3601,32 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     ordered bound pairs over all specs) so the contract can't pass vacuously.
     Verified true (174 ordered bound pairs across all mounted specs, none
     inverted) before asserting.
+  - a schema-composition-keyword-is-a-sequence contract test (`src/registry.rs`
+    `every_composer_keyword_declares_a_sequence`) asserts every `oneOf`/`anyOf`/
+    `allOf` a mounted spec declares is a **sequence** — an array of Schema Objects
+    to compose (`not`, a single schema, is deliberately excluded). In OpenAPI
+    3.0.x these three keywords MUST each be an array; a composer whose value is a
+    mapping (`allOf:` straight to `type: object` children) or a scalar is an
+    invalid document — a Redoc/Swagger/codegen client expecting a *list* of member
+    schemas is handed one object it can't iterate, so the composition breaks where
+    a caller reads/builds the payload. A live hazard in these specs, which lean on
+    `allOf` to extend the shared `CamaraError` with each API's own `code` enum and
+    for the `Area`/`Device` polymorphic families: a composer block pasted from a
+    sibling whose `- ` sequence markers are dropped/dedented in the edit, collapsing
+    the array into a bare mapping. Invisible to every existing test — the
+    array-items/discriminator/enum/`$ref` tests check an `items` schema, a
+    discriminator's completeness, a value list, or a ref target, never that a
+    composer opens a sequence. A pure `composers_not_a_sequence` extractor (no YAML
+    dep): an inline `[ … ]` flow sequence is accepted, any other inline scalar
+    flagged; a block-form key is decided by its first non-blank following line — a
+    `- ` sequence item at the key's own indent or deeper is accepted, a deeper
+    mapping key/scalar or an immediate dedent to a sibling (empty value) is flagged.
+    Unit-covered (`composer_sequence_extraction_rules`: a deeper `- ` child, an
+    inline `[ … ]`, and a same-indent `- ` child pass; a mapping value, an inline
+    scalar, and an empty block flagged in document order; plus a non-vacuous floor
+    of ≥50 block-form composers over all specs) so the contract can't pass
+    vacuously. Verified true (90 block-form composers across all mounted specs, all
+    opening a sequence — no drift to fix) before asserting.
   Full response-vs-schema validation still TODO (would need a YAML/JSON-Schema
   validator — a dependency trade-off, deferred).
 
@@ -3609,6 +3635,31 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 ## Scan journal
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
+
+- 2026-08-13 — contract-harness: added a **schema-composition-keyword-is-a-sequence**
+  contract test (`src/registry.rs` `every_composer_keyword_declares_a_sequence`)
+  asserting every `oneOf`/`anyOf`/`allOf` a mounted spec declares is a sequence (an
+  array of Schema Objects), the OpenAPI 3.0.x rule for the three composition
+  keywords (`not`, a single schema, excluded). A composer whose value is a mapping
+  (`allOf:` straight to `type: object` children) or a scalar is an invalid document
+  — a client expecting a list of member schemas gets one object it can't iterate,
+  so the composition breaks; a live hazard where these specs lean on `allOf` to
+  extend the shared `CamaraError` with each API's own `code` enum and for the
+  `Area`/`Device` families (a pasted composer whose `- ` markers are dropped/
+  dedented collapses the array into a bare mapping). Invisible to every existing
+  test (array-items/discriminator/enum/`$ref` check an `items` schema, a
+  discriminator's completeness, a value list, or a ref target, never that a
+  composer opens a sequence). New pure `composers_not_a_sequence` extractor (no YAML
+  dep): inline `[ … ]` accepted, other inline scalar flagged; a block key decided by
+  its first non-blank following line — a `- ` item at the key's own indent or deeper
+  accepted, a deeper mapping/scalar or an immediate dedent to a sibling (empty)
+  flagged. Unit-covered (`composer_sequence_extraction_rules`: deeper-`- `/inline-
+  `[ … ]`/same-indent-`- ` pass, mapping/scalar/empty flagged in document order;
+  plus a non-vacuous floor of ≥50 block-form composers) so the contract can't pass
+  vacuously. Verified true (90 block-form composers across all mounted specs, all
+  opening a sequence — no drift to fix). Tests: +2 (1 contract, 1 extractor unit).
+  `cargo test` 2205 green (was 2203); `cargo build --release` warning-clean. No new
+  dep; binary unchanged (`#[cfg(test)]`-only). — binary: 3.7M (3851944 B, +0 B)
 
 - 2026-08-13 — contract-harness: added a **numeric-bound-ordering** contract test
   (`src/registry.rs` `every_numeric_bound_is_ordered_low_to_high`) asserting that

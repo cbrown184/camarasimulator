@@ -8041,4 +8041,194 @@ components:
             "expected several discriminators across specs, got {discriminators}"
         );
     }
+
+    /// Extract the 1-based line number of every `oneOf`/`anyOf`/`allOf` keyword a
+    /// spec declares whose value is **not a sequence** (an array of schemas) —
+    /// without a YAML dep.
+    ///
+    /// In OpenAPI 3.0.x the three schema-composition keywords `oneOf`, `anyOf`
+    /// and `allOf` MUST each be an *array* of Schema Objects (`not`, by contrast,
+    /// is a single schema, so it is deliberately excluded here). A composer whose
+    /// value is a mapping (`allOf:` followed straight by `type: object` children)
+    /// or a scalar is an invalid document: a Redoc/Swagger/codegen client expects
+    /// a *list* of member schemas to compose — CamaraSim uses `allOf` to extend
+    /// the shared `CamaraError` with each API's own `code` enum, and for the
+    /// `Area`/`Device` polymorphic families — so it is handed a single object it
+    /// can't iterate and the composition breaks. It is invisible to every existing
+    /// test: the array-items / discriminator / enum / `$ref` tests check an
+    /// `items` schema, a discriminator's completeness, a value list, or a ref
+    /// target, never that a composer opens a sequence.
+    ///
+    /// For each `oneOf`/`anyOf`/`allOf` key: an inline flow-sequence value
+    /// (`allOf: [ … ]`, first non-space char `[`) is a valid array and accepted;
+    /// any other inline scalar is flagged. A block-form key (its value is empty
+    /// once a trailing `# comment` is stripped) opens a block whose first
+    /// non-blank following line decides it — a YAML sequence item (`-` first
+    /// char), at the key's own indent or deeper, is a sequence and accepted; a
+    /// mapping key or scalar indented deeper (the value is a mapping), or an
+    /// immediate dedent to a shallower/sibling line (an empty value), is flagged.
+    /// A line literally naming one of these keys inside prose is excluded by the
+    /// exact key-name match before the value colon.
+    fn composers_not_a_sequence(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some((k, v)) = line.trim_start().split_once(':') else {
+                continue;
+            };
+            let k = k.trim();
+            if k != "oneOf" && k != "anyOf" && k != "allOf" {
+                continue;
+            }
+            // Strip a trailing `# comment` from the value; what remains, trimmed,
+            // is the inline value (empty ⇒ the key opens a block).
+            let inline = v.split('#').next().unwrap_or(v).trim();
+            if !inline.is_empty() {
+                // Inline value: only a flow sequence `[ … ]` is a valid array.
+                if !inline.starts_with('[') {
+                    out.push(i + 1);
+                }
+                continue;
+            }
+            // Block form: the first non-blank following line decides it.
+            let c = indent(line);
+            let mut opens_sequence = false;
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                let li = indent(l);
+                if li < c {
+                    break; // dedented to an ancestor: the composer's value is empty
+                }
+                // A sequence item may sit at the key's own indent (`li == c`) or
+                // deeper (`li > c`); a `-` first char is a YAML sequence entry.
+                // Anything else — a sibling key at `li == c`, or a mapping key /
+                // scalar at `li > c` — means the value is not a sequence.
+                opens_sequence = l.trim_start().starts_with('-');
+                break;
+            }
+            if !opens_sequence {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_composer_keyword_declares_a_sequence() {
+        // Contract-harness invariant (OpenAPI 3.0.x structural rule): every
+        // `oneOf`/`anyOf`/`allOf` a mounted spec declares MUST be a *sequence* —
+        // an array of Schema Objects to compose. (`not` is a single schema and is
+        // excluded.) A composer whose value is a mapping (`allOf:` straight to
+        // `type: object` children) or a scalar is an invalid document: a
+        // Redoc/Swagger/codegen client expecting a list of member schemas is
+        // handed one object it can't iterate, so the composition silently breaks
+        // where a caller reads or builds the payload.
+        //
+        // A routine hazard in these vendored specs, which lean on `allOf` to
+        // extend the shared `CamaraError` with each API's own `code` enum and for
+        // the `Area`/`Device` polymorphic families: a composer block pasted from a
+        // sibling whose `- ` sequence markers are dropped/dedented in the edit,
+        // collapsing the array into a bare mapping. It is invisible to every
+        // existing test — the array-items / discriminator / enum / `$ref` tests
+        // check an `items` schema, a discriminator's completeness, a value list,
+        // or a ref target, never that a composer opens a sequence. Verified true
+        // across all mounted specs before asserting.
+        for api in APIS {
+            let bad = composers_not_a_sequence(api.body);
+            assert!(
+                bad.is_empty(),
+                "{} spec declares `oneOf`/`anyOf`/`allOf` whose value is not a \
+                 sequence (an array of schemas) at line(s): {:?}",
+                api.name,
+                bad
+            );
+        }
+    }
+
+    #[test]
+    fn composer_sequence_extraction_rules() {
+        // Unit-cover the `composers_not_a_sequence` extractor so the contract test
+        // above can't pass vacuously and its detection is pinned: a block composer
+        // whose first child is a `- ` sequence item (at the key's own indent or
+        // deeper) and an inline `[ … ]` flow sequence pass; a block composer whose
+        // value is a mapping, an inline scalar, or empty (its block dedents
+        // straight to a sibling key) is flagged, in document order.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    GoodBlock:
+      allOf:
+        - $ref: '#/components/schemas/Base'
+        - type: object
+    GoodInline:
+      oneOf: [ { type: string }, { type: integer } ]
+    GoodSameIndent:
+      anyOf:
+      - type: string
+      - type: integer
+    BadMapping:
+      allOf:
+        type: object
+        properties:
+          x:
+            type: string
+    BadScalar:
+      anyOf: nonsense
+    BadEmpty:
+      oneOf:
+      properties:
+        x:
+          type: string
+";
+        // Flagged, in document order: `BadMapping`'s `allOf` at line 25 (its first
+        // child is a mapping key, not a `- ` item), `BadScalar`'s `anyOf` at line
+        // 31 (an inline scalar, not a flow sequence), and `BadEmpty`'s `oneOf` at
+        // line 33 (its block dedents straight to the `properties:` sibling — an
+        // empty value). Not flagged: `GoodBlock` (a deeper `- ` child),
+        // `GoodInline` (an inline `[ … ]`) and `GoodSameIndent` (a `- ` child at
+        // the key's own indent).
+        assert_eq!(composers_not_a_sequence(body), vec![25, 31, 33]);
+
+        // Non-vacuous floor: across every registered spec every composer opens a
+        // sequence (the invariant the contract test asserts), and the corpus
+        // actually declares many composers (`allOf` over `CamaraError` + the
+        // polymorphic families), so a broken extractor can't hide behind an empty
+        // scan. Count block-form composer keys with a detection independent of the
+        // extractor.
+        let mut composers = 0usize;
+        for api in APIS {
+            assert!(
+                composers_not_a_sequence(api.body).is_empty(),
+                "{}: every `oneOf`/`anyOf`/`allOf` must declare a sequence",
+                api.name
+            );
+            for line in api.body.lines() {
+                let t = line.trim();
+                if t == "oneOf:" || t == "anyOf:" || t == "allOf:" {
+                    composers += 1;
+                }
+            }
+        }
+        assert!(
+            composers >= 50,
+            "expected many composer keywords across specs, got {composers}"
+        );
+    }
 }
