@@ -3877,6 +3877,33 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-13 — contract-harness: added a **facet-keyword↔type-consistency** contract
+  test (`src/registry.rs` `every_facet_keyword_sits_on_its_required_type`) asserting
+  that where a Schema Object declares a string/array/object validation *facet* keyword
+  beside a scalar `type:`, that type is the one the facet constrains — the string facets
+  `minLength`/`maxLength`/`pattern` on `type: string`, the array facets
+  `minItems`/`maxItems`/`uniqueItems` on `type: array`, the object facets
+  `minProperties`/`maxProperties` on `type: object`. A facet on the wrong type
+  (`pattern` under `type: integer`, `minItems` under `type: string`) is
+  self-contradictory: the keyword can never constrain a value of that type, so a
+  validator ignores it and a Redoc/Swagger/codegen client silently drops the constraint
+  where a caller reads/builds the payload. The type-agreement complement of the two
+  facet-*value* tests (`every_size_bound_is_a_non_negative_integer` checks a size
+  facet's value domain; `every_numeric_bound_is_ordered_low_to_high` checks a lower/upper
+  pair's ordering — neither ever looks at the sibling `type`), mirroring
+  `every_format_matches_its_type` for the validation facets. New pure
+  `facet_keyword_type_mismatches` extractor (no YAML dep; reuses the dedent-bounded
+  same-indent `sibling_type` scan + `inside_example` ancestor walk of
+  `format_type_mismatches`, and skips a property literally *named* a facet keyword — a
+  block opener with no inline value). Unit-covered
+  (`facet_keyword_type_consistency_extraction_rules`: string/array/object facets on the
+  right type pass incl. `uniqueItems`; `pattern`-on-integer, `minItems`-on-string,
+  `minProperties`-on-array flagged in document order `[32, 34, 38]`; typeless/
+  named-facet/example skips; a ≥30 agreeing-pair non-vacuous floor). Verified true across
+  all mounted specs (no drift to fix). Tests: +2 (1 contract, 1 unit). `cargo test` 2239
+  green (was 2237); `cargo build --release` succeeds. No new dep; binary unchanged
+  (`#[cfg(test)]`-only). — binary: 3.7M (3851944 B, +0 B)
+
 - 2026-08-13 — contract-harness: added a **properties-object↔type-consistency**
   contract test (`src/registry.rs` `every_properties_object_is_object_typed`)
   asserting that wherever a Schema Object declares a `properties:` mapping beside a

@@ -12190,4 +12190,347 @@ components:
             "expected many object-typed properties blocks across specs, got {object_typed}"
         );
     }
+
+    // The `type` a string/array/object validation *facet* keyword modifies, or `None`
+    // when the key is not a facet keyword. String facets constrain the characters of a
+    // string, array facets the elements of an array, object facets the members of an
+    // object — each is meaningless on any other type.
+    fn facet_required_type(key: &str) -> Option<&'static str> {
+        Some(match key {
+            "minLength" | "maxLength" | "pattern" => "string",
+            "minItems" | "maxItems" | "uniqueItems" => "array",
+            "minProperties" | "maxProperties" => "object",
+            _ => return None,
+        })
+    }
+
+    fn facet_keyword_type_mismatches(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        // True when a line's key holds an inline scalar value (so it is a keyword
+        // occurrence, not a block-opening property literally *named* the keyword);
+        // returns the key when so. Surrounding quotes/inline comments are irrelevant —
+        // only presence of a non-empty value matters here.
+        let inline_key = |l: &str| -> Option<String> {
+            let (k, v) = l.trim_start().split_once(':')?;
+            let v = v.split('#').next().unwrap_or(v).trim();
+            if v.is_empty() {
+                None
+            } else {
+                Some(k.trim().to_string())
+            }
+        };
+        // The inline scalar of a `type:` key (inline comment + surrounding quotes
+        // stripped), or `None` for any other key / a block opener.
+        let type_scalar = |l: &str| -> Option<String> {
+            let (k, v) = l.trim_start().split_once(':')?;
+            if k.trim() != "type" {
+                return None;
+            }
+            let v = v
+                .split('#')
+                .next()
+                .unwrap_or(v)
+                .trim()
+                .trim_matches('"')
+                .trim_matches('\'');
+            if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            }
+        };
+        // True when line `i` (indent `c`) sits inside an `example:`/`examples:`
+        // payload — some enclosing container key up the indent ladder is
+        // `example`/`examples` (mirroring `format_type_mismatches`).
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        // The sibling `type:` scalar in the same object as line `i` (indent `c`):
+        // scan down through the object's block for a same-indent `type`, then up,
+        // dedent-bounded so a nested/following object's `type` never pairs.
+        let sibling_type = |i: usize, c: usize| -> Option<String> {
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c {
+                    if let Some(v) = type_scalar(l) {
+                        return Some(v);
+                    }
+                }
+                j += 1;
+            }
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c {
+                    if let Some(v) = type_scalar(l) {
+                        return Some(v);
+                    }
+                }
+            }
+            None
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some(key) = inline_key(line) else {
+                continue;
+            };
+            let Some(want) = facet_required_type(&key) else {
+                continue; // not a facet keyword
+            };
+            let c = indent(line);
+            if inside_example(i, c) {
+                continue;
+            }
+            if let Some(ty) = sibling_type(i, c) {
+                if ty != want {
+                    out.push(i + 1);
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_facet_keyword_sits_on_its_required_type() {
+        // Contract-harness invariant (OpenAPI 3.0.x / JSON-Schema structural rule):
+        // where a Schema Object declares a string/array/object validation *facet*
+        // keyword as a sibling of a `type:` scalar, that type MUST be the one the facet
+        // constrains — the string facets `minLength`/`maxLength`/`pattern` on
+        // `type: string`, the array facets `minItems`/`maxItems`/`uniqueItems` on
+        // `type: array`, the object facets `minProperties`/`maxProperties` on
+        // `type: object`. A facet on the wrong type (`pattern` under `type: integer`,
+        // `minItems` under `type: string`) is a self-contradictory schema: the keyword
+        // can never constrain a value of that type, so a validator ignores it and a
+        // Redoc/Swagger/codegen client silently drops the constraint exactly where a
+        // caller reads or builds the payload.
+        //
+        // This is the type-agreement complement of the two facet-*value* tests:
+        // `every_size_bound_is_a_non_negative_integer` checks a size facet's value is a
+        // non-negative integer and `every_numeric_bound_is_ordered_low_to_high` checks
+        // a lower/upper pair's ordering — neither ever looks at the sibling `type`, so a
+        // domain-valid, well-ordered `maxLength: 10` left on a `type: integer` (a field
+        // retyped without its facets updated, or a facet pasted from a string sibling
+        // onto a numeric one) sails through both. It mirrors `every_format_matches_its_type`
+        // (format↔type) for the validation facets. Only a facet keyword with a `type:`
+        // scalar sibling in the same object is inspected (an inherited/absent type — e.g.
+        // a facet on an `allOf`/`$ref` composition — or a property literally *named* the
+        // keyword, is skipped). Verified true across all mounted specs before asserting.
+        for api in APIS {
+            let bad = facet_keyword_type_mismatches(api.body);
+            assert!(
+                bad.is_empty(),
+                "{} spec declares a string/array/object validation facet keyword on a \
+                 `type:` that does not match the facet's family (e.g. `pattern` off \
+                 `string`, `minItems` off `array`, `minProperties` off `object`) at \
+                 line(s): {:?}",
+                api.name,
+                bad
+            );
+        }
+    }
+
+    #[test]
+    fn facet_keyword_type_consistency_extraction_rules() {
+        // Unit-cover `facet_keyword_type_mismatches` so the contract test above can't
+        // pass vacuously and its detection is pinned: a facet on its correct type passes
+        // (string facets on string, array facets on array incl. `uniqueItems`, object
+        // facets on object, whether `type` is declared before or after the facet); a
+        // facet on the wrong type is flagged in document order (`pattern` on integer,
+        // `minItems` on string, `minProperties` on array); a facet with no sibling `type`
+        // scalar (type inherited/absent) is skipped; a property literally *named* a facet
+        // keyword (a block opener, no inline value) is skipped; and a facet inside an
+        // `example:` payload is skipped.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    GoodStr:
+      type: string
+      minLength: 1
+      maxLength: 5
+      pattern: '^x+$'
+    GoodArr:
+      type: array
+      minItems: 1
+      maxItems: 3
+      uniqueItems: true
+      items:
+        type: string
+    GoodObj:
+      type: object
+      minProperties: 1
+      maxProperties: 4
+    BadPatternOnInt:
+      type: integer
+      pattern: '^x+$'
+    BadMinItemsOnStr:
+      minItems: 2
+      type: string
+    BadMinPropsOnArr:
+      type: array
+      minProperties: 1
+    NoType:
+      maxLength: 9
+    NamedFacet:
+      type: object
+      properties:
+        pattern:
+          type: string
+    InExample:
+      type: object
+      example:
+        type: integer
+        maxLength: 3
+";
+        // Flagged, in document order: line 32 (`BadPatternOnInt.pattern` beside
+        // `type: integer`, a string facet), line 34 (`BadMinItemsOnStr.minItems` beside
+        // `type: string` declared below — an array facet, found by the down-scan), and
+        // line 38 (`BadMinPropsOnArr.minProperties` beside `type: array`, an object
+        // facet). Not flagged: the three Good schemas (string/array/object facets each on
+        // their matching type — incl. `uniqueItems: true` on the array); `NoType`'s
+        // `maxLength` (no sibling `type` scalar); the property literally *named* `pattern`
+        // (line 44, a block opener with no inline value); and the `maxLength` inside the
+        // `example:` payload (line 50).
+        assert_eq!(
+            facet_keyword_type_mismatches(body),
+            vec![32, 34, 38]
+        );
+
+        // Non-vacuous floor: across every registered spec every facet keyword sits on
+        // its matching type (the invariant the contract test asserts), and the corpus
+        // declares many facet+type pairs that actually agree — so the type-comparison
+        // path runs on real data and a broken (always-empty) extractor can't hide behind
+        // a corpus that never pairs a facet with a type. Count agreeing pairs with a
+        // presence detector that pairs the same way but compares for a match.
+        let mut agree = 0usize;
+        for api in APIS {
+            assert!(
+                facet_keyword_type_mismatches(api.body).is_empty(),
+                "{}: every validation facet keyword must sit on its matching type",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            let type_of = |l: &str| -> Option<String> {
+                let (k, v) = l.trim_start().split_once(':')?;
+                if k.trim() != "type" {
+                    return None;
+                }
+                let v = v
+                    .split('#')
+                    .next()
+                    .unwrap_or(v)
+                    .trim()
+                    .trim_matches('"')
+                    .trim_matches('\'');
+                (!v.is_empty()).then(|| v.to_string())
+            };
+            for (i, l) in lines.iter().enumerate() {
+                let Some((k, v)) = l.trim_start().split_once(':') else {
+                    continue;
+                };
+                if v.split('#').next().unwrap_or(v).trim().is_empty() {
+                    continue; // block opener, not a keyword occurrence
+                }
+                let Some(want) = facet_required_type(k.trim()) else {
+                    continue;
+                };
+                let c = indent(l);
+                // sibling type: down then up, dedent-bounded (mirrors the extractor)
+                let mut ty = None;
+                let mut j = i + 1;
+                while j < lines.len() {
+                    let x = lines[j];
+                    if x.trim().is_empty() {
+                        j += 1;
+                        continue;
+                    }
+                    if indent(x) < c {
+                        break;
+                    }
+                    if indent(x) == c {
+                        if let Some(t) = type_of(x) {
+                            ty = Some(t);
+                            break;
+                        }
+                    }
+                    j += 1;
+                }
+                if ty.is_none() {
+                    let mut m = i;
+                    while m > 0 {
+                        m -= 1;
+                        let x = lines[m];
+                        if x.trim().is_empty() {
+                            continue;
+                        }
+                        if indent(x) < c {
+                            break;
+                        }
+                        if indent(x) == c {
+                            if let Some(t) = type_of(x) {
+                                ty = Some(t);
+                                break;
+                            }
+                        }
+                    }
+                }
+                if ty.as_deref() == Some(want) {
+                    agree += 1;
+                }
+            }
+        }
+        assert!(
+            agree >= 30,
+            "expected many facet+type pairs that agree across specs, got {agree}"
+        );
+    }
 }
