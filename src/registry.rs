@@ -10014,4 +10014,316 @@ components:
             "expected many direct property keys across specs, got {property_keys}"
         );
     }
+
+    /// Returns the 1-based line numbers of every `default:` scalar whose schema
+    /// object also declares a sibling `enum:` list that does **not** contain the
+    /// default's value — a self-contradictory constraint: the schema offers a
+    /// default value that a validator built from the very same `enum` would
+    /// reject, and a Redoc/Swagger form pre-fills a field with a value outside
+    /// its own closed set.
+    ///
+    /// Pure and YAML-dep-free, mirroring `schema_bounds_inverted`'s
+    /// sibling-pairing: for each `default:` key with an inline scalar value at
+    /// indent `c`, scan its object's block (down then up, each bounded by the
+    /// first line indented *below* `c`, the dedent that closes the object) for an
+    /// `enum:` key at *exactly* `c`. When one is found, collect that enum's values
+    /// (the flow `enum: [A, B]` and block `enum:`/`- A` forms, unquoted and
+    /// comment-trimmed, mirroring `enums_with_no_values_or_duplicates`) and flag
+    /// the `default` when its normalized value is absent from them. The
+    /// exact-indent, dedent-bounded match keeps a `default` in one property from
+    /// pairing with a following sibling property's `enum`. Skipped (nothing to
+    /// compare): a `default:` that opens a block rather than holding an inline
+    /// scalar (an object/array default, or a schema property literally named
+    /// `default`), a `default` with no sibling `enum` (unconstrained, always
+    /// valid), and an `enum:` sibling that is a mapping named `enum` rather than a
+    /// value list (its collected value set is empty).
+    fn defaults_outside_their_enum(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        // Unquote a scalar and trim a trailing ` # comment`.
+        let norm = |raw: &str| -> String {
+            let mut v = raw.trim();
+            if let Some(pos) = v.find(" #") {
+                v = v[..pos].trim_end();
+            }
+            let v = v.trim();
+            let unq = v
+                .strip_prefix('"')
+                .and_then(|s| s.strip_suffix('"'))
+                .or_else(|| v.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')))
+                .unwrap_or(v);
+            unq.trim().to_string()
+        };
+        // The inline scalar value of a `name:` key. `None` when the line is a
+        // different key or opens a block (no inline value after the colon).
+        let inline_val = |l: &str, name: &str| -> Option<String> {
+            let (k, v) = l.trim_start().split_once(':')?;
+            if k.trim() != name {
+                return None;
+            }
+            let n = norm(v);
+            if n.is_empty() {
+                None
+            } else {
+                Some(n)
+            }
+        };
+        // The values of the enum whose `enum:` key sits at line index `e`.
+        let enum_values_at = |e: usize| -> Vec<String> {
+            let line = lines[e];
+            let rest = line.trim_start()["enum:".len()..].trim_start();
+            if rest.starts_with('[') {
+                // Flow list — gather across lines until the closing `]`.
+                let mut buf = rest.to_string();
+                let mut k = e;
+                while !buf.contains(']') && k + 1 < lines.len() {
+                    k += 1;
+                    buf.push(' ');
+                    buf.push_str(lines[k].trim());
+                }
+                let open = buf.find('[').map(|x| x + 1).unwrap_or(0);
+                let close = buf.rfind(']').unwrap_or(buf.len());
+                let inner = if close >= open { &buf[open..close] } else { "" };
+                if inner.trim().is_empty() {
+                    Vec::new()
+                } else {
+                    inner.split(',').map(|s| norm(s)).filter(|v| !v.is_empty()).collect()
+                }
+            } else if rest.is_empty() || rest.starts_with('#') {
+                // Block list — `- ` children at a deeper indent, but only when the
+                // first child is a `-` item (else it is a property named `enum`).
+                let base = indent(line);
+                let mut values: Vec<String> = Vec::new();
+                let mut first_child_seen = false;
+                let mut j = e + 1;
+                while j < lines.len() {
+                    let l = lines[j];
+                    if l.trim().is_empty() || l.trim_start().starts_with('#') {
+                        j += 1;
+                        continue;
+                    }
+                    if indent(l) <= base {
+                        break;
+                    }
+                    let item = l.trim_start();
+                    if !first_child_seen {
+                        first_child_seen = true;
+                        if !item.starts_with('-') {
+                            break;
+                        }
+                    }
+                    if !item.starts_with('-') {
+                        break;
+                    }
+                    let val = norm(item[1..].trim_start());
+                    if !val.is_empty() {
+                        values.push(val);
+                    }
+                    j += 1;
+                }
+                values
+            } else {
+                Vec::new()
+            }
+        };
+        let is_enum_key =
+            |l: &str| l.trim_start().starts_with("enum:") && !l.trim_start().starts_with("enums");
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some(dv) = inline_val(line, "default") else { continue };
+            let c = indent(line);
+            let mut e = None;
+            // Scan down through this object's block for a sibling `enum:`.
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_enum_key(l) {
+                    e = Some(j);
+                    break;
+                }
+                j += 1;
+            }
+            // The enum may be declared before the default; scan up too.
+            if e.is_none() {
+                let mut k = i;
+                while k > 0 {
+                    k -= 1;
+                    let l = lines[k];
+                    if l.trim().is_empty() {
+                        continue;
+                    }
+                    if indent(l) < c {
+                        break;
+                    }
+                    if indent(l) == c && is_enum_key(l) {
+                        e = Some(k);
+                        break;
+                    }
+                }
+            }
+            let Some(e) = e else { continue };
+            let values = enum_values_at(e);
+            if !values.is_empty() && !values.iter().any(|v| v == &dv) {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_default_is_a_member_of_its_enum() {
+        // Contract-harness invariant (OpenAPI 3.0.x / JSON-Schema structural rule):
+        // where a Schema Object declares BOTH a `default` and an `enum`, the
+        // default MUST be one of the enum's values. An `enum` fixes the closed set
+        // a field may take; a `default` outside that set is self-contradictory —
+        // the schema pre-supplies a value its own validator rejects, so a
+        // Redoc/Swagger form pre-fills a control with an option the field can never
+        // legally hold and a codegen client's default fails the enum's own check.
+        //
+        // A routine hazard in these scenario-table-heavy specs, where enum/default
+        // pairs are hand-authored per API (an `order` param `[asc, desc]`, a
+        // `deviceStatus` list, an edge-zone `edgeCloudZoneStatus`): a default typed
+        // from memory, or an enum member renamed after the default was set, leaves
+        // the two disagreeing. It is invisible to every existing test — the enum
+        // test checks a value list's own members (unique/non-empty), the
+        // numeric-bound test compares two numeric keywords, and the identity/
+        // wiring/`$ref` tests never compare a default against its enum. Verified
+        // true across all mounted specs before asserting.
+        for api in APIS {
+            let offenders = defaults_outside_their_enum(api.body);
+            assert!(
+                offenders.is_empty(),
+                "{} spec declares a `default` outside its sibling `enum` (a value \
+                 the enum's own validator would reject) at line(s): {:?}",
+                api.name,
+                offenders
+            );
+        }
+    }
+
+    #[test]
+    fn default_enum_membership_extraction_rules() {
+        // Unit-cover the `defaults_outside_their_enum` extractor so the contract
+        // test above can't pass vacuously and its detection is pinned: a `default`
+        // is flagged only when a same-indent sibling `enum` (declared before OR
+        // after it) omits the default's value; quotes/comments are normalized on
+        // both sides before comparison; a `default` with no sibling enum is never
+        // flagged; a `default` in one property never pairs with a following
+        // property's enum across the dedent; and a `default:` that opens a block
+        // (an object/array default or a property literally named `default`) is
+        // skipped.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    GoodFlow:
+      type: string
+      enum: [asc, desc]
+      default: desc
+    BadAfter:
+      type: string
+      enum: [red, green]
+      default: blue
+    GoodBefore:
+      type: string
+      default: left
+      enum:
+        - left
+        - right
+    BadBefore:
+      type: string
+      default: up
+      enum:
+        - left
+        - right
+    NoEnum:
+      type: string
+      default: anything
+    Quoted:
+      type: string
+      enum: [asc, desc]
+      default: \"asc\"
+    Split:
+      type: object
+      properties:
+        a:
+          type: string
+          default: solo
+        b:
+          type: string
+          enum: [x, y]
+    NamedDefault:
+      type: object
+      properties:
+        default:
+          type: string
+";
+        // Flagged, in document order: line 21 (`BadAfter.default: blue`, whose
+        // `enum: [red, green]` sibling above omits it) and line 30
+        // (`BadBefore.default: up`, whose block `enum` below omits it). Not flagged:
+        // `GoodFlow`/`GoodBefore` (default in enum, after / before it), `Quoted`
+        // (`\"asc\"` normalizes into `[asc, desc]`), `NoEnum` (no sibling enum),
+        // `Split.a.default: solo` (property `b`'s enum sits past the dedent, never
+        // pairs), and `NamedDefault` (a `default:` opening a block has no inline
+        // scalar to compare).
+        assert_eq!(defaults_outside_their_enum(body), vec![21, 30]);
+
+        // Non-vacuous floor: across every registered spec every default with a
+        // sibling enum is a member of it (the invariant the contract test asserts),
+        // and the corpus actually declares several enum-bearing defaults (e.g. an
+        // `order` param, status enums), so the membership path runs on real data
+        // and a broken (always-empty) extractor can't hide behind a corpus that
+        // never pairs a default with an enum. Count pairs with a window detector
+        // independent of the extractor's membership comparison.
+        let mut pairs = 0usize;
+        for api in APIS {
+            assert!(
+                defaults_outside_their_enum(api.body).is_empty(),
+                "{}: every default with a sibling enum must be one of its values",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            for (i, l) in lines.iter().enumerate() {
+                let t = l.trim_start();
+                if !t.starts_with("default:") {
+                    continue;
+                }
+                let v = t["default:".len()..].trim();
+                if v.is_empty() || v.starts_with('#') {
+                    continue;
+                }
+                let c = indent(l);
+                let lo = i.saturating_sub(8);
+                let hi = (i + 8).min(lines.len());
+                let has_enum = (lo..hi).any(|j| {
+                    j != i && indent(lines[j]) == c && lines[j].trim_start().starts_with("enum:")
+                });
+                if has_enum {
+                    pairs += 1;
+                }
+            }
+        }
+        assert!(
+            pairs >= 4,
+            "expected several default+enum sibling pairs across specs, got {pairs}"
+        );
+    }
 }

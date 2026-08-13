@@ -3756,6 +3756,27 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     stray brace, a whitespace, and a query `?` in document order (an `x-` extension
     excluded), and holds a ≥100 non-vacuous path-key floor. Verified true across all
     mounted specs (no drift to fix).
+  - a default-in-enum contract test (`src/registry.rs`
+    `every_default_is_a_member_of_its_enum`) asserts that wherever a Schema Object
+    declares BOTH a `default` and an `enum`, the default is one of the enum's
+    values. An `enum` fixes the closed set a field may take, so a `default` outside
+    it is self-contradictory — the schema pre-supplies a value its own validator
+    rejects, and a Redoc/Swagger form pre-fills a control with an option the field
+    can never hold. Invisible to the sibling enum test (which checks a value list's
+    own members are unique/non-empty, never against a default) and to the
+    numeric-bound-ordering test (which compares two *numeric* keywords). New pure
+    `defaults_outside_their_enum` extractor (no YAML dep) mirrors
+    `schema_bounds_inverted`'s same-indent sibling-pairing: for each inline
+    `default:` scalar it finds an `enum:` at exactly its indent (scanning down then
+    up, dedent-bounded so a following property's enum never pairs), collects that
+    enum's values (flow + block forms, reusing the enum-extractor normalization),
+    and flags a non-member. A `default` opening a block (object/array default, or a
+    property named `default`) and a `default` with no sibling enum are skipped. A
+    new `default_enum_membership_extraction_rules` unit pins detection (member/
+    non-member, default-before/after-enum, quoted normalization, cross-property
+    non-pairing, block-default skip) and holds a ≥4 non-vacuous default+enum pair
+    floor. Verified true across all mounted specs (every enum-bearing default — the
+    `order` param, the status enums — is a member; no drift to fix).
   Full response-vs-schema validation still TODO (would need a YAML/JSON-Schema
   validator — a dependency trade-off, deferred).
 
@@ -3764,6 +3785,28 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 ## Scan journal
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
+
+- 2026-08-13 — contract-harness: added a **default-in-enum** contract test
+  (`src/registry.rs` `every_default_is_a_member_of_its_enum`) asserting that wherever a
+  Schema Object declares BOTH a `default` and an `enum`, the default is one of the enum's
+  values. An `enum` fixes the closed set a field may take, so a `default` outside it is
+  self-contradictory: the schema pre-supplies a value its own validator would reject, and a
+  Redoc/Swagger form pre-fills a control with an option the field can never legally hold.
+  Invisible to the sibling enum test (checks a value list's own members are unique/non-empty,
+  never against a default) and the numeric-bound-ordering test (compares two *numeric*
+  keywords). New pure `defaults_outside_their_enum` extractor (no YAML dep) mirrors
+  `schema_bounds_inverted`'s same-indent sibling-pairing — for each inline `default:` scalar
+  it locates an `enum:` at exactly its indent (scan down then up, dedent-bounded so a
+  following property's enum never pairs), collects that enum's values (flow + block forms,
+  reusing the enum-extractor normalization), and flags a non-member; a `default` opening a
+  block (object/array default, or a property literally named `default`) or lacking a sibling
+  enum is skipped. New `default_enum_membership_extraction_rules` unit pins detection
+  (member/non-member, default-before/after-enum, quoted normalization, cross-property
+  non-pairing, block-default skip) and holds a ≥4 non-vacuous default+enum pair floor.
+  Verified true across all mounted specs (every enum-bearing default — the `order` query
+  param, the status enums — is a member; no drift to fix). Tests: +2 (1 contract, 1 unit).
+  `cargo test` 2225 green (was 2223); `cargo build --release` succeeds. No new dep; binary
+  unchanged (`#[cfg(test)]`-only). — binary: 3.7M (3851944 B, +0 B)
 
 - 2026-08-13 — contract-harness: added a **path-template-well-formedness** contract test
   (`src/registry.rs` `every_path_template_key_is_well_formed`) asserting every `paths:` key a
