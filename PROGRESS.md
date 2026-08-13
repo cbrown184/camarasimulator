@@ -3854,6 +3854,33 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-13 — contract-harness: added a **default↔type-consistency** contract test
+  (`src/registry.rs` `every_default_matches_its_schema_type`) asserting that where a Schema
+  Object declares a `default` beside a scalar `type`, the default conforms to that type. A
+  `default` is a fall-back *instance* of the schema, so a value of the wrong JSON type — an
+  unquoted `true`/`5` under `type: string` (YAML reads it as a boolean/number), a quoted or
+  fractional value under `type: integer`, a non-numeric value under `type: number`, a
+  non-boolean under `type: boolean` — is self-contradictory: the schema pre-supplies a value
+  its own validator rejects, so a Redoc/Swagger form pre-fills, or a codegen client emits, a
+  default the field can never legally hold. The `default` analogue of
+  `every_enum_value_matches_its_schema_type` (which checks enum *members* against a scalar
+  type) and the type-conformance complement of `every_default_is_a_member_of_its_enum` (which
+  checks a default against a sibling *enum* — but only when one is present, so a default on a
+  plain typed schema with no enum escapes it entirely); no existing test compares a default's
+  value against its own `type`. New pure `defaults_inconsistent_with_type` extractor (no YAML
+  dep; reuses the enum test's quoting-aware `inconsistent` classifier, its dedent-bounded
+  same-indent `sibling_type` scan, and its `inside_example` ancestor walk). Skips an untyped
+  default (e.g. a server variable's), a non-scalar sibling type, a `null`/`~` default, a
+  property named `default`, and a `default:` inside an `example:` payload. Unit-covered
+  (`default_type_consistency_extraction_rules`: string/integer/number/boolean matches +
+  quoted-numeric-under-string pass; unquoted-bool-under-string, quoted/fractional-under-integer
+  and non-numeric-under-number flagged in document order; typeless/named-default/example/null/
+  split-property skips; plus a ≥10 non-vacuous scalar-typed-default floor). Verified true across
+  all mounted specs (every typed default — `maxAge`, page sizes, boolean opt-ins, status-enum
+  defaults — conforms; no drift to fix). Tests: +2 (1 contract, 1 unit). `cargo test` 2235
+  green (was 2233); `cargo build --release` succeeds. No new dep; binary unchanged
+  (`#[cfg(test)]`-only). — binary: 3.7M (3851944 B, +0 B)
+
 - 2026-08-13 18:46Z — contract-harness: added a **scenario-block-well-formedness**
   contract test (`src/registry.rs` `every_scenario_block_is_well_formed`) that inspects
   the *inside* of every `x-camarasim-scenarios` block, asserting each declares a `cases:`

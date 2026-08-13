@@ -11481,4 +11481,381 @@ components:
             "expected several default+enum sibling pairs across specs, got {pairs}"
         );
     }
+
+    /// Line numbers (1-based) of `default:` keywords whose inline scalar value
+    /// contradicts the sibling scalar `type:` in the same Schema Object — the
+    /// `default` analogue of `enum_values_inconsistent_with_type`, without a YAML dep.
+    ///
+    /// In OpenAPI 3.0.x a `default` supplies a fall-back value for the schema, so it
+    /// MUST itself be a valid instance of that schema. Where the object declares a
+    /// scalar `type` (string/integer/number/boolean), a default of the wrong JSON
+    /// type — an unquoted `true`/`5` under `type: string` (YAML reads it as a
+    /// boolean/number), a quoted or fractional value under `type: integer`, a
+    /// non-numeric value under `type: number` — is a self-contradictory schema: the
+    /// schema pre-supplies a value its own validator rejects.
+    ///
+    /// Only a `default` carrying an inline scalar *and* a sibling scalar `type:` is
+    /// inspected. Skipped: a `default:` that opens a block (an object/array default,
+    /// or a property literally named `default`, neither of which has an inline
+    /// scalar); a `default` with no scalar `type:` sibling (e.g. a server-variable
+    /// default, which is untyped); and a `default:` inside an `example:`/`examples:`
+    /// payload. Quoting is significant — a quoted token is always a YAML string,
+    /// whatever its inner text would parse as. A `null`/`~` default is legal for a
+    /// nullable schema of any type and is not flagged.
+    fn defaults_inconsistent_with_type(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        // The raw inline value token of a `name:` key (inline comment stripped, but
+        // quoting *preserved* so a quoted scalar stays classifiable as a string);
+        // `None` when the line is a different key or opens a block (no inline value).
+        let raw_inline = |l: &str, name: &str| -> Option<String> {
+            let (k, v) = l.trim_start().split_once(':')?;
+            if k.trim() != name {
+                return None;
+            }
+            let v = v.split('#').next().unwrap_or(v).trim();
+            if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            }
+        };
+        // The sibling `type:` scalar in the same object as line `i` (indent `c`):
+        // scan down through the object's block for a same-indent `type`, then up,
+        // dedent-bounded so a nested/following object's `type` never pairs. Mirrors
+        // `enum_values_inconsistent_with_type`'s `sibling_type`.
+        let sibling_type = |i: usize, c: usize| -> Option<String> {
+            let scalar_type = |l: &str| -> Option<String> {
+                let (k, v) = l.trim_start().split_once(':')?;
+                if k.trim() != "type" {
+                    return None;
+                }
+                let v = v
+                    .split('#')
+                    .next()
+                    .unwrap_or(v)
+                    .trim()
+                    .trim_matches('"')
+                    .trim_matches('\'');
+                if v.is_empty() {
+                    None
+                } else {
+                    Some(v.to_string())
+                }
+            };
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c {
+                    if let Some(v) = scalar_type(l) {
+                        return Some(v);
+                    }
+                }
+                j += 1;
+            }
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c {
+                    if let Some(v) = scalar_type(l) {
+                        return Some(v);
+                    }
+                }
+            }
+            None
+        };
+        // True when line `i` (indent `c`) sits inside an `example:`/`examples:`
+        // payload — some enclosing container key up the indent ladder is
+        // `example`/`examples`. Mirrors `enum_values_inconsistent_with_type`.
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        // Whether the raw (as-written) default token `raw` contradicts scalar type
+        // `ty`. Quoting is significant: a quoted token is always a YAML string,
+        // whatever its inner text would otherwise parse as. Shares the classification
+        // rules of `enum_values_inconsistent_with_type::inconsistent`.
+        fn inconsistent(raw: &str, ty: &str) -> bool {
+            let v = raw.trim();
+            if v.is_empty() || v == "null" || v == "~" {
+                return false; // JSON null is legal for a nullable schema of any type
+            }
+            let quoted = v.len() >= 2
+                && ((v.starts_with('"') && v.ends_with('"'))
+                    || (v.starts_with('\'') && v.ends_with('\'')));
+            let is_bool = !quoted
+                && matches!(v, "true" | "false" | "True" | "False" | "TRUE" | "FALSE");
+            let is_int = !quoted && v.parse::<i64>().is_ok();
+            let is_num = !quoted && v.parse::<f64>().is_ok();
+            match ty {
+                "string" => is_bool || is_num, // an unquoted bool/number is not a string
+                "boolean" => !is_bool,
+                "integer" => !is_int,
+                "number" => !is_num,
+                _ => false,
+            }
+        }
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some(raw) = raw_inline(line, "default") else {
+                continue;
+            };
+            let c = indent(line);
+            if inside_example(i, c) {
+                continue;
+            }
+            let Some(ty) = sibling_type(i, c) else {
+                continue;
+            };
+            if !matches!(ty.as_str(), "string" | "integer" | "number" | "boolean") {
+                continue;
+            }
+            if inconsistent(&raw, &ty) {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_default_matches_its_schema_type() {
+        // Contract-harness invariant (OpenAPI 3.0.x / JSON-Schema structural rule):
+        // where a Schema Object declares a `default` beside a scalar `type`, the
+        // default MUST conform to that type. A `default` is a fall-back *instance* of
+        // the schema, so a value of the wrong JSON type — an unquoted `true`/`5`
+        // under `type: string` (YAML reads it as a boolean/number), a quoted or
+        // fractional value under `type: integer`, a non-numeric value under
+        // `type: number`, a non-boolean under `type: boolean` — is a
+        // self-contradictory schema: the schema pre-supplies a value its own
+        // validator would reject, so a Redoc/Swagger form pre-fills a control with a
+        // value the field can never legally hold and a codegen client's default fails
+        // the type's own check at the point a caller reads or builds it.
+        //
+        // This is the `default` analogue of `every_enum_value_matches_its_schema_type`
+        // (which checks enum *members* against a scalar type) and the type-conformance
+        // complement of `every_default_is_a_member_of_its_enum` (which checks a
+        // default against a sibling *enum*, but only when one is present — a default
+        // on a plain typed schema with no enum escapes it entirely). No existing test
+        // compares a `default`'s value against its own `type`. Only a default with a
+        // scalar `type:` sibling (string/integer/number/boolean) in the same object is
+        // inspected; an untyped default (e.g. a server variable's), a non-scalar
+        // sibling type, a `null`/`~` default, a property named `default`, and a
+        // `default:` inside an `example:` payload are skipped. Verified true across
+        // all mounted specs before asserting.
+        for api in APIS {
+            let bad = defaults_inconsistent_with_type(api.body);
+            assert!(
+                bad.is_empty(),
+                "{} spec declares a `default` that contradicts its sibling scalar \
+                 `type:` (e.g. an unquoted bool/number under `type: string`, a quoted \
+                 or fractional value under `type: integer`) at `default:` line(s): {:?}",
+                api.name,
+                bad
+            );
+        }
+    }
+
+    #[test]
+    fn default_type_consistency_extraction_rules() {
+        // Unit-cover `defaults_inconsistent_with_type` so the contract test above
+        // can't pass vacuously and its detection is pinned: string/integer/boolean/
+        // number defaults that match their type all pass; a quoted numeric default
+        // under `type: string` passes (quoting makes it a string); an unquoted `true`
+        // under `type: string`, a quoted `'1'` and a fractional `2.5` under
+        // `type: integer`, and a non-numeric default under `type: number` are flagged
+        // in document order; a typeless default, a property literally named `default`,
+        // a `default:` inside an `example:` payload, a `null` default of a nullable
+        // schema, and a default whose only same-indent `type` sits in a following
+        // property across a dedent are all skipped.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    GoodStr:
+      type: string
+      default: desc
+    GoodInt:
+      type: integer
+      default: 10
+    GoodBool:
+      type: boolean
+      default: false
+    GoodNum:
+      type: number
+      default: 1.5
+    GoodStrQuotedNum:
+      type: string
+      default: '5'
+    BadStrBool:
+      type: string
+      default: true
+    BadIntQuoted:
+      type: integer
+      default: '1'
+    BadIntFrac:
+      type: integer
+      default: 2.5
+    BadNumText:
+      type: number
+      default: notanumber
+    NoType:
+      default: anything
+    NamedDefault:
+      type: object
+      properties:
+        default:
+          type: string
+    InExample:
+      type: object
+      example:
+        type: integer
+        default: hello
+    Nullable:
+      type: integer
+      nullable: true
+      default: null
+    Split:
+      type: object
+      properties:
+        a:
+          default: solo
+        b:
+          type: integer
+";
+        // Flagged, in document order: line 31 (`BadStrBool.default: true` — a YAML
+        // boolean, not a string), line 34 (`BadIntQuoted.default: '1'` — a quoted
+        // string, not an integer), line 37 (`BadIntFrac.default: 2.5` — fractional,
+        // not an integer) and line 40 (`BadNumText.default: notanumber` — not a
+        // number). Not flagged: the four Good schemas; `GoodStrQuotedNum` (`'5'` is a
+        // quoted string under `type: string`); `NoType` (no sibling type); the
+        // property literally named `default` (opens a block, no inline scalar); the
+        // `default:` inside the `example:` payload; `Nullable` (its `null` default is
+        // legal for any nullable type); and `Split.a.default: solo`, whose only
+        // candidate `type: integer` sits in the following property `Split.b` past a
+        // dedent, so the two never pair.
+        assert_eq!(defaults_inconsistent_with_type(body), vec![31, 34, 37, 40]);
+
+        // Non-vacuous floor: across every registered spec every scalar-typed default
+        // conforms to its type (the invariant the contract test asserts), and the
+        // corpus actually declares many typed defaults (a `maxAge`, a page size, a
+        // boolean opt-in flag, a status enum's default) — so the value-comparison
+        // path runs on real data and a broken (always-empty) extractor can't hide
+        // behind a corpus that never pairs a default with a scalar type. Count typed
+        // defaults with a presence detector independent of the value comparison: a
+        // `default:` inline scalar whose same-indent object declares a scalar `type:`.
+        let mut typed_defaults = 0usize;
+        for api in APIS {
+            assert!(
+                defaults_inconsistent_with_type(api.body).is_empty(),
+                "{}: every scalar-typed default must conform to its type",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            let scalar_type_line = |l: &str| {
+                matches!(
+                    l.trim_start(),
+                    "type: string" | "type: integer" | "type: number" | "type: boolean"
+                )
+            };
+            for (i, l) in lines.iter().enumerate() {
+                let t = l.trim_start();
+                let Some((k, v)) = t.split_once(':') else {
+                    continue;
+                };
+                if k.trim() != "default" || v.split('#').next().unwrap_or(v).trim().is_empty() {
+                    continue;
+                }
+                let c = indent(l);
+                // Same-indent scalar `type:` sibling, scanning down then up
+                // (dedent-bounded), independent of the extractor's classification.
+                let mut has = false;
+                let mut j = i + 1;
+                while j < lines.len() {
+                    let x = lines[j];
+                    if x.trim().is_empty() {
+                        j += 1;
+                        continue;
+                    }
+                    if indent(x) < c {
+                        break;
+                    }
+                    if indent(x) == c && scalar_type_line(x) {
+                        has = true;
+                        break;
+                    }
+                    j += 1;
+                }
+                if !has {
+                    let mut m = i;
+                    while m > 0 {
+                        m -= 1;
+                        let x = lines[m];
+                        if x.trim().is_empty() {
+                            continue;
+                        }
+                        if indent(x) < c {
+                            break;
+                        }
+                        if indent(x) == c && scalar_type_line(x) {
+                            has = true;
+                            break;
+                        }
+                    }
+                }
+                if has {
+                    typed_defaults += 1;
+                }
+            }
+        }
+        assert!(
+            typed_defaults >= 10,
+            "expected many scalar-typed defaults across specs, got {typed_defaults}"
+        );
+    }
 }
