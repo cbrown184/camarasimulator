@@ -7376,6 +7376,289 @@ components:
         );
     }
 
+    /// Returns the 1-based line numbers of a schema's *lower*-bound keyword
+    /// (`minimum`/`minLength`/`minItems`/`minProperties`) whose paired
+    /// *upper*-bound keyword (`maximum`/`maxLength`/`maxItems`/`maxProperties`),
+    /// declared as a sibling in the same schema object, holds a strictly smaller
+    /// numeric value — an inverted, unsatisfiable range (`minimum: 100` beside
+    /// `maximum: 1`, so no value can validate).
+    ///
+    /// Pure and YAML-dep-free: for each lower-bound key with an inline numeric
+    /// value at indent `c`, scan its object's block both directions (down then
+    /// up), each bounded by the first line indented *below* `c` (the dedent that
+    /// closes the object), for the paired upper-bound key at *exactly* `c`. The
+    /// exact-indent, dedent-bounded match keeps a bound nested in a sub-schema
+    /// (a deeper `properties:` entry) or belonging to a following sibling schema
+    /// from being mistaken for the pair. A bound whose value is non-numeric (a
+    /// `{template}` or an unparsable scalar) or that opens a block rather than an
+    /// inline value is skipped — there is nothing to compare. `min == max` (a
+    /// single-value range) is valid; only `min > max` is flagged.
+    fn schema_bounds_inverted(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        // The inline scalar value of a `name:` key as f64 — inline comment and
+        // quotes stripped. `None` when the line is a different key, opens a block
+        // (no inline value), or the value isn't a number.
+        let num_val = |l: &str, name: &str| -> Option<f64> {
+            let (k, v) = l.trim_start().split_once(':')?;
+            if k.trim() != name {
+                return None;
+            }
+            let v = v
+                .split('#')
+                .next()
+                .unwrap_or(v)
+                .trim()
+                .trim_matches('"')
+                .trim_matches('\'');
+            if v.is_empty() {
+                return None;
+            }
+            v.parse::<f64>().ok()
+        };
+        // The (lower, upper) bound keyword pairs whose values must be ordered.
+        const PAIRS: [(&str, &str); 4] = [
+            ("minimum", "maximum"),
+            ("minLength", "maxLength"),
+            ("minItems", "maxItems"),
+            ("minProperties", "maxProperties"),
+        ];
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            for (lo, hi) in PAIRS {
+                let Some(lv) = num_val(line, lo) else { continue };
+                let c = indent(line);
+                let mut hv = None;
+                // Scan down through this object's block for the upper-bound sibling.
+                let mut j = i + 1;
+                while j < lines.len() {
+                    let l = lines[j];
+                    if l.trim().is_empty() {
+                        j += 1;
+                        continue;
+                    }
+                    if indent(l) < c {
+                        break; // dedented out of this object
+                    }
+                    if indent(l) == c {
+                        if let Some(v) = num_val(l, hi) {
+                            hv = Some(v);
+                            break;
+                        }
+                    }
+                    j += 1;
+                }
+                // The upper bound may be declared before the lower; scan up too.
+                if hv.is_none() {
+                    let mut k = i;
+                    while k > 0 {
+                        k -= 1;
+                        let l = lines[k];
+                        if l.trim().is_empty() {
+                            continue;
+                        }
+                        if indent(l) < c {
+                            break; // reached the key that opened this object
+                        }
+                        if indent(l) == c {
+                            if let Some(v) = num_val(l, hi) {
+                                hv = Some(v);
+                                break;
+                            }
+                        }
+                    }
+                }
+                if let Some(hv) = hv {
+                    if lv > hv {
+                        out.push(i + 1);
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_numeric_bound_is_ordered_low_to_high() {
+        // Contract-harness invariant (OpenAPI 3.0.x / JSON-Schema structural rule):
+        // where a Schema Object declares both a lower and an upper bound of the same
+        // family — `minimum`/`maximum`, `minLength`/`maxLength`, `minItems`/
+        // `maxItems`, `minProperties`/`maxProperties` — the lower MUST NOT exceed the
+        // upper. An inverted pair (`minimum: 100` beside `maximum: 1`) is an
+        // unsatisfiable schema: no value validates, so a Redoc/Swagger/codegen client
+        // is handed a field nothing can ever fill and a validator rejects every
+        // payload at exactly the point a caller reads or builds it.
+        //
+        // A routine hazard in these scenario-table-heavy specs, where numeric ranges
+        // are hand-tuned per API (a `maxAge`, a `radius`, an array-size cap): a bound
+        // pasted from a sibling and only half-edited, or a lower/upper pair typed in
+        // the wrong order. It is invisible to every existing test — the enum test
+        // checks a value list's members, the required/parameter/array/`$ref` tests
+        // check required entries, a parameter's identity, an array's element type, or
+        // a ref's target; none ever compares two numeric keywords. Verified true
+        // across all mounted specs before asserting.
+        for api in APIS {
+            let inverted = schema_bounds_inverted(api.body);
+            assert!(
+                inverted.is_empty(),
+                "{} spec declares an inverted numeric bound pair (lower bound exceeds \
+                 its upper-bound sibling — an unsatisfiable range) at line(s): {:?}",
+                api.name,
+                inverted
+            );
+        }
+    }
+
+    #[test]
+    fn numeric_bound_ordering_extraction_rules() {
+        // Unit-cover the `schema_bounds_inverted` extractor so the contract test
+        // above can't pass vacuously and its detection is pinned: a lower bound is
+        // flagged only when its same-family upper-bound *sibling* (same object, same
+        // indent) holds a strictly smaller value; the upper bound declared before
+        // *or* after the lower is paired; `min == max` (a single-value range) is
+        // valid; a non-numeric value is skipped (nothing to compare); and a bound in
+        // a different object — a following sibling schema, or a nested sub-schema at
+        // another indent — is never mistaken for the pair.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    Good:
+      type: integer
+      minimum: 1
+      maximum: 10
+    BadNum:
+      type: integer
+      minimum: 100
+      maximum: 1
+    BadLen:
+      type: string
+      maxLength: 3
+      minLength: 9
+    Equal:
+      type: integer
+      minimum: 5
+      maximum: 5
+    Split:
+      type: object
+      properties:
+        a:
+          type: integer
+          minimum: 50
+        b:
+          type: integer
+          maximum: 1
+    Nested:
+      type: object
+      minProperties: 1
+      properties:
+        inner:
+          type: integer
+          minimum: 2
+          maximum: 100
+      maxProperties: 3
+    Weird:
+      type: string
+      minLength: notanumber
+      maxLength: 5
+";
+        // Flagged, in document order: line 20 (`BadNum.minimum: 100` > its
+        // `maximum: 1` sibling below) and line 25 (`BadLen.minLength: 9` > its
+        // `maxLength: 3` sibling above — upper declared first). Not flagged: `Good`
+        // and `Equal` (ordered / single-value ranges); `Split.a.minimum: 50`, whose
+        // only candidate `maximum: 1` sits in the *following* property `Split.b` past
+        // a dedent, so the two never pair; `Nested` (`minProperties: 1` pairs across
+        // the nested `inner` sub-schema with `maxProperties: 3`, and `inner`'s own
+        // `2`/`100` is ordered); and `Weird` (a non-numeric `minLength` is skipped).
+        assert_eq!(schema_bounds_inverted(body), vec![20, 25]);
+
+        // Non-vacuous floor: across every registered spec no bound pair is inverted
+        // (the invariant the contract test asserts), and the corpus actually declares
+        // many *ordered* bound pairs — so the value-comparison path runs on real data
+        // and a broken (always-empty) extractor can't hide behind a corpus that never
+        // pairs bounds. Count pairs with a presence-only detector independent of the
+        // extractor's value comparison.
+        let mut pairs = 0usize;
+        for api in APIS {
+            assert!(
+                schema_bounds_inverted(api.body).is_empty(),
+                "{}: every numeric bound pair must order lower <= upper",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            let is_key = |l: &str, name: &str| {
+                l.trim_start()
+                    .split_once(':')
+                    .is_some_and(|(k, _)| k.trim() == name)
+            };
+            for (lo, hi) in [
+                ("minimum", "maximum"),
+                ("minLength", "maxLength"),
+                ("minItems", "maxItems"),
+                ("minProperties", "maxProperties"),
+            ] {
+                for (i, l) in lines.iter().enumerate() {
+                    if !is_key(l, lo) {
+                        continue;
+                    }
+                    let c = indent(l);
+                    let mut has = false;
+                    let mut j = i + 1;
+                    while j < lines.len() {
+                        let x = lines[j];
+                        if x.trim().is_empty() {
+                            j += 1;
+                            continue;
+                        }
+                        if indent(x) < c {
+                            break;
+                        }
+                        if indent(x) == c && is_key(x, hi) {
+                            has = true;
+                            break;
+                        }
+                        j += 1;
+                    }
+                    if !has {
+                        let mut k = i;
+                        while k > 0 {
+                            k -= 1;
+                            let x = lines[k];
+                            if x.trim().is_empty() {
+                                continue;
+                            }
+                            if indent(x) < c {
+                                break;
+                            }
+                            if indent(x) == c && is_key(x, hi) {
+                                has = true;
+                                break;
+                            }
+                        }
+                    }
+                    if has {
+                        pairs += 1;
+                    }
+                }
+            }
+        }
+        assert!(
+            pairs >= 100,
+            "expected many ordered bound pairs across specs, got {pairs}"
+        );
+    }
+
     /// Returns the 1-based line numbers of `example:` keys that share their
     /// object — same parent block, at the same indentation — with an `examples:`
     /// sibling. That pairing is the OpenAPI 3.0.x "the `example` field is

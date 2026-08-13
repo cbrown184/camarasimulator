@@ -3578,6 +3578,29 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     (`discriminator_property_name_extraction_rules`, incl. a non-vacuous floor over
     all specs) so the contract can't pass vacuously. Verified true across all
     mounted specs before asserting.
+  - a numeric-bound-ordering contract test (`src/registry.rs`
+    `every_numeric_bound_is_ordered_low_to_high`) asserts that where a Schema
+    Object declares both a lower and an upper bound of the same family —
+    `minimum`/`maximum`, `minLength`/`maxLength`, `minItems`/`maxItems`,
+    `minProperties`/`maxProperties` — the lower does not exceed the upper. An
+    inverted pair (`minimum: 100` beside `maximum: 1`) is an **unsatisfiable**
+    schema: no value validates, so a Redoc/Swagger/codegen client is handed a
+    field nothing can fill and a validator rejects every payload — a hazard where
+    these scenario-heavy specs hand-tune numeric ranges per API (a `maxAge`, a
+    `radius`, an array-size cap) and a bound pasted from a sibling is only
+    half-edited or the pair is typed in the wrong order. Invisible to every
+    existing test — the enum/required/parameter/array/`$ref` tests check a value
+    list's members, required entries, a parameter's identity, an array's element
+    type, or a ref's target; none ever compares two numeric keywords. A pure
+    `schema_bounds_inverted` extractor (no YAML dep; for each lower-bound key with
+    an inline numeric value scans its object both directions, bounded by the
+    dedent that closes it, for the paired upper-bound key at exactly its indent,
+    parses both as f64 and flags lower > upper; `min == max` is valid, a
+    non-numeric/block value is skipped) is unit-covered
+    (`numeric_bound_ordering_extraction_rules`, incl. a non-vacuous floor of ≥100
+    ordered bound pairs over all specs) so the contract can't pass vacuously.
+    Verified true (174 ordered bound pairs across all mounted specs, none
+    inverted) before asserting.
   Full response-vs-schema validation still TODO (would need a YAML/JSON-Schema
   validator — a dependency trade-off, deferred).
 
@@ -3586,6 +3609,28 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 ## Scan journal
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
+
+- 2026-08-13 — contract-harness: added a **numeric-bound-ordering** contract test
+  (`src/registry.rs` `every_numeric_bound_is_ordered_low_to_high`) asserting that
+  where a schema declares both a lower and an upper bound of the same family
+  (`minimum`/`maximum`, `minLength`/`maxLength`, `minItems`/`maxItems`,
+  `minProperties`/`maxProperties`) the lower does not exceed the upper — an inverted
+  pair is an unsatisfiable schema no value validates, a copy-paste/typo hazard where
+  these specs hand-tune numeric ranges per API, invisible to every existing test (the
+  enum/required/parameter/array/`$ref` tests never compare two numeric keywords). New
+  pure `schema_bounds_inverted` extractor (no YAML dep): for each lower-bound key with
+  an inline numeric value it scans its object both directions, bounded by the dedent
+  that closes it, for the paired upper-bound key at exactly its indent, parses both as
+  f64 and flags lower > upper (`min == max` valid; non-numeric/block value skipped).
+  Unit-covered (`numeric_bound_ordering_extraction_rules`: an inverted `minimum`>`maximum`
+  and `minLength`>`maxLength` flagged, ordered/equal ranges and a cross-object bound in
+  a following sibling left alone, a nested sub-schema paired across its own children, a
+  non-numeric bound skipped; plus a non-vacuous floor of ≥100 ordered bound pairs) so
+  the contract can't pass vacuously. Verified true across all 61 mounted specs (174
+  ordered bound pairs, none inverted — no drift to fix). Tests: +2 (1 contract, 1
+  extractor unit). `cargo test` 2203 green (was 2201); `cargo build --release`
+  warning-clean. No new dep; binary unchanged (`#[cfg(test)]`-only). — binary: 3.7M
+  (3851944 B, +0 B)
 
 - 2026-08-13 — contract-harness: added a **discriminator-completeness** contract
   test (`src/registry.rs` `every_discriminator_declares_a_property_name`) asserting
