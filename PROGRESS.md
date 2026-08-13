@@ -3888,6 +3888,29 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     whitespace/`.`//`:`(`/non-ASCII rejected; a ≥100 operationId non-vacuous floor)
     so the contract can't pass vacuously. Verified true across all 143 mounted
     operationIds (no drift to fix) before asserting.
+  - a numeric-facet↔numeric-type contract test (`src/registry.rs`
+    `every_numeric_facet_sits_on_a_numeric_type`) asserts that where a Schema Object
+    declares a *numeric* validation facet keyword —
+    `minimum`/`maximum`/`exclusiveMinimum`/`exclusiveMaximum`/`multipleOf` — beside a
+    scalar `type:`, that type is `integer` or `number`. A numeric facet on a
+    non-numeric type (`minimum` under `type: string`, `multipleOf` under `type: array`)
+    is self-contradictory: the keyword can never constrain a value of that type, so a
+    validator ignores it and a Redoc/Swagger/codegen client silently drops the bound
+    where a caller reads/builds the payload. The numeric-family sibling of
+    `every_facet_keyword_sits_on_its_required_type` (which covers only the single-typed
+    string/array/object facets — a numeric facet's required type is the *pair* {integer,
+    number}, so it needs its own check), and the type-agreement complement of the
+    numeric-facet-*value* tests (`every_numeric_bound_is_ordered_low_to_high`,
+    `every_size_bound_is_a_non_negative_integer` — neither looks at the sibling `type`).
+    New pure `numeric_facet_type_mismatches` extractor + `is_numeric_facet` predicate
+    (no YAML dep; reuses the facet test's inline-value keyword detection, dedent-bounded
+    down-then-up `sibling_type` scan, and `inside_example` walk). Unit-covered
+    (`numeric_facet_type_consistency_extraction_rules`: bounds/`multipleOf` on
+    integer/number + boolean `exclusiveMinimum` beside a numeric type pass;
+    `minimum`-on-string/`maximum`-on-boolean/`multipleOf`-on-array flagged in document
+    order; typeless/named-facet/example skips; a ≥30 agreeing-pair non-vacuous floor) so
+    the contract can't pass vacuously. Verified true across all mounted specs (all 255
+    numeric-facet occurrences on integer/number — no drift to fix) before asserting.
   Full response-vs-schema validation still TODO (would need a YAML/JSON-Schema
   validator — a dependency trade-off, deferred).
 
@@ -3897,7 +3920,35 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-13 — contract-harness: added a **numeric-facet↔numeric-type** contract test
+  (`src/registry.rs` `every_numeric_facet_sits_on_a_numeric_type`) asserting that where a
+  Schema Object declares a *numeric* validation facet keyword —
+  `minimum`/`maximum`/`exclusiveMinimum`/`exclusiveMaximum`/`multipleOf` — beside a scalar
+  `type:`, that type is `integer` or `number`. A numeric facet on a non-numeric type
+  (`minimum` under `type: string`, `multipleOf` under `type: array`) is self-contradictory:
+  the keyword can never constrain a value of that type, so a validator ignores it and a
+  Redoc/Swagger/codegen client silently drops the bound where a caller reads/builds the
+  payload. The numeric-family sibling of the just-landed
+  `every_facet_keyword_sits_on_its_required_type` (which covers only the single-typed
+  string/array/object facets — a numeric facet's required type is the *pair* {integer,
+  number}, so it needs its own check), and the type-agreement complement of the two
+  numeric-facet-*value* tests (`every_numeric_bound_is_ordered_low_to_high`,
+  `every_size_bound_is_a_non_negative_integer` — neither looks at the sibling `type`, so a
+  well-ordered `minimum: 0`/`maximum: 10` left on a `type: string` sails through both). New
+  pure `numeric_facet_type_mismatches` extractor + `is_numeric_facet` predicate (no YAML
+  dep; reuses the facet test's inline-value keyword detection, dedent-bounded down-then-up
+  `sibling_type` scan, and `inside_example` ancestor walk). Unit-covered
+  (`numeric_facet_type_consistency_extraction_rules`: bounds/`multipleOf` on integer/number
+  + boolean `exclusiveMinimum` beside a numeric type pass; `minimum`-on-string,
+  `maximum`-on-boolean, `multipleOf`-on-array flagged in document order `[28, 30, 34]`;
+  typeless/named-facet/example skips; a ≥30 agreeing-pair non-vacuous floor). Verified true
+  across all mounted specs (all 255 numeric-facet occurrences — port ranges, coordinate
+  bounds, page sizes — sit on integer/number; no drift to fix). Tests: +2 (1 contract, 1
+  unit). `cargo test` 2243 green (was 2241); `cargo build --release` succeeds. No new dep;
+  binary unchanged (`#[cfg(test)]`-only). — binary: 3.7M (3851944 B, +0 B)
+
 - 2026-08-13 — contract-harness: added an **operationId-well-formedness** contract
+  test (`src/registry.rs` `every_operation_id_is_a_well_formed_token`) asserting every
   test (`src/registry.rs` `every_operation_id_is_a_well_formed_token`) asserting every
   `operationId` a mounted spec declares is a codegen-safe identifier — begins with an
   ASCII letter, thereafter only ASCII alphanumerics / `_` / `-`. An operationId is the

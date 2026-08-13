@@ -12442,6 +12442,142 @@ components:
         out
     }
 
+    /// True for a *numeric* validation facet keyword — `minimum`/`maximum`/
+    /// `exclusiveMinimum`/`exclusiveMaximum`/`multipleOf`. Unlike the single-typed
+    /// string/array/object facets (`facet_required_type`), a numeric facet's required
+    /// type is the numeric *pair* {`integer`, `number`}, so it needs its own predicate.
+    fn is_numeric_facet(key: &str) -> bool {
+        matches!(
+            key,
+            "minimum" | "maximum" | "exclusiveMinimum" | "exclusiveMaximum" | "multipleOf"
+        )
+    }
+
+    /// Line numbers (1-based) where a numeric validation facet keyword sits beside a
+    /// scalar `type:` that is neither `integer` nor `number`. Mirrors
+    /// `facet_keyword_type_mismatches` exactly (inline-value keyword detection,
+    /// `example:` skip, dedent-bounded down-then-up sibling-`type` scan); only the
+    /// accepted-type test differs — the numeric pair rather than one fixed family.
+    fn numeric_facet_type_mismatches(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        // The keyword name when a line holds an inline scalar value (so it is a keyword
+        // occurrence, not a block-opening property literally *named* the keyword).
+        let inline_key = |l: &str| -> Option<String> {
+            let (k, v) = l.trim_start().split_once(':')?;
+            let v = v.split('#').next().unwrap_or(v).trim();
+            if v.is_empty() {
+                None
+            } else {
+                Some(k.trim().to_string())
+            }
+        };
+        // The inline scalar of a `type:` key (inline comment + surrounding quotes
+        // stripped), or `None` for any other key / a block opener.
+        let type_scalar = |l: &str| -> Option<String> {
+            let (k, v) = l.trim_start().split_once(':')?;
+            if k.trim() != "type" {
+                return None;
+            }
+            let v = v
+                .split('#')
+                .next()
+                .unwrap_or(v)
+                .trim()
+                .trim_matches('"')
+                .trim_matches('\'');
+            if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            }
+        };
+        // True when line `i` (indent `c`) sits inside an `example:`/`examples:` payload.
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        // The sibling `type:` scalar in the same object as line `i` (indent `c`):
+        // scan down through the object's block for a same-indent `type`, then up,
+        // dedent-bounded so a nested/following object's `type` never pairs.
+        let sibling_type = |i: usize, c: usize| -> Option<String> {
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c {
+                    if let Some(v) = type_scalar(l) {
+                        return Some(v);
+                    }
+                }
+                j += 1;
+            }
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c {
+                    if let Some(v) = type_scalar(l) {
+                        return Some(v);
+                    }
+                }
+            }
+            None
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some(key) = inline_key(line) else {
+                continue;
+            };
+            if !is_numeric_facet(&key) {
+                continue;
+            }
+            let c = indent(line);
+            if inside_example(i, c) {
+                continue;
+            }
+            if let Some(ty) = sibling_type(i, c) {
+                if ty != "integer" && ty != "number" {
+                    out.push(i + 1);
+                }
+            }
+        }
+        out
+    }
+
     #[test]
     fn every_facet_keyword_sits_on_its_required_type() {
         // Contract-harness invariant (OpenAPI 3.0.x / JSON-Schema structural rule):
@@ -12645,6 +12781,205 @@ components:
         assert!(
             agree >= 30,
             "expected many facet+type pairs that agree across specs, got {agree}"
+        );
+    }
+
+    #[test]
+    fn every_numeric_facet_sits_on_a_numeric_type() {
+        // Contract-harness invariant (OpenAPI 3.0.x / JSON-Schema structural rule):
+        // where a Schema Object declares a *numeric* validation facet keyword —
+        // `minimum`/`maximum`/`exclusiveMinimum`/`exclusiveMaximum`/`multipleOf` — as a
+        // sibling of a `type:` scalar, that type MUST be `integer` or `number`. A numeric
+        // facet on a non-numeric type (`minimum` under `type: string`, `multipleOf` under
+        // `type: array`) is a self-contradictory schema: the keyword can never constrain a
+        // value of that type, so a validator ignores it and a Redoc/Swagger/codegen client
+        // silently drops the bound exactly where a caller reads or builds the payload.
+        //
+        // The numeric-family sibling of `every_facet_keyword_sits_on_its_required_type`,
+        // which covers only the single-typed string/array/object facets (`minLength`/…,
+        // `minItems`/…, `minProperties`/…) — a numeric facet's required type is the pair
+        // {integer, number}, so it needs its own check. Also the type-agreement complement
+        // of the two numeric-facet-*value* tests: `every_numeric_bound_is_ordered_low_to_high`
+        // (a lower/upper pair's ordering) and `every_size_bound_is_a_non_negative_integer`
+        // (a size facet's value domain) — neither ever looks at the sibling `type`, so a
+        // domain-valid, well-ordered `minimum: 0`/`maximum: 10` left on a `type: string`
+        // (a field retyped without its facets updated, or a bound pasted from a numeric
+        // sibling onto a string one) sails through both. Only a numeric facet with a `type:`
+        // scalar sibling in the same object is inspected (an inherited/absent type — e.g. a
+        // facet on an `allOf`/`$ref` composition — or a property literally *named* the
+        // keyword, is skipped). Verified true across all mounted specs before asserting.
+        for api in APIS {
+            let bad = numeric_facet_type_mismatches(api.body);
+            assert!(
+                bad.is_empty(),
+                "{} spec declares a numeric validation facet keyword (minimum/maximum/\
+                 exclusiveMinimum/exclusiveMaximum/multipleOf) on a `type:` that is neither \
+                 `integer` nor `number` at line(s): {:?}",
+                api.name,
+                bad
+            );
+        }
+    }
+
+    #[test]
+    fn numeric_facet_type_consistency_extraction_rules() {
+        // Unit-cover `numeric_facet_type_mismatches` so the contract test above can't pass
+        // vacuously and its detection is pinned: a numeric facet on `integer`/`number`
+        // passes (bounds and `multipleOf`, whether `type` is declared before or after the
+        // facet, incl. a boolean `exclusiveMinimum` beside a numeric type); a numeric facet
+        // on a non-numeric type is flagged in document order (`minimum` on string, `maximum`
+        // on boolean, `multipleOf` on array); a facet with no sibling `type` scalar (type
+        // inherited/absent) is skipped; a property literally *named* a numeric facet (a block
+        // opener, no inline value) is skipped; and a facet inside an `example:` payload is
+        // skipped.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    GoodInt:
+      type: integer
+      minimum: 0
+      maximum: 10
+    GoodNum:
+      type: number
+      minimum: 0.5
+      multipleOf: 0.1
+    GoodExclusive:
+      exclusiveMinimum: true
+      type: integer
+      minimum: 1
+    BadMinOnStr:
+      type: string
+      minimum: 3
+    BadMaxOnBool:
+      maximum: 5
+      type: boolean
+    BadMultipleOfOnArr:
+      type: array
+      multipleOf: 2
+      items:
+        type: string
+    NoType:
+      minimum: 9
+    NamedFacet:
+      type: object
+      properties:
+        minimum:
+          type: number
+    InExample:
+      type: object
+      example:
+        minimum: 3
+";
+        // Flagged, in document order: line 28 (`BadMinOnStr.minimum` beside `type: string`
+        // declared above), line 30 (`BadMaxOnBool.maximum` beside `type: boolean` declared
+        // below — found by the down-scan), and line 34 (`BadMultipleOfOnArr.multipleOf`
+        // beside `type: array`; its nested `items.type: string` is deeper-indented and never
+        // pairs). Not flagged: the three Good schemas (numeric facets each on integer/number,
+        // incl. `exclusiveMinimum: true` beside `type: integer`); `NoType`'s `minimum` (no
+        // sibling `type` scalar); the property literally *named* `minimum` (line 42, a block
+        // opener with no inline value); and the `minimum` inside the `example:` payload
+        // (line 47).
+        assert_eq!(numeric_facet_type_mismatches(body), vec![28, 30, 34]);
+
+        // Non-vacuous floor: across every registered spec every numeric facet sits on a
+        // numeric type (the invariant the contract test asserts), and the corpus declares
+        // many numeric-facet+type pairs that actually agree (port ranges, coordinate
+        // bounds, page sizes) — so the type-comparison path runs on real data and a broken
+        // (always-empty) extractor can't hide behind a corpus that never pairs a numeric
+        // facet with a type. Count agreeing pairs with a presence detector that pairs the
+        // same way but confirms the sibling type is numeric.
+        let mut agree = 0usize;
+        for api in APIS {
+            assert!(
+                numeric_facet_type_mismatches(api.body).is_empty(),
+                "{}: every numeric facet keyword must sit on a numeric type",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            let type_of = |l: &str| -> Option<String> {
+                let (k, v) = l.trim_start().split_once(':')?;
+                if k.trim() != "type" {
+                    return None;
+                }
+                let v = v
+                    .split('#')
+                    .next()
+                    .unwrap_or(v)
+                    .trim()
+                    .trim_matches('"')
+                    .trim_matches('\'');
+                (!v.is_empty()).then(|| v.to_string())
+            };
+            for (i, l) in lines.iter().enumerate() {
+                let Some((k, v)) = l.trim_start().split_once(':') else {
+                    continue;
+                };
+                if v.split('#').next().unwrap_or(v).trim().is_empty() {
+                    continue; // block opener, not a keyword occurrence
+                }
+                if !is_numeric_facet(k.trim()) {
+                    continue;
+                }
+                let c = indent(l);
+                // sibling type: down then up, dedent-bounded (mirrors the extractor)
+                let mut ty = None;
+                let mut j = i + 1;
+                while j < lines.len() {
+                    let x = lines[j];
+                    if x.trim().is_empty() {
+                        j += 1;
+                        continue;
+                    }
+                    if indent(x) < c {
+                        break;
+                    }
+                    if indent(x) == c {
+                        if let Some(t) = type_of(x) {
+                            ty = Some(t);
+                            break;
+                        }
+                    }
+                    j += 1;
+                }
+                if ty.is_none() {
+                    let mut m = i;
+                    while m > 0 {
+                        m -= 1;
+                        let x = lines[m];
+                        if x.trim().is_empty() {
+                            continue;
+                        }
+                        if indent(x) < c {
+                            break;
+                        }
+                        if indent(x) == c {
+                            if let Some(t) = type_of(x) {
+                                ty = Some(t);
+                                break;
+                            }
+                        }
+                    }
+                }
+                if matches!(ty.as_deref(), Some("integer") | Some("number")) {
+                    agree += 1;
+                }
+            }
+        }
+        assert!(
+            agree >= 30,
+            "expected many numeric-facet+type pairs that agree across specs, got {agree}"
         );
     }
 }
