@@ -9757,6 +9757,413 @@ components:
         );
     }
 
+    /// The 1-based line numbers, in document order, of every `enum:` at least one
+    /// of whose values contradicts its sibling scalar `type:` — without a YAML dep.
+    ///
+    /// An `enum` fixes the closed set of values a schema may take, and a sibling
+    /// `type` fixes their JSON type; the two apply to the *same* Schema Object, so
+    /// every enum value must conform to the type. A value that does not — an
+    /// unquoted `true`/`5` under `type: string` (YAML parses it as a boolean/number,
+    /// not a string), a quoted `'1'` or a fractional `1.5` under `type: integer`, a
+    /// non-boolean under `type: boolean` — is a self-contradictory schema: the
+    /// value the enum offers is one the type's own validator rejects, so a
+    /// Redoc/Swagger form pre-fills or a codegen client emits a member the field can
+    /// never legally hold.
+    ///
+    /// Invisible to `every_enum_lists_unique_non_empty_values` (which checks a
+    /// value list's own members are non-empty and unique, never against a type) and
+    /// to `every_type_names_a_valid_schema_type` / `every_format_matches_its_type`
+    /// (which check the `type` token itself, or a `format` modifier, never the enum
+    /// values a type constrains).
+    ///
+    /// Only an enum with a `type:` *scalar sibling* naming one of the four scalar
+    /// JSON types (`string`/`integer`/`number`/`boolean`) in the same object is
+    /// inspected — the sibling is found by the same same-indent, dedent-bounded
+    /// scan (down through the object's block then up) as `format_type_mismatches`.
+    /// An enum with no sibling type (inherited via `allOf`/`$ref`, or typeless), or
+    /// a non-scalar sibling type (`object`/`array`, whose members are structured),
+    /// is skipped — nothing to compare against value-by-value. A `null`/`~` member
+    /// (JSON null, legal in a nullable enum of any type), a property literally named
+    /// `enum` (a block whose first child is not a `- ` item), and an `enum:` inside
+    /// an `example:`/`examples:` payload are all skipped. Both YAML enum forms are
+    /// handled: a flow list (`enum: [A, B]`, gathered to its `]`) and a block list
+    /// (`enum:` then `- ` children), mirroring `enums_with_no_values_or_duplicates`;
+    /// a quoted value is a string regardless of what its unquoted text would parse
+    /// as, so quoting is preserved (not stripped) before classification.
+    fn enum_values_inconsistent_with_type(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        // The inline scalar of a `name:` key (inline comment + surrounding quotes
+        // stripped); `None` when the line is a different key or opens a block.
+        let scalar = |l: &str, name: &str| -> Option<String> {
+            let (k, v) = l.trim_start().split_once(':')?;
+            if k.trim() != name {
+                return None;
+            }
+            let v = v
+                .split('#')
+                .next()
+                .unwrap_or(v)
+                .trim()
+                .trim_matches('"')
+                .trim_matches('\'');
+            if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            }
+        };
+        // True when line `i` (indent `c`) sits inside an `example:`/`examples:`
+        // payload — mirrors `format_type_mismatches`.
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        // The sibling `type:` scalar in the same object as line `i` (indent `c`):
+        // scan down through the object's block for a same-indent `type`, then up,
+        // dedent-bounded so a nested/following object's `type` never pairs.
+        let sibling_type = |i: usize, c: usize| -> Option<String> {
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c {
+                    if let Some(v) = scalar(l, "type") {
+                        return Some(v);
+                    }
+                }
+                j += 1;
+            }
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c {
+                    if let Some(v) = scalar(l, "type") {
+                        return Some(v);
+                    }
+                }
+            }
+            None
+        };
+        // Whether a raw (as-written) enum value token contradicts scalar type `ty`.
+        // Quoting is significant: a quoted token is always a YAML string, whatever
+        // its inner text would otherwise parse as.
+        fn inconsistent(raw: &str, ty: &str) -> bool {
+            let mut v = raw.trim();
+            if let Some(p) = v.find(" #") {
+                v = v[..p].trim_end();
+            }
+            let v = v.trim();
+            if v.is_empty() || v == "null" || v == "~" {
+                return false; // JSON null is legal in a nullable enum of any type
+            }
+            let quoted = v.len() >= 2
+                && ((v.starts_with('"') && v.ends_with('"'))
+                    || (v.starts_with('\'') && v.ends_with('\'')));
+            let is_bool = !quoted
+                && matches!(v, "true" | "false" | "True" | "False" | "TRUE" | "FALSE");
+            let is_int = !quoted && v.parse::<i64>().is_ok();
+            let is_num = !quoted && v.parse::<f64>().is_ok();
+            match ty {
+                "string" => is_bool || is_num, // an unquoted bool/number is not a string
+                "boolean" => !is_bool,
+                "integer" => !is_int,
+                "number" => !is_num,
+                _ => false,
+            }
+        }
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < lines.len() {
+            let line = lines[i];
+            let t = line.trim_start();
+            if !t.starts_with("enum:") {
+                i += 1;
+                continue;
+            }
+            let c = indent(line);
+            let enum_line = i;
+            let rest = t["enum:".len()..].trim_start();
+            let mut raws: Vec<String> = Vec::new();
+            let mut is_enum_list = true;
+            if rest.starts_with('[') {
+                // Flow list — gather across lines until the closing `]`.
+                let mut buf = rest.to_string();
+                let mut k = i;
+                while !buf.contains(']') && k + 1 < lines.len() {
+                    k += 1;
+                    buf.push(' ');
+                    buf.push_str(lines[k].trim());
+                }
+                let open = buf.find('[').map(|x| x + 1).unwrap_or(0);
+                let close = buf.rfind(']').unwrap_or(buf.len());
+                let inner = if close >= open { &buf[open..close] } else { "" };
+                if !inner.trim().is_empty() {
+                    raws = inner
+                        .split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect();
+                }
+                i = k + 1;
+            } else if rest.is_empty() || rest.starts_with('#') {
+                // Block list — `- ` items at a deeper indent, but only when this is
+                // genuinely an enum list (first child is a `-`, not a property named
+                // `enum` whose value is a mapping).
+                let base = c;
+                let mut first_child_seen = false;
+                let mut j = i + 1;
+                while j < lines.len() {
+                    let l = lines[j];
+                    if l.trim().is_empty() || l.trim_start().starts_with('#') {
+                        j += 1;
+                        continue;
+                    }
+                    if indent(l) <= base {
+                        break;
+                    }
+                    let item = l.trim_start();
+                    if !first_child_seen {
+                        first_child_seen = true;
+                        if !item.starts_with('-') {
+                            is_enum_list = false;
+                            break;
+                        }
+                    }
+                    if !item.starts_with('-') {
+                        break;
+                    }
+                    raws.push(item[1..].trim_start().to_string());
+                    j += 1;
+                }
+                i = j;
+            } else {
+                // `enum: <scalar>` — not a list; a property named `enum`. Skip.
+                i += 1;
+                continue;
+            }
+            if !is_enum_list || raws.is_empty() {
+                continue;
+            }
+            if inside_example(enum_line, c) {
+                continue;
+            }
+            let Some(ty) = sibling_type(enum_line, c) else {
+                continue;
+            };
+            if !matches!(ty.as_str(), "string" | "integer" | "number" | "boolean") {
+                continue;
+            }
+            if raws.iter().any(|r| inconsistent(r, &ty)) {
+                out.push(enum_line + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_enum_value_matches_its_schema_type() {
+        // Contract-harness invariant (OpenAPI 3.0.x / JSON-Schema structural rule):
+        // where a Schema Object declares an `enum` beside a scalar `type`, every
+        // enum value MUST conform to that type. An `enum` fixes the closed set the
+        // field may take and the sibling `type` fixes their JSON type, so a value
+        // outside the type — an unquoted `true`/`5` under `type: string` (YAML reads
+        // it as a boolean/number), a quoted `'1'` or fractional `1.5` under
+        // `type: integer`, a non-boolean under `type: boolean` — is a
+        // self-contradictory schema: the enum offers a member the type's own
+        // validator would reject, so a Redoc/Swagger form pre-fills, or a codegen
+        // client emits, a value the field can never legally hold.
+        //
+        // This is the value-conformance complement of the enum and type tests:
+        // `every_enum_lists_unique_non_empty_values` checks the value list's own
+        // members are non-empty and unique but never against a type, and
+        // `every_type_names_a_valid_schema_type` / `every_format_matches_its_type`
+        // check the `type` token itself (or a `format` modifier) but never the enum
+        // values the type constrains. Only an enum with a scalar `type:` sibling
+        // (string/integer/number/boolean) in the same object is inspected; a
+        // typeless enum, a non-scalar sibling type, a `null` member, a property
+        // named `enum`, and an `enum:` inside an `example:` payload are skipped.
+        // Verified true across all mounted specs before asserting.
+        for api in APIS {
+            let bad = enum_values_inconsistent_with_type(api.body);
+            assert!(
+                bad.is_empty(),
+                "{} spec declares an `enum` with a value that contradicts its sibling \
+                 scalar `type:` (e.g. an unquoted bool/number under `type: string`, a \
+                 quoted or fractional value under `type: integer`) at `enum:` line(s): \
+                 {:?}",
+                api.name,
+                bad
+            );
+        }
+    }
+
+    #[test]
+    fn enum_value_type_consistency_extraction_rules() {
+        // Unit-cover `enum_values_inconsistent_with_type` so the contract test above
+        // can't pass vacuously and its detection is pinned: a string enum of bare
+        // words / a flow string enum / an integer enum / a boolean enum all pass; an
+        // unquoted `true` under `type: string` and a quoted `'1'` under
+        // `type: integer` are flagged in document order; a typeless enum, a property
+        // literally named `enum`, an `enum:` inside an `example:` payload, and a
+        // `null` member of a nullable string enum are all skipped.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    GoodStr:
+      type: string
+      enum:
+        - active
+        - inactive
+    GoodStrFlow:
+      type: string
+      enum: [asc, desc]
+    GoodInt:
+      type: integer
+      enum:
+        - 1
+        - 2
+    GoodBool:
+      type: boolean
+      enum: [true, false]
+    BadStrHasBool:
+      type: string
+      enum:
+        - active
+        - true
+    BadIntHasQuoted:
+      type: integer
+      enum: ['1', 2]
+    NoType:
+      enum:
+        - x
+        - y
+    NamedEnum:
+      type: object
+      properties:
+        enum:
+          type: string
+    InExample:
+      type: object
+      example:
+        type: string
+        enum:
+          - 1
+          - 2
+    NullableStr:
+      type: string
+      nullable: true
+      enum:
+        - active
+        - null
+";
+        // Flagged, in document order: BadStrHasBool's `enum:` (line 32 — its value
+        // `true` is a YAML boolean, not a string) and BadIntHasQuoted's `enum:`
+        // (line 37 — its quoted `'1'` is a string, not an integer). Not flagged: the
+        // four Good schemas; NoType (no sibling `type`); the property literally named
+        // `enum` (block whose first child opens a mapping); the `enum:` inside the
+        // `example:` payload; and NullableStr (its only off-type member is `null`).
+        assert_eq!(enum_values_inconsistent_with_type(body), vec![32, 37]);
+
+        // Non-vacuous floor: across every registered spec every enum value conforms
+        // to its sibling scalar type (the invariant the contract test asserts), and
+        // the corpus declares many scalar-typed enums (the status/order/network-type/
+        // credential-type/event-type enums) — so the value-comparison path runs on
+        // real data and a broken (always-empty) extractor can't hide behind a corpus
+        // that never pairs an enum with a scalar type. Count conforming scalar-typed
+        // enums with a presence detector: an `enum:` whose nearest preceding
+        // non-blank line at the same indent declares a scalar `type:`.
+        let mut typed_enums = 0usize;
+        for api in APIS {
+            assert!(
+                enum_values_inconsistent_with_type(api.body).is_empty(),
+                "{}: every enum value must conform to its sibling scalar type",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            for (i, l) in lines.iter().enumerate() {
+                if l.trim_start() != "enum:" && !l.trim_start().starts_with("enum: [") {
+                    continue;
+                }
+                let c = indent(l);
+                let mut k = i;
+                while k > 0 {
+                    k -= 1;
+                    let x = lines[k];
+                    if x.trim().is_empty() {
+                        continue;
+                    }
+                    if indent(x) < c {
+                        break;
+                    }
+                    if indent(x) == c {
+                        let xt = x.trim_start();
+                        if matches!(
+                            xt,
+                            "type: string"
+                                | "type: integer"
+                                | "type: number"
+                                | "type: boolean"
+                        ) {
+                            typed_enums += 1;
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+        assert!(
+            typed_enums >= 10,
+            "expected many scalar-typed enums across specs, got {typed_enums}"
+        );
+    }
+
     /// Line numbers (1-based) of OpenAPI 3.0.x boolean-valued keywords whose
     /// declared value is not a JSON boolean (`true`/`false`).
     ///

@@ -3808,6 +3808,32 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-13 — contract-harness: added an **enum-value↔type-consistency** contract test
+  (`src/registry.rs` `every_enum_value_matches_its_schema_type`) asserting that where a
+  Schema Object declares an `enum` beside a scalar `type`, every enum value conforms to that
+  type. An `enum` fixes the closed value set and the sibling `type` fixes their JSON type, so a
+  value outside it — an unquoted `true`/`5` under `type: string` (YAML reads it as boolean/
+  number), a quoted `'1'` or fractional `1.5` under `type: integer`, a non-boolean under
+  `type: boolean` — is self-contradictory: the enum offers a member the type's own validator
+  rejects, so a Redoc/Swagger form pre-fills, or a codegen client emits, a value the field can
+  never legally hold. The value-conformance complement of `every_enum_lists_unique_non_empty_
+  values` (checks a value list's own members are unique/non-empty, never against a type) and of
+  `every_type_names_a_valid_schema_type` / `every_format_matches_its_type` (check the `type`
+  token or a `format` modifier, never the enum values a type constrains). New pure
+  `enum_values_inconsistent_with_type` extractor (no YAML dep): collects each enum's raw values
+  (flow + block forms, mirroring `enums_with_no_values_or_duplicates`), finds its sibling
+  scalar `type:` by the same-indent, dedent-bounded scan `format_type_mismatches` uses, and
+  flags a quoting-aware type mismatch (a quoted token is always a string). Skips a typeless
+  enum, a non-scalar sibling type (`object`/`array`), a `null`/`~` member (legal in a nullable
+  enum), a property literally named `enum`, and an `enum:` inside an `example:` payload. New
+  `enum_value_type_consistency_extraction_rules` unit pins detection (string/integer/boolean
+  enums pass; an unquoted bool under string and a quoted `'1'` under integer flagged in
+  document order; typeless/named-enum/example/null-member skips) and holds a ≥10 non-vacuous
+  scalar-typed-enum floor. Verified true across all mounted specs (the status/order/network-
+  type/credential-type/event-type enums — every value conforms; no drift to fix). Tests: +2
+  (1 contract, 1 unit). `cargo test` 2229 green (was 2227); `cargo build --release` succeeds.
+  No new dep; binary unchanged (`#[cfg(test)]`-only). — binary: 3.7M (3851944 B, +0 B)
+
 - 2026-08-13 — contract-harness: added a **format↔type-consistency** contract test
   (`src/registry.rs` `every_format_matches_its_type`) asserting that where a Schema Object
   declares a recognized `format` beside a `type` scalar, the type is the one the format
