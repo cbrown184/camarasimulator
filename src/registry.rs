@@ -7375,4 +7375,198 @@ components:
             "expected many array schemas across specs, got {arrays}"
         );
     }
+
+    /// Returns the 1-based line numbers of `example:` keys that share their
+    /// object — same parent block, at the same indentation — with an `examples:`
+    /// sibling. That pairing is the OpenAPI 3.0.x "the `example` field is
+    /// mutually exclusive of the `examples` field" violation (Media Type Object
+    /// and Parameter Object). Each conflicting object is reported once, at its
+    /// `example:` line.
+    ///
+    /// Pure and YAML-dep-free: for each `example:` key at indent `c`, scan its
+    /// object's block both directions (down then up), each bounded by the first
+    /// line indented *below* `c` (the dedent that closes the object), and flag it
+    /// when an `examples:` key appears at *exactly* `c`. The exact-indent match
+    /// keeps a schema's own singular `example:` (3.0.x has no schema `examples:`)
+    /// and a deeper-nested `examples:` inside the example payload from being
+    /// mistaken for a sibling, and the dedent bound keeps a following media
+    /// type's `examples:` from leaking across object boundaries.
+    fn objects_declaring_both_example_and_examples(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let key_is = |l: &str, name: &str| -> bool {
+            l.trim_start()
+                .split_once(':')
+                .is_some_and(|(k, _)| k.trim() == name)
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            if !key_is(line, "example") {
+                continue;
+            }
+            let c = indent(line);
+            let mut conflict = false;
+            // Scan down through this object's block for an `examples:` sibling.
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) < c {
+                    break; // dedented out of this object
+                }
+                if indent(l) == c && key_is(l, "examples") {
+                    conflict = true;
+                    break;
+                }
+                j += 1;
+            }
+            // `examples:` may be declared before `example:`; scan up the block.
+            if !conflict {
+                let mut k = i;
+                while k > 0 {
+                    k -= 1;
+                    let l = lines[k];
+                    if l.trim().is_empty() {
+                        continue;
+                    }
+                    if indent(l) < c {
+                        break; // reached the key that opened this object
+                    }
+                    if indent(l) == c && key_is(l, "examples") {
+                        conflict = true;
+                        break;
+                    }
+                }
+            }
+            if conflict {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn no_object_declares_both_example_and_examples() {
+        // Contract-harness invariant (OpenAPI 3.0.x structural rule): in a Media
+        // Type Object and a Parameter Object the `example` field is *mutually
+        // exclusive* of the `examples` field — a single object MUST NOT declare
+        // both. A document that does is invalid, and a Redoc/Swagger/codegen
+        // client is left to guess which sample to render or generate from, so the
+        // documented example silently depends on the tool.
+        //
+        // A routine hazard in these vendored specs: a Media Type / Parameter block
+        // drafted with a singular `example:` (or pasted from a sibling that used
+        // one) later grows a richer `examples:` map, and the original `example:`
+        // is left behind — both now sit as siblings. It is invisible to every
+        // existing test: `every_media_type_declares_a_schema` checks that a
+        // payload *has* a schema, never how its sample is expressed, and the
+        // enum/required/array/`$ref` tests check value lists, required entries,
+        // element types, or ref targets, never the example/examples pair.
+        // Verified true across all mounted specs before asserting.
+        for api in APIS {
+            let both = objects_declaring_both_example_and_examples(api.body);
+            assert!(
+                both.is_empty(),
+                "{} spec declares both `example` and `examples` in one object \
+                 (they are mutually exclusive) at `example:` line(s): {:?}",
+                api.name,
+                both
+            );
+        }
+    }
+
+    #[test]
+    fn example_examples_exclusivity_extraction_rules() {
+        // Unit-cover the `objects_declaring_both_example_and_examples` extractor
+        // so the contract test above can't pass vacuously and its detection is
+        // pinned: an `example:` is flagged only when an `examples:` sits at the
+        // same indent in the same object; `examples:` declared after *or* before
+        // `example:` triggers it; a lone `example:` (parameter or schema) is left
+        // alone; a following media type's `examples:` never leaks to the object
+        // above it; and an `examples:` nested deeper than the `example:` (inside
+        // the example payload, or in a sibling sub-schema) is not a sibling.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      parameters:
+        - name: bad
+          in: query
+          example: 2
+          examples:
+            e1:
+              value: 3
+        - name: good
+          in: query
+          example: 1
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              examples:
+                e2:
+                  value: baz
+              example:
+                foo: bar
+            application/xml:
+              example: solo
+components:
+  schemas:
+    S:
+      type: object
+      properties:
+        p:
+          type: string
+          example: nested
+";
+        // Flagged, in document order: the `example:` at line 12 (the parameter
+        // named `bad`, with an `examples:` sibling directly below) and the
+        // `example:` at line 27 (the `application/json` media type, whose
+        // `examples:` sibling sits above it). Not flagged: line 18 (parameter
+        // `good`, a lone `example:`), line 30 (`application/xml`, a lone
+        // `example:` — the `examples:` above belongs to a different media type),
+        // and line 38 (a schema's singular `example:`, no `examples:` in 3.0.x).
+        assert_eq!(
+            objects_declaring_both_example_and_examples(body),
+            vec![12, 27]
+        );
+
+        // Non-vacuous floor: across every registered spec no object declares both
+        // (the invariant the contract test asserts), and the corpus actually uses
+        // both keys heavily — so the mutual-exclusivity surface is real and a
+        // broken extractor can't hide behind an empty scan. Count each key with a
+        // detection independent of the extractor.
+        let (mut examples_plural, mut example_singular) = (0usize, 0usize);
+        for api in APIS {
+            assert!(
+                objects_declaring_both_example_and_examples(api.body).is_empty(),
+                "{}: no object may declare both `example` and `examples`",
+                api.name
+            );
+            for line in api.body.lines() {
+                match line.trim_start().split_once(':').map(|(k, _)| k.trim()) {
+                    Some("examples") => examples_plural += 1,
+                    Some("example") => example_singular += 1,
+                    _ => {}
+                }
+            }
+        }
+        assert!(
+            example_singular >= 100,
+            "expected many `example:` keys across specs, got {example_singular}"
+        );
+        assert!(
+            examples_plural >= 20,
+            "expected many `examples:` keys across specs, got {examples_plural}"
+        );
+    }
 }

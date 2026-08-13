@@ -3541,6 +3541,25 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     `description` — converged onto the canonical 3.0.x `allOf:` wrapper (a lone
     `- $ref` item beside the `description`), so the annotation now renders and the
     reference still resolves.
+  - an example/examples-exclusivity contract test (`src/registry.rs`
+    `no_object_declares_both_example_and_examples`) asserts no object a mounted
+    spec declares carries both an `example` and an `examples` key as siblings —
+    the OpenAPI 3.0.x rule that in a Media Type Object and a Parameter Object the
+    `example` field is **mutually exclusive** of `examples`. An object that
+    declares both is invalid, and a Redoc/Swagger/codegen client is left to guess
+    which sample to render or generate. The natural way it creeps in: a media
+    type / parameter drafted with a singular `example:` later grows a richer
+    `examples:` map and the original `example:` is left behind. Invisible to every
+    existing test — `every_media_type_declares_a_schema` checks a payload *has* a
+    schema, never how its sample is expressed; the enum/required/array/`$ref`
+    tests check value lists, required entries, element types, or ref targets. A
+    pure `objects_declaring_both_example_and_examples` extractor (no YAML dep; for
+    each `example:` key scans its object both directions at the key's own indent,
+    bounded by a dedent, and flags an `examples:` sibling at exactly that indent —
+    so a schema's singular `example:`, a deeper `examples:` inside the example
+    payload, and a following media type's `examples:` are never mistaken) is
+    unit-covered (`example_examples_exclusivity_extraction_rules`) so the contract
+    can't pass vacuously. Verified true across all mounted specs before asserting.
   Full response-vs-schema validation still TODO (would need a YAML/JSON-Schema
   validator — a dependency trade-off, deferred).
 
@@ -3549,6 +3568,30 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 ## Scan journal
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
+
+- 2026-08-13 — contract-harness: added an **example/examples mutual-exclusivity**
+  contract test (`src/registry.rs` `no_object_declares_both_example_and_examples`)
+  asserting no object a mounted spec declares carries both an `example` and an
+  `examples` key as siblings — the OpenAPI 3.0.x rule that in a Media Type Object
+  and a Parameter Object the `example` field is mutually exclusive of `examples`.
+  Both keys are used heavily across the corpus (≈599 `example:`, ≈241 `examples:`),
+  so a client handed an object declaring both must guess which sample to render or
+  generate — invisible to every existing test (they check that a payload has a
+  schema, or a value list's members, never how a sample is expressed). New pure
+  `objects_declaring_both_example_and_examples` extractor (no YAML dep): for each
+  `example:` key it scans that object both directions at the key's own indent,
+  bounded by a dedent, and flags an `examples:` sibling at exactly that indent —
+  the exact-indent match keeps a schema's singular `example:`, a deeper `examples:`
+  inside the example payload, and a following media type's `examples:` from being
+  mistaken for a sibling. Unit-covered (`example_examples_exclusivity_extraction_
+  rules`: parameter-with-`examples`-below and media-type-with-`examples`-above
+  flagged in document order; lone parameter/schema `example:` and a sibling media
+  type's `examples:` left alone; plus a non-vacuous floor of ≥100 `example:` and
+  ≥20 `examples:` keys over all specs) so the contract can't pass vacuously.
+  Verified true across all 57 mounted specs (no drift to fix). Tests: +2 (1
+  contract, 1 extractor unit). `cargo test` 2199 green (was 2197); `cargo build
+  --release` warning-clean. No new dep; binary unchanged (`#[cfg(test)]`-only). —
+  binary: 3.7M (3851944 B, +0 B)
 
 - 2026-08-12 — contract-harness: added a **lone-`$ref`** contract test
   (`src/registry.rs` `every_ref_object_stands_alone`) asserting no `$ref` a mounted
