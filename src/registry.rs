@@ -10386,6 +10386,236 @@ components:
         );
     }
 
+    /// Line numbers (1-based) of OpenAPI 3.0.x number-valued schema keywords whose
+    /// declared value is not a JSON number — `minimum`, `maximum`, `multipleOf` —
+    /// plus any `multipleOf` that is not strictly greater than 0.
+    ///
+    /// In OpenAPI 3.0.x these three keywords are the number-valued Schema Object
+    /// facets: `minimum`/`maximum` bound a numeric value (either may itself be
+    /// negative or fractional), and `multipleOf` constrains the value to a multiple
+    /// of a number that MUST be strictly greater than 0. So a non-numeric scalar (a
+    /// word, a YAML anchor, a stray range like `1..10`) is an invalid document a
+    /// validator/codegen tool rejects or mis-reads, and a `multipleOf: 0`/negative
+    /// (a division by a non-positive step) is unsatisfiable — both at exactly the
+    /// point a caller reads or builds the payload.
+    ///
+    /// This is the number-family analogue of `boolean_keyword_non_boolean_values`
+    /// (boolean modifiers) and `size_bounds_out_of_domain` (the integer
+    /// length/size/count caps), and the *value-type* complement of
+    /// `every_numeric_bound_is_ordered_low_to_high`: that ordering test compares a
+    /// `minimum`/`maximum` pair only when *both* are present and *already parse as
+    /// numbers*, so a lone `minimum` with no `maximum` sibling — or either given a
+    /// non-numeric value — is never checked for numeric-ness, and `multipleOf` (which
+    /// has no lower/upper sibling) is inspected by no test at all.
+    ///
+    /// Two contexts are excluded, mirroring the boolean/format extractors: a keyword
+    /// with an *empty* inline value is a property literally named for the keyword (it
+    /// opens a schema, not a scalar), and a keyword appearing as data inside an
+    /// `example:`/`examples:` payload is example data, detected by walking the
+    /// ancestor chain for an enclosing `example:`/`examples:` key. The inline scalar
+    /// is read with inline-comment and surrounding quotes stripped (as its siblings
+    /// do). Only a keyword at the start of its line (after indentation), whose `:`
+    /// immediately follows it, is inspected — a longer key sharing the prefix
+    /// (`minimumAge:`) does not match. Offending lines are returned in document order.
+    fn numeric_keyword_non_numeric_values(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        // The (keyword, inline-scalar) of a number-keyword line; `None` when the
+        // line is not one of the number keywords.
+        fn keyword_value(l: &str) -> Option<(&'static str, &str)> {
+            const NUM_KEYWORDS: [&str; 3] = ["minimum", "maximum", "multipleOf"];
+            let t = l.trim_start();
+            for kw in NUM_KEYWORDS {
+                if let Some(rest) = t.strip_prefix(kw) {
+                    if let Some(v) = rest.strip_prefix(':') {
+                        return Some((
+                            kw,
+                            v.split('#')
+                                .next()
+                                .unwrap_or(v)
+                                .trim()
+                                .trim_matches('"')
+                                .trim_matches('\''),
+                        ));
+                    }
+                }
+            }
+            None
+        }
+        // True when line `i` (indent `c`) sits inside an `example:`/`examples:`
+        // payload — some enclosing container key up the indent ladder is
+        // `example`/`examples`.
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some((kw, v)) = keyword_value(line) else {
+                continue;
+            };
+            if v.is_empty() {
+                continue; // a property literally named for the keyword (block opener)
+            }
+            if inside_example(i, indent(line)) {
+                continue; // example data, not a schema keyword
+            }
+            match v.parse::<f64>() {
+                // `multipleOf` MUST be strictly greater than 0 (OpenAPI 3.0.x);
+                // `minimum`/`maximum` may be any finite number.
+                Ok(n) if n.is_finite() => {
+                    if kw == "multipleOf" && n <= 0.0 {
+                        out.push(i + 1);
+                    }
+                }
+                _ => out.push(i + 1),
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_numeric_schema_keyword_carries_a_number() {
+        // Contract-harness invariant (OpenAPI 3.0.x): every number-valued schema
+        // keyword a mounted spec declares — `minimum`, `maximum`, `multipleOf` — MUST
+        // carry a JSON number, and a `multipleOf` MUST be strictly greater than 0. A
+        // non-numeric value (a word, a stray range) is an invalid document a
+        // validator/codegen tool rejects or mis-reads, and a non-positive
+        // `multipleOf` is an unsatisfiable constraint — both where a caller reads or
+        // builds the payload.
+        //
+        // This is the value-type complement of
+        // `every_numeric_bound_is_ordered_low_to_high`, which compares a
+        // `minimum`/`maximum` pair only when both are present and already numeric —
+        // so a lone `minimum`, either given a non-numeric value, or any `multipleOf`
+        // (no sibling to pair with) escapes it — and the number-family analogue of
+        // the boolean-keyword and size-bound value tests. A live hazard in these
+        // scenario-table-heavy specs, whose numeric ranges (a `maxAge`, a `radius`, a
+        // currency `multipleOf`) are hand-tuned per API. A property literally *named*
+        // for a keyword (empty value) and a keyword inside an `example:`/`examples:`
+        // payload are excluded. Verified true across all mounted specs before
+        // asserting.
+        for api in APIS {
+            let bad = numeric_keyword_non_numeric_values(api.body);
+            assert!(
+                bad.is_empty(),
+                "{} spec declares an OpenAPI 3.0.x number keyword \
+                 (minimum/maximum/multipleOf) with a non-numeric value, or a \
+                 multipleOf that is not > 0, at line(s): {:?}",
+                api.name,
+                bad
+            );
+        }
+    }
+
+    #[test]
+    fn numeric_keyword_value_extraction_rules() {
+        // Unit-cover the `numeric_keyword_non_numeric_values` extractor so the
+        // contract test above can't pass vacuously and its detection is pinned:
+        // numeric values (incl. negative `-90` and fractional `0.001`) pass; a
+        // property literally named `minimum` (empty value, block opener) and a
+        // `maximum:` inside an `example:` payload are skipped; a non-numeric
+        // `maximum: many` and a non-positive `multipleOf: 0` / `multipleOf: -2` are
+        // flagged in document order.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    Good:
+      type: object
+      properties:
+        lat:
+          type: number
+          minimum: -90
+          maximum: 90
+        amt:
+          type: number
+          multipleOf: 0.001
+        minimum:
+          type: integer
+    Event:
+      type: object
+      example:
+        maximum: lots
+        id: abc
+    BadWord:
+      type: integer
+      maximum: many
+    BadZero:
+      type: number
+      multipleOf: 0
+    BadNeg:
+      type: number
+      multipleOf: -2
+";
+        // Flagged, in document order: `BadWord.maximum: many` (line 33),
+        // `BadZero.multipleOf: 0` (line 36) and `BadNeg.multipleOf: -2` (line 39).
+        // Not flagged: the numeric `minimum: -90`/`maximum: 90`/`multipleOf: 0.001`
+        // (lines 19, 20, 23), the property literally named `minimum:` (line 24, empty
+        // value), and the `maximum: lots` inside the `example:` payload (line 29).
+        assert_eq!(numeric_keyword_non_numeric_values(body), vec![33, 36, 39]);
+
+        // Non-vacuous floor: across every registered spec every number keyword
+        // carries a number and every `multipleOf` is positive (the invariant the
+        // contract test asserts), and the corpus declares many such keywords — so the
+        // value-parsing path runs on real data and a broken (always-empty) extractor
+        // can't hide behind a corpus that never declares one. Count keyword lines
+        // carrying a non-empty inline value with a detector independent of the
+        // extractor's parsing.
+        let mut numerics = 0usize;
+        for api in APIS {
+            assert!(
+                numeric_keyword_non_numeric_values(api.body).is_empty(),
+                "{}: every minimum/maximum must be numeric and every multipleOf > 0",
+                api.name
+            );
+            for line in api.body.lines() {
+                if let Some((k, v)) = line.trim_start().split_once(':') {
+                    if matches!(k.trim(), "minimum" | "maximum" | "multipleOf")
+                        && !v.split('#').next().unwrap_or(v).trim().is_empty()
+                    {
+                        numerics += 1;
+                    }
+                }
+            }
+        }
+        assert!(
+            numerics >= 150,
+            "expected many OpenAPI 3.0.x number keywords across specs, got {numerics}"
+        );
+    }
+
     /// The path-template key of every Path Item a spec declares under `paths:`
     /// that is not a well-formed OpenAPI *path template*.
     ///

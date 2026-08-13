@@ -3799,6 +3799,33 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     skip, no-type skip, named-`format` skip, example skip) and holds a ≥100
     non-vacuous agreeing-pair floor. Verified true across all mounted specs (every
     recognized format sits on its matching type; no drift to fix).
+  - a numeric-keyword-value-type contract test (`src/registry.rs`
+    `every_numeric_schema_keyword_carries_a_number`) asserts every number-valued
+    Schema Object keyword a mounted spec declares — `minimum`, `maximum`,
+    `multipleOf` — carries a JSON number, and every `multipleOf` is strictly
+    greater than 0 (the OpenAPI 3.0.x rule for it). A non-numeric value (a word, a
+    stray range) is an invalid document a validator/codegen tool rejects, and a
+    `multipleOf: 0`/negative is an unsatisfiable constraint — both where a caller
+    reads or builds the payload. The number-family analogue of the boolean-keyword
+    (`every_boolean_schema_keyword_carries_a_boolean`) and size-bound
+    (`every_size_bound_is_a_non_negative_integer`) value tests, and the value-type
+    complement of `every_numeric_bound_is_ordered_low_to_high`: that ordering test
+    compares a `minimum`/`maximum` pair only when both are present and already
+    numeric, so a lone `minimum`, either given a non-numeric value, or any
+    `multipleOf` (no sibling to pair with) escapes it — a live hazard in these
+    scenario-table-heavy specs whose numeric ranges are hand-tuned per API. A new
+    pure `numeric_keyword_non_numeric_values` extractor (no YAML dep; mirrors
+    `boolean_keyword_non_boolean_values` — line-leading keyword, `:` immediately
+    after, inline comment/quotes stripped; skips a keyword with an empty value (a
+    property literally named for it) and one inside an `example:`/`examples:`
+    payload via an ancestor-chain walk) is unit-covered
+    (`numeric_keyword_value_extraction_rules`: negative/fractional numbers pass, a
+    named-`minimum` block-opener and an example-payload `maximum:` skipped, a
+    non-numeric `maximum` and a `multipleOf: 0`/`-2` flagged in document order, plus
+    a ≥150 non-vacuous floor of real number keywords) so the contract can't pass
+    vacuously. Verified true (255 number keywords across all mounted specs — every
+    `minimum`/`maximum` numeric, every `multipleOf` positive — no drift to fix)
+    before asserting.
   Full response-vs-schema validation still TODO (would need a YAML/JSON-Schema
   validator — a dependency trade-off, deferred).
 
@@ -3807,6 +3834,27 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 ## Scan journal
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
+
+- 2026-08-13 — contract-harness: added a **numeric-keyword-value-type** contract test
+  (`src/registry.rs` `every_numeric_schema_keyword_carries_a_number`) asserting every
+  number-valued Schema Object keyword — `minimum`, `maximum`, `multipleOf` — carries a JSON
+  number, and every `multipleOf` is strictly greater than 0 (its OpenAPI 3.0.x rule). A
+  non-numeric value is an invalid document a validator/codegen tool rejects; a
+  `multipleOf: 0`/negative is unsatisfiable. The number-family analogue of the boolean-keyword
+  and size-bound value tests, and the value-type complement of
+  `every_numeric_bound_is_ordered_low_to_high` — which compares a `minimum`/`maximum` pair only
+  when both are present and already numeric, so a lone `minimum`, either given a non-numeric
+  value, or any `multipleOf` (no sibling) escapes it. New pure
+  `numeric_keyword_non_numeric_values` extractor (no YAML dep; mirrors
+  `boolean_keyword_non_boolean_values` — line-leading keyword, inline comment/quotes stripped;
+  skips an empty-value block-opener property and an `example:`/`examples:`-payload keyword via
+  an ancestor-chain walk). Unit-covered (`numeric_keyword_value_extraction_rules`:
+  negative/fractional pass, named-`minimum`/example skips, non-numeric `maximum` and
+  `multipleOf: 0`/`-2` flagged in document order, plus a ≥150 non-vacuous floor). Verified true
+  across all mounted specs (255 number keywords — every minimum/maximum numeric, every
+  multipleOf positive — no drift to fix). Tests: +2 (1 contract, 1 unit). `cargo test` 2231
+  green (was 2229); `cargo build --release` succeeds. No new dep; binary unchanged
+  (`#[cfg(test)]`-only). — binary: 3.7M (3851944 B, +0 B)
 
 - 2026-08-13 — contract-harness: added an **enum-value↔type-consistency** contract test
   (`src/registry.rs` `every_enum_value_matches_its_schema_type`) asserting that where a
