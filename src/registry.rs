@@ -327,6 +327,11 @@ pub const APIS: &[ApiSpec] = &[
         version: "vwip",
         body: include_str!("../specs/edge-application-management/vwip/openapi.yaml"),
     },
+    ApiSpec {
+        name: "esim-remote-management",
+        version: "vwip",
+        body: include_str!("../specs/esim-remote-management/vwip/openapi.yaml"),
+    },
 ];
 
 #[cfg(test)]

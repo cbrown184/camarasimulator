@@ -60,6 +60,7 @@
 //! - **Dedicated Network — Networks vwip** — `/dedicated-network/vwip/…`.
 //! - **Dedicated Network — Accesses vwip** — `/dedicated-network-accesses/vwip/…`.
 //! - **Edge Application Management vwip** — `/edge-application-management/vwip/…`.
+//! - **eSIM Remote Management vwip** — `/esim-remote-management/vwip/…`.
 //!
 //! Plus [`openapi`], which serves each mounted API's vendored OpenAPI spec at
 //! `/{api}/v{n}/openapi.yaml` and a human-readable docs page at
@@ -89,6 +90,7 @@ pub mod device_visit_location;
 pub mod device_reachability_status;
 pub mod device_roaming_status;
 pub mod edge_application_management;
+pub mod esim_remote_management;
 pub mod geofencing_subscriptions;
 pub mod home_devices_qod;
 pub mod iot_sim_fraud_prevention;
@@ -186,5 +188,6 @@ pub fn routes() -> Router {
         .merge(dedicated_network_accesses::routes())
         .merge(dedicated_network_areas::routes())
         .merge(edge_application_management::routes())
+        .merge(esim_remote_management::routes())
         .merge(openapi::routes())
 }

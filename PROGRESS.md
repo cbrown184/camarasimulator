@@ -1146,6 +1146,27 @@ generalised `spawn_call_progression` (an ordered `(state, reason?)` step list), 
 remaining transition (`callingCaller`) and the `callDuration`/`recordingResult`
 fields stay deferred.
 
+A **new CAMARA API** joins the mounted set: **eSIM Remote Management vwip**
+(`/esim-remote-management/vwip`; CAMARA eSimRemoteManagement, work-in-progress —
+no released version, mounted at its canonical `vwip` base path). The first slice
+is the stateless profile-inventory read `POST /profile/downloaded-list`
+(operationId `profileList`, scope `esim-remote-management:downloadedlist`): given
+a base "CMP" envelope (`timestamp`/`sequenceNum`/`clientId`/`data`) whose
+`data.eId` (32 hex) names a device eUICC, it returns the installed profiles. The
+`eId` is the control plane (DESIGN §7): its trailing three **decimal** digits
+(hex letters skipped, mirroring Traffic Influence's `appId`) select a reserved
+CAMARA error suffix → canonical error, else `d % 4` sets the profile count
+(`…000`/no-digits → empty eUICC, `…001`→1, `…002`→2, `…003`→3) with at most one
+profile enabled (the eUICC single-active rule — the first). `imei` (15-digit) and
+each `iccid` (20-digit, `89`-prefixed) are derived deterministically from the
+`eId` via a self-contained FNV hash + Luhn check digit (no new dependency). A
+missing/non-32-hex `eId` → 400 INVALID_ARGUMENT (a documented tightening of the
+upstream optional field); a malformed `sequenceNum` → 400. Per the CamaraSim
+house style the vendored spec swaps the upstream inline `openId`/Generic4xx for
+the shared `auth`/`errors.yaml` `$ref`s and exposes the full reserved error set
+(409/422/429 flagged as CamaraSim extensions). The three asynchronous lifecycle
+legs (`profileDownload`, `profileOperation`, `profileResultQuery`) are deferred.
+
 ## In progress (claimed this pass)
 
 _None._  <!-- agent: put the claimed item + run timestamp here, clear it when done -->
@@ -2728,6 +2749,24 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
         POLYGON query areas a documented cut. **Completes Dedicated Network — Areas
         vwip.**
 - [~] Other CAMARA APIs as capacity allows
+  - [~] eSIM Remote Management vwip (`/esim-remote-management/vwip`; CAMARA
+    eSimRemoteManagement `wip` — no released version, mounted at its canonical
+    `vwip` base path; OEM/eIM remote eUICC profile management, base "CMP"
+    request/response envelope):
+    - [x] `POST /profile/downloaded-list` (`profileList`,
+      `esim-remote-management:downloadedlist`) — the stateless profile-inventory
+      read. `data.eId` (32 hex) is the control plane (DESIGN §7): reserved error
+      suffix on its trailing three decimal digits → canonical CAMARA error (full
+      shared set; 409/422/429 flagged as CamaraSim extensions in the spec), else
+      `d % 4` → profile count (`…000`→empty eUICC, `…001`→1, `…002`→2, `…003`→3),
+      first profile enabled (eUICC single-active rule), rest disabled. `imei`
+      (15-digit) + per-profile `iccid` (20-digit, `89`-prefixed) derived
+      deterministically from the `eId` (self-contained FNV + Luhn, no new dep).
+      Missing/non-32-hex `eId` → 400 INVALID_ARGUMENT (documented tightening of
+      the upstream optional field); malformed `sequenceNum` → 400. Vendored spec
+      uses the shared `auth`/`errors.yaml` `$ref`s. `x-correlator` echoed.
+    - [ ] the async lifecycle legs (`profileDownload` / `profileOperation` /
+      `profileResultQuery`) — task-oriented, deferred (no live eUICC engine).
   - [~] Edge Application Management vwip (`/edge-application-management/vwip`;
     CAMARA EdgeApplicationManagement `wip` — no released version, mounted at its
     canonical `vwip` base path like the other unreleased EdgeCloud APIs; the
@@ -4025,6 +4064,28 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 ## Scan journal
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
+
+- 2026-08-14 — **new API: eSIM Remote Management vwip** (`/esim-remote-management/vwip`;
+  CAMARA eSimRemoteManagement `wip`). A prior survey found the planned backlog leaves
+  all deferred for real reasons (TLS sink → maintainer rustls decision; the rest → "no
+  live engine"), so this pass extends **coverage** instead: a genuinely unmounted,
+  public-spec CAMARA API. Verified against the CAMARA GitHub org first — Scam Signal is
+  private (GSMA), RainfallIntensity is an empty sandbox; eSimRemoteManagement has a real
+  published `esim-remote-management.yaml`. Implemented the simplest stateless leg,
+  `POST /profile/downloaded-list` (`profileList`, scope
+  `esim-remote-management:downloadedlist`): a base "CMP" envelope whose `data.eId`
+  (32 hex) is the control plane (DESIGN §7) — reserved suffix on its trailing three
+  decimal digits → canonical CAMARA error (full shared set, 409/422/429 marked CamaraSim
+  extensions per the upstream "non-exhaustive errors" note), else `d % 4` → installed
+  profile count (`…000`→empty, `…001`→1, `…002`→2, `…003`→3), first profile enabled
+  (eUICC single-active rule). `imei`/`iccid` derived deterministically from the `eId`
+  (self-contained FNV-1a + Luhn check digit — **no new dependency**). Missing/non-32-hex
+  `eId` or malformed `sequenceNum` → 400 INVALID_ARGUMENT. Vendored spec
+  (`specs/esim-remote-management/vwip/openapi.yaml`) in CamaraSim house style: shared
+  `auth`/`errors.yaml` `$ref`s, `x-camarasim-scenarios`, one path (the 3 async lifecycle
+  legs deferred). Registry + `apis.rs` wired. Tests: +17 (scenario units incl. Luhn
+  validity, all functional cases, validation, auth, correlator). `cargo test` 2271 green
+  (was 2254); `cargo build --release` succeeds. — binary: 3.8M (3885000 B, +24312 B)
 
 - 2026-08-14 — Click to Dial vwip: simulated **failed call progression** (the
   sibling backlog leaf to the previous pass's success progression). A `…002`

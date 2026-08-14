@@ -1,0 +1,298 @@
+# CamaraSim — eSIM Remote Management, API version vwip (CAMARA wip).
+#
+# Vendored from the CAMARA eSIM Remote Management API (eSimRemoteManagement,
+# work-in-progress — no released version yet, so mounted at its canonical `vwip`
+# base path like the other unreleased CAMARA APIs) and annotated with CamaraSim's
+# parameter-driven functional cases (docs/DESIGN.md §7, §9). Backed by
+# `src/apis/esim_remote_management/vwip.rs`; spec and code must not drift.
+#
+# This first slice serves only `POST /profile/downloaded-list` (operationId
+# `profileList`) — the stateless read leg that lists the eSIM profiles installed
+# on a device's eUICC, keyed by the device `eId`. The three lifecycle legs
+# (`profileDownload`, `profileOperation`, `profileResultQuery`) are asynchronous,
+# task-oriented operations and are not modelled yet.
+#
+# Per the CamaraSim house style the vendored upstream inline error responses and
+# `openId` security scheme are replaced with `$ref`s to the shared
+# `../../shared/errors.yaml` and `../../auth/openapi.yaml` fragments so the served
+# copy stays consistent with every other mounted API; the request/response
+# schemas are the upstream CAMARA schemas verbatim.
+openapi: 3.0.3
+info:
+  title: eSIM Remote Management
+  description: |
+    Provides eSIM-based remote management, letting device manufacturers (OEMs)
+    and ecosystem partners remotely manage the eSIM profiles installed on a
+    device's eUICC — downloading, activating, de-activating, deleting, and
+    querying them.
+
+    This is the CamaraSim reference double for the CAMARA eSIM Remote Management
+    API (work-in-progress). This slice models the **profile inventory query**:
+    given a device `eId`, return the profiles currently stored on that device's
+    eUICC (their `iccid` and enable status), plus the device `imei`. It requires
+    the `esim-remote-management:downloadedlist` scope.
+
+    ## Request / response envelope
+
+    Every operation wraps its payload in a base "CMP request" envelope
+    (`timestamp` / `sequenceNum` / `clientId` / `data`) and answers with a base
+    "CMP response" envelope carrying a `resultCode` (`B100000` = success),
+    `resultDesc`, the echoed `sequenceNum`, and a `data` payload. This is the
+    upstream API's own convention, kept verbatim.
+
+    ## Functional cases — the input is the control plane (docs/DESIGN.md §7)
+
+    The device `eId` (`data.eId`, 32 hex characters) is the control plane. Its
+    trailing three **decimal** digits (non-digit characters — the hex letters —
+    are skipped, mirroring Traffic Influence's hex `appId`) drive the case:
+
+    - **Reserved error suffix** — if those trailing three digits name a reserved
+      CAMARA status the endpoint answers with that canonical CAMARA error instead
+      of a result (shared convention — see the referenced `errors.yaml`): `…400`,
+      `…401`, `…403`, `…404`, `…409`, `…422`, `…429`, `…500`, `…503`.
+    - **Profile inventory** — otherwise the trailing three digits `d` set the
+      number of installed profiles (`d % 4`, so `…000` / no digits → an empty
+      eUICC, `…001` → 1, `…002` → 2, `…003` → 3). At most one profile is enabled
+      at a time (the eUICC rule): the first profile is enabled (`enableStatus: 1`),
+      the rest disabled (`0`). Each profile's `iccid` and the device `imei` are
+      derived deterministically from the `eId` (a stable FNV hash + a Luhn check
+      digit), so the same `eId` always returns the same inventory.
+
+    A `data.eId` that is absent or not 32 hex characters → `400 INVALID_ARGUMENT`
+    (CamaraSim requires the `eId` for the query — a documented tightening of the
+    upstream optional field).
+
+    Examples: `eId` `A1B2C3D4E5F600000000000000000001` → 1 enabled profile;
+    `…0000000000000000000000000000404` → `404 NOT_FOUND`.
+  version: wip
+  license:
+    name: Apache-2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0.html
+
+servers:
+  - url: "{apiRoot}/esim-remote-management/vwip"
+    variables:
+      apiRoot:
+        default: http://localhost:8080
+        description: API root, e.g. the CamaraSim base URL.
+
+paths:
+  /profile/downloaded-list:
+    post:
+      operationId: profileList
+      summary: Query downloaded profile list
+      description: |
+        Retrieve the list of eSIM profiles currently downloaded on the device's
+        eUICC — each profile's `iccid` and enable status — identified by the
+        device `eId`.
+
+        See the API description for the parameter-driven functional cases.
+      security:
+        - openId:
+            - esim-remote-management:downloadedlist
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BaseCmpReqEidProfileListReq"
+      responses:
+        "200":
+          description: The list of profiles installed on the device's eUICC.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BaseCmpRespEidProfileListResp"
+              examples:
+                oneEnabledProfile:
+                  summary: A device with one enabled profile
+                  value:
+                    resultCode: B100000
+                    resultDesc: Success
+                    sequenceNum: seq-0001
+                    data:
+                      imei: "356938035643809"
+                      eId: "A1B2C3D4E5F600000000000000000001"
+                      profiles:
+                        - iccid: "8931089011234567890"
+                          enableStatus: 1
+                emptyEuicc:
+                  summary: A device with no installed profiles
+                  value:
+                    resultCode: B100000
+                    resultDesc: Success
+                    data:
+                      imei: "356938035643809"
+                      eId: "A1B2C3D4E5F600000000000000000000"
+                      profiles: []
+        "400":
+          $ref: "../../shared/errors.yaml#/components/responses/InvalidArgument"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "409":
+          $ref: "../../shared/errors.yaml#/components/responses/Conflict"
+        "422":
+          $ref: "../../shared/errors.yaml#/components/responses/ServiceNotApplicable"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          The profile inventory is selected from the device `eId` (`data.eId`)
+          whose trailing three decimal digits drive the case (docs/DESIGN.md §7).
+          Reserved error suffixes come from the shared convention in errors.yaml.
+          Note: the canonical eSIM Remote Management spec declares
+          400/401/403/404/500/503 for this operation; CamaraSim exposes the full
+          shared reserved error set so every reserved case is reachable
+          (409/422/429 are CamaraSim extensions, sanctioned by the upstream spec's
+          own "error list is not exhaustive" note). The asynchronous lifecycle
+          operations (download / operation / result query) are not modelled yet.
+        cases:
+          - input: "`data.eId` ending in a reserved error suffix (e.g. …404)"
+            result: the canonical CAMARA error for that status
+          - input: "`data.eId` ending in …000 (or with no trailing decimal digits)"
+            result: "200 — an empty eUICC (profiles: [])"
+          - input: "`data.eId` ending in …001"
+            result: "200 — one enabled profile (enableStatus 1)"
+          - input: "`data.eId` ending in …002 / …003"
+            result: "200 — 2 / 3 profiles; the first enabled, the rest disabled"
+          - input: "`data.eId` absent or not 32 hex characters"
+            result: "400 INVALID_ARGUMENT"
+          - input: "a `sequenceNum` that violates its pattern"
+            result: "400 INVALID_ARGUMENT"
+
+components:
+  securitySchemes:
+    openId:
+      $ref: "../../auth/openapi.yaml#/components/securitySchemes/camaraOAuth"
+
+  parameters:
+    XCorrelator:
+      name: x-correlator
+      in: header
+      required: false
+      description: Correlation id for the request, echoed back on the response.
+      schema:
+        type: string
+
+  headers:
+    XCorrelator:
+      description: The `x-correlator` from the request, echoed if one was sent.
+      required: false
+      schema:
+        type: string
+
+  schemas:
+    BaseCmpReqEidProfileListReq:
+      type: object
+      description: Request body for querying the downloaded profile list.
+      properties:
+        timestamp:
+          type: string
+          format: date-time
+          maxLength: 64
+          description: >-
+            Request timestamp, RFC 3339 with a time zone. Accepted for fidelity;
+            not interpreted by CamaraSim.
+        sequenceNum:
+          type: string
+          pattern: '^[a-zA-Z0-9_\-]{1,64}$'
+          maxLength: 64
+          description: Sequence number for request tracking, echoed on the response.
+          example: seq-0001
+        clientId:
+          type: string
+          pattern: '^[a-zA-Z0-9_\-]{1,128}$'
+          maxLength: 128
+          description: Client identifier. Accepted for fidelity.
+        data:
+          $ref: "#/components/schemas/EidProfileListReq"
+
+    EidProfileListReq:
+      type: object
+      description: Data payload for the profile list request.
+      properties:
+        eId:
+          type: string
+          pattern: '^[A-Fa-f0-9]{32}$'
+          maxLength: 64
+          description: The device EID (eUICC identifier) to query profiles for.
+          example: "A1B2C3D4E5F600000000000000000001"
+
+    BaseCmpRespEidProfileListResp:
+      type: object
+      description: Response body for the profile list query.
+      properties:
+        resultCode:
+          type: string
+          pattern: '^B[0-9]{6}$'
+          maxLength: 32
+          description: "`B100000` — success; any other value — failure."
+          example: B100000
+        resultDesc:
+          type: string
+          pattern: '^[\s\S]{0,256}$'
+          maxLength: 256
+          description: Result description message.
+          example: Success
+        sequenceNum:
+          type: string
+          pattern: '^[a-zA-Z0-9_\-]{1,64}$'
+          maxLength: 64
+          description: The request's `sequenceNum`, echoed if one was supplied.
+          example: seq-0001
+        data:
+          $ref: "#/components/schemas/EidProfileListResp"
+
+    EidProfileListResp:
+      type: object
+      description: Data payload for the profile list response.
+      properties:
+        imei:
+          type: string
+          pattern: '^[0-9]{15}$'
+          maxLength: 32
+          description: The device IMEI, derived deterministically from the eId.
+          example: "356938035643809"
+        profiles:
+          type: array
+          maxItems: 100
+          description: The profiles installed on the device's eUICC.
+          items:
+            $ref: "#/components/schemas/ProfileInfo"
+        eId:
+          type: string
+          pattern: '^[A-Fa-f0-9]{32}$'
+          maxLength: 64
+          description: The device EID, echoed from the request.
+          example: "A1B2C3D4E5F600000000000000000001"
+
+    ProfileInfo:
+      type: object
+      description: Information about a single installed profile.
+      properties:
+        iccid:
+          type: string
+          pattern: '^[0-9]{19,20}$'
+          maxLength: 32
+          description: The profile's ICCID, derived deterministically from the eId.
+          example: "8931089011234567890"
+        enableStatus:
+          type: integer
+          format: int32
+          minimum: 0
+          maximum: 1
+          description: "Profile enable status: 0 — disabled, 1 — enabled."
+          example: 1
