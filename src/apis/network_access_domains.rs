@@ -11,9 +11,10 @@
 //!   yet, so mounted at its canonical `vwip` base path like Network Access Devices
 //!   and the other pre-1.0 wip APIs).
 //!
-//! This slice implements the read-only, provider-level
-//! `GET /trust-domains/capabilities` leg; the Services catalog and the stateful
-//! Trust Domain / device CRUD resources are later slices.
+//! Implemented so far (all read-only): the provider-level
+//! `GET /trust-domains/capabilities` leg and the `GET /services` catalog
+//! (`getServices`). The single-service `GET /services/{serviceId}` read and the
+//! stateful Trust Domain / device CRUD resources are later slices.
 
 pub mod vwip;
 

@@ -4214,6 +4214,29 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-14 — Network Access Domains vwip: added the **Services catalog** read
+  leg `GET /services` (`getServices`, scope `network-access-domains:services:read`)
+  — the second endpoint of the API and its cleanest remaining **stateless**,
+  non-spatial leg (phase discipline: stateless first). Verified the upstream
+  signature + the `ServiceList`/`Service`/`ServiceSite` schemas against the
+  canonical `code/modules/Services/{Services,ServiceSites}.yaml`. Unlike the
+  provider-fixed `getTrustDomainCapabilities`, this op is keyed to the
+  **authenticated identity**, so — mirroring the other subject-keyed reads — its
+  control plane is the **token subject** (DESIGN §7): a reserved error suffix on
+  the subject → canonical CAMARA error; else the subject's trailing three digits
+  `d` fix the `ServiceList` deterministically (`…000`/no digits → `200 []`, a list
+  never 404s; else `((d-1) % 3) + 1` services, 1–3), each carrying a deterministic
+  UUID-shaped `id` + `serviceSite` (SHA-256, distinct domain tags; **no new dep**,
+  reusing sha2). `serviceSite.location` (geo/address) omitted (optional in the
+  schema — documented cut). Spec: new `/services` path (op, 200 examples,
+  reserved-error responses, `x-camarasim-scenarios`) + `ServiceId`/`ServiceList`/
+  `Service`/`ServiceSite` schemas; refreshed header + `info.description` +
+  documented cuts. Single-service `GET /services/{serviceId}` + Trust Domain CRUD
+  remain later slices. Tests: +8 (2 units: catalog count from trailing digits,
+  per-service shape/determinism/UUID; 6 router integration: 200 two-service catalog,
+  200 empty `…000` list, `…404` reserved 404, wrong-scope 403, no-token 401,
+  correlator echo). `cargo test` 2425 green (was 2417); `cargo build --release`
+  succeeds. — binary: 4.0M (4121200 B, +12984 B)
 - 2026-08-14 — **new API: Network Access Domains vwip**
   (`/network-access-domains/vwip`; CAMARA NetworkAccessManagement / Network
   Access Domains, wip). A fresh survey confirmed the mounted set's remaining
