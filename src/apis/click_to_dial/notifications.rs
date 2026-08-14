@@ -22,10 +22,13 @@
 //!   `deleteSession` → `DELETE_REQUESTED` event (request-triggered, not from a
 //!   live engine).
 //!
-//! The *intermediate* lifecycle transitions
-//! (`callingCaller`/`callingCallee`/`connected`, and a spontaneous `failed`), the
+//! A **simulated successful progression** is also modelled: a `…001` `callee` line
+//! drives an ordered `callingCallee` → `connected` sequence after the create-time
+//! event, delivered off the request path by `super::vwip`'s `spawn_call_progression`
+//! via the awaited [`send`] (so the two steps keep their order on the wire). The
+//! remaining intermediate transitions (`callingCaller`, a spontaneous `failed`), the
 //! `callDuration`, and the `recordingResult` remain documented cuts (no live call
-//! progression; DESIGN §7, §11).
+//! engine; DESIGN §7, §11).
 //!
 //! ## Simulator constraints & documented cuts (shared with QoD / Session Insights)
 //!
@@ -189,6 +192,16 @@ pub fn spawn_delivery(sink: String, event: Value, auth: Option<String>) {
     tokio::spawn(async move {
         let _ = deliver(&sink, &event, auth.as_deref()).await;
     });
+}
+
+/// Await a single best-effort delivery of `event` to `sink`, dropping any
+/// transport error. Unlike [`spawn_delivery`] (which spawns an independent task),
+/// this is awaited, so a caller delivering an **ordered sequence** of events from
+/// one task keeps them in order on the wire — used by the simulated call
+/// progression ([`super::vwip`]'s `spawn_call_progression`), which must send
+/// `callingCallee` before `connected`.
+pub async fn send(sink: &str, event: &Value, auth: Option<&str>) {
+    let _ = deliver(sink, event, auth).await;
 }
 
 /// POST `event` to an `http://` `sink` as `application/cloudevents+json`.

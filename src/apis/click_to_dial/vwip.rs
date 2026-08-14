@@ -115,18 +115,22 @@
 //!   not real captured audio, and the recording is available as soon as the call
 //!   exists (the CAMARA precondition that the call session has *completed* is not
 //!   modelled — `status` transitions past `initiating` are a deferred slice).
-//! - **Notifications — the two request-triggered events.** A `createCall` that
-//!   supplies a `sink` delivers one create-time `status-changed` CloudEvent
-//!   reflecting the call's initial `initiating` state, and `terminateCall`
-//!   delivers a terminal one reflecting the `disconnected` state (with a `reason`);
-//!   see [`super::notifications`]. Both are `http://` sinks only, with the
-//!   ACCESSTOKEN `sinkCredential` bearer applied. The *intermediate* lifecycle
-//!   transitions (`callingCaller`/`callingCallee`/`connected`, a spontaneous
-//!   `failed`, `callDuration` / `recordingResult`) remain a deferred slice —
-//!   CamaraSim runs no live call engine (like QoD, which models create + delete
-//!   events but no mid-life stream).
+//! - **Notifications — the request-triggered events + simulated progression.** A
+//!   `createCall` that supplies a `sink` delivers one create-time `status-changed`
+//!   CloudEvent reflecting the call's initial `initiating` state, and
+//!   `terminateCall` delivers a terminal one reflecting the `disconnected` state
+//!   (with a `reason`); see [`super::notifications`]. Additionally, a `…001`
+//!   `callee` line requests a **simulated successful progression** — after the
+//!   create-time event the call advances `callingCallee` → `connected`, each
+//!   delivered off the request path by [`spawn_call_progression`] (mirroring QoD's
+//!   `…001` `NETWORK_TERMINATED` timer); a concurrent `terminateCall` halts it.
+//!   All callbacks are `http://` sinks only, with the ACCESSTOKEN `sinkCredential`
+//!   bearer / PLAIN Basic applied. The remaining intermediate transitions
+//!   (`callingCaller`, a spontaneous `failed`, `callDuration` / `recordingResult`)
+//!   and re-deriving the stored `Call.status` remain deferred — CamaraSim runs no
+//!   live call engine.
 
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::body::Bytes;
 use axum::extract::Path;
@@ -186,6 +190,24 @@ const NOT_AVAILABLE_TAIL: u16 = 0;
 /// The trailing-three-digit sentinel that marks a `callee` line as
 /// non-recordable (only relevant when `recordingEnabled` is `true`).
 const RECORDING_UNSUPPORTED_TAIL: u16 = 777;
+
+/// The trailing-three-digit sentinel on the `callee` line that requests a
+/// simulated **successful call progression**: after the create-time `initiating`
+/// event, the call advances `callingCallee` → `connected`, each step delivered as
+/// a `status-changed` CloudEvent to the call's `sink` (docs/DESIGN.md §7). Not a
+/// reserved *error* suffix, so it is free for this API's use; mirrors QoD's `…001`
+/// (`NETWORK_TERMINATED`) / geofencing's `…001` (`area-entered`) convention.
+const PROGRESSION_TAIL: u16 = 1;
+
+/// The ordered intermediate states delivered by [`spawn_call_progression`] after
+/// the create-time `initiating` event — the network reaching the callee, then the
+/// two parties connecting (both valid CAMARA `CallStatus` values).
+const PROGRESSION_STATES: [&str; 2] = ["callingCallee", "connected"];
+
+/// The fixed grace before each simulated progression step, so the create-time
+/// `initiating` event is observed first and the steps are spaced. Short — there is
+/// no real call to set up.
+const PROGRESSION_GRACE: Duration = Duration::from_millis(50);
 
 /// Routes for Click to Dial vwip, mounted at their canonical URLs.
 pub fn routes() -> Router {
@@ -360,10 +382,74 @@ async fn create_call(claims: Claims, headers: HeaderMap, body: Bytes) -> Respons
             &req.callee.number,
             INITIATING_STATE,
         );
-        notifications::spawn_delivery(sink.to_string(), event, auth);
+        notifications::spawn_delivery(sink.to_string(), event, auth.clone());
+
+        // A `…001` callee line additionally requests a simulated successful
+        // progression: after the create-time `initiating` event, the call
+        // advances `callingCallee` → `connected`, each delivered off the request
+        // path (docs/DESIGN.md §7). Only the happy path reaches here, so the
+        // callee tail is already known-good (no reserved-error / not-available /
+        // recording-unsupported line has this suffix).
+        if scenarios::trailing_three_digits(&req.callee.number) == Some(PROGRESSION_TAIL) {
+            spawn_call_progression(
+                id.clone(),
+                req.caller.number.clone(),
+                req.callee.number.clone(),
+                sink.to_string(),
+                auth,
+            );
+        }
     }
 
     with_correlator((StatusCode::CREATED, Json(call)).into_response(), &correlator)
+}
+
+/// Simulate a **successful call progression** for a call created with an `http://`
+/// `sink` and a `callee` line ending `…001` ([`PROGRESSION_TAIL`]).
+///
+/// A fire-and-forget timer (off the request path) delivers the ordered
+/// intermediate [`PROGRESSION_STATES`] (`callingCallee` → `connected`) as
+/// `status-changed` CloudEvents to the sink, each after a short
+/// [`PROGRESSION_GRACE`], modelling the network reaching the callee and the two
+/// parties connecting. This mirrors QoD's `spawn_network_termination` and
+/// geofencing's `spawn_movement` — CamaraSim has no live call engine, so a
+/// deterministic identifier tail drives the transition instead.
+///
+/// The steps are delivered **in order from a single task** ([`notifications::send`]
+/// is awaited, not spawned) so `callingCallee` precedes `connected` on the wire.
+/// Each step is delivered only while the call is still live: a concurrent
+/// `terminateCall` evicts the call and fires the terminal `disconnected` event, and
+/// the next progression step then finds the call gone and stops — so a terminated
+/// call never emits a later `connected`. The stored `Call.status` is **not**
+/// advanced (it stays `initiating`); with no live engine the progression is
+/// observable only through the delivered events — a documented cut mirroring
+/// Traffic Influence's un-re-derived `state` (docs/DESIGN.md §7, §11).
+fn spawn_call_progression(
+    call_id: String,
+    caller: String,
+    callee: String,
+    sink: String,
+    auth: Option<String>,
+) {
+    tokio::spawn(async move {
+        for state in PROGRESSION_STATES {
+            tokio::time::sleep(PROGRESSION_GRACE).await;
+            // Stop if a concurrent `terminateCall` already ended the call — its
+            // terminal `disconnected` event has fired; don't emit a later state.
+            if super::store::get(&call_id).is_none() {
+                return;
+            }
+            let event = notifications::status_changed_event(
+                notifications::new_event_id(),
+                rfc3339_utc(now_unix_secs()),
+                &call_id,
+                &caller,
+                &callee,
+                state,
+            );
+            notifications::send(&sink, &event, auth.as_deref()).await;
+        }
+    });
 }
 
 /// `GET /click-to-dial/vwip/calls/{callId}` — read a created call back
@@ -1592,6 +1678,94 @@ mod tests {
         let accepted =
             tokio::time::timeout(std::time::Duration::from_millis(400), listener.accept()).await;
         assert!(accepted.is_err(), "an errored create must not notify the sink");
+    }
+
+    // --- simulated call progression (…001 callee) --------------------------
+
+    #[tokio::test]
+    async fn a_001_callee_progresses_calling_callee_then_connected() {
+        // A `…001` callee line requests a simulated successful progression: after
+        // the create-time `initiating` event, the call advances `callingCallee`
+        // → `connected`, each delivered to the sink in order.
+        use tokio::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let sink = format!("http://{addr}/ctd-progress");
+
+        let body = format!(
+            r#"{{"caller":{{"number":"+123456789111"}},"callee":{{"number":"+123456789001"}},"sink":"{sink}"}}"#
+        );
+        let (status, _, created) = call_ok(&body).await;
+        assert_eq!(status, StatusCode::CREATED);
+        // The stored resource is created `initiating` (progression is not
+        // re-derived onto it — a documented cut).
+        assert_eq!(created["status"], "initiating");
+        let id = created["callId"].as_str().unwrap().to_string();
+
+        // Events arrive on separate connections, in order: initiating (create-time,
+        // immediate), then the two progression steps after their grace.
+        let (_, first) = read_one_event(&listener).await;
+        let (_, second) = read_one_event(&listener).await;
+        let (_, third) = read_one_event(&listener).await;
+        for e in [&first, &second, &third] {
+            assert_eq!(e["type"], notifications::EVENT_TYPE);
+            assert_eq!(e["data"]["callId"], json!(id));
+            assert_eq!(e["data"]["caller"]["number"], "+123456789111");
+            assert_eq!(e["data"]["callee"]["number"], "+123456789001");
+        }
+        assert_eq!(first["data"]["status"]["state"], "initiating");
+        assert_eq!(second["data"]["status"]["state"], "callingCallee");
+        assert_eq!(third["data"]["status"]["state"], "connected");
+    }
+
+    #[tokio::test]
+    async fn the_progression_callbacks_carry_the_sink_credential_bearer() {
+        // The ACCESSTOKEN sinkCredential authenticates every progression callback,
+        // not just the create-time event.
+        use tokio::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let sink = format!("http://{addr}/ctd-progress-auth");
+
+        // A distinct pair whose callee still ends `…001` (tail == PROGRESSION_TAIL).
+        let body = format!(
+            r#"{{"caller":{{"number":"+123456780111"}},"callee":{{"number":"+123456780001"}},"sink":"{sink}","sinkCredential":{{"credentialType":"ACCESSTOKEN","accessToken":"prog-secret","accessTokenType":"bearer"}}}}"#
+        );
+        let (status, _, _) = call_ok(&body).await;
+        assert_eq!(status, StatusCode::CREATED);
+
+        // initiating, then callingCallee, then connected — all bearer-authenticated.
+        for expected in ["initiating", "callingCallee", "connected"] {
+            let (head, event) = read_one_event(&listener).await;
+            assert!(
+                head.contains("Authorization: Bearer prog-secret\r\n"),
+                "progression callback carries the bearer ({expected}): {head}"
+            );
+            assert_eq!(event["data"]["status"]["state"], expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_non_001_happy_callee_fires_only_the_create_time_event() {
+        // A happy callee that does not end `…001` fires the single create-time
+        // event and no progression — a second callback never arrives.
+        use tokio::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let sink = format!("http://{addr}/ctd-no-progress");
+
+        let body = format!(
+            r#"{{"caller":{{"number":"+123456789111"}},"callee":{{"number":"+123456789026"}},"sink":"{sink}"}}"#
+        );
+        let (status, _, _) = call_ok(&body).await;
+        assert_eq!(status, StatusCode::CREATED);
+
+        let (_, first) = read_one_event(&listener).await;
+        assert_eq!(first["data"]["status"]["state"], "initiating");
+        // No progression: no second callback connection is attempted.
+        let accepted =
+            tokio::time::timeout(std::time::Duration::from_millis(400), listener.accept()).await;
+        assert!(accepted.is_err(), "a non-001 callee must fire no progression event");
     }
 
     // --- status-changed CloudEvents on `sink` (terminate-time event) -------

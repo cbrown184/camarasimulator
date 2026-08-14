@@ -1128,6 +1128,18 @@ mirroring the sibling `readNetwork`. The `207` multi-status form, the list/delet
 legs and the `/accesses/{accessId}/devices…` sub-resources remain documented cuts
 for later passes.
 
+**Click to Dial vwip** now models a **simulated successful call progression**: a
+`…001` `callee` line on a call created with an `http://` `sink` advances
+`callingCallee` → `connected` after the create-time `initiating` event, each
+delivered in order off the request path (`vwip::spawn_call_progression`, a
+fire-and-forget timer mirroring QoD's `…001` `NETWORK_TERMINATED` and geofencing's
+`spawn_movement`), with the ACCESSTOKEN Bearer / PLAIN Basic `sinkCredential`
+applied; a concurrent `terminateCall` halts it (store-presence guard, so a
+terminated call never emits a later `connected`). The stored `Call.status` stays
+`initiating` (no live call engine — a documented cut, mirroring Traffic Influence's
+un-re-derived `state`). The remaining transitions (`callingCaller`, a spontaneous
+`failed`, `callDuration`/`recordingResult`) stay deferred.
+
 ## In progress (claimed this pass)
 
 _None._  <!-- agent: put the claimed item + run timestamp here, clear it when done -->
@@ -2219,9 +2231,19 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
       now returns the removed `Call` so the participants can be read for the event.
       `http://` only (`https://`/no-sink → 204 with no event); exactly-once vs a
       concurrent terminate (atomic `remove`). No new dep.
-    - [ ] ongoing *intermediate* lifecycle transitions
-      (`callingCaller`/`callingCallee`/`connected`, a spontaneous `failed`, with
-      `callDuration`/`recordingResult`) — deferred (no live call engine).
+    - [~] *intermediate* lifecycle transitions (`callingCaller`/`callingCallee`/
+      `connected`, a spontaneous `failed`, with `callDuration`/`recordingResult`):
+      - [x] simulated **successful progression** — a `…001` `callee` line on a
+        call created with an `http://` `sink` advances `callingCallee` →
+        `connected` after the create-time `initiating` event, each delivered
+        in order off the request path (`vwip::spawn_call_progression`, mirroring
+        QoD's `…001` `NETWORK_TERMINATED` / geofencing's `spawn_movement`), with
+        the ACCESSTOKEN Bearer / PLAIN Basic `sinkCredential` applied; a concurrent
+        `terminateCall` halts it (guarded by store presence). The stored
+        `Call.status` is not advanced (no live engine — documented cut, mirroring
+        Traffic Influence's un-re-derived `state`).
+      - [ ] `callingCaller`, a spontaneous `failed`, `callDuration` /
+        `recordingResult` — still deferred (no live call engine).
     - [ ] TLS (`https://` sink) delivery (needs a rustls TLS client).
 - [x] Most Frequent Location vwip (`/most-frequent-location/vwip`; CAMARA
   MostFrequentLocation `wip` — no released version, mounted at its canonical
@@ -3988,6 +4010,33 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 ## Scan journal
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
+
+- 2026-08-14 — Click to Dial vwip: simulated **successful call progression** (a
+  genuine backlog leaf, not another contract-lint test — the prior pass's survey
+  flagged only `https://` TLS sink delivery as the *hard*-blocked item needing a
+  maintainer's rustls/binary-size decision; this intermediate-transition leaf is
+  faithfully modellable with the sim's established timer convention). A `…001`
+  `callee` line on a call created with an `http://` `sink` now advances
+  `callingCallee` → `connected` after the create-time `initiating` event, each
+  delivered **in order** off the request path by new `vwip::spawn_call_progression`
+  (a fire-and-forget `tokio` timer, guarded by store presence so a concurrent
+  `terminateCall` halts it — a terminated call never emits a later `connected`),
+  mirroring QoD's `…001` `NETWORK_TERMINATED` and geofencing's `spawn_movement`.
+  In-order delivery uses a new awaited `notifications::send` (vs the spawned
+  `spawn_delivery`). The ACCESSTOKEN Bearer / PLAIN Basic `sinkCredential` is
+  applied to every progression callback. The stored `Call.status` is **not**
+  advanced (no live call engine — a documented cut, mirroring Traffic Influence's
+  un-re-derived `state`); `callingCaller`, a spontaneous `failed`, and
+  `callDuration`/`recordingResult` stay deferred. No new dependency (raw-TCP
+  CloudEvents, unchanged). Spec: `specs/click-to-dial/vwip/openapi.yaml` — updated
+  the `statusChanged` callback summary, the documented-cuts prose, the `CallStatus`
+  / `StatusChangedEvent` / `CallEventData` descriptions, and added two
+  `x-camarasim-scenarios` cases (the `…001` progression + the terminate-halt);
+  the `CallStatus` enum already admitted `callingCallee`/`connected`. Tests: +3
+  (progression order + data; ACCESSTOKEN bearer on every progression callback;
+  a non-`001` happy callee fires only the create-time event, bounded timeout).
+  `cargo test` 2252 green (was 2249); `cargo build --release` succeeds. — binary:
+  3.7M (3858936 B, +6992 B)
 
 - 2026-08-14 — **backlog survey / decision needed (no code change).** Phases 0–5 are
   functionally complete: every mounted CAMARA API's endpoints are implemented, tested,
