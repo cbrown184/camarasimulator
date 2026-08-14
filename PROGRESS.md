@@ -3911,6 +3911,31 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     order; typeless/named-facet/example skips; a ≥30 agreeing-pair non-vacuous floor) so
     the contract can't pass vacuously. Verified true across all mounted specs (all 255
     numeric-facet occurrences on integer/number — no drift to fix) before asserting.
+  - a single-schema-`items` contract test (`src/registry.rs`
+    `every_items_declares_a_single_schema`) asserts every Schema Object `items:` a
+    mounted spec declares is a **single** Schema Object, not a sequence — the
+    OpenAPI 3.0.x rule that `items` describes every array element with one schema
+    (unlike JSON Schema / OAS 3.1, which admit the positional-tuple `items: [ … ]`
+    form). An `items:` whose value is a sequence (an inline flow `items: [ … ]` or a
+    block whose first child is a `- ` item) is an invalid document: a Redoc/Swagger/
+    codegen client expecting one element schema is handed a list it can't apply, so
+    the array's element type silently breaks where a caller reads/builds the payload.
+    The **exact structural mirror** of `every_composer_keyword_declares_a_sequence`
+    (`oneOf`/`anyOf`/`allOf` MUST be sequences; `items` MUST NOT be one) and
+    invisible to every existing test — `every_array_schema_declares_items` proves an
+    array *has* an `items`, never that the `items` it has is a single schema, and the
+    composer test inspects only the three composer keywords. A pure
+    `items_declared_as_a_sequence` extractor (no YAML dep; the inverted inline-`[` /
+    first-child-`-` detection of `composers_not_a_sequence`, line-leading `items:`
+    only so a property literally *named* `items` opens its own single-schema mapping
+    and is never flagged, and an ancestor-chain `example:`/`examples:` walk excludes a
+    JSON `items` array field in a payload) is unit-covered
+    (`items_single_schema_extraction_rules`: mapping-child / inline-`{…}` / `$ref`
+    single schemas pass; a block `- ` tuple and an inline `[ … ]` flagged in document
+    order; a named-`items` property and an example-payload `items:` skipped; plus a
+    ≥50 non-vacuous floor of block-form `items:` keys over all specs) so the contract
+    can't pass vacuously. Verified true (87 block-form `items:` across the mounted
+    specs, all single schemas — no drift to fix) before asserting.
   Full response-vs-schema validation still TODO (would need a YAML/JSON-Schema
   validator — a dependency trade-off, deferred).
 
@@ -3919,6 +3944,30 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 ## Scan journal
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
+
+- 2026-08-14 00:58Z — contract-harness: added a **single-schema-`items`** contract test
+  (`src/registry.rs` `every_items_declares_a_single_schema`) asserting every Schema Object
+  `items:` a mounted spec declares is a **single** Schema Object, not a sequence — the
+  OpenAPI 3.0.x rule that `items` describes every array element with one schema (unlike
+  JSON Schema / OAS 3.1's positional-tuple `items: [ … ]`). A sequence-valued `items` (an
+  inline flow `items: [ … ]` or a block whose first child is a `- ` item) is invalid: a
+  Redoc/Swagger/codegen client expecting one element schema is handed a list it can't apply,
+  so the array's element type silently breaks where a caller reads/builds the payload. The
+  exact structural mirror of `every_composer_keyword_declares_a_sequence` (`oneOf`/`anyOf`/
+  `allOf` MUST be sequences; `items` MUST NOT be one), invisible to
+  `every_array_schema_declares_items` (proves an array *has* items, never that they're a
+  single schema) and the composer test (only the three composer keywords). New pure
+  `items_declared_as_a_sequence` extractor (no YAML dep; the inverted inline-`[`/
+  first-child-`-` detection of `composers_not_a_sequence`, line-leading `items:` only so a
+  property named `items` opens its own single-schema mapping and is never flagged, plus an
+  ancestor-chain `example:`/`examples:` walk excluding a JSON `items` array field).
+  Unit-covered (`items_single_schema_extraction_rules`: mapping-child/inline-`{…}`/`$ref`
+  pass; block `- ` tuple + inline `[ … ]` flagged in document order `[36, 41]`; named-`items`
+  property + example-payload `items:` skipped; a ≥50 non-vacuous floor of block-form `items:`
+  keys). Verified true (87 block-form `items:` across all mounted specs, all single schemas —
+  no drift to fix). Tests: +2 (1 contract, 1 unit). `cargo test` 2245 green (was 2243);
+  `cargo build --release` succeeds. No new dep; binary unchanged (`#[cfg(test)]`-only).
+  — binary: 3.7M (3851944 B, +0 B)
 
 - 2026-08-13 — contract-harness: added a **numeric-facet↔numeric-type** contract test
   (`src/registry.rs` `every_numeric_facet_sits_on_a_numeric_type`) asserting that where a

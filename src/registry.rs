@@ -9198,6 +9198,222 @@ components:
         );
     }
 
+    /// Extract the 1-based line number of every `items:` a spec declares whose
+    /// value is a **sequence** — the invalid OpenAPI 3.0.x tuple form — without a
+    /// YAML dep.
+    ///
+    /// In OpenAPI 3.0.x a Schema Object's `items` MUST be a **single** Schema
+    /// Object describing every element of the array; unlike JSON Schema / OAS 3.1
+    /// it does NOT admit the positional-tuple `items: [ … ]` form. So an `items:`
+    /// whose value is a sequence — an inline flow `items: [ … ]`, or a block whose
+    /// first non-blank child is a `- ` item — is an invalid document: a
+    /// Redoc/Swagger/codegen client expecting one element schema is handed a list
+    /// it can't apply, so the array's element type silently breaks where a caller
+    /// reads or builds the payload.
+    ///
+    /// The exact structural mirror of `composers_not_a_sequence` (`oneOf`/`anyOf`/
+    /// `allOf` MUST be sequences; `items` MUST NOT be one) — the same inline-`[` /
+    /// first-child-`-` detection, inverted. Only an `items:` at the start of its
+    /// line is inspected, so a property literally *named* `items` (its value is a
+    /// Schema Object mapping, never a `- ` sequence) is never flagged; and an
+    /// `items:` appearing as data inside an `example:`/`examples:` payload (a JSON
+    /// field named `items` holding an array) is excluded by walking the ancestor
+    /// chain, mirroring `type_values_not_a_valid_type`.
+    fn items_declared_as_a_sequence(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        // True when line `i` (indent `c`) sits inside an `example:`/`examples:`
+        // payload — some enclosing container key up the indent ladder is
+        // `example`/`examples`.
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some((k, v)) = line.trim_start().split_once(':') else {
+                continue;
+            };
+            if k.trim() != "items" {
+                continue;
+            }
+            // Strip a trailing `# comment` from the value; what remains, trimmed,
+            // is the inline value (empty ⇒ the key opens a block).
+            let inline = v.split('#').next().unwrap_or(v).trim();
+            let is_sequence = if !inline.is_empty() {
+                // Inline value: only a flow sequence `[ … ]` is a tuple; a mapping
+                // `{ … }` or a `$ref` scalar is a single schema.
+                inline.starts_with('[')
+            } else {
+                // Block form: the first non-blank following line decides it — a
+                // `- ` sequence item at the key's own indent or deeper is a tuple;
+                // a mapping child (a single schema), or a dedent (an empty value,
+                // a different test's concern), is not.
+                let c = indent(line);
+                let mut seq = false;
+                let mut j = i + 1;
+                while j < lines.len() {
+                    let l = lines[j];
+                    if l.trim().is_empty() {
+                        j += 1;
+                        continue;
+                    }
+                    if indent(l) < c {
+                        break;
+                    }
+                    seq = l.trim_start().starts_with('-');
+                    break;
+                }
+                seq
+            };
+            if is_sequence && !inside_example(i, indent(line)) {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_items_declares_a_single_schema() {
+        // Contract-harness invariant (OpenAPI 3.0.x structural rule): every Schema
+        // Object `items:` a mounted spec declares MUST be a *single* Schema Object
+        // describing every element of the array — not a sequence. (OAS 3.0.x, unlike
+        // JSON Schema / OAS 3.1, does not admit the positional-tuple `items: [ … ]`
+        // form.) An `items:` whose value is a sequence — an inline flow
+        // `items: [ … ]` or a block whose first child is a `- ` item — is an invalid
+        // document: a Redoc/Swagger/codegen client expecting one element schema is
+        // handed a list it can't apply, so the array's element type silently breaks
+        // where a caller reads or builds the payload.
+        //
+        // The exact structural mirror of `every_composer_keyword_declares_a_sequence`
+        // (`oneOf`/`anyOf`/`allOf` MUST be sequences; `items` MUST NOT be one) and a
+        // live hazard in these vendored specs: a spec drafted or migrated with a 3.1
+        // idiom, or an `items` block pasted from a `oneOf`/`anyOf` sibling with its
+        // `- ` markers left in place, yields a tuple `items` no other test sees —
+        // `every_array_schema_declares_items` proves an array *has* an `items`, never
+        // that the `items` it has is a single schema, and the composer test inspects
+        // only the three composer keywords. Verified true across all mounted specs
+        // before asserting.
+        for api in APIS {
+            let bad = items_declared_as_a_sequence(api.body);
+            assert!(
+                bad.is_empty(),
+                "{} spec declares an `items:` whose value is a sequence (the invalid \
+                 OpenAPI 3.0.x tuple form; `items` must be a single schema) at \
+                 line(s): {:?}",
+                api.name,
+                bad
+            );
+        }
+    }
+
+    #[test]
+    fn items_single_schema_extraction_rules() {
+        // Unit-cover the `items_declared_as_a_sequence` extractor so the contract
+        // test above can't pass vacuously and its detection is pinned: an `items:`
+        // opening a mapping (a `type:` child) and an inline `{ … }`/`$ref` scalar
+        // are single schemas and pass; an `items:` opening a `- ` sequence (block
+        // form) and an inline flow `[ … ]` are the invalid tuple form and are
+        // flagged, in document order; a property literally *named* `items` (its
+        // value a Schema Object) and an `items:` inside an `example:` payload (a JSON
+        // array field) are never flagged.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    GoodBlock:
+      type: array
+      items:
+        type: string
+    GoodInlineRef:
+      type: array
+      items: { $ref: '#/components/schemas/GoodBlock' }
+    GoodNamedProperty:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            type: integer
+    WithExample:
+      type: object
+      example:
+        items:
+          - a
+          - b
+    BadBlockTuple:
+      type: array
+      items:
+        - type: string
+        - type: integer
+    BadInlineTuple:
+      type: array
+      items: [ { type: string }, { type: integer } ]
+";
+        // Flagged, in document order: `BadBlockTuple`'s `items` at line 36 (its first
+        // child is a `- ` sequence item — the 3.1 tuple form) and `BadInlineTuple`'s
+        // `items` at line 41 (an inline flow `[ … ]` sequence). Not flagged:
+        // `GoodBlock` (a mapping child), `GoodInlineRef` (an inline `{ … }` mapping),
+        // both `items:` under `GoodNamedProperty` (the property name and its real
+        // array item both open single-schema mappings), and the `items:` inside
+        // `WithExample`'s `example:` payload (example data, a `- ` list).
+        assert_eq!(items_declared_as_a_sequence(body), vec![36, 41]);
+
+        // Non-vacuous floor: across every registered spec every `items` is a single
+        // schema (the invariant the contract asserts), and the corpus declares many
+        // block-form `items` keys (every array-typed schema), so a broken extractor
+        // can't hide behind an empty scan. Count block-form `items:` keys with a
+        // detection independent of the extractor.
+        let mut items = 0usize;
+        for api in APIS {
+            assert!(
+                items_declared_as_a_sequence(api.body).is_empty(),
+                "{}: every `items` must be a single schema",
+                api.name
+            );
+            for line in api.body.lines() {
+                if line.trim() == "items:" {
+                    items += 1;
+                }
+            }
+        }
+        assert!(
+            items >= 50,
+            "expected many `items` keywords across specs, got {items}"
+        );
+    }
+
     /// Extract the 1-based line number of every Schema Object `type:` a spec
     /// declares whose scalar value names **no valid OpenAPI 3.0.x type** — without
     /// a YAML dep.
