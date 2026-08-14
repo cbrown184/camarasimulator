@@ -1,10 +1,15 @@
 //! In-Home Device Management **v1** (CAMARA InHomeDeviceManagement 1.0.0, sandbox).
 //!
-//! One endpoint so far:
+//! Endpoints:
 //! - `GET /in-home-device-management/v1/devices` — list the devices attached to
 //!   the household fixed-line network named by the required `ssid` query
 //!   parameter, optionally narrowed by `connectionStatus` (operationId
 //!   `listDevices`, scope `inhome.device.read`).
+//! - `GET /in-home-device-management/v1/devices/{deviceId}` — read a single
+//!   device of the household named by the required `ssid` query parameter, by its
+//!   `deviceId` (operationId `getDevice`, scope `inhome.device.read`). Stateless:
+//!   the roster is regenerated from the `ssid` and the matching device returned,
+//!   else `404 NOT_FOUND`.
 //!
 //! ## What it does
 //!
@@ -41,7 +46,7 @@
 //! devices; `ssid=Home-404` → `404 NOT_FOUND`; `ssid=Home-005&connectionStatus=blocked`
 //! → only the blocked devices of that household.
 
-use axum::extract::RawQuery;
+use axum::extract::{Path, RawQuery};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
@@ -57,7 +62,15 @@ const READ_SCOPE: &str = "inhome.device.read";
 
 /// Routes for In-Home Device Management v1, mounted at their canonical URLs.
 pub fn routes() -> Router {
-    Router::new().route("/in-home-device-management/v1/devices", get(list_devices))
+    Router::new()
+        .route(
+            "/in-home-device-management/v1/devices",
+            get(list_devices),
+        )
+        .route(
+            "/in-home-device-management/v1/devices/:device_id",
+            get(get_device),
+        )
 }
 
 /// The client device types CamaraSim rotates through for a household's attached
@@ -109,6 +122,93 @@ async fn list_devices(claims: Claims, headers: HeaderMap, RawQuery(query): RawQu
 
     let body = json!({ "total": devices.len(), "devices": devices });
     with_correlator((StatusCode::OK, Json(body)).into_response(), &correlator)
+}
+
+/// `GET /in-home-device-management/v1/devices/{deviceId}` — read a single device
+/// of a household by its id (`getDevice`).
+///
+/// A household is fully deterministic from its `ssid` (see [`household`]), so —
+/// like the sibling Network Access Devices `getNetworkAccessDevice` — this
+/// endpoint needs no store: it regenerates the `ssid`'s roster and returns the
+/// device whose `deviceId` matches the path parameter. The `ssid` query parameter
+/// is **required** (it names the household, upstream CAMARA `getDevice`).
+///
+/// Two control planes (docs/DESIGN.md §7):
+///
+/// 1. **Reserved error suffix (`ssid`).** A household-level plane, mirroring
+///    `listDevices`: if the `ssid`'s trailing three digits name a reserved CAMARA
+///    status, the endpoint answers that canonical error regardless of the id.
+/// 2. **The `deviceId` vs the household's roster.** A `deviceId` that belongs to
+///    the `ssid`'s deterministic roster → `200` with that `Device`; any other id
+///    (unknown, from another household, or malformed) → `404 NOT_FOUND`. The id is
+///    opaque to the caller (`dev-…`), so it is not itself a scenario plane.
+async fn get_device(
+    claims: Claims,
+    headers: HeaderMap,
+    Path(device_id): Path<String>,
+    RawQuery(query): RawQuery,
+) -> Response {
+    // Optional correlation header, echoed on every response (CAMARA Commonalities).
+    let correlator = headers.get("x-correlator").cloned();
+
+    // Endpoint authorisation: the token must carry this API's scope.
+    if let Err(e) = claims.require_scope(READ_SCOPE) {
+        return with_correlator(e.into_response(), &correlator);
+    }
+
+    // The `ssid` query parameter is required (it names the household).
+    let ssid = match parse_ssid(query.as_deref(), &correlator) {
+        Ok(s) => s,
+        Err(response) => return response,
+    };
+
+    // Error plane: a reserved trailing-three-digit suffix on the `ssid` selects a
+    // canonical CAMARA error (household-level, checked first — mirrors listDevices).
+    if let Some(err) = scenarios::reserved_error(&ssid) {
+        return with_correlator(err.into_response(), &correlator);
+    }
+
+    // Regenerate the household roster and look the id up. An id that is not one of
+    // this household's devices — unknown, another household's, or malformed — is a
+    // `404 NOT_FOUND` (there is no store to distinguish them).
+    match household(&ssid)
+        .into_iter()
+        .find(|d| d["deviceId"] == json!(device_id))
+    {
+        Some(device) => {
+            with_correlator((StatusCode::OK, Json(device)).into_response(), &correlator)
+        }
+        None => with_correlator(
+            CamaraError::not_found("No device found for the provided id on this household.")
+                .into_response(),
+            &correlator,
+        ),
+    }
+}
+
+/// Parse and validate the required `ssid` query parameter for a per-device
+/// operation. A missing or empty `ssid` → 400 `INVALID_ARGUMENT`. Other query
+/// parameters are ignored (Commonalities).
+fn parse_ssid(query: Option<&str>, correlator: &Option<HeaderValue>) -> Result<String, Response> {
+    #[derive(serde::Deserialize, Default)]
+    struct Raw {
+        ssid: Option<String>,
+    }
+
+    let raw: Raw = serde_urlencoded::from_str(query.unwrap_or("")).map_err(|_| {
+        invalid_argument(
+            "the query string is not valid application/x-www-form-urlencoded",
+            correlator,
+        )
+    })?;
+
+    match raw.ssid {
+        Some(s) if !s.is_empty() => Ok(s),
+        _ => Err(invalid_argument(
+            "`ssid` is required and must be a non-empty string.",
+            correlator,
+        )),
+    }
 }
 
 /// The validated `listDevices` query controls.
@@ -516,6 +616,137 @@ mod tests {
         assert_eq!(
             headers.get("x-correlator").and_then(|v| v.to_str().ok()),
             Some("corr-err")
+        );
+    }
+
+    // --- getDevice: GET /devices/{deviceId} --------------------------------
+
+    async fn get_one(
+        token: Option<&str>,
+        device_id: &str,
+        query: &str,
+        correlator: Option<&str>,
+    ) -> (StatusCode, HeaderMap, Value) {
+        let mut builder = Request::builder()
+            .method("GET")
+            .uri(format!(
+                "/in-home-device-management/v1/devices/{device_id}?{query}"
+            ))
+            .header("host", HOST);
+        if let Some(t) = token {
+            builder = builder.header("authorization", format!("Bearer {t}"));
+        }
+        if let Some(c) = correlator {
+            builder = builder.header("x-correlator", c);
+        }
+        let response = app()
+            .oneshot(builder.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let headers = response.headers().clone();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, headers, json)
+    }
+
+    async fn get_one_ok(device_id: &str, query: &str) -> (StatusCode, HeaderMap, Value) {
+        let token = mint_token(READ_SCOPE).await;
+        get_one(Some(&token), device_id, query, None).await
+    }
+
+    #[tokio::test]
+    async fn get_device_returns_the_matching_device() {
+        // Pick a real device out of a household roster, then read it back by id.
+        let roster = household("Home-005");
+        let target = &roster[2]; // a client device (the gateway is index 0)
+        let id = target["deviceId"].as_str().unwrap();
+
+        let (status, _, body) = get_one_ok(id, "ssid=Home-005").await;
+        assert_eq!(status, StatusCode::OK);
+        // A bare Device object (not the DeviceList wrapper), matching the roster.
+        assert_eq!(&body, target);
+        assert_eq!(body["ssid"], "Home-005");
+    }
+
+    #[tokio::test]
+    async fn get_device_gateway_is_readable() {
+        let roster = household("QuietHouse");
+        let id = roster[0]["deviceId"].as_str().unwrap();
+        let (status, _, body) = get_one_ok(id, "ssid=QuietHouse").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["infraDevice"], "modem");
+    }
+
+    #[tokio::test]
+    async fn get_device_unknown_id_is_404() {
+        let (status, _, body) = get_one_ok("dev-000000000000dead", "ssid=Home-005").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn get_device_from_another_household_is_404() {
+        // A valid id for Home-005, queried against a different household → 404.
+        let id = household("Home-005")[1]["deviceId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let (status, _, body) = get_one_ok(&id, "ssid=OtherHouse-007").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn get_device_missing_ssid_is_400() {
+        let (status, _, body) = get_one_ok("dev-abc", "").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "INVALID_ARGUMENT");
+    }
+
+    #[tokio::test]
+    async fn get_device_reserved_ssid_suffix_selects_a_canonical_camara_error() {
+        // The household-level error plane fires before the id lookup: …429 → 429,
+        // a status the id-not-found path can never produce.
+        let (status, _, body) = get_one_ok("dev-anything", "ssid=Home-429").await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(body["code"], "TOO_MANY_REQUESTS");
+    }
+
+    #[tokio::test]
+    async fn get_device_scope_and_auth_are_enforced() {
+        let id = household("Home-005")[0]["deviceId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // No token → 401.
+        let (status, _, body) = get_one(None, &id, "ssid=Home-005", None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["code"], "UNAUTHENTICATED");
+
+        // Token without the scope → 403.
+        let token = mint_token("some:other-scope").await;
+        let (status, _, body) = get_one(Some(&token), &id, "ssid=Home-005", None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["code"], "PERMISSION_DENIED");
+    }
+
+    #[tokio::test]
+    async fn get_device_echoes_the_correlator() {
+        let id = household("Home-005")[0]["deviceId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let token = mint_token(READ_SCOPE).await;
+        let (status, headers, _) =
+            get_one(Some(&token), &id, "ssid=Home-005", Some("corr-get")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-get")
         );
     }
 }

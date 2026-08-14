@@ -2989,8 +2989,20 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
       (`total` reflects it). Missing/empty `ssid` or unknown `connectionStatus`
       → 400 INVALID_ARGUMENT. Deterministic `deviceId`/`macAddress` (self-contained
       FNV-1a, no new dep). `x-correlator` echoed.
-    - [ ] the device-mutation legs (`getDevice`/`updateDevice`/`deleteDevice`/
-      `performDeviceAction`/`getDeviceNetworkHealth`) — a later stateful slice.
+    - [~] the per-device legs:
+      - [x] `GET /devices/{deviceId}` (`getDevice`, `inhome.device.read`) —
+        single-device read of the household named by the required `ssid` query
+        param, by `deviceId`. Implemented **statelessly** (no store, mirroring
+        Network Access Devices' `getNetworkAccessDevice`): the household roster is
+        regenerated from the `ssid` and the matching device returned. Two control
+        planes (DESIGN §7): the `ssid` reserved-error suffix → canonical CAMARA
+        error (household-level, checked first, mirroring `listDevices`); else the
+        `deviceId` vs the roster — a member id → `200` that `Device`, any other id
+        (unknown / other household / malformed) → `404 NOT_FOUND` (the opaque
+        `dev-…` id is not itself a plane). Missing/empty `ssid` → 400
+        INVALID_ARGUMENT. `x-correlator` echoed.
+      - [ ] `updateDevice` / `deleteDevice` / `performDeviceAction` /
+        `getDeviceNetworkHealth` — a later stateful slice.
 
 ## Cross-cutting (do alongside the item that needs it)
 - [~] `errors.rs`: base CAMARA error model done (`src/errors.rs`, `specs/shared/errors.yaml`); per-version catalogs still TODO (DESIGN §8)
@@ -4131,6 +4143,29 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 ## Scan journal
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
+
+- 2026-08-14 — In-Home Device Management v1: added the **`getDevice`** leg
+  (`GET /devices/{deviceId}`, scope `inhome.device.read`) — single-device read of
+  the household named by the required `ssid` query param. Confirmed the upstream
+  signature against the canonical CAMARA `InHomeDeviceManagement.yaml`
+  (`getDevice` = `GET /v1/devices/{deviceId}` with a **required `ssid` query
+  param** + `deviceId` path). Implemented **statelessly** — no store, mirroring
+  Network Access Devices' `getNetworkAccessDevice`: the household roster is
+  regenerated from the `ssid` (reusing the existing `household()` deriver) and the
+  device whose `deviceId` matches the path returned. Two control planes (DESIGN
+  §7): the `ssid` reserved-error suffix → canonical CAMARA error (household-level,
+  checked first, mirroring `listDevices`); else the `deviceId` vs the roster — a
+  member id → `200` that bare `Device`, any other id (unknown / other household /
+  malformed) → `404 NOT_FOUND`; missing/empty `ssid` → 400 INVALID_ARGUMENT.
+  New `parse_ssid` helper + `:device_id` route; **no new dependency**. Spec:
+  added the `/devices/{deviceId}` GET path to the vendored
+  `specs/in-home-device-management/v1/openapi.yaml` (shared `errors.yaml` `$ref`s,
+  `x-camarasim-scenarios`, a `Device` example) + updated the header comment.
+  Tests: +8 (matching-device read, gateway read, unknown-id 404, other-household
+  404, missing-ssid 400, reserved-suffix `…429` → canonical 429 before the id
+  lookup, scope/auth 403/401, correlator echo). `cargo test` 2352 green (was
+  2344); `cargo build --release` succeeds.
+  — binary: 3.9M (4009056 B, +9624 B)
 
 - 2026-08-14 — **new API: In-Home Device Management v1**
   (`/in-home-device-management/v1`; CAMARA InHomeDeviceManagement, sandbox). A

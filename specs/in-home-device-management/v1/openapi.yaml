@@ -6,9 +6,11 @@
 # functional cases (docs/DESIGN.md §7, §9). Backed by
 # `src/apis/in_home_device_management/v1.rs`; spec and code must not drift.
 #
-# CamaraSim implements the read-only inventory leg `GET /devices` (listDevices).
-# The device-mutation legs (getDevice / updateDevice / deleteDevice /
-# performDeviceAction / getDeviceNetworkHealth) are a later slice.
+# CamaraSim implements the read-only inventory legs `GET /devices` (listDevices)
+# and `GET /devices/{deviceId}` (getDevice — single-device read, stateless: the
+# household roster is regenerated from the `ssid` and the matching device
+# returned). The mutation legs (updateDevice / deleteDevice / performDeviceAction /
+# getDeviceNetworkHealth) are a later slice.
 openapi: 3.0.3
 info:
   title: In-Home Device Management
@@ -202,6 +204,116 @@ paths:
           - input: "&connectionStatus=<state>"
             result: "200 — the roster narrowed to devices in that state (total reflects it)"
           - input: missing or empty ssid, or unknown connectionStatus value
+            result: "400 INVALID_ARGUMENT"
+
+  /devices/{deviceId}:
+    get:
+      operationId: getDevice
+      summary: Read a single device of a household network
+      description: |
+        Reads a single device of the household named by the required `ssid`, by
+        its `deviceId`.
+
+        CamaraSim implements this **statelessly**, mirroring the sibling
+        `listDevices`: a household's roster is fully deterministic from its
+        `ssid`, so the endpoint regenerates that roster and returns the device
+        whose `deviceId` matches the path parameter. Two control planes
+        (docs/DESIGN.md §7): the `ssid`'s trailing three digits select a reserved
+        CAMARA error (household-level, checked first, exactly as `listDevices`);
+        otherwise the `deviceId` is matched against the household's roster — a
+        member id → `200` with that `Device`, any other id (unknown, from another
+        household, or malformed) → `404 NOT_FOUND`. The `deviceId` is opaque
+        (`dev-…`), so it is not itself a scenario plane.
+      security:
+        - openId:
+            - inhome.device.read
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+        - name: deviceId
+          in: path
+          required: true
+          description: The `deviceId` of the device to read (from `listDevices`).
+          schema:
+            type: string
+          example: dev-a1b2c3d4e5f60718
+        - name: ssid
+          in: query
+          required: true
+          description: SSID of the household fixed-line network the device is on.
+          schema:
+            type: string
+            minLength: 1
+          example: Home-005
+      responses:
+        "200":
+          description: The requested device.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Device"
+              examples:
+                clientDevice:
+                  summary: A client device of the household
+                  value:
+                    deviceId: dev-0f1e2d3c4b5a6978
+                    ssid: Home-005
+                    deviceName: Mobile-1
+                    deviceType: mobile
+                    macAddress: "02:aa:bb:cc:dd:ee"
+                    ipAddress: "192.168.1.20"
+                    connectionStatus: connected
+                    blocked: false
+                    paused: false
+                    interfaceType: wifi
+        "400":
+          description: |
+            400 — invalid request. CamaraSim returns `INVALID_ARGUMENT` for a
+            missing or empty `ssid`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InHomeError"
+              examples:
+                invalidArgument:
+                  summary: Missing `ssid` query parameter
+                  value:
+                    status: 400
+                    code: INVALID_ARGUMENT
+                    message: "`ssid` is required and must be a non-empty string."
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "409":
+          $ref: "../../shared/errors.yaml#/components/responses/Conflict"
+        "422":
+          $ref: "../../shared/errors.yaml#/components/responses/ServiceNotApplicable"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          Result selected from the `ssid` identifier and the `deviceId` path
+          parameter (docs/DESIGN.md §7). The `ssid`'s trailing three digits select
+          a reserved CAMARA error (checked first, as `listDevices`); otherwise the
+          `deviceId` is matched against the household's deterministically-generated
+          roster.
+        cases:
+          - input: ssid ending in a reserved error suffix (e.g. …404, …429)
+            result: the canonical CAMARA error for that status
+          - input: "deviceId that is a member of the ssid's roster"
+            result: "200 — that Device object"
+          - input: "deviceId not in the ssid's roster (unknown / other household / malformed)"
+            result: "404 NOT_FOUND"
+          - input: missing or empty ssid
             result: "400 INVALID_ARGUMENT"
 
 components:
