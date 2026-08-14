@@ -16,6 +16,13 @@
 //!   `getDevice`: the roster is regenerated from the `ssid`, the matching device
 //!   looked up, and a deterministic [`DeviceNetworkHealth`] derived from it, else
 //!   `404 NOT_FOUND`.
+//! - `POST /in-home-device-management/v1/devices/{deviceId}/actions/{actionId}` —
+//!   perform a network-access action (only `schedule-access` is defined upstream)
+//!   on a household device (operationId `performDeviceAction`, scope
+//!   `inhome.device.write`). Stateless synchronous acknowledgement (mirroring the
+//!   eSIM `profileOperation` legs): nothing is persisted; a `connected` device
+//!   reports `status: "applied"`, an offline one `status: "accepted"`, else the
+//!   `ssid`/`deviceId` planes give the canonical error / `404 NOT_FOUND`.
 //!
 //! ## What it does
 //!
@@ -54,10 +61,11 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use axum::body::Bytes;
 use axum::extract::{Path, RawQuery};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde_json::{json, Value};
 
@@ -65,8 +73,19 @@ use crate::auth::verify::Claims;
 use crate::errors::CamaraError;
 use crate::scenarios;
 
-/// The OAuth2 scope `listDevices` requires (CAMARA InHomeDeviceManagement 1.0.0).
+/// The OAuth2 scope the read operations require (CAMARA InHomeDeviceManagement 1.0.0).
 const READ_SCOPE: &str = "inhome.device.read";
+
+/// The OAuth2 scope the mutating operations require (`performDeviceAction`, and the
+/// as-yet-unmounted `updateDevice`/`deleteDevice`).
+const WRITE_SCOPE: &str = "inhome.device.write";
+
+/// The `actionId` path values `performDeviceAction` accepts (CAMARA enum). Only
+/// `schedule-access` is defined upstream today.
+const ACTION_IDS: [&str; 1] = ["schedule-access"];
+
+/// The recurrence values a `scheduleAccess` window accepts (CAMARA `frequency` enum).
+const FREQUENCIES: [&str; 4] = ["once", "daily", "weekdays", "weekends"];
 
 /// Routes for In-Home Device Management v1, mounted at their canonical URLs.
 pub fn routes() -> Router {
@@ -82,6 +101,10 @@ pub fn routes() -> Router {
         .route(
             "/in-home-device-management/v1/devices/:device_id/network-health",
             get(get_device_network_health),
+        )
+        .route(
+            "/in-home-device-management/v1/devices/:device_id/actions/:action_id",
+            post(perform_device_action),
         )
 }
 
@@ -265,6 +288,174 @@ async fn get_device_network_health(
             &correlator,
         ),
     }
+}
+
+/// `POST /in-home-device-management/v1/devices/{deviceId}/actions/{actionId}` —
+/// perform a network-access action on a household device (`performDeviceAction`).
+///
+/// The only action CAMARA defines today is `schedule-access` (schedule an internet
+/// access window on a device, e.g. parental controls). CamaraSim has no live home
+/// network, so — like the eSIM `profileOperation`/`profileDownload` legs — the
+/// action is modelled as a **stateless synchronous acknowledgement**: the household
+/// roster is regenerated from the body's `ssid` ([`household`]), the addressed
+/// `deviceId` looked up, and a `DeviceActionResponse` returned. Nothing is
+/// persisted (there is no schedule store), so a repeated call is idempotent.
+///
+/// Three control planes (docs/DESIGN.md §7):
+///
+/// 1. **Reserved error suffix (`ssid`).** A household-level plane, checked first
+///    (mirrors `getDevice`): if the `ssid`'s trailing three digits name a reserved
+///    CAMARA status, the endpoint answers that canonical error — this is how the
+///    `409 CONFLICT` case in the upstream error set is reached (`ssid=…409`).
+/// 2. **The `deviceId` vs the household's roster.** A member id → `201`; any other
+///    id (unknown, another household's, or malformed) → `404 NOT_FOUND`.
+/// 3. **The matched device's `connectionStatus`.** A `connected` device applies the
+///    schedule immediately → `status: "applied"` with an `appliedAt` timestamp; a
+///    device that is offline/paused/blocked can only queue it → `status:
+///    "accepted"` (no `appliedAt`, since it has not taken effect yet).
+///
+/// The generated `actionId` is a stable, opaque token derived from the device and
+/// the action, so a caller can reproduce it from the inputs.
+async fn perform_device_action(
+    claims: Claims,
+    headers: HeaderMap,
+    Path((device_id, action_id)): Path<(String, String)>,
+    body: Bytes,
+) -> Response {
+    // Optional correlation header, echoed on every response (CAMARA Commonalities).
+    let correlator = headers.get("x-correlator").cloned();
+
+    // Endpoint authorisation: the token must carry this API's write scope.
+    if let Err(e) = claims.require_scope(WRITE_SCOPE) {
+        return with_correlator(e.into_response(), &correlator);
+    }
+
+    // Parse and validate the request body (`ssid` required; `scheduleAccess` shape).
+    let ssid = match parse_action_body(&body, &correlator) {
+        Ok(s) => s,
+        Err(response) => return response,
+    };
+
+    // The `actionId` path segment must name a supported action.
+    if !ACTION_IDS.contains(&action_id.as_str()) {
+        return invalid_argument(
+            "`actionId` must be one of: schedule-access.",
+            &correlator,
+        );
+    }
+
+    // Error plane: a reserved trailing-three-digit suffix on the `ssid` selects a
+    // canonical CAMARA error (household-level, checked first — mirrors getDevice).
+    if let Some(err) = scenarios::reserved_error(&ssid) {
+        return with_correlator(err.into_response(), &correlator);
+    }
+
+    // Regenerate the household roster and look the id up; an id that is not one of
+    // this household's devices is a `404 NOT_FOUND`.
+    let device = match household(&ssid)
+        .into_iter()
+        .find(|d| d["deviceId"] == json!(device_id))
+    {
+        Some(device) => device,
+        None => {
+            return with_correlator(
+                CamaraError::not_found("No device found for the provided id on this household.")
+                    .into_response(),
+                &correlator,
+            )
+        }
+    };
+
+    // A connected device applies the action now; an offline one only queues it.
+    let applied = device["connectionStatus"] == "connected";
+    let mut response = json!({
+        "actionId": action_id_token(&device_id, &action_id),
+        "deviceId": device_id,
+        "actionType": action_id,
+        "status": if applied { "applied" } else { "accepted" },
+    });
+    if applied {
+        response
+            .as_object_mut()
+            .expect("action response is a JSON object")
+            .insert("appliedAt".into(), json!(rfc3339_utc(now_unix_secs())));
+    }
+
+    with_correlator((StatusCode::CREATED, Json(response)).into_response(), &correlator)
+}
+
+/// Parse and validate a `performDeviceAction` request body. Returns the household
+/// `ssid` on success, or a `400 INVALID_ARGUMENT` response on any problem:
+/// non-JSON, an unknown field, a missing/empty `ssid`, or a `scheduleAccess` that
+/// is present but malformed (missing/empty `from`/`to`, or a `frequency` outside
+/// the CAMARA enum).
+fn parse_action_body(body: &Bytes, correlator: &Option<HeaderValue>) -> Result<String, Response> {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct ScheduleAccess {
+        from: Option<String>,
+        to: Option<String>,
+        frequency: Option<String>,
+    }
+
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Raw {
+        ssid: Option<String>,
+        #[serde(rename = "scheduleAccess")]
+        schedule_access: Option<ScheduleAccess>,
+    }
+
+    let raw: Raw = serde_json::from_slice(body).map_err(|e| {
+        invalid_argument(
+            &format!("the request body is not valid JSON for this operation: {e}"),
+            correlator,
+        )
+    })?;
+
+    let ssid = match raw.ssid {
+        Some(s) if !s.is_empty() => s,
+        _ => {
+            return Err(invalid_argument(
+                "`ssid` is required and must be a non-empty string.",
+                correlator,
+            ))
+        }
+    };
+
+    // `scheduleAccess` is optional, but when present its window must be complete.
+    if let Some(sa) = raw.schedule_access {
+        if !sa.from.as_deref().is_some_and(|s| !s.is_empty()) {
+            return Err(invalid_argument(
+                "`scheduleAccess.from` is required and must be a non-empty date-time.",
+                correlator,
+            ));
+        }
+        if !sa.to.as_deref().is_some_and(|s| !s.is_empty()) {
+            return Err(invalid_argument(
+                "`scheduleAccess.to` is required and must be a non-empty date-time.",
+                correlator,
+            ));
+        }
+        match sa.frequency.as_deref() {
+            Some(f) if FREQUENCIES.contains(&f) => {}
+            _ => {
+                return Err(invalid_argument(
+                    "`scheduleAccess.frequency` is required and must be one of: once, daily, weekdays, weekends.",
+                    correlator,
+                ))
+            }
+        }
+    }
+
+    Ok(ssid)
+}
+
+/// A stable, opaque identifier for a performed action, derived from the target
+/// device and the action name (FNV-1a, no dependency). Deterministic so a caller
+/// can reproduce it from the inputs.
+fn action_id_token(device_id: &str, action: &str) -> String {
+    format!("act-{:016x}", fnv1a(&format!("{device_id}:{action}"), 0, 0x04))
 }
 
 /// Parse and validate the required `ssid` query parameter for a per-device
@@ -1106,6 +1297,207 @@ mod tests {
         assert_eq!(
             headers.get("x-correlator").and_then(|v| v.to_str().ok()),
             Some("corr-nh")
+        );
+    }
+
+    // --- performDeviceAction: POST /devices/{deviceId}/actions/{actionId} ----
+
+    #[test]
+    fn action_id_token_is_deterministic_and_opaque() {
+        let a = action_id_token("dev-1234", "schedule-access");
+        let b = action_id_token("dev-1234", "schedule-access");
+        assert_eq!(a, b, "same inputs → same token");
+        assert!(a.starts_with("act-"));
+        // A different device yields a different action id.
+        assert_ne!(a, action_id_token("dev-5678", "schedule-access"));
+    }
+
+    async fn perform(
+        token: Option<&str>,
+        device_id: &str,
+        action_id: &str,
+        body: &str,
+        correlator: Option<&str>,
+    ) -> (StatusCode, HeaderMap, Value) {
+        let mut builder = Request::builder()
+            .method("POST")
+            .uri(format!(
+                "/in-home-device-management/v1/devices/{device_id}/actions/{action_id}"
+            ))
+            .header("host", HOST)
+            .header("content-type", "application/json");
+        if let Some(t) = token {
+            builder = builder.header("authorization", format!("Bearer {t}"));
+        }
+        if let Some(c) = correlator {
+            builder = builder.header("x-correlator", c);
+        }
+        let response = app()
+            .oneshot(builder.body(Body::from(body.to_string())).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let headers = response.headers().clone();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, headers, json)
+    }
+
+    async fn perform_ok(
+        device_id: &str,
+        action_id: &str,
+        body: &str,
+    ) -> (StatusCode, HeaderMap, Value) {
+        let token = mint_token(WRITE_SCOPE).await;
+        perform(Some(&token), device_id, action_id, body, None).await
+    }
+
+    /// The first roster device whose `connectionStatus` matches `want`.
+    fn device_with_status(ssid: &str, want: &str) -> String {
+        household(ssid)
+            .into_iter()
+            .find(|d| d["connectionStatus"] == want)
+            .unwrap_or_else(|| panic!("{ssid} has no {want} device"))["deviceId"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    }
+
+    #[tokio::test]
+    async fn perform_action_on_connected_device_is_applied() {
+        // The gateway is always connected → the action applies immediately.
+        let id = device_with_status("Home-005", "connected");
+        let (status, _, body) =
+            perform_ok(&id, "schedule-access", r#"{"ssid":"Home-005"}"#).await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(body["deviceId"], id);
+        assert_eq!(body["actionType"], "schedule-access");
+        assert_eq!(body["status"], "applied");
+        assert!(body["actionId"].as_str().unwrap().starts_with("act-"));
+        // An applied action carries the timestamp at which it took effect.
+        assert!(body["appliedAt"].as_str().unwrap().ends_with('Z'));
+    }
+
+    #[tokio::test]
+    async fn perform_action_on_offline_device_is_accepted() {
+        // Home-005 has a blocked client (see STATUS_CYCLE) → the action is only queued.
+        let id = device_with_status("Home-005", "blocked");
+        let (status, _, body) = perform_ok(
+            &id,
+            "schedule-access",
+            r#"{"ssid":"Home-005","scheduleAccess":{"from":"2026-06-13T22:00:00Z","to":"2026-06-14T07:00:00Z","frequency":"daily"}}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(body["status"], "accepted");
+        // A queued (not-yet-applied) action reports no appliedAt.
+        assert!(body.get("appliedAt").is_none());
+    }
+
+    #[tokio::test]
+    async fn perform_action_unknown_device_is_404() {
+        let (status, _, body) =
+            perform_ok("dev-000000000000dead", "schedule-access", r#"{"ssid":"Home-005"}"#).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn perform_action_unknown_action_id_is_400() {
+        let id = device_with_status("Home-005", "connected");
+        let (status, _, body) = perform_ok(&id, "reboot", r#"{"ssid":"Home-005"}"#).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "INVALID_ARGUMENT");
+    }
+
+    #[tokio::test]
+    async fn perform_action_missing_ssid_is_400() {
+        let (status, _, body) = perform_ok("dev-abc", "schedule-access", r#"{}"#).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "INVALID_ARGUMENT");
+    }
+
+    #[tokio::test]
+    async fn perform_action_incomplete_schedule_window_is_400() {
+        // `scheduleAccess` present but missing `to` → 400.
+        let id = device_with_status("Home-005", "connected");
+        let (status, _, body) = perform_ok(
+            &id,
+            "schedule-access",
+            r#"{"ssid":"Home-005","scheduleAccess":{"from":"2026-06-13T22:00:00Z","frequency":"daily"}}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "INVALID_ARGUMENT");
+    }
+
+    #[tokio::test]
+    async fn perform_action_bad_frequency_is_400() {
+        let id = device_with_status("Home-005", "connected");
+        let (status, _, body) = perform_ok(
+            &id,
+            "schedule-access",
+            r#"{"ssid":"Home-005","scheduleAccess":{"from":"2026-06-13T22:00:00Z","to":"2026-06-14T07:00:00Z","frequency":"hourly"}}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "INVALID_ARGUMENT");
+    }
+
+    #[tokio::test]
+    async fn perform_action_unknown_field_is_400() {
+        let id = device_with_status("Home-005", "connected");
+        let (status, _, body) =
+            perform_ok(&id, "schedule-access", r#"{"ssid":"Home-005","bogus":1}"#).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "INVALID_ARGUMENT");
+    }
+
+    #[tokio::test]
+    async fn perform_action_reserved_ssid_suffix_selects_a_canonical_camara_error() {
+        // The household-level error plane fires before the id lookup; …409 is how the
+        // upstream CONFLICT case in the error set is reached.
+        let (status, _, body) =
+            perform_ok("dev-anything", "schedule-access", r#"{"ssid":"Home-409"}"#).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["code"], "CONFLICT");
+    }
+
+    #[tokio::test]
+    async fn perform_action_scope_and_auth_are_enforced() {
+        let id = device_with_status("Home-005", "connected");
+        let body = r#"{"ssid":"Home-005"}"#;
+
+        // No token → 401.
+        let (status, _, b) = perform(None, &id, "schedule-access", body, None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(b["code"], "UNAUTHENTICATED");
+
+        // The read scope is not enough — this is a write operation → 403.
+        let read = mint_token(READ_SCOPE).await;
+        let (status, _, b) = perform(Some(&read), &id, "schedule-access", body, None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(b["code"], "PERMISSION_DENIED");
+    }
+
+    #[tokio::test]
+    async fn perform_action_echoes_the_correlator() {
+        let id = device_with_status("Home-005", "connected");
+        let token = mint_token(WRITE_SCOPE).await;
+        let (status, headers, _) = perform(
+            Some(&token),
+            &id,
+            "schedule-access",
+            r#"{"ssid":"Home-005"}"#,
+            Some("corr-act"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-act")
         );
     }
 }

@@ -3013,8 +3013,22 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
         band/`rssiDbm`/`wifiCompatibility`/`maxPhyRateMbps`, and a blocked/
         disconnected device or a weak signal (< −75 dBm) → `networkCongestion:
         red`. `measuredAt` = now (self-contained RFC 3339 formatter, no new dep).
-      - [ ] `updateDevice` / `deleteDevice` / `performDeviceAction` — a later
-        stateful slice.
+      - [x] `POST /devices/{deviceId}/actions/{actionId}` (`performDeviceAction`,
+        `inhome.device.write`) — perform a network-access action (only
+        `schedule-access` is defined upstream). Modelled as a **stateless
+        synchronous acknowledgement** (like the eSIM `profileOperation` legs):
+        nothing persisted, so a repeat is idempotent. Three control planes
+        (DESIGN §7): the `ssid` reserved-error suffix → canonical CAMARA error
+        (household-level, checked first — this is how the upstream 409 CONFLICT is
+        reached, `…409`); the `deviceId` vs the roster (member → 201, else 404);
+        and the matched device's `connectionStatus` — a `connected` device →
+        `status: applied` (with `appliedAt`), an offline/paused/blocked one →
+        `status: accepted` (no `appliedAt`). `scheduleAccess` (optional) is
+        validated when present (`from`/`to`/`frequency` enum); unknown `actionId`
+        or a malformed body → 400 INVALID_ARGUMENT. Opaque, deterministic
+        `actionId` token (reuses the module's FNV; no new dep).
+      - [ ] `updateDevice` / `deleteDevice` — a later stateful slice (both need a
+        device-mutation store).
 
 ## Cross-cutting (do alongside the item that needs it)
 - [~] `errors.rs`: base CAMARA error model done (`src/errors.rs`, `specs/shared/errors.yaml`); per-version catalogs still TODO (DESIGN §8)
@@ -4156,6 +4170,32 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-14 — In-Home Device Management v1: added the **`performDeviceAction`**
+  leg (`POST /devices/{deviceId}/actions/{actionId}`, scope `inhome.device.write`)
+  — the first *write* leg of this API. Confirmed the upstream signature against the
+  canonical CAMARA `InHomeDeviceManagement.yaml`: path enum `actionId:
+  [schedule-access]`, `DeviceActionRequest{ssid*, scheduleAccess{from*,to*,
+  frequency* [once|daily|weekdays|weekends]}}`, `201 DeviceActionResponse{actionId*,
+  deviceId*, actionType* [schedule-access], status* [accepted|applied], appliedAt}`.
+  Modelled as a **stateless synchronous acknowledgement** (mirroring the eSIM
+  `profileOperation` legs — no store, so a repeat is idempotent): regenerate the
+  `ssid` roster, look up the `deviceId`, acknowledge. Three control planes
+  (DESIGN §7): `ssid` reserved-error suffix → canonical CAMARA error (household-
+  level, checked first — `…409` reaches the upstream CONFLICT case); `deviceId` vs
+  roster (member → 201, else 404); and the matched device's `connectionStatus` — a
+  `connected` device → `status: applied` (+`appliedAt`), an offline/paused/blocked
+  one → `status: accepted` (no `appliedAt`). Optional `scheduleAccess` validated
+  when present (`from`/`to` non-empty, `frequency` enum); unknown `actionId`,
+  unknown field, missing/empty `ssid`, or a malformed window → 400 INVALID_ARGUMENT.
+  Opaque deterministic `actionId` token reuses the module's FNV — **no new dep**.
+  Spec: new `POST /devices/{deviceId}/actions/{actionId}` path +
+  `ScheduleAccess`/`DeviceActionRequest`/`DeviceActionResponse` schemas +
+  `x-camarasim-scenarios` + two 201 examples; header + mutation-legs note updated.
+  Tests: +12 (applied vs accepted, schedule body, unknown-device 404, unknown-
+  actionId 400, missing-ssid 400, incomplete window 400, bad frequency 400,
+  unknown-field 400, reserved `…409` → CONFLICT, write-scope isolation vs read /
+  no-token, correlator, + a deterministic action-id unit). `cargo test` 2374 green
+  (was 2362); `cargo build --release` succeeds. — binary: 3.9M (4048320 B, +21736 B)
 - 2026-08-14 — In-Home Device Management v1: added the **`getDeviceNetworkHealth`**
   leg (`GET /devices/{deviceId}/network-health`, scope `inhome.device.read`) —
   the matched device's network-health telemetry. Confirmed the upstream signature
