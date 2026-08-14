@@ -2974,7 +2974,7 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
         success → 200 `AppDeploymentInfo` (appDeploymentId unchanged, appInstances
         re-derived per effective zone). New `deployment_store::update` (atomic
         check-and-replace). No new dep. **Completes the deployments resource.**
-  - [~] In-Home Device Management v1 (`/in-home-device-management/v1`; CAMARA
+  - [x] In-Home Device Management v1 (`/in-home-device-management/v1`; CAMARA
     InHomeDeviceManagement 1.0.0, sandbox; consumer home-LAN device inventory —
     distinct from the network-side Home Devices QoD):
     - [x] `GET /devices` (`listDevices`, `inhome.device.read`) — stateless,
@@ -2989,7 +2989,7 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
       (`total` reflects it). Missing/empty `ssid` or unknown `connectionStatus`
       → 400 INVALID_ARGUMENT. Deterministic `deviceId`/`macAddress` (self-contained
       FNV-1a, no new dep). `x-correlator` echoed.
-    - [~] the per-device legs:
+    - [x] the per-device legs:
       - [x] `GET /devices/{deviceId}` (`getDevice`, `inhome.device.read`) —
         single-device read of the household named by the required `ssid` query
         param, by `deviceId`. Implemented **statelessly** (no store, mirroring
@@ -3038,8 +3038,19 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
         (household-level, checked first — `…409` → 409 CONFLICT) and the `deviceId`
         vs the live roster (member → 200 + single-use tombstone, any other or
         already-deleted → 404). Missing/empty `ssid` → 400 INVALID_ARGUMENT.
-      - [ ] `updateDevice` (`PATCH /devices/{deviceId}`) — a later stateful slice
-        (needs a device-overlay store for `deviceName`/`blocked`/`paused`).
+      - [x] `updateDevice` (`PATCH /devices/{deviceId}`, `inhome.device.write`) —
+        the API's second mutation. A partial update of the mutable fields
+        (`deviceName`/`blocked`/`paused`); records a per-`(ssid,deviceId)` **overlay**
+        in the in-memory store (`store::merge_overlay`/`overlay`, PATCH-merge
+        semantics, no new dep) that the read legs apply via `live_household`, so
+        the change shows up in `getDevice`/`listDevices`/`getDeviceNetworkHealth`.
+        Effective `blocked`/`paused` fold into `connectionStatus` (blocking wins;
+        clearing an admin state → `connected`), keeping `Device` consistent. Two
+        control planes: `ssid` reserved-error suffix (checked first, `…409`→409)
+        and `deviceId` vs the live roster (member → 200 updated Device, else 404;
+        a deleted device → 404). Empty body / `{}` → no-op 200. **Completes
+        In-Home Device Management v1** (and the tail of the "Other CAMARA APIs"
+        backlog slice).
 
 ## Cross-cutting (do alongside the item that needs it)
 - [~] `errors.rs`: base CAMARA error model done (`src/errors.rs`, `specs/shared/errors.yaml`); per-version catalogs still TODO (DESIGN §8)
@@ -4181,6 +4192,37 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-14 — In-Home Device Management v1: added the **`updateDevice`** leg
+  (`PATCH /devices/{deviceId}`, scope `inhome.device.write`) — the API's **second
+  mutation** and its **last remaining leg**, so the API is now complete. The public
+  CAMARA sandbox yaml for InHomeDeviceManagement isn't web-fetchable, so I followed
+  the module's documented intent (PROGRESS backlog note) + CAMARA PATCH conventions:
+  a partial update of the three mutable fields (`deviceName`/`blocked`/`paused`),
+  required `ssid` query, `200` with the updated `Device`. The inventory is derived
+  statelessly from the `ssid`, so — mirroring `deleteDevice`'s tombstone — a PATCH
+  can't rewrite a row; it records a per-`(ssid,deviceId)` **overlay** in a new
+  in-memory map (`store::merge_overlay`/`overlay`, `Mutex<HashMap>`, lock never held
+  across await, **no new dep**), and the read legs apply it via `live_household`, so
+  the change is observable through `getDevice`/`listDevices`/`getDeviceNetworkHealth`
+  and a subsequent `performDeviceAction`. Overlays PATCH-merge (an absent field keeps
+  its prior value). To keep `Device` consistent, effective `blocked`/`paused` fold
+  into `connectionStatus` via a new `apply_overlay` (blocking wins over pausing;
+  clearing an admin state returns the device to `connected`; the underlying
+  connected/disconnected link state is otherwise preserved). Two control planes
+  (DESIGN §7): the `ssid` reserved-error suffix (household-level, checked first —
+  `…409`→409 CONFLICT) and the `deviceId` vs the live roster (member → 200 updated
+  Device, else 404; a deleted device → 404). Empty body / `{}` → no-op 200; unknown
+  field / empty `deviceName` / wrong-typed field / missing `ssid` → 400
+  INVALID_ARGUMENT (serde `deny_unknown_fields`). Spec: new `patch` op on
+  `/devices/{deviceId}` + `UpdateDeviceRequest` schema + `x-camarasim-scenarios` +
+  two request/one response examples; header + module docs + `WRITE_SCOPE` comment
+  updated. Tests: +19 (4 `apply_overlay` units: rename-only, block-folds, clear-
+  returns-to-connected, block-beats-pause; a store overlay-merge unit; 14 router
+  integration: rename+persist, block reflected in list & red health, PATCH-merge,
+  empty/`{}` no-op, unknown-id 404, deleted-device 404, wrong-household 404, reserved
+  `…409`→409, missing-ssid 400, unknown-field 400, empty-name 400, wrong-type 400,
+  write-scope vs read/no-token, correlator). `cargo test` 2404 green (was 2385);
+  `cargo build --release` succeeds. — binary: 3.9M (4081688 B, +20584 B)
 - 2026-08-14 — In-Home Device Management v1: added the **`deleteDevice`** leg
   (`DELETE /devices/{deviceId}`, scope `inhome.device.write`) — the API's **first
   mutation**. Confirmed the upstream signature against the canonical CAMARA

@@ -25,8 +25,19 @@
 //! - [`delete`] is the single-use gate: it returns `true` only the first time a
 //!   `(ssid, deviceId)` is tombstoned, so a second `deleteDevice` for the same
 //!   device answers `404 NOT_FOUND` rather than a second `200`.
+//!
+//! ## Device overlays (`updateDevice`)
+//!
+//! `updateDevice` (`PATCH /devices/{deviceId}`) is the API's second mutation. Like
+//! `deleteDevice` it cannot rewrite a persisted row (there is none — the roster is
+//! derived from the `ssid`); instead it records a small **overlay** of the mutable
+//! fields (`deviceName` / `blocked` / `paused`) per `(ssid, deviceId)`, and the read
+//! legs apply that overlay on top of the regenerated device (see
+//! [`super::v1::live_household`]). The overlay is merged on each PATCH (partial
+//! update — an absent field leaves the prior value in place) and survives for the
+//! life of the process (single node, in-memory only — docs/DESIGN.md §4).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, OnceLock};
 
 /// The process-global tombstone set: the `(ssid, deviceId)` pairs that have been
@@ -59,6 +70,67 @@ pub fn is_deleted(ssid: &str, device_id: &str) -> bool {
         .contains(&(ssid.to_string(), device_id.to_string()))
 }
 
+/// A partial update of a device's mutable fields (`updateDevice`). Each field is
+/// `Some` only when the caller set it; `None` leaves the prior value untouched, so
+/// overlays merge with PATCH semantics.
+#[derive(Clone, Default, Debug, PartialEq)]
+pub struct Overlay {
+    /// A new human-friendly name for the device.
+    pub device_name: Option<String>,
+    /// Whether the device is blocked from the network.
+    pub blocked: Option<bool>,
+    /// Whether the device's internet access is paused.
+    pub paused: Option<bool>,
+}
+
+impl Overlay {
+    /// Whether this overlay carries no changes (an empty PATCH body).
+    pub fn is_empty(&self) -> bool {
+        self.device_name.is_none() && self.blocked.is_none() && self.paused.is_none()
+    }
+}
+
+/// The process-global overlay map: the mutable-field overrides recorded for a
+/// `(ssid, deviceId)` by `updateDevice`. In-memory only (single node, per DESIGN §4).
+fn overlays() -> &'static Mutex<HashMap<(String, String), Overlay>> {
+    static OVERLAYS: OnceLock<Mutex<HashMap<(String, String), Overlay>>> = OnceLock::new();
+    OVERLAYS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Merge `patch` into the overlay for device `device_id` of household `ssid` and
+/// persist it, returning the resulting merged overlay. PATCH semantics: only the
+/// `Some` fields of `patch` overwrite; absent fields keep whatever a prior update
+/// set. The whole read-merge-write runs under one lock hold (never across an
+/// `.await`), so concurrent PATCHes of the same device don't interleave.
+pub fn merge_overlay(ssid: &str, device_id: &str, patch: Overlay) -> Overlay {
+    let mut map = overlays()
+        .lock()
+        .expect("in-home device overlay store not poisoned");
+    let entry = map
+        .entry((ssid.to_string(), device_id.to_string()))
+        .or_default();
+    if patch.device_name.is_some() {
+        entry.device_name = patch.device_name;
+    }
+    if patch.blocked.is_some() {
+        entry.blocked = patch.blocked;
+    }
+    if patch.paused.is_some() {
+        entry.paused = patch.paused;
+    }
+    entry.clone()
+}
+
+/// The overlay recorded for device `device_id` of household `ssid`, if any. The
+/// read legs apply it on top of the regenerated device.
+pub fn overlay(ssid: &str, device_id: &str) -> Option<Overlay> {
+    overlays()
+        .lock()
+        .expect("in-home device overlay store not poisoned")
+        .get(&(ssid.to_string(), device_id.to_string()))
+        .cloned()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -76,5 +148,46 @@ mod tests {
         assert!(!is_deleted(ssid, "dev-y"));
         // The same deviceId under a different ssid is a different key.
         assert!(!is_deleted("OtherStoreHouse-unique", "dev-x"));
+    }
+
+    #[test]
+    fn overlay_merges_with_patch_semantics_and_is_scoped_to_the_pair() {
+        let ssid = "UnitOverlayHouse-unique";
+        // No overlay to start.
+        assert_eq!(overlay(ssid, "dev-o"), None);
+
+        // First patch sets a name and blocks the device.
+        let merged = merge_overlay(
+            ssid,
+            "dev-o",
+            Overlay {
+                device_name: Some("Kids Tablet".into()),
+                blocked: Some(true),
+                paused: None,
+            },
+        );
+        assert_eq!(merged.device_name.as_deref(), Some("Kids Tablet"));
+        assert_eq!(merged.blocked, Some(true));
+        assert_eq!(merged.paused, None);
+
+        // A second patch that only pauses leaves the earlier name/blocked in place.
+        let merged = merge_overlay(
+            ssid,
+            "dev-o",
+            Overlay {
+                device_name: None,
+                blocked: None,
+                paused: Some(true),
+            },
+        );
+        assert_eq!(merged.device_name.as_deref(), Some("Kids Tablet"));
+        assert_eq!(merged.blocked, Some(true));
+        assert_eq!(merged.paused, Some(true));
+        assert_eq!(overlay(ssid, "dev-o"), Some(merged));
+
+        // A different device of the same household has no overlay.
+        assert_eq!(overlay(ssid, "dev-other"), None);
+        // An empty overlay reports empty.
+        assert!(Overlay::default().is_empty());
     }
 }

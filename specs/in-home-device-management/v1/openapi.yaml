@@ -426,6 +426,152 @@ paths:
             result: "404 NOT_FOUND"
           - input: missing or empty ssid
             result: "400 INVALID_ARGUMENT"
+    patch:
+      operationId: updateDevice
+      summary: Update the mutable settings of a household device
+      description: |
+        Updates the mutable settings of the device named by the `deviceId` path
+        parameter on the household named by the required `ssid`. Only three fields
+        are mutable: `deviceName`, `blocked` and `paused`. The body is a partial
+        update — every field is optional, and an empty body (or `{}`) is a no-op
+        that returns the device unchanged.
+
+        This is the API's second **mutation**. The inventory is otherwise derived
+        statelessly from the `ssid`, so a PATCH cannot rewrite a stored row (there
+        is none) — instead CamaraSim records a small **overlay** of the mutable
+        fields in an in-memory store, and the read legs (`listDevices` /
+        `getDevice` / `getDeviceNetworkHealth`) apply it on top of the regenerated
+        device. So after a successful update the new values show up on the read
+        legs; the overlay merges on each PATCH (an absent field keeps its prior
+        value) and is in-memory and single-node (docs/DESIGN.md §4).
+
+        To keep the returned `Device` internally consistent, the effective
+        `blocked`/`paused` are folded back into `connectionStatus`: blocking wins
+        over pausing (a blocked device is off the network → `connectionStatus:
+        blocked`), pausing yields `connectionStatus: paused`, and *clearing* an
+        admin state (`blocked`/`paused` → `false`) returns a device that was in
+        that state to `connected`. The underlying link state
+        (`connected`/`disconnected`) is otherwise preserved.
+
+        Two control planes (docs/DESIGN.md §7): the `ssid`'s trailing three digits
+        select a reserved CAMARA error (household-level, checked first, exactly as
+        `getDevice`/`deleteDevice` — an `ssid=…409` reaches the `409 CONFLICT`
+        case); otherwise the `deviceId` is matched against the household's live
+        roster — a member id that has not been deleted → `200` with the updated
+        `Device`, any other id (unknown, from another household, malformed, or
+        deleted) → `404 NOT_FOUND`.
+      security:
+        - openId:
+            - inhome.device.write
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+        - name: deviceId
+          in: path
+          required: true
+          description: The `deviceId` of the device to update (from `listDevices`).
+          schema:
+            type: string
+          example: dev-a1b2c3d4e5f60718
+        - name: ssid
+          in: query
+          required: true
+          description: SSID of the household fixed-line network the device is on.
+          schema:
+            type: string
+            minLength: 1
+          example: Home-005
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateDeviceRequest"
+            examples:
+              rename:
+                summary: Rename a device
+                value:
+                  deviceName: Living Room TV
+              block:
+                summary: Block a device from the network
+                value:
+                  blocked: true
+      responses:
+        "200":
+          description: The updated device.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Device"
+              example:
+                deviceId: dev-0f1e2d3c4b5a6978
+                ssid: Home-005
+                deviceName: Living Room TV
+                deviceType: tv
+                macAddress: "02:aa:bb:cc:dd:ee"
+                ipAddress: "192.168.1.20"
+                connectionStatus: blocked
+                blocked: true
+                paused: false
+                interfaceType: wifi
+        "400":
+          description: |
+            400 — invalid request. CamaraSim returns `INVALID_ARGUMENT` for a
+            missing or empty `ssid`, an unknown body field, an empty `deviceName`,
+            or a wrong-typed field.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InHomeError"
+              examples:
+                invalidArgument:
+                  summary: Missing `ssid` query parameter
+                  value:
+                    status: 400
+                    code: INVALID_ARGUMENT
+                    message: "`ssid` is required and must be a non-empty string."
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "409":
+          $ref: "../../shared/errors.yaml#/components/responses/Conflict"
+        "422":
+          $ref: "../../shared/errors.yaml#/components/responses/ServiceNotApplicable"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          Result selected from the `ssid` identifier and the `deviceId` path
+          parameter (docs/DESIGN.md §7). The `ssid`'s trailing three digits select
+          a reserved CAMARA error (checked first, as `getDevice`); otherwise the
+          `deviceId` is matched against the household's live (non-deleted) roster.
+          A successful update records/merges an overlay of the mutable fields, and
+          the effective blocked/paused fold into connectionStatus (blocking wins;
+          clearing an admin state returns the device to connected).
+        cases:
+          - input: ssid ending in a reserved error suffix (e.g. …409, …404)
+            result: the canonical CAMARA error for that status (…409 → 409 CONFLICT)
+          - input: "deviceId a live member, body {deviceName: X}"
+            result: "200 — the Device with its new name (connection untouched)"
+          - input: "deviceId a live member, body {blocked: true}"
+            result: "200 — the Device with blocked=true, connectionStatus=blocked, paused=false"
+          - input: "deviceId a live member, body {paused: false} on a paused device"
+            result: "200 — the Device back to connectionStatus=connected"
+          - input: "deviceId a live member, empty body or {}"
+            result: "200 — the Device unchanged (no-op)"
+          - input: "deviceId already deleted, or not in the ssid's roster (unknown / other household / malformed)"
+            result: "404 NOT_FOUND"
+          - input: "missing/empty ssid, unknown field, empty deviceName, or a wrong-typed field"
+            result: "400 INVALID_ARGUMENT"
 
   /devices/{deviceId}/network-health:
     get:
@@ -817,6 +963,30 @@ components:
           $ref: "#/components/schemas/InfraDevice"
         interfaceType:
           $ref: "#/components/schemas/InterfaceType"
+
+    UpdateDeviceRequest:
+      type: object
+      additionalProperties: false
+      description: >-
+        A partial update of a device's mutable settings (`updateDevice`). Every
+        field is optional; only the fields present are changed, and an empty body
+        (or `{}`) is a no-op. Setting `blocked` or `paused` folds into the returned
+        device's `connectionStatus` (blocking wins over pausing; clearing an admin
+        state returns the device to `connected`).
+      properties:
+        deviceName:
+          type: string
+          minLength: 1
+          description: A new human-friendly name for the device.
+          example: Living Room TV
+        blocked:
+          type: boolean
+          description: Whether the device is blocked from the network.
+          example: true
+        paused:
+          type: boolean
+          description: Whether the device's internet access is paused.
+          example: false
 
     DeviceList:
       type: object

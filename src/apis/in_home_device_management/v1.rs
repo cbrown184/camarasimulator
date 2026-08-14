@@ -31,6 +31,14 @@
 //!   through [`live_household`], so a deleted device stops appearing and a repeat
 //!   delete is a `404 NOT_FOUND`. The `ssid`/`deviceId` planes work exactly as
 //!   `getDevice` (an `ssid=…409` reaches the upstream `409 CONFLICT`).
+//! - `PATCH /in-home-device-management/v1/devices/{deviceId}` — update the mutable
+//!   settings of a household device (operationId `updateDevice`, scope
+//!   `inhome.device.write`). The API's second **mutation**: it records an overlay
+//!   of the mutable fields (`deviceName`/`blocked`/`paused`) in the in-memory
+//!   [`store`] and answers `200` with the updated `Device`; the read legs go
+//!   through [`live_household`], so the new values (and the derived
+//!   `connectionStatus`) show up in `getDevice`/`listDevices`. The `ssid`/`deviceId`
+//!   planes work exactly as `getDevice`/`deleteDevice`.
 //!
 //! ## What it does
 //!
@@ -86,7 +94,7 @@ use crate::scenarios;
 const READ_SCOPE: &str = "inhome.device.read";
 
 /// The OAuth2 scope the mutating operations require (`performDeviceAction`,
-/// `deleteDevice`, and the as-yet-unmounted `updateDevice`).
+/// `deleteDevice` and `updateDevice`).
 const WRITE_SCOPE: &str = "inhome.device.write";
 
 /// The `actionId` path values `performDeviceAction` accepts (CAMARA enum). Only
@@ -105,7 +113,9 @@ pub fn routes() -> Router {
         )
         .route(
             "/in-home-device-management/v1/devices/:device_id",
-            get(get_device).delete(delete_device),
+            get(get_device)
+                .patch(update_device)
+                .delete(delete_device),
         )
         .route(
             "/in-home-device-management/v1/devices/:device_id/network-health",
@@ -472,6 +482,138 @@ async fn delete_device(
     with_correlator((StatusCode::OK, Json(body)).into_response(), &correlator)
 }
 
+/// `PATCH /in-home-device-management/v1/devices/{deviceId}` — update the mutable
+/// settings of a household device (`updateDevice`).
+///
+/// This is the API's second **mutation**. The inventory is derived statelessly
+/// from the `ssid`, so — like `deleteDevice` — a PATCH cannot rewrite a stored row
+/// (there is none). Instead CamaraSim records a small **overlay** of the mutable
+/// fields (`deviceName` / `blocked` / `paused`) in the in-memory [`store`], and the
+/// read legs ([`live_household`]) apply it on top of the regenerated device. So
+/// after a successful update the new values (and the derived `connectionStatus`)
+/// show up in `getDevice` / `listDevices`. The overlay merges on each PATCH (an
+/// absent field keeps its prior value) and is single-node, in-memory
+/// (docs/DESIGN.md §4).
+///
+/// The `ssid` query parameter is **required** (it names the household). The body is
+/// an `UpdateDeviceRequest`: a partial update whose fields are all optional; an
+/// empty body (or `{}`) is a no-op that returns the device unchanged. On success the
+/// endpoint returns `200` with the updated [`Device`].
+///
+/// Two control planes (docs/DESIGN.md §7):
+///
+/// 1. **Reserved error suffix (`ssid`).** A household-level plane, checked first
+///    (mirrors `getDevice`/`deleteDevice`): if the `ssid`'s trailing three digits
+///    name a reserved CAMARA status, the endpoint answers that canonical error —
+///    this is how the `409 CONFLICT` case in the upstream error set is reached
+///    (`ssid=…409`).
+/// 2. **The `deviceId` vs the household's live roster.** A member id that has not
+///    been deleted → `200` with the updated device (and the overlay is recorded);
+///    any other id (unknown, from another household, malformed, or deleted) →
+///    `404 NOT_FOUND`.
+async fn update_device(
+    claims: Claims,
+    headers: HeaderMap,
+    Path(device_id): Path<String>,
+    RawQuery(query): RawQuery,
+    body: Bytes,
+) -> Response {
+    // Optional correlation header, echoed on every response (CAMARA Commonalities).
+    let correlator = headers.get("x-correlator").cloned();
+
+    // Endpoint authorisation: the token must carry this API's write scope.
+    if let Err(e) = claims.require_scope(WRITE_SCOPE) {
+        return with_correlator(e.into_response(), &correlator);
+    }
+
+    // The `ssid` query parameter is required (it names the household).
+    let ssid = match parse_ssid(query.as_deref(), &correlator) {
+        Ok(s) => s,
+        Err(response) => return response,
+    };
+
+    // Parse and validate the PATCH body into an overlay (or a no-op empty overlay).
+    let patch = match parse_update_body(&body, &correlator) {
+        Ok(p) => p,
+        Err(response) => return response,
+    };
+
+    // Error plane: a reserved trailing-three-digit suffix on the `ssid` selects a
+    // canonical CAMARA error (household-level, checked first — mirrors getDevice;
+    // `…409` reaches the upstream CONFLICT case).
+    if let Some(err) = scenarios::reserved_error(&ssid) {
+        return with_correlator(err.into_response(), &correlator);
+    }
+
+    // The id must name a device of this household's *live* roster (not deleted);
+    // any other id — unknown, another household's, malformed, or deleted — is a 404.
+    let is_member = live_household(&ssid)
+        .iter()
+        .any(|d| d["deviceId"] == json!(device_id));
+    if !is_member {
+        return with_correlator(
+            CamaraError::not_found("No device found for the provided id on this household.")
+                .into_response(),
+            &correlator,
+        );
+    }
+
+    // Merge the patch into the device's overlay (persisted), then render the device
+    // through the read path so the response matches a subsequent `getDevice`.
+    if !patch.is_empty() {
+        store::merge_overlay(&ssid, &device_id, patch);
+    }
+    let device = live_household(&ssid)
+        .into_iter()
+        .find(|d| d["deviceId"] == json!(device_id))
+        .expect("the device was just confirmed a live member");
+
+    with_correlator((StatusCode::OK, Json(device)).into_response(), &correlator)
+}
+
+/// Parse and validate an `updateDevice` request body into an overlay. An empty
+/// body (or `{}`) yields an empty (no-op) overlay. Returns `400 INVALID_ARGUMENT`
+/// on any problem: non-JSON, an unknown field, or a `deviceName` that is present
+/// but empty. Field types (`blocked`/`paused` booleans) are enforced by serde, so
+/// a wrong-typed value is also a `400`.
+fn parse_update_body(body: &Bytes, correlator: &Option<HeaderValue>) -> Result<store::Overlay, Response> {
+    // An empty body is a valid no-op PATCH (nothing to change).
+    if body.is_empty() {
+        return Ok(store::Overlay::default());
+    }
+
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Raw {
+        #[serde(rename = "deviceName")]
+        device_name: Option<String>,
+        blocked: Option<bool>,
+        paused: Option<bool>,
+    }
+
+    let raw: Raw = serde_json::from_slice(body).map_err(|e| {
+        invalid_argument(
+            &format!("the request body is not valid JSON for this operation: {e}"),
+            correlator,
+        )
+    })?;
+
+    if let Some(name) = &raw.device_name {
+        if name.is_empty() {
+            return Err(invalid_argument(
+                "`deviceName`, when present, must be a non-empty string.",
+                correlator,
+            ));
+        }
+    }
+
+    Ok(store::Overlay {
+        device_name: raw.device_name,
+        blocked: raw.blocked,
+        paused: raw.paused,
+    })
+}
+
 /// Parse and validate a `performDeviceAction` request body. Returns the household
 /// `ssid` on success, or a `400 INVALID_ARGUMENT` response on any problem:
 /// non-JSON, an unknown field, a missing/empty `ssid`, or a `scheduleAccess` that
@@ -676,14 +818,17 @@ fn household(ssid: &str) -> Vec<Value> {
 }
 
 /// The household's *live* roster: its deterministically-derived [`household`]
-/// devices minus any that have been deleted (tombstoned in [`store`]).
+/// devices minus any that have been deleted (tombstoned in [`store`]), with any
+/// `updateDevice` overlay applied on top of each surviving device.
 ///
-/// The inventory is derived from the `ssid`, so `deleteDevice` cannot drop a row
-/// — it records a tombstone instead, and every read leg goes through this helper
-/// so a deleted device stops appearing (`listDevices` omits it, `getDevice` /
-/// `getDeviceNetworkHealth` / `performDeviceAction` `404`). Households that have
-/// never had a delete carry no tombstones, so this is exactly `household(ssid)`
-/// for them.
+/// The inventory is derived from the `ssid`, so the mutations cannot rewrite a
+/// stored row — `deleteDevice` records a tombstone and `updateDevice` records a
+/// small field overlay, and every read leg goes through this helper so both take
+/// effect: a deleted device stops appearing (`listDevices` omits it, `getDevice` /
+/// `getDeviceNetworkHealth` / `performDeviceAction` `404`), and an updated device
+/// shows its new `deviceName`/`blocked`/`paused` (and the derived
+/// `connectionStatus`). Households that have never been mutated carry neither
+/// tombstones nor overlays, so this is exactly `household(ssid)` for them.
 fn live_household(ssid: &str) -> Vec<Value> {
     household(ssid)
         .into_iter()
@@ -692,7 +837,59 @@ fn live_household(ssid: &str) -> Vec<Value> {
                 .as_str()
                 .is_none_or(|id| !store::is_deleted(ssid, id))
         })
+        .map(|mut d| {
+            // Apply the update overlay for this device, if one was recorded.
+            let id = d["deviceId"].as_str().map(str::to_string);
+            if let Some(id) = id {
+                if let Some(ov) = store::overlay(ssid, &id) {
+                    apply_overlay(&mut d, &ov);
+                }
+            }
+            d
+        })
         .collect()
+}
+
+/// Apply an `updateDevice` [`store::Overlay`] to a derived device in place.
+///
+/// Only the three mutable fields can be overridden: `deviceName`, `blocked` and
+/// `paused`. To keep the `Device` internally consistent — the roster's invariant
+/// is `blocked == (connectionStatus == "blocked")` and `paused == (… == "paused")`
+/// — the effective `blocked`/`paused` are folded back into `connectionStatus`:
+/// blocking wins over pausing (a blocked device is off the network), and *clearing*
+/// an admin state (`blocked`/`paused` → `false`) returns a device that was in that
+/// state to `connected`. The underlying link state (`connected`/`disconnected`) is
+/// otherwise preserved, so an overlay that touches only `deviceName` leaves the
+/// connection alone.
+fn apply_overlay(device: &mut Value, ov: &store::Overlay) {
+    let obj = device.as_object_mut().expect("device is a JSON object");
+
+    if let Some(name) = &ov.device_name {
+        obj.insert("deviceName".into(), json!(name));
+    }
+
+    let base_status = obj["connectionStatus"].as_str().unwrap_or("connected");
+    let base_blocked = obj["blocked"].as_bool().unwrap_or(base_status == "blocked");
+    let base_paused = obj["paused"].as_bool().unwrap_or(base_status == "paused");
+    let blocked = ov.blocked.unwrap_or(base_blocked);
+    let paused = ov.paused.unwrap_or(base_paused);
+
+    let status = if blocked {
+        "blocked"
+    } else if paused {
+        "paused"
+    } else if base_status == "blocked" || base_status == "paused" {
+        // The admin state was cleared → the device is back on the network.
+        "connected"
+    } else {
+        // Preserve the underlying link state (connected / disconnected).
+        base_status
+    }
+    .to_string();
+
+    obj.insert("blocked".into(), json!(status == "blocked"));
+    obj.insert("paused".into(), json!(status == "paused"));
+    obj.insert("connectionStatus".into(), json!(status));
 }
 
 /// A stable, opaque device id derived from the `ssid` and the device's household
@@ -1796,6 +1993,338 @@ mod tests {
         assert_eq!(
             headers.get("x-correlator").and_then(|v| v.to_str().ok()),
             Some("corr-del")
+        );
+    }
+
+    // --- updateDevice: PATCH /devices/{deviceId} ---------------------------
+
+    async fn patch_one(
+        token: Option<&str>,
+        device_id: &str,
+        query: &str,
+        body: &str,
+        correlator: Option<&str>,
+    ) -> (StatusCode, HeaderMap, Value) {
+        let mut builder = Request::builder()
+            .method("PATCH")
+            .uri(format!(
+                "/in-home-device-management/v1/devices/{device_id}?{query}"
+            ))
+            .header("host", HOST)
+            .header("content-type", "application/json");
+        if let Some(t) = token {
+            builder = builder.header("authorization", format!("Bearer {t}"));
+        }
+        if let Some(c) = correlator {
+            builder = builder.header("x-correlator", c);
+        }
+        let response = app()
+            .oneshot(builder.body(Body::from(body.to_string())).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let headers = response.headers().clone();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, headers, json)
+    }
+
+    async fn patch_ok(device_id: &str, query: &str, body: &str) -> (StatusCode, HeaderMap, Value) {
+        let token = mint_token(WRITE_SCOPE).await;
+        patch_one(Some(&token), device_id, query, body, None).await
+    }
+
+    // Each mutating test uses a dedicated `ssid` so the process-global overlay
+    // store never bleeds between concurrently-running tests.
+
+    // --- Pure unit: apply_overlay ------------------------------------------
+
+    #[test]
+    fn apply_overlay_renames_without_touching_the_connection() {
+        let mut d = household("UpUnit-005")[2].clone();
+        let before_status = d["connectionStatus"].clone();
+        apply_overlay(
+            &mut d,
+            &store::Overlay {
+                device_name: Some("Living Room TV".into()),
+                blocked: None,
+                paused: None,
+            },
+        );
+        assert_eq!(d["deviceName"], "Living Room TV");
+        // Only the name changed — the connection state is untouched.
+        assert_eq!(d["connectionStatus"], before_status);
+    }
+
+    #[test]
+    fn apply_overlay_blocking_folds_into_connection_status() {
+        // Start from a device that is connected so the change is observable.
+        let mut d = json!({
+            "deviceId": "dev-x", "ssid": "UpUnit", "deviceName": "Tablet",
+            "deviceType": "mobile", "macAddress": "02:00:00:00:00:01",
+            "ipAddress": "192.168.1.20", "connectionStatus": "connected",
+            "blocked": false, "paused": false, "interfaceType": "wifi",
+        });
+        apply_overlay(
+            &mut d,
+            &store::Overlay { device_name: None, blocked: Some(true), paused: None },
+        );
+        // Invariant maintained: blocked wins and folds into connectionStatus.
+        assert_eq!(d["blocked"], true);
+        assert_eq!(d["paused"], false);
+        assert_eq!(d["connectionStatus"], "blocked");
+    }
+
+    #[test]
+    fn apply_overlay_clearing_an_admin_state_returns_to_connected() {
+        let mut d = json!({
+            "deviceId": "dev-x", "ssid": "UpUnit", "deviceName": "Tablet",
+            "deviceType": "mobile", "macAddress": "02:00:00:00:00:01",
+            "ipAddress": "192.168.1.20", "connectionStatus": "paused",
+            "blocked": false, "paused": true, "interfaceType": "wifi",
+        });
+        apply_overlay(
+            &mut d,
+            &store::Overlay { device_name: None, blocked: None, paused: Some(false) },
+        );
+        assert_eq!(d["paused"], false);
+        assert_eq!(d["blocked"], false);
+        assert_eq!(d["connectionStatus"], "connected");
+    }
+
+    #[test]
+    fn apply_overlay_blocking_takes_precedence_over_pausing() {
+        let mut d = json!({
+            "deviceId": "dev-x", "ssid": "UpUnit", "deviceName": "Tablet",
+            "deviceType": "mobile", "macAddress": "02:00:00:00:00:01",
+            "ipAddress": "192.168.1.20", "connectionStatus": "connected",
+            "blocked": false, "paused": false, "interfaceType": "wifi",
+        });
+        apply_overlay(
+            &mut d,
+            &store::Overlay { device_name: None, blocked: Some(true), paused: Some(true) },
+        );
+        assert_eq!(d["connectionStatus"], "blocked");
+        assert_eq!(d["blocked"], true);
+        assert_eq!(d["paused"], false);
+    }
+
+    // --- Integration through the router ------------------------------------
+
+    #[tokio::test]
+    async fn update_device_renames_and_persists() {
+        let ssid = "UpRename-005";
+        let id = household(ssid)[2]["deviceId"].as_str().unwrap().to_string();
+
+        let (status, _, body) =
+            patch_ok(&id, &format!("ssid={ssid}"), r#"{"deviceName":"Studio Laptop"}"#).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["deviceId"], id);
+        assert_eq!(body["deviceName"], "Studio Laptop");
+
+        // The change is observable through getDevice (the overlay persists).
+        let (status, _, got) = get_one_ok(&id, &format!("ssid={ssid}")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(got["deviceName"], "Studio Laptop");
+    }
+
+    #[tokio::test]
+    async fn update_device_blocks_and_reflects_in_list_and_health() {
+        let ssid = "UpBlock-005";
+        // Pick a client device that starts connected so blocking is a real change.
+        let roster = household(ssid);
+        let target = roster
+            .iter()
+            .find(|d| d["connectionStatus"] == "connected" && d["deviceType"] != "other")
+            .expect("UpBlock-005 has a connected client");
+        let id = target["deviceId"].as_str().unwrap().to_string();
+
+        let (status, _, body) =
+            patch_ok(&id, &format!("ssid={ssid}"), r#"{"blocked":true}"#).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["blocked"], true);
+        assert_eq!(body["connectionStatus"], "blocked");
+        assert_eq!(body["paused"], false);
+
+        // listDevices with connectionStatus=blocked now includes it.
+        let (status, _, list_body) =
+            list_ok(&format!("ssid={ssid}&connectionStatus=blocked")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(list_body["devices"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|d| d["deviceId"].as_str() == Some(id.as_str())));
+
+        // Its network-health now reports red congestion (off the network).
+        let (status, _, health) = get_health_ok(&id, &format!("ssid={ssid}")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(health["networkCongestion"], "red");
+    }
+
+    #[tokio::test]
+    async fn update_device_merges_successive_patches() {
+        let ssid = "UpMerge-005";
+        // Pick a connected client so pausing is a real, observable change.
+        let roster = household(ssid);
+        let id = roster
+            .iter()
+            .find(|d| d["connectionStatus"] == "connected" && d["deviceType"] != "other")
+            .expect("UpMerge-005 has a connected client")["deviceId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // First patch renames.
+        let (status, _, _) =
+            patch_ok(&id, &format!("ssid={ssid}"), r#"{"deviceName":"Den PC"}"#).await;
+        assert_eq!(status, StatusCode::OK);
+        // Second patch pauses — the earlier name must survive (PATCH semantics).
+        let (status, _, body) = patch_ok(&id, &format!("ssid={ssid}"), r#"{"paused":true}"#).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["deviceName"], "Den PC");
+        assert_eq!(body["paused"], true);
+        assert_eq!(body["connectionStatus"], "paused");
+    }
+
+    #[tokio::test]
+    async fn update_device_empty_body_is_a_noop() {
+        let ssid = "UpNoop-005";
+        let id = household(ssid)[2]["deviceId"].as_str().unwrap().to_string();
+        let original = household(ssid)[2].clone();
+
+        // An empty body and an empty object both return the unchanged device.
+        let (status, _, body) = patch_ok(&id, &format!("ssid={ssid}"), "").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, original);
+
+        let (status, _, body) = patch_ok(&id, &format!("ssid={ssid}"), "{}").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, original);
+    }
+
+    #[tokio::test]
+    async fn update_device_unknown_id_is_404() {
+        let (status, _, body) = patch_ok(
+            "dev-000000000000dead",
+            "ssid=UpUnknown-005",
+            r#"{"blocked":true}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn update_device_on_a_deleted_device_is_404() {
+        let ssid = "UpDeleted-005";
+        let id = household(ssid)[2]["deviceId"].as_str().unwrap().to_string();
+        // Delete it first, then a PATCH must 404 (the read filter applies).
+        let (status, _, _) = delete_ok(&id, &format!("ssid={ssid}")).await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, _, body) =
+            patch_ok(&id, &format!("ssid={ssid}"), r#"{"blocked":true}"#).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn update_device_from_another_household_is_404() {
+        let id = household("UpOwner-005")[1]["deviceId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let (status, _, body) =
+            patch_ok(&id, "ssid=UpOther-007", r#"{"paused":true}"#).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn update_device_reserved_ssid_suffix_selects_a_canonical_camara_error() {
+        // The household-level error plane fires before the id lookup; …409 is how
+        // the upstream CONFLICT case is reached.
+        let (status, _, body) =
+            patch_ok("dev-anything", "ssid=Up-409", r#"{"blocked":true}"#).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["code"], "CONFLICT");
+    }
+
+    #[tokio::test]
+    async fn update_device_missing_ssid_is_400() {
+        let (status, _, body) = patch_ok("dev-abc", "", r#"{"blocked":true}"#).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "INVALID_ARGUMENT");
+    }
+
+    #[tokio::test]
+    async fn update_device_unknown_field_is_400() {
+        let ssid = "UpBadField-005";
+        let id = household(ssid)[2]["deviceId"].as_str().unwrap().to_string();
+        let (status, _, body) =
+            patch_ok(&id, &format!("ssid={ssid}"), r#"{"colour":"red"}"#).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "INVALID_ARGUMENT");
+    }
+
+    #[tokio::test]
+    async fn update_device_empty_device_name_is_400() {
+        let ssid = "UpEmptyName-005";
+        let id = household(ssid)[2]["deviceId"].as_str().unwrap().to_string();
+        let (status, _, body) =
+            patch_ok(&id, &format!("ssid={ssid}"), r#"{"deviceName":""}"#).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "INVALID_ARGUMENT");
+    }
+
+    #[tokio::test]
+    async fn update_device_wrong_typed_field_is_400() {
+        let ssid = "UpBadType-005";
+        let id = household(ssid)[2]["deviceId"].as_str().unwrap().to_string();
+        let (status, _, body) =
+            patch_ok(&id, &format!("ssid={ssid}"), r#"{"blocked":"yes"}"#).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "INVALID_ARGUMENT");
+    }
+
+    #[tokio::test]
+    async fn update_device_scope_and_auth_are_enforced() {
+        let ssid = "UpAuth-005";
+        let id = household(ssid)[1]["deviceId"].as_str().unwrap().to_string();
+        let query = format!("ssid={ssid}");
+
+        // No token → 401.
+        let (status, _, b) = patch_one(None, &id, &query, r#"{"paused":true}"#, None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(b["code"], "UNAUTHENTICATED");
+
+        // The read scope is not enough — this is a write operation → 403.
+        let read = mint_token(READ_SCOPE).await;
+        let (status, _, b) =
+            patch_one(Some(&read), &id, &query, r#"{"paused":true}"#, None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(b["code"], "PERMISSION_DENIED");
+    }
+
+    #[tokio::test]
+    async fn update_device_echoes_the_correlator() {
+        let ssid = "UpCorr-005";
+        let id = household(ssid)[1]["deviceId"].as_str().unwrap().to_string();
+        let token = mint_token(WRITE_SCOPE).await;
+        let (status, headers, _) = patch_one(
+            Some(&token),
+            &id,
+            &format!("ssid={ssid}"),
+            r#"{"deviceName":"Corr Device"}"#,
+            Some("corr-patch"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-patch")
         );
     }
 }
