@@ -2278,8 +2278,16 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
         delivery, `http://`-only, ACCESSTOKEN Bearer / PLAIN Basic credential, and
         `terminateCall` halt; the stored `Call.status` stays `initiating`
         (documented cut). `…002` is a non-reserved-error suffix, so it is free.
-      - [ ] `callingCaller`, `callDuration` / `recordingResult` — still deferred
-        (no live call engine).
+      - [x] simulated **`callingCaller` front leg** — a `…003` `callee` line on a
+        call created with an `http://` `sink` advances `callingCaller` →
+        `callingCallee` → `connected` after the create-time `initiating` event (the
+        only path that emits the caller-alerting `callingCaller` state — the
+        platform alerts the caller first). Reuses the generalised
+        `vwip::spawn_call_progression` step-list path (in-order off-request-path
+        delivery, `http://`-only, ACCESSTOKEN Bearer / PLAIN Basic credential,
+        `terminateCall` halt); `…003` is a non-reserved-error suffix, so it is free.
+        The stored `Call.status` stays `initiating` (documented cut).
+      - [ ] `callDuration` / `recordingResult` — still deferred (no live call engine).
     - [ ] TLS (`https://` sink) delivery (needs a rustls TLS client).
 - [x] Most Frequent Location vwip (`/most-frequent-location/vwip`; CAMARA
   MostFrequentLocation `wip` — no released version, mounted at its canonical
@@ -4064,6 +4072,29 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 ## Scan journal
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
+
+- 2026-08-14 — Click to Dial vwip: simulated **`callingCaller` front leg** — the
+  third and last modellable intermediate-transition leaf (after the …001 success /
+  …002 failure `callingCallee` progressions of the prior two passes). A `…003`
+  `callee` line on a call created with an `http://` `sink` now advances
+  `callingCaller` → `callingCallee` → `connected` after the create-time `initiating`
+  event — the full CAMARA ClickToDial front leg (the platform alerts the *caller*
+  first, then reaches the callee, then the parties connect), and the only path that
+  emits the otherwise-unreachable `callingCaller` `CallStatus`. Reuses the already
+  generalised `vwip::spawn_call_progression` step-list path unchanged (in-order,
+  off-request-path, `http://`-only, ACCESSTOKEN Bearer / PLAIN Basic `sinkCredential`
+  applied to every callback incl. `callingCaller`, `terminateCall`-halt guarded by
+  store presence). The stored `Call.status` stays `initiating` (no live engine —
+  documented cut, mirroring …001/…002). `…003` is a non-reserved-error suffix
+  (reserved set = 400/401/403/404/409/422/429/500/503; …000/…777 already used), so it
+  is free. `callDuration`/`recordingResult` stay deferred (need a live engine). No new
+  dependency (raw-TCP CloudEvents, unchanged). Spec:
+  `specs/click-to-dial/vwip/openapi.yaml` — updated the overview / `createCall`
+  callback summary / `CallStatus` (enum already admitted `callingCaller`) prose, and
+  added a `…003` `x-camarasim-scenarios` case. Tests: +2 (full-progression order incl.
+  `callingCaller`, no terminal reason; ACCESSTOKEN bearer on every full-progression
+  callback). `cargo test` 2273 green (was 2271); `cargo build --release` succeeds. —
+  binary: 3.8M (3886144 B, +1144 B)
 
 - 2026-08-14 — **new API: eSIM Remote Management vwip** (`/esim-remote-management/vwip`;
   CAMARA eSimRemoteManagement `wip`). A prior survey found the planned backlog leaves

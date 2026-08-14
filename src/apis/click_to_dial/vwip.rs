@@ -123,11 +123,13 @@
 //!   line's tail requests a **simulated progression** delivered off the request
 //!   path by [`spawn_call_progression`] (mirroring QoD's `…001` `NETWORK_TERMINATED`
 //!   timer), a concurrent `terminateCall` halting it: a `…001` callee advances
-//!   `callingCallee` → `connected` (success), and a `…002` callee advances
+//!   `callingCallee` → `connected` (success), a `…002` callee advances
 //!   `callingCallee` → `failed` (the network reaches the callee but the call is not
-//!   answered — the terminal `failed` step carries a `reason`). All callbacks are
-//!   `http://` sinks only, with the ACCESSTOKEN `sinkCredential` bearer / PLAIN
-//!   Basic applied. The remaining intermediate transition (`callingCaller`) and the
+//!   answered — the terminal `failed` step carries a `reason`), and a `…003` callee
+//!   advances `callingCaller` → `callingCallee` → `connected` (the full front leg —
+//!   the platform alerts the caller first, the only path that emits the
+//!   caller-alerting `callingCaller` state). All callbacks are `http://` sinks only,
+//!   with the ACCESSTOKEN `sinkCredential` bearer / PLAIN Basic applied. The
 //!   `callDuration` / `recordingResult` fields — and re-deriving the stored
 //!   `Call.status` — remain deferred: CamaraSim runs no live call engine.
 
@@ -231,6 +233,25 @@ const FAILED_REASON: &str = "The callee did not answer the call.";
 /// `disconnected` event).
 const FAILED_PROGRESSION: [ProgressionStep; 2] =
     [("callingCallee", None), ("failed", Some(FAILED_REASON))];
+
+/// The trailing-three-digit sentinel on the `callee` line that requests a
+/// simulated **full success progression** — the one that exercises the caller-side
+/// alerting leg. After the create-time `initiating` event the call advances
+/// `callingCaller` → `callingCallee` → `connected`, modelling the full CAMARA
+/// ClickToDial front leg (the platform alerts the *caller* first, then reaches the
+/// callee, then the parties connect). Not a reserved *error* suffix, so it is free
+/// for this API's use (mirrors [`PROGRESSION_TAIL`] / [`FAILED_TAIL`]); it is the
+/// only sentinel that emits the otherwise-unreachable `callingCaller` state.
+const FULL_PROGRESSION_TAIL: u16 = 3;
+
+/// The ordered steps delivered for a [`FULL_PROGRESSION_TAIL`] callee after the
+/// create-time `initiating` event — the caller being alerted (`callingCaller`), the
+/// network then reaching the callee (`callingCallee`), and finally the two parties
+/// connecting (`connected`). A superset of [`SUCCESS_PROGRESSION`] that prepends the
+/// caller-alerting leg; all three are valid CAMARA `CallStatus` values, none
+/// terminal, so no step carries a `reason`.
+const FULL_PROGRESSION: [ProgressionStep; 3] =
+    [("callingCaller", None), ("callingCallee", None), ("connected", None)];
 
 /// The fixed grace before each simulated progression step, so the create-time
 /// `initiating` event is observed first and the steps are spaced. Short — there is
@@ -415,13 +436,16 @@ async fn create_call(claims: Claims, headers: HeaderMap, body: Bytes) -> Respons
         // The callee tail additionally selects a simulated post-create
         // progression, each step delivered off the request path (docs/DESIGN.md
         // §7): `…001` → a successful `callingCallee` → `connected`; `…002` → a
-        // failed `callingCallee` → `failed` (the terminal step carrying a reason).
+        // failed `callingCallee` → `failed` (the terminal step carrying a reason);
+        // `…003` → a full success `callingCaller` → `callingCallee` → `connected`
+        // (the only path that exercises the caller-alerting `callingCaller` leg).
         // Only the happy path reaches here, so the callee tail is already
         // known-good (no reserved-error / not-available / recording-unsupported
         // line has one of these suffixes).
         let progression = match scenarios::trailing_three_digits(&req.callee.number) {
             Some(PROGRESSION_TAIL) => Some(&SUCCESS_PROGRESSION[..]),
             Some(FAILED_TAIL) => Some(&FAILED_PROGRESSION[..]),
+            Some(FULL_PROGRESSION_TAIL) => Some(&FULL_PROGRESSION[..]),
             _ => None,
         };
         if let Some(steps) = progression {
@@ -441,8 +465,9 @@ async fn create_call(claims: Claims, headers: HeaderMap, body: Bytes) -> Respons
 
 /// Simulate a **call progression** for a call created with an `http://` `sink` and
 /// a `callee` line ending `…001` ([`PROGRESSION_TAIL`], the
-/// [`SUCCESS_PROGRESSION`] → `connected`) or `…002` ([`FAILED_TAIL`], the
-/// [`FAILED_PROGRESSION`] → `failed`).
+/// [`SUCCESS_PROGRESSION`] → `connected`), `…002` ([`FAILED_TAIL`], the
+/// [`FAILED_PROGRESSION`] → `failed`), or `…003` ([`FULL_PROGRESSION_TAIL`], the
+/// [`FULL_PROGRESSION`] `callingCaller` → `callingCallee` → `connected`).
 ///
 /// A fire-and-forget timer (off the request path) delivers the given ordered
 /// `steps` as `status-changed` CloudEvents to the sink, each after a short
@@ -1878,6 +1903,77 @@ mod tests {
             assert!(
                 head.contains("Authorization: Bearer fail-secret\r\n"),
                 "failed-progression callback carries the bearer ({expected}): {head}"
+            );
+            assert_eq!(event["data"]["status"]["state"], expected);
+        }
+    }
+
+    // --- simulated full progression (…003 callee → callingCaller) ----------
+
+    #[tokio::test]
+    async fn a_003_callee_progresses_calling_caller_then_callee_then_connected() {
+        // A `…003` callee line requests the *full* success progression: after the
+        // create-time `initiating` event, the call advances `callingCaller` →
+        // `callingCallee` → `connected`, each delivered to the sink in order. This
+        // is the only path that emits the caller-alerting `callingCaller` state.
+        use tokio::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let sink = format!("http://{addr}/ctd-full");
+
+        let body = format!(
+            r#"{{"caller":{{"number":"+123456789111"}},"callee":{{"number":"+123456789003"}},"sink":"{sink}"}}"#
+        );
+        let (status, _, created) = call_ok(&body).await;
+        assert_eq!(status, StatusCode::CREATED);
+        // The stored resource is created `initiating` (progression is not
+        // re-derived onto it — a documented cut, as for the …001/…002 paths).
+        assert_eq!(created["status"], "initiating");
+        let id = created["callId"].as_str().unwrap().to_string();
+
+        // Events arrive in order: initiating (create-time), callingCaller,
+        // callingCallee, connected — four in total, one per state.
+        let (_, first) = read_one_event(&listener).await;
+        let (_, second) = read_one_event(&listener).await;
+        let (_, third) = read_one_event(&listener).await;
+        let (_, fourth) = read_one_event(&listener).await;
+        for e in [&first, &second, &third, &fourth] {
+            assert_eq!(e["type"], notifications::EVENT_TYPE);
+            assert_eq!(e["data"]["callId"], json!(id));
+            assert_eq!(e["data"]["caller"]["number"], "+123456789111");
+            assert_eq!(e["data"]["callee"]["number"], "+123456789003");
+            // No step in the full-success progression is terminal, so none carries
+            // a reason (unlike the …002 terminal `failed`).
+            assert!(e["data"]["status"]["reason"].is_null());
+        }
+        assert_eq!(first["data"]["status"]["state"], "initiating");
+        assert_eq!(second["data"]["status"]["state"], "callingCaller");
+        assert_eq!(third["data"]["status"]["state"], "callingCallee");
+        assert_eq!(fourth["data"]["status"]["state"], "connected");
+    }
+
+    #[tokio::test]
+    async fn the_full_progression_callbacks_carry_the_sink_credential_bearer() {
+        // The ACCESSTOKEN sinkCredential authenticates every full-progression
+        // callback, including the caller-alerting `callingCaller` step.
+        use tokio::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let sink = format!("http://{addr}/ctd-full-auth");
+
+        // A distinct pair whose callee still ends `…003` (tail == FULL_PROGRESSION_TAIL).
+        let body = format!(
+            r#"{{"caller":{{"number":"+123456780111"}},"callee":{{"number":"+123456780003"}},"sink":"{sink}","sinkCredential":{{"credentialType":"ACCESSTOKEN","accessToken":"full-secret","accessTokenType":"bearer"}}}}"#
+        );
+        let (status, _, _) = call_ok(&body).await;
+        assert_eq!(status, StatusCode::CREATED);
+
+        // initiating, callingCaller, callingCallee, connected — all bearer-authed.
+        for expected in ["initiating", "callingCaller", "callingCallee", "connected"] {
+            let (head, event) = read_one_event(&listener).await;
+            assert!(
+                head.contains("Authorization: Bearer full-secret\r\n"),
+                "full-progression callback carries the bearer ({expected}): {head}"
             );
             assert_eq!(event["data"]["status"]["state"], expected);
         }

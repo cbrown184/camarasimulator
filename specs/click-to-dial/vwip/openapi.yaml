@@ -121,17 +121,20 @@ info:
       the transition, mirroring Quality on Demand's `…001` `NETWORK_TERMINATED`); a
       concurrent `terminateCall` halts it, so a terminated call never emits a later
       step: a `…001` callee advances `callingCallee` → `connected` (**success**),
-      and a `…002` callee advances `callingCallee` → `failed` (**failure** — the
+      a `…002` callee advances `callingCallee` → `failed` (**failure** — the
       network reaches the callee but the call is not answered; the terminal `failed`
-      step carries a `reason` in `data.status`, like the terminate event). Delivery
+      step carries a `reason` in `data.status`, like the terminate event), and a
+      `…003` callee advances `callingCaller` → `callingCallee` → `connected` (the
+      **full front leg** — the platform alerts the caller first, then reaches the
+      callee, then the parties connect; the only path that emits the caller-alerting
+      `callingCaller` state). Delivery
       is fire-and-forget over raw TCP to `http://` sinks only (no TLS client — an
       `https://` sink is a no-op cut); a `sinkCredential` is applied to every
       callback's `Authorization` header — `ACCESSTOKEN` → `Bearer <accessToken>`
       (RFC 6750), `PLAIN` → `Basic base64(identifier:secret)` (RFC 7617) —
       `REFRESHTOKEN` remains a cut. The stored `Call.status` is **not** advanced by
       the progression (it stays `initiating`) — with no live call engine the
-      progression is observable only through the delivered events. The remaining
-      intermediate transition (`callingCaller`) and the
+      progression is observable only through the delivered events. The
       `callDuration`/`recordingResult` fields remain a deferred slice.
 
     CamaraSim exposes the full shared reserved-error set here so every reserved
@@ -312,9 +315,11 @@ paths:
                 Call status-changed notification (CloudEvents). CamaraSim delivers
                 one create-time event reflecting the `initiating` state; a `…001`
                 callee also drives a simulated `callingCallee` → `connected`
-                (success) progression, and a `…002` callee a `callingCallee` →
-                `failed` (failure, with a `reason`) progression. The remaining
-                transitions are a deferred slice.
+                (success) progression, a `…002` callee a `callingCallee` →
+                `failed` (failure, with a `reason`) progression, and a `…003`
+                callee the full `callingCaller` → `callingCallee` → `connected`
+                front-leg progression. The `callDuration`/`recordingResult`
+                fields are a deferred slice.
               requestBody:
                 required: true
                 content:
@@ -355,6 +360,12 @@ paths:
               201; after the create-time initiating event, a simulated progression
               delivers callingCallee then failed status-changed CloudEvents (in
               order); the terminal failed event carries a data.status.reason; the
+              stored Call.status stays initiating
+          - input: "a happy-path create with a callee number ending 003 and an http:// sink"
+            result: >-
+              201; after the create-time initiating event, a simulated full
+              progression delivers callingCaller then callingCallee then connected
+              status-changed CloudEvents (in order); none carries a reason; the
               stored Call.status stays initiating
           - input: "a create that supplies an https:// sink, or that errors before 201"
             result: "201 (https no-op cut) / the error — no CloudEvent is delivered"
@@ -758,11 +769,12 @@ components:
         `initiating`; `disconnected` is reached when the call is ended by
         `terminateCall` (carried by the terminal `status-changed` notification). A
         `…001` callee drives a simulated **success** progression through
-        `callingCallee` and `connected`, and a `…002` callee a simulated **failure**
-        progression through `callingCallee` and `failed` (both carried by the
-        progression `status-changed` notifications; the stored resource `status`
-        stays `initiating`). The remaining intermediate state (`callingCaller`)
-        needs a live call engine — a deferred slice.
+        `callingCallee` and `connected`, a `…002` callee a simulated **failure**
+        progression through `callingCallee` and `failed`, and a `…003` callee the
+        **full front-leg** progression through `callingCaller`, `callingCallee` and
+        `connected` — the only path that emits the caller-alerting `callingCaller`
+        state (all carried by the progression `status-changed` notifications; the
+        stored resource `status` stays `initiating`).
       enum:
         - initiating
         - callingCaller
