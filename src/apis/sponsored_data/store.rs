@@ -39,6 +39,17 @@ pub struct SponsorshipRecord {
     /// The granted data volume (MB) — echoes the request's `dataVolume`, else the
     /// onboarding default.
     pub data_volume_mb: i64,
+    /// The consumer's `webhookUrl` (required at `startSponsorship`), where the
+    /// operator delivers the end-of-session notification when the session is
+    /// revoked. Held so `revokeSponsorship` can fire the callback after eviction.
+    /// An empty string means "no webhook" (never happens in production — the field
+    /// is required — but keeps test records that don't exercise the callback simple).
+    pub webhook_url: String,
+    /// The consumer's `callbackToken` (a v4 UUID, required at `startSponsorship`),
+    /// applied to the webhook's `Authorization: Bearer` header to authenticate the
+    /// notification (see the spec's `callbackToken`). A secret — never echoed in a
+    /// response, only used to authenticate the outbound callback.
+    pub callback_token: String,
 }
 
 /// The process-global session store: `sessionId` → [`SponsorshipRecord`].
@@ -121,6 +132,8 @@ mod tests {
             start_time: 1_717_200_000,
             end_time: 1_717_200_600,
             data_volume_mb: 50,
+            webhook_url: "http://127.0.0.1:1/webhook".to_string(),
+            callback_token: "550e8400-e29b-41d4-a716-446655440000".to_string(),
         }
     }
 
@@ -177,6 +190,8 @@ mod tests {
             start_time: 1_717_200_000,
             end_time: 1_717_200_600,
             data_volume_mb: 50,
+            webhook_url: "http://127.0.0.1:1/webhook".to_string(),
+            callback_token: "550e8400-e29b-41d4-a716-446655440000".to_string(),
         };
         insert("am-unit-1".to_string(), mk(campaign, "+123456789012"));
         insert("am-unit-2".to_string(), mk(campaign, "+123456789013"));

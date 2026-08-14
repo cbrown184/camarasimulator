@@ -19,15 +19,25 @@
 #   - The sponsorship **start**, **session-status** read and **revoke**, plus the
 #     campaign **status** (`getCampaignStatus`) and **active-sponsorships** list
 #     (`getActiveSponsorships`), are mounted. The upstream campaign-management
-#     operations (`configureAlerts`, `manageCampaign`) and the end-of-session
-#     `webhookUrl` callback are deferred to later passes (see PROGRESS.md).
+#     operations (`configureAlerts`, `manageCampaign`) are deferred to later
+#     passes (see PROGRESS.md).
 #     `startSponsorship` persists the granted session in an in-memory store so
 #     `getSessionStatus` can read it back, `revokeSponsorship` can evict it, and
 #     `getActiveSponsorships` can scan it for a campaign's active sessions.
-#   - `getSessionStatus`'s `endReason` values `session_revoked` and
-#     `not_available` are documented in the schema but not reachable through a
-#     status read: `revokeSponsorship` **evicts** the session, so a revoked
-#     session's status `404`s rather than reporting `session_revoked`.
+#   - The end-of-session `webhookUrl` callback is delivered on **revoke**:
+#     `revokeSponsorship` POSTs a `SessionEndedNotification`
+#     (`endReason: session_revoked`) to the session's recorded `webhookUrl`,
+#     authenticated with its `callbackToken` (`Authorization: Bearer …`). Delivery
+#     is fire-and-forget over a raw TCP POST (no HTTP-client dependency) and
+#     `http://`-only — an `https://` webhook is a documented no-op cut (no TLS
+#     client), mirroring every other CamaraSim `sink`/callback leg. The
+#     natural-end webhooks (`validity_expired`/`data_exhausted`) stay deferred
+#     (no background expiry worker).
+#   - `getSessionStatus`'s `endReason` value `session_revoked` is now reachable
+#     only through the **revoke webhook**, never through a status read:
+#     `revokeSponsorship` **evicts** the session, so a revoked session's status
+#     `404`s rather than reporting `session_revoked`. `not_available` stays
+#     documented-but-unreached.
 #   - The upstream `wip` contract declares **no** `securitySchemes`; CamaraSim
 #     assigns the canonical `<api>:<resource>:<action>` scopes
 #     `sponsored-data:sponsorship:create` (start),
@@ -211,6 +221,30 @@ paths:
             result: "400 OUT_OF_RANGE"
           - input: "missing/malformed sponsorId, campaignId, phoneNumber, webhookUrl, or callbackToken; or non-JSON body"
             result: "400 INVALID_ARGUMENT"
+      callbacks:
+        sessionEnded:
+          "{$request.body#/webhookUrl}":
+            post:
+              summary: End-of-session notification (delivered on revoke)
+              description: >-
+                When the session ends, the operator POSTs a
+                `SessionEndedNotification` to the `webhookUrl` supplied at
+                `startSponsorship`, authenticated with the `callbackToken` as
+                `Authorization: Bearer <callbackToken>` (RFC 6750). CamaraSim fires
+                this on `revokeSponsorship` (`endReason: session_revoked`); it
+                delivers only to `http://` webhooks (an `https://` webhook is a
+                documented no-op cut — no TLS client), and the natural-end reasons
+                (`validity_expired`/`data_exhausted`) are deferred (no background
+                expiry worker).
+              requestBody:
+                required: true
+                content:
+                  application/json:
+                    schema:
+                      $ref: "#/components/schemas/SessionEndedNotification"
+              responses:
+                "204":
+                  description: The consumer accepted the notification (body ignored, best-effort).
 
   /sponsorship/{sponsorId}/{campaignId}/{sessionId}/session-status:
     get:
@@ -394,8 +428,15 @@ paths:
         cases:
           - input: "sessionId of a stored session whose sponsorId/campaignId match the path"
             result: '200 with requestResult "successful_revocation"; the session is evicted'
+          - input: "a revoked session started with an http:// webhookUrl"
+            result: >-
+              a SessionEndedNotification (endReason session_revoked) is POSTed to
+              the webhookUrl with Authorization: Bearer <callbackToken>
+              (fire-and-forget, off the 200 response path)
+          - input: "a revoked session started with an https:// webhookUrl"
+            result: "200 as above; the webhook is not delivered (no TLS client — documented cut)"
           - input: "unknown sessionId, or sponsorId/campaignId not matching the stored session"
-            result: "404 NOT_FOUND (a mismatch leaves the session in place)"
+            result: "404 NOT_FOUND (a mismatch leaves the session in place; no webhook fired)"
           - input: "sessionId of an already-revoked session (single-use)"
             result: "404 NOT_FOUND"
 
@@ -675,7 +716,15 @@ components:
     WebhookUrl:
       type: string
       format: uri
-      description: URL the operator will call on session status changes (delivery deferred).
+      description: >-
+        URL the operator calls on session status changes. CamaraSim delivers the
+        **end-of-session** notification here on `revokeSponsorship` (a
+        `SessionEndedNotification` with `endReason: session_revoked`). The upstream
+        schema mandates `https://`; CamaraSim additionally accepts `http://` for
+        loopback receivers and **delivers only to `http://`** — an `https://`
+        webhook is a documented no-op cut (no TLS client). Natural-end
+        notifications (`validity_expired`/`data_exhausted`) are deferred (no
+        background expiry worker).
       example: https://sponsor.example.com/webhook
 
     Time:
@@ -722,7 +771,11 @@ components:
           type: string
           format: uuid
           pattern: "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
-          description: Version-4 UUID security token for authenticating webhook notifications.
+          description: >-
+            Version-4 UUID security token for authenticating webhook
+            notifications. CamaraSim applies it to the end-of-session webhook's
+            `Authorization` header as `Bearer <callbackToken>` (RFC 6750). Held in
+            memory only and never echoed in a response (it is a secret).
           example: 550e8400-e29b-41d4-a716-446655440000
 
     SponsorshipSession:
@@ -807,11 +860,12 @@ components:
           type: string
           description: >-
             Why the session ended — present only when `sessionStatus` is
-            `inactive`. CamaraSim reaches `validity_expired` (past `endTime`) and
-            `data_exhausted` (grant fully consumed); `session_revoked` and
-            `not_available` are documented but not reachable through a status
-            read: `revokeSponsorship` evicts the session, so a revoked session's
-            status `404`s rather than reporting `session_revoked`.
+            `inactive`. Through a **status read** CamaraSim reaches
+            `validity_expired` (past `endTime`) and `data_exhausted` (grant fully
+            consumed). `session_revoked` is surfaced only through the
+            **revoke webhook** (`revokeSponsorship` evicts the session, so a
+            revoked session's status `404`s rather than reporting it here);
+            `not_available` stays documented-but-unreached.
           enum:
             - validity_expired
             - data_exhausted
@@ -854,6 +908,53 @@ components:
           enum:
             - successful_revocation
           example: successful_revocation
+
+    SessionEndedNotification:
+      type: object
+      additionalProperties: false
+      description: >-
+        The end-of-session notification POSTed to a session's `webhookUrl` when the
+        session ends. CamaraSim delivers it on `revokeSponsorship` with
+        `endReason: session_revoked`. `sessionStatus` is always `inactive` (the
+        session has ended).
+      required:
+        - sponsorId
+        - campaignId
+        - sessionId
+        - phoneNumber
+        - sessionStatus
+        - endReason
+        - eventTime
+      properties:
+        sponsorId:
+          $ref: "#/components/schemas/SponsorId"
+        campaignId:
+          $ref: "#/components/schemas/CampaignId"
+        sessionId:
+          $ref: "#/components/schemas/SessionId"
+        phoneNumber:
+          $ref: "#/components/schemas/PhoneNumber"
+        sessionStatus:
+          type: string
+          description: The session's status at the time of the notification (always `inactive`).
+          enum:
+            - inactive
+          example: inactive
+        endReason:
+          type: string
+          description: >-
+            Why the session ended. CamaraSim emits `session_revoked` (the only
+            notification leg currently modelled — see the API description).
+          enum:
+            - session_revoked
+            - validity_expired
+            - data_exhausted
+            - not_available
+          example: session_revoked
+        eventTime:
+          allOf:
+            - $ref: "#/components/schemas/Time"
+          description: When the session ended (RFC 3339 UTC).
 
     CampaignStatus:
       type: object

@@ -2162,9 +2162,20 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     `sessionId` → store state is the only control plane (like `getSessionStatus`):
     unknown id, or a `sponsorId`/`campaignId` not matching the stored session, →
     `404 NOT_FOUND` (a mismatch leaves the session in place); a second revoke →
-    `404`. Because revoke evicts, `getSessionStatus`'s `endReason` `session_revoked`
-    stays documented-but-unreached. The end-of-session `webhookUrl` callback is
-    still deferred. New `store::remove_matching` (atomic check-and-remove).
+    `404`. New `store::remove_matching` (atomic check-and-remove).
+  - [x] end-of-session `webhookUrl` callback on `revokeSponsorship`
+    (`src/apis/sponsored_data/notifications.rs`) — a successful revoke POSTs a
+    `SessionEndedNotification` (`endReason: session_revoked`, `sessionStatus:
+    inactive`) to the session's recorded `webhookUrl`, authenticated with its
+    `callbackToken` (`Authorization: Bearer <callbackToken>`, RFC 6750). The
+    store now persists `webhook_url`/`callback_token` (secret, never echoed).
+    Fire-and-forget over raw TCP off the request path (no HTTP-client dep,
+    `http://`-only — an `https://` webhook is a documented no-op cut, no TLS
+    client), mirroring every other CamaraSim callback leg. This is the only place
+    `session_revoked` surfaces (revoke evicts the session, so a status read
+    `404`s). Natural-end webhooks (`validity_expired`/`data_exhausted`) stay
+    deferred (no background expiry worker). Spec: `SessionEndedNotification`
+    schema + a `callbacks` block on `startSponsorship` + revoke scenarios.
   - [~] campaign operations (`/campaign/…`):
     - [x] `GET /campaign/{sponsorId}/{campaignId}/campaign-status`
       (`getCampaignStatus`, `sponsored-data:campaign:read`) — reports a whole
@@ -4083,6 +4094,33 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 ## Scan journal
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
+
+- 2026-08-14 — Sponsored Data vwip: implemented the previously-deferred
+  **end-of-session `webhookUrl` callback** on `revokeSponsorship`. A successful
+  revoke now POSTs a `SessionEndedNotification` (`endReason: session_revoked`,
+  `sessionStatus: inactive`, `eventTime`) to the session's recorded `webhookUrl`,
+  authenticated with its `callbackToken` as `Authorization: Bearer <token>`
+  (RFC 6750). New `src/apis/sponsored_data/notifications.rs` (event builder +
+  `callback_authorization` + `spawn_delivery` + raw-TCP `deliver` + `parse_http_url`),
+  mirroring the established fire-and-forget notification pattern: off the request
+  path, `http://`-only (an `https://` webhook is a documented no-op cut — no TLS
+  client), **no new dependency**. The store's `SponsorshipRecord` now persists
+  `webhook_url`/`callback_token` (the token a secret, never echoed); captured at
+  `startSponsorship`, read at revoke. This makes `session_revoked` — otherwise
+  unreachable through a status read (revoke evicts the session) — observable to
+  the consumer. Chose this over the top-of-backlog TLS sink items: those need a
+  rustls crypto provider (ring/aws-lc), a large binary hit the project has
+  deliberately avoided (see Cargo.toml comments), so not a headless call; and over
+  the live-engine-dependent legs (call duration, eUICC async, provisioning worker
+  streams) which aren't meaningfully simulatable. Spec:
+  `specs/sponsored-data/vwip/openapi.yaml` — new `SessionEndedNotification` schema,
+  a `callbacks` block on `startSponsorship`, revoke `x-camarasim-scenarios` (http
+  fires / https no-op), and updated `WebhookUrl`/`callbackToken`/`endReason` +
+  header. Tests: +7 (5 in notifications: payload shape, bearer/none auth,
+  http-url parse, deliver-with-bearer via loopback, non-http no-op; 2 handler
+  integration: revoke fires the webhook end-to-end, https revoke still 200).
+  `cargo test` 2313 green (was 2306); `cargo build --release` succeeds.
+  — binary: 3.8M (3946240 B, +11120 B)
 
 - 2026-08-14 — eSIM Remote Management vwip: added the **command leg**
   `POST /profile/oper` (`profileOperation`, scope `esim-remote-management:oper`) —

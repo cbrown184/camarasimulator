@@ -88,11 +88,17 @@
 //! (and a mismatch leaves the session in place). Revoke is single-use — a second
 //! revoke of the same session `404`s.
 //!
-//! Because revoke evicts the session, the `getSessionStatus` `endReason` value
-//! `session_revoked` remains unreachable through a subsequent status read (a
-//! revoked session is gone, so its status `404`s); it and `not_available` stay
-//! documented-but-unreached. The end-of-session `webhookUrl` callback is still
-//! deferred to a later pass.
+//! On a successful revoke the operator fires the **end-of-session webhook**
+//! ([`super::notifications`]): a `SessionEndedNotification` carrying
+//! `endReason:"session_revoked"` is POSTed to the consumer's recorded
+//! `webhookUrl`, authenticated with its `callbackToken` (`Authorization: Bearer`).
+//! Delivery is fire-and-forget off the request path (`http://` only — an `https://`
+//! webhook is a no-op cut, no TLS client), so the `200` is never delayed. Because
+//! revoke evicts the session, `session_revoked` remains unreachable through a
+//! *status read* (a revoked session's status `404`s) — the webhook is the only
+//! place it surfaces. `not_available` stays documented-but-unreached, and the
+//! natural-end webhooks (`validity_expired`/`data_exhausted`) stay deferred (no
+//! background expiry worker).
 //!
 //! ## Campaign status (`getCampaignStatus`)
 //!
@@ -133,6 +139,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
 
+use super::notifications;
 use super::store::{self, SponsorshipRecord};
 use crate::auth::verify::Claims;
 use crate::errors::CamaraError;
@@ -266,13 +273,13 @@ async fn start_sponsorship(claims: Claims, headers: HeaderMap, body: Bytes) -> R
         }
         None => return invalid_argument("`phoneNumber` is required.", &correlator),
     };
-    match req.webhook_url.as_deref() {
-        Some(u) if !u.is_empty() => {}
+    let webhook_url = match req.webhook_url.as_deref() {
+        Some(u) if !u.is_empty() => u.to_string(),
         Some(_) => return invalid_argument("`webhookUrl` must not be empty.", &correlator),
         None => return invalid_argument("`webhookUrl` is required.", &correlator),
-    }
-    match req.callback_token.as_deref() {
-        Some(t) if is_uuid_v4(t) => {}
+    };
+    let callback_token = match req.callback_token.as_deref() {
+        Some(t) if is_uuid_v4(t) => t.to_string(),
         Some(_) => {
             return invalid_argument(
                 "`callbackToken` must be a version-4 UUID.",
@@ -280,7 +287,7 @@ async fn start_sponsorship(claims: Claims, headers: HeaderMap, body: Bytes) -> R
             )
         }
         None => return invalid_argument("`callbackToken` is required.", &correlator),
-    }
+    };
 
     // Optional bounded controls: absent → onboarding default; present → range-checked.
     let data_volume = match req.data_volume {
@@ -323,6 +330,8 @@ async fn start_sponsorship(claims: Claims, headers: HeaderMap, body: Bytes) -> R
             start_time: now,
             end_time: end,
             data_volume_mb: data_volume,
+            webhook_url,
+            callback_token,
         },
     );
     let body = build_response(
@@ -501,6 +510,24 @@ async fn revoke_sponsorship(
             )
         }
     };
+
+    // Fire the end-of-session webhook (fire-and-forget, off the request path): the
+    // consumer's recorded `webhookUrl` is notified that the session ended with
+    // `endReason: "session_revoked"`, authenticated with its `callbackToken`
+    // (`Authorization: Bearer …`). `http://` only (an `https://` webhook is a
+    // documented no-op cut — no TLS client). See `super::notifications`.
+    if !record.webhook_url.is_empty() {
+        let notification = notifications::session_ended_notification(
+            &record.sponsor_id,
+            &record.campaign_id,
+            &session_id,
+            &record.phone_number,
+            "session_revoked",
+            rfc3339_utc(unix_now()),
+        );
+        let auth = notifications::callback_authorization(&record.callback_token);
+        notifications::spawn_delivery(record.webhook_url.clone(), notification, auth);
+    }
 
     let body = revoke_response(&session_id, &record);
     with_correlator((StatusCode::OK, Json(body)).into_response(), &correlator)
@@ -1292,6 +1319,8 @@ mod tests {
             start_time: 1_717_200_000,
             end_time: 1_717_200_600, // +10 min
             data_volume_mb: 50,
+            webhook_url: "http://127.0.0.1:1/webhook".to_string(),
+            callback_token: "550e8400-e29b-41d4-a716-446655440000".to_string(),
         };
 
         // Active: now inside the window, tail 12 % 51 = 12 consumed of 50.
@@ -1445,6 +1474,8 @@ mod tests {
             start_time: 1_717_200_000, // 2024-06-01T00:00:00Z
             end_time: 1_717_200_600,   // +10 min
             data_volume_mb: 50,
+            webhook_url: "http://127.0.0.1:1/webhook".to_string(),
+            callback_token: "550e8400-e29b-41d4-a716-446655440000".to_string(),
         };
         let body = revoke_response("sid-9", &record);
         assert_eq!(body["sponsorId"], SPONSOR);
@@ -1563,6 +1594,79 @@ mod tests {
             headers.get("x-correlator").and_then(|v| v.to_str().ok()),
             Some("corr-rev-err")
         );
+    }
+
+    /// Revoking a session started with an `http://` `webhookUrl` fires the
+    /// end-of-session webhook to that URL: a POST carrying
+    /// `endReason: "session_revoked"`, authenticated with the session's
+    /// `callbackToken` (`Authorization: Bearer …`). End-to-end through the router:
+    /// start → store → revoke → spawned delivery.
+    #[tokio::test]
+    async fn revoke_fires_the_end_of_session_webhook() {
+        use tokio::io::AsyncReadExt;
+        use tokio::net::TcpListener;
+
+        let create = mint_token(CREATE_SCOPE).await;
+        let del = mint_token(DELETE_SCOPE).await;
+
+        // A loopback receiver for the webhook.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let webhook = format!("http://{addr}/wh");
+
+        // Start a session whose webhookUrl points at the receiver.
+        let body = json!({
+            "sponsorId": SPONSOR,
+            "campaignId": CAMPAIGN,
+            "phoneNumber": "+123456789012",
+            "webhookUrl": webhook,
+            "callbackToken": CB_TOKEN,
+        })
+        .to_string();
+        let (status, _, created) = post(Some(&create), &body, None).await;
+        assert_eq!(status, StatusCode::CREATED);
+        let session = created["sessionId"].as_str().unwrap().to_string();
+
+        // Accept the webhook delivery off to the side (fire-and-forget from revoke).
+        let accept = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = Vec::new();
+            sock.read_to_end(&mut buf).await.unwrap();
+            String::from_utf8(buf).unwrap()
+        });
+
+        // Revoke → 200; the webhook is delivered from the spawned task.
+        let (status, _, _) =
+            delete_revoke(Some(&del), &revoke_url(SPONSOR, CAMPAIGN, &session), None).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let raw = accept.await.unwrap();
+        let (head, payload) = raw.split_once("\r\n\r\n").expect("headers then body");
+        assert!(head.starts_with("POST /wh HTTP/1.1\r\n"), "request line: {head}");
+        assert!(
+            head.contains(&format!("Authorization: Bearer {CB_TOKEN}\r\n")),
+            "bearer callbackToken present: {head}"
+        );
+        let parsed: Value = serde_json::from_str(payload).expect("body is JSON");
+        assert_eq!(parsed["sessionId"], session);
+        assert_eq!(parsed["sessionStatus"], "inactive");
+        assert_eq!(parsed["endReason"], "session_revoked");
+        assert_eq!(parsed["phoneNumber"], "+123456789012");
+    }
+
+    /// A session started with an `https://` `webhookUrl` still revokes `200` — the
+    /// webhook is a no-op cut (no TLS client), so nothing is delivered and the
+    /// caller is unaffected.
+    #[tokio::test]
+    async fn revoke_with_an_https_webhook_still_succeeds() {
+        let create = mint_token(CREATE_SCOPE).await;
+        let del = mint_token(DELETE_SCOPE).await;
+        // The default WEBHOOK const is https:// → the delivery no-ops.
+        let session = start_session(&create, "+123456789012").await;
+        let (status, _, body) =
+            delete_revoke(Some(&del), &revoke_url(SPONSOR, CAMPAIGN, &session), None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["requestResult"], "successful_revocation");
     }
 
     // --- getCampaignStatus -------------------------------------------------
@@ -1809,6 +1913,8 @@ mod tests {
             start_time: now - 60,
             end_time: now + 600,
             data_volume_mb: 50,
+            webhook_url: "http://127.0.0.1:1/webhook".to_string(),
+            callback_token: "550e8400-e29b-41d4-a716-446655440000".to_string(),
         };
         assert!(is_active(&rec, now), "inside window with data → active");
         assert!(!is_active(&rec, now + 601), "past endTime → inactive");

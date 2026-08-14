@@ -16,10 +16,14 @@
 //! Reading a session back makes Sponsored Data **stateful**, so a shared
 //! in-memory [`store`] holds started sessions keyed by `sessionId`.
 //!
-//! The `revoke` read and the campaign-management operations, plus the
-//! `webhookUrl` end-of-session callback, are deferred to later passes (see
-//! `PROGRESS.md`).
+//! `revokeSponsorship` now fires the end-of-session `webhookUrl` callback
+//! ([`notifications`]): when a session is revoked, a `SessionEndedNotification`
+//! (`endReason: session_revoked`) is POSTed to the consumer's recorded
+//! `webhookUrl`, authenticated with its `callbackToken`. The campaign-management
+//! operations (`configureAlerts`, `manageCampaign`) remain deferred to later
+//! passes (see `PROGRESS.md`).
 
+pub mod notifications;
 pub mod store;
 pub mod vwip;
 
