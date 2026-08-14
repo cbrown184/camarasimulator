@@ -332,6 +332,11 @@ pub const APIS: &[ApiSpec] = &[
         version: "vwip",
         body: include_str!("../specs/esim-remote-management/vwip/openapi.yaml"),
     },
+    ApiSpec {
+        name: "in-home-device-management",
+        version: "v1",
+        body: include_str!("../specs/in-home-device-management/v1/openapi.yaml"),
+    },
 ];
 
 #[cfg(test)]

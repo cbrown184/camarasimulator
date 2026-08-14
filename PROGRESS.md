@@ -2974,6 +2974,23 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
         success → 200 `AppDeploymentInfo` (appDeploymentId unchanged, appInstances
         re-derived per effective zone). New `deployment_store::update` (atomic
         check-and-replace). No new dep. **Completes the deployments resource.**
+  - [~] In-Home Device Management v1 (`/in-home-device-management/v1`; CAMARA
+    InHomeDeviceManagement 1.0.0, sandbox; consumer home-LAN device inventory —
+    distinct from the network-side Home Devices QoD):
+    - [x] `GET /devices` (`listDevices`, `inhome.device.read`) — stateless,
+      non-spatial, **`ssid`-keyed** household device inventory → `{ devices,
+      total }`. Two-legged only (the `ssid` names the household, not a
+      subscriber). Two control planes (DESIGN §7): the `ssid` reserved-error
+      suffix → canonical CAMARA error; else its trailing three digits `d` fix the
+      roster — every household carries one infrastructure gateway (`infraDevice:
+      modem`) plus `d % 6` client devices (`…000`/no-digits → gateway only),
+      types/connection-states fixed by `d`; and the optional `connectionStatus`
+      filter (`connected`/`disconnected`/`blocked`/`paused`) narrows the list
+      (`total` reflects it). Missing/empty `ssid` or unknown `connectionStatus`
+      → 400 INVALID_ARGUMENT. Deterministic `deviceId`/`macAddress` (self-contained
+      FNV-1a, no new dep). `x-correlator` echoed.
+    - [ ] the device-mutation legs (`getDevice`/`updateDevice`/`deleteDevice`/
+      `performDeviceAction`/`getDeviceNetworkHealth`) — a later stateful slice.
 
 ## Cross-cutting (do alongside the item that needs it)
 - [~] `errors.rs`: base CAMARA error model done (`src/errors.rs`, `specs/shared/errors.yaml`); per-version catalogs still TODO (DESIGN §8)
@@ -4114,6 +4131,39 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 ## Scan journal
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
+
+- 2026-08-14 — **new API: In-Home Device Management v1**
+  (`/in-home-device-management/v1`; CAMARA InHomeDeviceManagement, sandbox). A
+  fresh survey confirmed the planned backlog leaves are all deferred for real
+  reasons (TLS sink → maintainer rustls decision, deliberately avoided per the
+  prior journal; the rest → "no live engine / no provisioning worker"), so this
+  pass extends **coverage** with a genuinely-unmounted, public-spec CAMARA API —
+  the same playbook as the eSIM pass. Diffed the mounted set against the live
+  CAMARA GitHub org (93 repos): several sandbox APIs are unmounted
+  (VoiceVerificationCode/VoiceNotification are empty sandboxes; ConsentManagement
+  is stateful+notification-heavy; ModelAsAService is a multi-spec AI surface) —
+  chose InHomeDeviceManagement, whose `GET /devices` is a clean **stateless,
+  non-spatial** leg (phase discipline: stateless first). Verified the upstream
+  `InHomeDeviceManagement.yaml`: `listDevices` keys off a required `ssid` query
+  param, optional `connectionStatus` filter, returns `{ devices[], total }` with
+  the `deviceType`/`connectionStatus`/`infraDevice`/`interfaceType` enums.
+  Modelled in the house style: `ssid` is the control plane (DESIGN §7) — reserved
+  suffix on its trailing three digits → canonical CAMARA error (full shared set),
+  else `d % 6` client devices behind an always-present `modem` gateway
+  (`…000`/no-digits → gateway only), types/status fixed by `d`; the optional
+  `connectionStatus` narrows the list (`total` reflects it). Missing/empty `ssid`
+  or unknown `connectionStatus` → 400 INVALID_ARGUMENT. Deterministic
+  `deviceId`/locally-administered `macAddress` via a self-contained FNV-1a —
+  **no new dependency**. Two-legged only (the `ssid` names a household, not a
+  subscriber). The device-mutation legs (get/update/delete/action/network-health)
+  are a later stateful slice. New `src/apis/in_home_device_management{,.rs}` +
+  `v1.rs`; vendored `specs/in-home-device-management/v1/openapi.yaml` (shared
+  `auth`/`errors.yaml` `$ref`s, `x-camarasim-scenarios`, two examples); registry
+  + `apis.rs` wired. Tests: +15 (roster determinism/uniqueness, digit→count,
+  gateway-only, connectionStatus filter, total-matches-length, reserved-error,
+  ssid/status validation, scope isolation, auth, correlator). `cargo test` 2344
+  green (was 2329); `cargo build --release` succeeds.
+  — binary: 3.9M (3999432 B, +24872 B)
 
 - 2026-08-14 — eSIM Remote Management vwip: added the **fourth and final leg**
   `POST /profile/download` (`profileDownload`, scope
