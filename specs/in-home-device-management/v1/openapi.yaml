@@ -6,16 +6,18 @@
 # functional cases (docs/DESIGN.md §7, §9). Backed by
 # `src/apis/in_home_device_management/v1.rs`; spec and code must not drift.
 #
-# CamaraSim implements the read-only inventory legs `GET /devices` (listDevices),
+# CamaraSim implements the read inventory legs `GET /devices` (listDevices),
 # `GET /devices/{deviceId}` (getDevice — single-device read, stateless: the
 # household roster is regenerated from the `ssid` and the matching device
 # returned) and `GET /devices/{deviceId}/network-health`
 # (getDeviceNetworkHealth — the matched device's network-health telemetry, derived
-# deterministically from it, also stateless), plus the action leg
+# deterministically from it, also stateless), the action leg
 # `POST /devices/{deviceId}/actions/{actionId}` (performDeviceAction — a stateless
-# synchronous acknowledgement of a `schedule-access` action; nothing persisted).
-# The remaining mutation legs (updateDevice / deleteDevice) are a later stateful
-# slice.
+# synchronous acknowledgement of a `schedule-access` action; nothing persisted),
+# and the delete leg `DELETE /devices/{deviceId}` (deleteDevice — the API's first
+# mutation: it tombstones the device in an in-memory store and the read legs honour
+# the tombstone, so a deleted device stops appearing; a repeat delete → 404). The
+# remaining mutation leg (updateDevice) is a later slice.
 openapi: 3.0.3
 info:
   title: In-Home Device Management
@@ -317,6 +319,110 @@ paths:
           - input: "deviceId that is a member of the ssid's roster"
             result: "200 — that Device object"
           - input: "deviceId not in the ssid's roster (unknown / other household / malformed)"
+            result: "404 NOT_FOUND"
+          - input: missing or empty ssid
+            result: "400 INVALID_ARGUMENT"
+    delete:
+      operationId: deleteDevice
+      summary: Delete a device record from a household network
+      description: |
+        Deletes the device named by the `deviceId` path parameter from the
+        household named by the required `ssid`.
+
+        This is the API's first **mutation**. The inventory is otherwise derived
+        statelessly from the `ssid`, so a delete cannot remove a row from a table
+        (there is none) — instead CamaraSim records a *tombstone* in an in-memory
+        store, and the read legs (`listDevices` / `getDevice` /
+        `getDeviceNetworkHealth`) and the action leg (`performDeviceAction`)
+        filter tombstoned devices out of the regenerated roster. So after a
+        successful delete the device stops appearing, and a repeat delete answers
+        `404`. The tombstone is in-memory and single-node (docs/DESIGN.md §4);
+        there is no un-delete.
+
+        Two control planes (docs/DESIGN.md §7): the `ssid`'s trailing three digits
+        select a reserved CAMARA error (household-level, checked first, exactly as
+        `getDevice` — an `ssid=…409` reaches the `409 CONFLICT` case in this
+        operation's error set); otherwise the `deviceId` is matched against the
+        household's live roster — a member id that has not already been deleted →
+        `200` with a `DeleteDeviceResponse`, any other id (unknown, from another
+        household, malformed, or already deleted) → `404 NOT_FOUND`.
+      security:
+        - openId:
+            - inhome.device.write
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+        - name: deviceId
+          in: path
+          required: true
+          description: The `deviceId` of the device to delete (from `listDevices`).
+          schema:
+            type: string
+          example: dev-a1b2c3d4e5f60718
+        - name: ssid
+          in: query
+          required: true
+          description: SSID of the household fixed-line network the device is on.
+          schema:
+            type: string
+            minLength: 1
+          example: Home-005
+      responses:
+        "200":
+          description: The device record was deleted.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeleteDeviceResponse"
+              example:
+                deviceId: dev-0f1e2d3c4b5a6978
+                status: deleted
+        "400":
+          description: |
+            400 — invalid request. CamaraSim returns `INVALID_ARGUMENT` for a
+            missing or empty `ssid`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InHomeError"
+              examples:
+                invalidArgument:
+                  summary: Missing `ssid` query parameter
+                  value:
+                    status: 400
+                    code: INVALID_ARGUMENT
+                    message: "`ssid` is required and must be a non-empty string."
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "409":
+          $ref: "../../shared/errors.yaml#/components/responses/Conflict"
+        "422":
+          $ref: "../../shared/errors.yaml#/components/responses/ServiceNotApplicable"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          Result selected from the `ssid` identifier and the `deviceId` path
+          parameter (docs/DESIGN.md §7). The `ssid`'s trailing three digits select
+          a reserved CAMARA error (checked first, as `getDevice`); otherwise the
+          `deviceId` is matched against the household's live (non-deleted) roster.
+          A successful delete tombstones the device (single-use).
+        cases:
+          - input: ssid ending in a reserved error suffix (e.g. …409, …404)
+            result: the canonical CAMARA error for that status (…409 → 409 CONFLICT)
+          - input: "deviceId that is a live member of the ssid's roster"
+            result: "200 — DeleteDeviceResponse {deviceId, status: deleted}; the device is tombstoned"
+          - input: "deviceId already deleted, or not in the ssid's roster (unknown / other household / malformed)"
             result: "404 NOT_FOUND"
           - input: missing or empty ssid
             result: "400 INVALID_ARGUMENT"
@@ -899,6 +1005,25 @@ components:
             When the action took effect. Present only for `applied` actions (an
             `accepted` action has not yet been applied).
           example: "2026-06-13T22:00:00Z"
+
+    DeleteDeviceResponse:
+      type: object
+      additionalProperties: false
+      description: The acknowledgement of a deleted device record (`deleteDevice`).
+      required:
+        - deviceId
+        - status
+      properties:
+        deviceId:
+          type: string
+          description: The device whose record was deleted.
+          example: dev-0f1e2d3c4b5a6978
+        status:
+          type: string
+          description: The outcome of the delete.
+          enum:
+            - deleted
+          example: deleted
 
     InHomeError:
       description: >-

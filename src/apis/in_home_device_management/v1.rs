@@ -23,6 +23,14 @@
 //!   eSIM `profileOperation` legs): nothing is persisted; a `connected` device
 //!   reports `status: "applied"`, an offline one `status: "accepted"`, else the
 //!   `ssid`/`deviceId` planes give the canonical error / `404 NOT_FOUND`.
+//! - `DELETE /in-home-device-management/v1/devices/{deviceId}` — delete a device
+//!   record from a household (operationId `deleteDevice`, scope
+//!   `inhome.device.write`). The API's first **mutation**: it tombstones the
+//!   device in the in-memory [`store`] and answers `200` with a
+//!   `DeleteDeviceResponse` (`{deviceId, status: "deleted"}`); the read legs go
+//!   through [`live_household`], so a deleted device stops appearing and a repeat
+//!   delete is a `404 NOT_FOUND`. The `ssid`/`deviceId` planes work exactly as
+//!   `getDevice` (an `ssid=…409` reaches the upstream `409 CONFLICT`).
 //!
 //! ## What it does
 //!
@@ -69,6 +77,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde_json::{json, Value};
 
+use super::store;
 use crate::auth::verify::Claims;
 use crate::errors::CamaraError;
 use crate::scenarios;
@@ -76,8 +85,8 @@ use crate::scenarios;
 /// The OAuth2 scope the read operations require (CAMARA InHomeDeviceManagement 1.0.0).
 const READ_SCOPE: &str = "inhome.device.read";
 
-/// The OAuth2 scope the mutating operations require (`performDeviceAction`, and the
-/// as-yet-unmounted `updateDevice`/`deleteDevice`).
+/// The OAuth2 scope the mutating operations require (`performDeviceAction`,
+/// `deleteDevice`, and the as-yet-unmounted `updateDevice`).
 const WRITE_SCOPE: &str = "inhome.device.write";
 
 /// The `actionId` path values `performDeviceAction` accepts (CAMARA enum). Only
@@ -96,7 +105,7 @@ pub fn routes() -> Router {
         )
         .route(
             "/in-home-device-management/v1/devices/:device_id",
-            get(get_device),
+            get(get_device).delete(delete_device),
         )
         .route(
             "/in-home-device-management/v1/devices/:device_id/network-health",
@@ -143,9 +152,9 @@ async fn list_devices(claims: Claims, headers: HeaderMap, RawQuery(query): RawQu
         return with_correlator(err.into_response(), &correlator);
     }
 
-    // Build the household roster deterministically from the ssid, then apply the
-    // optional connectionStatus filter.
-    let devices: Vec<Value> = household(&params.ssid)
+    // Build the household roster deterministically from the ssid (minus any
+    // deleted devices), then apply the optional connectionStatus filter.
+    let devices: Vec<Value> = live_household(&params.ssid)
         .into_iter()
         .filter(|d| {
             params
@@ -203,10 +212,10 @@ async fn get_device(
         return with_correlator(err.into_response(), &correlator);
     }
 
-    // Regenerate the household roster and look the id up. An id that is not one of
-    // this household's devices — unknown, another household's, or malformed — is a
-    // `404 NOT_FOUND` (there is no store to distinguish them).
-    match household(&ssid)
+    // Regenerate the household roster (minus any deleted devices) and look the id
+    // up. An id that is not one of this household's live devices — unknown, deleted,
+    // another household's, or malformed — is a `404 NOT_FOUND`.
+    match live_household(&ssid)
         .into_iter()
         .find(|d| d["deviceId"] == json!(device_id))
     {
@@ -271,10 +280,10 @@ async fn get_device_network_health(
         return with_correlator(err.into_response(), &correlator);
     }
 
-    // Regenerate the household roster, find the addressed device, and derive its
-    // network-health telemetry. An id that is not one of this household's devices
-    // is a `404 NOT_FOUND` (there is no store to distinguish the reasons).
-    match household(&ssid)
+    // Regenerate the household roster (minus any deleted devices), find the
+    // addressed device, and derive its network-health telemetry. An id that is not
+    // one of this household's live devices is a `404 NOT_FOUND`.
+    match live_household(&ssid)
         .into_iter()
         .find(|d| d["deviceId"] == json!(device_id))
     {
@@ -350,9 +359,9 @@ async fn perform_device_action(
         return with_correlator(err.into_response(), &correlator);
     }
 
-    // Regenerate the household roster and look the id up; an id that is not one of
-    // this household's devices is a `404 NOT_FOUND`.
-    let device = match household(&ssid)
+    // Regenerate the household roster (minus any deleted devices) and look the id
+    // up; an id that is not one of this household's live devices is a `404 NOT_FOUND`.
+    let device = match live_household(&ssid)
         .into_iter()
         .find(|d| d["deviceId"] == json!(device_id))
     {
@@ -382,6 +391,85 @@ async fn perform_device_action(
     }
 
     with_correlator((StatusCode::CREATED, Json(response)).into_response(), &correlator)
+}
+
+/// `DELETE /in-home-device-management/v1/devices/{deviceId}` — delete a device
+/// record from a household (`deleteDevice`).
+///
+/// This is the API's first **mutation**. The inventory is otherwise derived
+/// statelessly from the `ssid`, so a delete cannot remove a row from a table
+/// (there is none) — instead it records a *tombstone* in the in-memory
+/// [`store`], and the read legs ([`live_household`]) filter tombstoned devices
+/// out of the regenerated roster. So after a successful delete the device stops
+/// appearing in `listDevices`/`getDevice`, and a repeat delete answers `404`.
+///
+/// The `ssid` query parameter is **required** (it names the household, upstream
+/// CAMARA `deleteDevice`). On success the endpoint returns `200` with a
+/// `DeleteDeviceResponse` (`{deviceId, status: "deleted"}`) — not a `204`.
+///
+/// Two control planes (docs/DESIGN.md §7):
+///
+/// 1. **Reserved error suffix (`ssid`).** A household-level plane, checked first
+///    (mirrors `getDevice`/`performDeviceAction`): if the `ssid`'s trailing three
+///    digits name a reserved CAMARA status, the endpoint answers that canonical
+///    error — this is how the `409 CONFLICT` case in the upstream delete error set
+///    is reached (`ssid=…409`).
+/// 2. **The `deviceId` vs the household's live roster.** A member id that has not
+///    already been deleted → `200 deleted` (and the device is tombstoned,
+///    single-use); any other id (unknown, another household's, malformed, or
+///    already deleted) → `404 NOT_FOUND`.
+async fn delete_device(
+    claims: Claims,
+    headers: HeaderMap,
+    Path(device_id): Path<String>,
+    RawQuery(query): RawQuery,
+) -> Response {
+    // Optional correlation header, echoed on every response (CAMARA Commonalities).
+    let correlator = headers.get("x-correlator").cloned();
+
+    // Endpoint authorisation: the token must carry this API's write scope.
+    if let Err(e) = claims.require_scope(WRITE_SCOPE) {
+        return with_correlator(e.into_response(), &correlator);
+    }
+
+    // The `ssid` query parameter is required (it names the household).
+    let ssid = match parse_ssid(query.as_deref(), &correlator) {
+        Ok(s) => s,
+        Err(response) => return response,
+    };
+
+    // Error plane: a reserved trailing-three-digit suffix on the `ssid` selects a
+    // canonical CAMARA error (household-level, checked first — mirrors getDevice;
+    // `…409` reaches the upstream CONFLICT case in the delete error set).
+    if let Some(err) = scenarios::reserved_error(&ssid) {
+        return with_correlator(err.into_response(), &correlator);
+    }
+
+    // The id must name a device of this household's *derived* roster; an id that is
+    // not one of them — unknown, another household's, or malformed — is a `404`.
+    let is_member = household(&ssid)
+        .iter()
+        .any(|d| d["deviceId"] == json!(device_id));
+    if !is_member {
+        return with_correlator(
+            CamaraError::not_found("No device found for the provided id on this household.")
+                .into_response(),
+            &correlator,
+        );
+    }
+
+    // Tombstone it (single-use): a second delete of the same device sees `false`
+    // and answers `404`, so the delete is not idempotently repeatable.
+    if !store::delete(&ssid, &device_id) {
+        return with_correlator(
+            CamaraError::not_found("No device found for the provided id on this household.")
+                .into_response(),
+            &correlator,
+        );
+    }
+
+    let body = json!({ "deviceId": device_id, "status": "deleted" });
+    with_correlator((StatusCode::OK, Json(body)).into_response(), &correlator)
 }
 
 /// Parse and validate a `performDeviceAction` request body. Returns the household
@@ -585,6 +673,26 @@ fn household(ssid: &str) -> Vec<Value> {
     }
 
     devices
+}
+
+/// The household's *live* roster: its deterministically-derived [`household`]
+/// devices minus any that have been deleted (tombstoned in [`store`]).
+///
+/// The inventory is derived from the `ssid`, so `deleteDevice` cannot drop a row
+/// — it records a tombstone instead, and every read leg goes through this helper
+/// so a deleted device stops appearing (`listDevices` omits it, `getDevice` /
+/// `getDeviceNetworkHealth` / `performDeviceAction` `404`). Households that have
+/// never had a delete carry no tombstones, so this is exactly `household(ssid)`
+/// for them.
+fn live_household(ssid: &str) -> Vec<Value> {
+    household(ssid)
+        .into_iter()
+        .filter(|d| {
+            d["deviceId"]
+                .as_str()
+                .is_none_or(|id| !store::is_deleted(ssid, id))
+        })
+        .collect()
 }
 
 /// A stable, opaque device id derived from the `ssid` and the device's household
@@ -1498,6 +1606,196 @@ mod tests {
         assert_eq!(
             headers.get("x-correlator").and_then(|v| v.to_str().ok()),
             Some("corr-act")
+        );
+    }
+
+    // --- deleteDevice: DELETE /devices/{deviceId} --------------------------
+
+    async fn delete_one(
+        token: Option<&str>,
+        device_id: &str,
+        query: &str,
+        correlator: Option<&str>,
+    ) -> (StatusCode, HeaderMap, Value) {
+        let mut builder = Request::builder()
+            .method("DELETE")
+            .uri(format!(
+                "/in-home-device-management/v1/devices/{device_id}?{query}"
+            ))
+            .header("host", HOST);
+        if let Some(t) = token {
+            builder = builder.header("authorization", format!("Bearer {t}"));
+        }
+        if let Some(c) = correlator {
+            builder = builder.header("x-correlator", c);
+        }
+        let response = app()
+            .oneshot(builder.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let headers = response.headers().clone();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, headers, json)
+    }
+
+    async fn delete_ok(device_id: &str, query: &str) -> (StatusCode, HeaderMap, Value) {
+        let token = mint_token(WRITE_SCOPE).await;
+        delete_one(Some(&token), device_id, query, None).await
+    }
+
+    // Each mutating test uses a dedicated `ssid` so the process-global tombstone
+    // store never bleeds between concurrently-running tests.
+
+    #[tokio::test]
+    async fn delete_device_returns_deleted_status() {
+        let ssid = "DelReturn-005";
+        let id = household(ssid)[2]["deviceId"] // a client device
+            .as_str()
+            .unwrap()
+            .to_string();
+        let (status, _, body) = delete_ok(&id, &format!("ssid={ssid}")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["deviceId"], id);
+        assert_eq!(body["status"], "deleted");
+    }
+
+    #[tokio::test]
+    async fn deleted_device_is_gone_from_get_and_list() {
+        let ssid = "DelGone-005";
+        let roster = household(ssid);
+        let before = roster.len();
+        let id = roster[2]["deviceId"].as_str().unwrap().to_string();
+
+        // Delete succeeds.
+        let (status, _, _) = delete_ok(&id, &format!("ssid={ssid}")).await;
+        assert_eq!(status, StatusCode::OK);
+
+        // getDevice for the deleted id → 404.
+        let (status, _, body) = get_one_ok(&id, &format!("ssid={ssid}")).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["code"], "NOT_FOUND");
+
+        // getDeviceNetworkHealth for the deleted id → 404.
+        let (status, _, _) = get_health_ok(&id, &format!("ssid={ssid}")).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        // listDevices omits it, and `total` drops by one.
+        let (status, _, list_body) = list_ok(&format!("ssid={ssid}")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(list_body["total"].as_u64().unwrap() as usize, before - 1);
+        for d in list_body["devices"].as_array().unwrap() {
+            assert_ne!(d["deviceId"].as_str().unwrap(), id);
+        }
+    }
+
+    #[tokio::test]
+    async fn deleted_device_cannot_be_actioned() {
+        // performDeviceAction on a deleted device also 404s (the read filter applies).
+        let ssid = "DelAction-005";
+        let id = household(ssid)[1]["deviceId"].as_str().unwrap().to_string();
+        let (status, _, _) = delete_ok(&id, &format!("ssid={ssid}")).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (status, _, body) = perform_ok(
+            &id,
+            "schedule-access",
+            &format!(r#"{{"ssid":"{ssid}"}}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn second_delete_of_the_same_device_is_404() {
+        let ssid = "DelTwice-005";
+        let id = household(ssid)[2]["deviceId"].as_str().unwrap().to_string();
+
+        let (status, _, _) = delete_ok(&id, &format!("ssid={ssid}")).await;
+        assert_eq!(status, StatusCode::OK);
+
+        // The single-use tombstone means a repeat delete is a 404, not a 200.
+        let (status, _, body) = delete_ok(&id, &format!("ssid={ssid}")).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn delete_unknown_device_is_404() {
+        // No mutation happens, so any (unique) ssid is safe here.
+        let (status, _, body) =
+            delete_ok("dev-000000000000dead", "ssid=DelUnknown-005").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn delete_device_from_another_household_is_404() {
+        // A valid id for one household, deleted against a different one → 404, and
+        // the id is NOT tombstoned for the wrong household (no cross-household leak).
+        let id = household("DelOwner-005")[1]["deviceId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let (status, _, body) = delete_ok(&id, "ssid=DelOther-007").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn delete_device_reserved_ssid_suffix_selects_a_canonical_camara_error() {
+        // The household-level error plane fires before the id lookup; …409 is how
+        // the upstream CONFLICT case in the delete error set is reached.
+        let (status, _, body) = delete_ok("dev-anything", "ssid=Del-409").await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["code"], "CONFLICT");
+    }
+
+    #[tokio::test]
+    async fn delete_device_missing_ssid_is_400() {
+        let (status, _, body) = delete_ok("dev-abc", "").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "INVALID_ARGUMENT");
+    }
+
+    #[tokio::test]
+    async fn delete_device_scope_and_auth_are_enforced() {
+        let ssid = "DelAuth-005";
+        let id = household(ssid)[1]["deviceId"].as_str().unwrap().to_string();
+        let query = format!("ssid={ssid}");
+
+        // No token → 401.
+        let (status, _, b) = delete_one(None, &id, &query, None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(b["code"], "UNAUTHENTICATED");
+
+        // The read scope is not enough — this is a write operation → 403.
+        let read = mint_token(READ_SCOPE).await;
+        let (status, _, b) = delete_one(Some(&read), &id, &query, None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(b["code"], "PERMISSION_DENIED");
+    }
+
+    #[tokio::test]
+    async fn delete_device_echoes_the_correlator() {
+        let ssid = "DelCorr-005";
+        let id = household(ssid)[1]["deviceId"].as_str().unwrap().to_string();
+        let token = mint_token(WRITE_SCOPE).await;
+        let (status, headers, _) = delete_one(
+            Some(&token),
+            &id,
+            &format!("ssid={ssid}"),
+            Some("corr-del"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-del")
         );
     }
 }

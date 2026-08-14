@@ -3027,8 +3027,19 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
         validated when present (`from`/`to`/`frequency` enum); unknown `actionId`
         or a malformed body → 400 INVALID_ARGUMENT. Opaque, deterministic
         `actionId` token (reuses the module's FNV; no new dep).
-      - [ ] `updateDevice` / `deleteDevice` — a later stateful slice (both need a
-        device-mutation store).
+      - [x] `deleteDevice` (`DELETE /devices/{deviceId}`, `inhome.device.write`) —
+        the API's first mutation. Introduces an in-memory tombstone store
+        (`src/apis/in_home_device_management/store.rs`; `Mutex<HashSet<(ssid,
+        deviceId)>>`, no new dep) honoured by the read legs via a new
+        `live_household`, so a deleted device stops appearing (`listDevices` omits
+        it; `getDevice`/`getDeviceNetworkHealth`/`performDeviceAction` → 404).
+        Returns `200` `DeleteDeviceResponse {deviceId, status: "deleted"}` (not
+        204). Two control planes (DESIGN §7): `ssid` reserved-error suffix
+        (household-level, checked first — `…409` → 409 CONFLICT) and the `deviceId`
+        vs the live roster (member → 200 + single-use tombstone, any other or
+        already-deleted → 404). Missing/empty `ssid` → 400 INVALID_ARGUMENT.
+      - [ ] `updateDevice` (`PATCH /devices/{deviceId}`) — a later stateful slice
+        (needs a device-overlay store for `deviceName`/`blocked`/`paused`).
 
 ## Cross-cutting (do alongside the item that needs it)
 - [~] `errors.rs`: base CAMARA error model done (`src/errors.rs`, `specs/shared/errors.yaml`); per-version catalogs still TODO (DESIGN §8)
@@ -4170,6 +4181,32 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-14 — In-Home Device Management v1: added the **`deleteDevice`** leg
+  (`DELETE /devices/{deviceId}`, scope `inhome.device.write`) — the API's **first
+  mutation**. Confirmed the upstream signature against the canonical CAMARA
+  `InHomeDeviceManagement.yaml`: `DELETE /v1/devices/{deviceId}` with a required
+  `ssid` query, `200 DeleteDeviceResponse{deviceId*, status* [deleted]}` (a body,
+  not a 204) + 401/403/404/409. The inventory is otherwise derived statelessly
+  from the `ssid`, so a delete can't drop a row — introduced a new in-memory
+  **tombstone store** (`src/apis/in_home_device_management/store.rs`;
+  `Mutex<HashSet<(ssid, deviceId)>>`, lock never held across await, mirroring the
+  sibling API stores, **no new dep**) recording deleted `(ssid, deviceId)` pairs,
+  and a new `live_household` that filters tombstoned devices out of the
+  regenerated roster. All four read/action legs (`listDevices`/`getDevice`/
+  `getDeviceNetworkHealth`/`performDeviceAction`) now go through `live_household`,
+  so a deleted device stops appearing (list omits it, the per-device legs → 404).
+  Two control planes (DESIGN §7): `ssid` reserved-error suffix (household-level,
+  checked first — `…409` reaches the upstream CONFLICT); the `deviceId` vs the live
+  roster (member → `200` + single-use tombstone via `store::delete`'s
+  first-insert-wins, any other/already-deleted → 404). Missing/empty `ssid` → 400.
+  Spec: new `delete` op on `/devices/{deviceId}` + `DeleteDeviceResponse` schema +
+  `x-camarasim-scenarios`; header + module docs updated (updateDevice noted as the
+  one remaining mutation leg). Tests: +11 (deleted-status body, gone-from-get/list,
+  can't-action-a-deleted-device, second-delete-404, unknown-id-404, wrong-household
+  -404 (no cross-household leak), reserved `…409` → CONFLICT, missing-ssid 400,
+  write-scope vs read/no-token, correlator, + a store single-use unit). `cargo
+  test` 2385 green (was 2374); `cargo build --release` succeeds. — binary: 3.9M
+  (4061104 B, +12784 B)
 - 2026-08-14 — In-Home Device Management v1: added the **`performDeviceAction`**
   leg (`POST /devices/{deviceId}/actions/{actionId}`, scope `inhome.device.write`)
   — the first *write* leg of this API. Confirmed the upstream signature against the
