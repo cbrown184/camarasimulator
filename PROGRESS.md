@@ -3989,6 +3989,33 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-14 — **backlog survey / decision needed (no code change).** Phases 0–5 are
+  functionally complete: every mounted CAMARA API's endpoints are implemented, tested,
+  and spec-documented. A full scan of open leaf checkboxes (`grep '- \[ \] '`) finds
+  **no small unclaimed behaviour increment left in the planned phases** — the only open
+  `[ ]` items are (a) **TLS (`https://`) sink delivery**, the *same* item repeated across
+  6 notification-bearing APIs (Quality on Demand, QoS Provisioning, Session Insights,
+  Traffic Influence, QoS Booking, geofencing-family), all blocked on one shared missing
+  piece — a rustls TLS client; and (b) a few explicitly **deferred / ongoing-transition**
+  notification features (`configureAlerts`/`manageCampaign`; intermediate lifecycle
+  transitions; ongoing state-change streams). The last 5+ passes have been near-identical
+  "no drift to fix" contract-lint tests — sharply diminishing value that was masking this
+  completeness. **Deliberately did NOT add a 6th redundant lint test, and did NOT
+  unilaterally add the TLS stack.** Rationale: TLS sink delivery needs `tokio-rustls` +
+  `rustls` + a crypto provider (ring/aws-lc-rs) + `webpki-roots` — a multi-dependency
+  addition with an estimated ~1 MB+ release-binary regression, for a niche simulator
+  feature. That is a hard-to-reverse dependency/size commitment that runs against the
+  design's core "keep the binary small" value (DESIGN §11), so it warrants a maintainer
+  sign-off rather than an unattended commit. The *verification policy* is NOT a blocker:
+  strict `webpki-roots` verification is the correct, secure, production-faithful default
+  (no verification-disabling), testable by injecting a trust anchor into the client's root
+  store for tests. **The one open question for the maintainer: accept the rustls
+  dependency + binary-size regression to enable `https://` sink delivery?** Once decided,
+  a single shared TLS-capable sink sender unblocks all 6 items. Recorded here so future
+  hourly passes stop churning redundant lint tests and pick up TLS when greenlit. No code
+  touched → `cargo test`/`build` unaffected, `main` stays green. — binary: 3.7M
+  (3851944 B, +0 B)
+
 - 2026-08-14 — contract-harness: added an **example↔type-consistency** contract test
   (`src/registry.rs` `every_example_matches_its_schema_type`) asserting that where a
   Schema Object declares an inline-scalar `example` beside a scalar `type`, the example
