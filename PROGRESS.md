@@ -2773,8 +2773,19 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
       Missing/non-32-hex `eId` → 400 INVALID_ARGUMENT (documented tightening of
       the upstream optional field); malformed `sequenceNum` → 400. Vendored spec
       uses the shared `auth`/`errors.yaml` `$ref`s. `x-correlator` echoed.
-    - [ ] the async lifecycle legs (`profileDownload` / `profileOperation` /
-      `profileResultQuery`) — task-oriented, deferred (no live eUICC engine).
+    - [x] `POST /profile/result/query` (`profileResultQuery`,
+      `esim-remote-management:query`) — the stateless result-query read leg.
+      Same base "CMP" envelope as `profileList`; `data.taskId` is the control
+      plane (DESIGN §7): reserved suffix on its trailing three decimal digits →
+      canonical CAMARA error (query fails), else `d % 3` → `operResult`
+      (`…000`/`…003`→0 executing, `…001`/`…004`→1 success, `…002`/`…005`→2 fail).
+      The response's device `eId` (32 hex, two FNV hashes), `imei`, and `iccid`
+      are synthesised deterministically from the `taskId` (reusing profileList's
+      FNV+Luhn helpers, no new dep). Missing/malformed `taskId` or `sequenceNum`
+      → 400 INVALID_ARGUMENT. `x-correlator` echoed.
+    - [ ] the async command legs (`profileDownload` / `profileOperation`) —
+      task-oriented, deferred (no live eUICC engine; they create the task that
+      `profileResultQuery` reports on).
   - [~] Edge Application Management vwip (`/edge-application-management/vwip`;
     CAMARA EdgeApplicationManagement `wip` — no released version, mounted at its
     canonical `vwip` base path like the other unreleased EdgeCloud APIs; the
@@ -4072,6 +4083,32 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 ## Scan journal
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
+
+- 2026-08-14 — eSIM Remote Management vwip: added a **second leg**,
+  `POST /profile/result/query` (`profileResultQuery`, scope
+  `esim-remote-management:query`) — the stateless result-query read that reports
+  the outcome of an asynchronous profile operation by its `taskId`. Verified the
+  upstream CAMARA `eSimRemoteManagement` spec for the exact op path, scope, and
+  base-CMP request/response envelope (`data.taskId` in → `data`:
+  `taskId`/`imei`/`iccid`/`operResult`/`eId`/`resultMsg` out). Modelled it in the
+  established house style, mirroring the existing `profileList` leg: `data.taskId`
+  is the control plane (DESIGN §7) — reserved suffix on its trailing three decimal
+  digits → canonical CAMARA error (the query itself fails), else `d % 3` →
+  `operResult` (0 executing / 1 success / 2 fail, all three reachable; `…000`→0,
+  `…001`→1, `…002`→2). The response's device identity (`eId` 32-hex from two FNV
+  hashes, `imei` 15-digit, `iccid` 20-digit) is synthesised deterministically from
+  the `taskId` reusing profileList's FNV-1a + Luhn helpers — **no new dependency**.
+  Missing/non-`^[a-zA-Z0-9_-]{1,64}$` `taskId` or malformed `sequenceNum` → 400
+  INVALID_ARGUMENT; the two async *command* legs (`profileDownload`/
+  `profileOperation`) that create such a task stay deferred (no live eUICC engine).
+  Spec: `specs/esim-remote-management/vwip/openapi.yaml` — new `/profile/result/query`
+  path (full shared error set, `x-camarasim-scenarios`, examples) + four new
+  schemas (`BaseCmpReqProfileResultQueryReq`/`ProfileResultQueryReq`/
+  `BaseCmpRespProfileResultQueryResp`/`ProfileResultQueryResp`); header/description
+  updated. Tests: +14 (executing/success/fail cases, determinism, reserved-error,
+  taskId/sequenceNum validation, unknown-field, scope isolation vs `profileList`,
+  auth, correlator, an eId-synthesis unit). `cargo test` 2287 green (was 2273);
+  `cargo build --release` succeeds. — binary: 3.8M (3905600 B, +19456 B)
 
 - 2026-08-14 — Click to Dial vwip: simulated **`callingCaller` front leg** — the
   third and last modellable intermediate-transition leaf (after the …001 success /

@@ -6,11 +6,18 @@
 # parameter-driven functional cases (docs/DESIGN.md §7, §9). Backed by
 # `src/apis/esim_remote_management/vwip.rs`; spec and code must not drift.
 #
-# This first slice serves only `POST /profile/downloaded-list` (operationId
-# `profileList`) — the stateless read leg that lists the eSIM profiles installed
-# on a device's eUICC, keyed by the device `eId`. The three lifecycle legs
-# (`profileDownload`, `profileOperation`, `profileResultQuery`) are asynchronous,
-# task-oriented operations and are not modelled yet.
+# This slice serves two stateless read legs:
+#   - `POST /profile/downloaded-list` (operationId `profileList`) — lists the eSIM
+#     profiles installed on a device's eUICC, keyed by the device `eId`.
+#   - `POST /profile/result/query` (operationId `profileResultQuery`) — reports the
+#     result of an asynchronous profile operation (download / enable / disable /
+#     delete), keyed by the `taskId` a prior operation returned. CamaraSim is
+#     stateless, so the result is deterministic from the `taskId` (§7): its
+#     trailing three decimal digits pick `operResult` (executing / success / fail),
+#     with the reported device `eId`/`imei`/`iccid` synthesised from the id.
+# The two command legs that create such a task (`profileDownload`,
+# `profileOperation`) are asynchronous, task-oriented operations and are not
+# modelled yet.
 #
 # Per the CamaraSim house style the vendored upstream inline error responses and
 # `openId` security scheme are replaced with `$ref`s to the shared
@@ -27,10 +34,16 @@ info:
     querying them.
 
     This is the CamaraSim reference double for the CAMARA eSIM Remote Management
-    API (work-in-progress). This slice models the **profile inventory query**:
-    given a device `eId`, return the profiles currently stored on that device's
-    eUICC (their `iccid` and enable status), plus the device `imei`. It requires
-    the `esim-remote-management:downloadedlist` scope.
+    API (work-in-progress). This slice models two stateless read legs:
+
+    - the **profile inventory query** (`profileList`): given a device `eId`,
+      return the profiles currently stored on that device's eUICC (their `iccid`
+      and enable status), plus the device `imei`. It requires the
+      `esim-remote-management:downloadedlist` scope.
+    - the **profile operation result query** (`profileResultQuery`): given the
+      `taskId` a prior asynchronous operation returned, report that task's
+      current `operResult` (0 executing / 1 success / 2 fail). It requires the
+      `esim-remote-management:query` scope.
 
     ## Request / response envelope
 
@@ -173,6 +186,107 @@ paths:
           - input: "a `sequenceNum` that violates its pattern"
             result: "400 INVALID_ARGUMENT"
 
+  /profile/result/query:
+    post:
+      operationId: profileResultQuery
+      summary: Query profile operation result
+      description: |
+        Query the result of an asynchronous profile operation (download,
+        enable, disable, or delete) using the `taskId` returned by that
+        operation.
+
+        CamaraSim is stateless, so the result is deterministic from the
+        `taskId` — see the API description for the parameter-driven functional
+        cases.
+      security:
+        - openId:
+            - esim-remote-management:query
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BaseCmpReqProfileResultQueryReq"
+      responses:
+        "200":
+          description: The current result of the queried task.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BaseCmpRespProfileResultQueryResp"
+              examples:
+                success:
+                  summary: A task that completed successfully
+                  value:
+                    resultCode: B100000
+                    resultDesc: Success
+                    sequenceNum: seq-77
+                    data:
+                      taskId: task-001
+                      imei: "356938035643809"
+                      iccid: "8931089011234567890"
+                      operResult: 1
+                      eId: "A1B2C3D4E5F600000000000000000001"
+                      resultMsg: Operation completed successfully
+                executing:
+                  summary: A task still in progress
+                  value:
+                    resultCode: B100000
+                    resultDesc: Success
+                    data:
+                      taskId: task-000
+                      imei: "356938035643809"
+                      iccid: "8931089011234567890"
+                      operResult: 0
+                      eId: "A1B2C3D4E5F600000000000000000000"
+                      resultMsg: Operation in progress
+        "400":
+          $ref: "../../shared/errors.yaml#/components/responses/InvalidArgument"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "409":
+          $ref: "../../shared/errors.yaml#/components/responses/Conflict"
+        "422":
+          $ref: "../../shared/errors.yaml#/components/responses/ServiceNotApplicable"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          The task result is selected from the `taskId` (`data.taskId`) whose
+          trailing three decimal digits drive the case (docs/DESIGN.md §7).
+          Reserved error suffixes come from the shared convention in errors.yaml
+          (the query itself fails); otherwise `d % 3` picks the task
+          `operResult`. The device `eId`/`imei`/`iccid` on the response are
+          synthesised deterministically from the `taskId`. As with `profileList`,
+          409/422/429 are CamaraSim extensions beyond the canonical eSIM error
+          set (sanctioned by the upstream "error list is not exhaustive" note).
+        cases:
+          - input: "`data.taskId` ending in a reserved error suffix (e.g. …404)"
+            result: the canonical CAMARA error for that status
+          - input: "`data.taskId` ending in …000 / …003 (or with no trailing decimal digits)"
+            result: "200 — operResult 0 (executing)"
+          - input: "`data.taskId` ending in …001 / …004"
+            result: "200 — operResult 1 (success)"
+          - input: "`data.taskId` ending in …002 / …005"
+            result: "200 — operResult 2 (fail)"
+          - input: "`data.taskId` absent or violating ^[a-zA-Z0-9_-]{1,64}$"
+            result: "400 INVALID_ARGUMENT"
+          - input: "a `sequenceNum` that violates its pattern"
+            result: "400 INVALID_ARGUMENT"
+
 components:
   securitySchemes:
     openId:
@@ -296,3 +410,111 @@ components:
           maximum: 1
           description: "Profile enable status: 0 — disabled, 1 — enabled."
           example: 1
+
+    BaseCmpReqProfileResultQueryReq:
+      type: object
+      description: Request body for querying an asynchronous operation's result.
+      properties:
+        timestamp:
+          type: string
+          format: date-time
+          maxLength: 64
+          description: >-
+            Request timestamp, RFC 3339 with a time zone. Accepted for fidelity;
+            not interpreted by CamaraSim.
+        sequenceNum:
+          type: string
+          pattern: '^[a-zA-Z0-9_\-]{1,64}$'
+          maxLength: 64
+          description: Sequence number for request tracking, echoed on the response.
+          example: seq-77
+        clientId:
+          type: string
+          pattern: '^[a-zA-Z0-9_\-]{1,128}$'
+          maxLength: 128
+          description: Client identifier. Accepted for fidelity.
+        data:
+          $ref: "#/components/schemas/ProfileResultQueryReq"
+
+    ProfileResultQueryReq:
+      type: object
+      description: Data payload for the result-query request.
+      properties:
+        taskId:
+          type: string
+          pattern: '^[a-zA-Z0-9_\-]{1,64}$'
+          maxLength: 64
+          description: >-
+            The task identifier returned by a prior asynchronous profile
+            operation. Required by CamaraSim (a documented tightening of the
+            upstream optional field) and the control plane for the result.
+          example: task-001
+
+    BaseCmpRespProfileResultQueryResp:
+      type: object
+      description: Response body for the result-query.
+      properties:
+        resultCode:
+          type: string
+          pattern: '^B[0-9]{6}$'
+          maxLength: 32
+          description: >-
+            `B100000` — the query itself succeeded; the queried task's outcome
+            is carried by `data.operResult`.
+          example: B100000
+        resultDesc:
+          type: string
+          pattern: '^[\s\S]{0,256}$'
+          maxLength: 256
+          description: Result description message.
+          example: Success
+        sequenceNum:
+          type: string
+          pattern: '^[a-zA-Z0-9_\-]{1,64}$'
+          maxLength: 64
+          description: The request's `sequenceNum`, echoed if one was supplied.
+          example: seq-77
+        data:
+          $ref: "#/components/schemas/ProfileResultQueryResp"
+
+    ProfileResultQueryResp:
+      type: object
+      description: Data payload for the result-query response.
+      properties:
+        taskId:
+          type: string
+          pattern: '^[a-zA-Z0-9_\-]{1,64}$'
+          maxLength: 64
+          description: The task identifier, echoed from the request.
+          example: task-001
+        imei:
+          type: string
+          pattern: '^[0-9]{15}$'
+          maxLength: 32
+          description: The device IMEI, synthesised deterministically from the taskId.
+          example: "356938035643809"
+        iccid:
+          type: string
+          pattern: '^[0-9]{19,20}$'
+          maxLength: 32
+          description: The affected profile's ICCID, synthesised from the taskId.
+          example: "8931089011234567890"
+        operResult:
+          type: integer
+          format: int32
+          minimum: 0
+          maximum: 2
+          description: "Task result: 0 — executing, 1 — success, 2 — fail."
+          example: 1
+        eId:
+          type: string
+          pattern: '^[A-Fa-f0-9]{32}$'
+          maxLength: 64
+          description: The device EID, synthesised deterministically from the taskId.
+          example: "A1B2C3D4E5F600000000000000000001"
+        resultMsg:
+          type: string
+          pattern: '^[\s\S]{0,512}$'
+          maxLength: 512
+          description: Human-readable description of the task result.
+          example: Operation completed successfully

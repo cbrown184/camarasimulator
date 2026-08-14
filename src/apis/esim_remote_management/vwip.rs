@@ -1,8 +1,13 @@
 //! eSIM Remote Management **vwip** (CAMARA eSIM Remote Management, wip).
 //!
-//! One endpoint so far:
+//! Two endpoints so far:
 //! - `POST /esim-remote-management/vwip/profile/downloaded-list` — list the eSIM
 //!   profiles installed on a device's eUICC (operationId `profileList`).
+//! - `POST /esim-remote-management/vwip/profile/result/query` — query the result
+//!   of an asynchronous profile operation by its `taskId` (operationId
+//!   `profileResultQuery`). Stateless: the result is deterministic from the
+//!   `taskId` (its trailing three digits pick `operResult` — executing / success
+//!   / fail — with the device `eId`/`imei`/`iccid` synthesised from the id).
 //!
 //! ## What it does
 //!
@@ -59,15 +64,24 @@ use crate::scenarios;
 /// Management).
 const LIST_SCOPE: &str = "esim-remote-management:downloadedlist";
 
+/// The OAuth2 scope the `profileResultQuery` endpoint requires (CAMARA eSIM
+/// Remote Management).
+const QUERY_SCOPE: &str = "esim-remote-management:query";
+
 /// The success `resultCode` of the base CMP response envelope (`B100000`).
 const RESULT_OK: &str = "B100000";
 
 /// Routes for eSIM Remote Management vwip, mounted at their canonical URLs.
 pub fn routes() -> Router {
-    Router::new().route(
-        "/esim-remote-management/vwip/profile/downloaded-list",
-        post(profile_list),
-    )
+    Router::new()
+        .route(
+            "/esim-remote-management/vwip/profile/downloaded-list",
+            post(profile_list),
+        )
+        .route(
+            "/esim-remote-management/vwip/profile/result/query",
+            post(profile_result_query),
+        )
 }
 
 /// `POST /profile/downloaded-list` request body — the base CMP envelope
@@ -168,6 +182,128 @@ async fn profile_list(claims: Claims, headers: HeaderMap, body: Bytes) -> Respon
     }
 
     with_correlator((StatusCode::OK, Json(out)).into_response(), &correlator)
+}
+
+/// `POST /profile/result/query` request body — the base CMP envelope
+/// (CAMARA `BaseCmpReqProfileResultQueryReq`).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ResultQueryRequest {
+    #[allow(dead_code)]
+    timestamp: Option<String>,
+    #[serde(rename = "sequenceNum")]
+    sequence_num: Option<String>,
+    #[serde(rename = "clientId")]
+    #[allow(dead_code)]
+    client_id: Option<String>,
+    data: Option<ResultQueryData>,
+}
+
+/// The `data` payload (CAMARA `ProfileResultQueryReq`).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ResultQueryData {
+    #[serde(rename = "taskId")]
+    task_id: Option<String>,
+}
+
+/// `POST /esim-remote-management/vwip/profile/result/query`.
+///
+/// Queries the result of an asynchronous profile operation (download / enable /
+/// disable / delete) by the `taskId` a prior operation returned. CamaraSim is
+/// stateless, so the result is deterministic from the `taskId` (docs/DESIGN.md
+/// §7): its trailing three decimal digits are the control plane — a reserved
+/// error suffix selects a canonical CAMARA error, otherwise `d % 3` picks the
+/// task `operResult` (`0` executing / `1` success / `2` fail). The `eId`,
+/// `imei`, and per-task `iccid` on the response are derived deterministically
+/// from the `taskId`, so the same `taskId` always reports the same result.
+async fn profile_result_query(claims: Claims, headers: HeaderMap, body: Bytes) -> Response {
+    // Optional correlation header, echoed on every response (CAMARA Commonalities).
+    let correlator = headers.get("x-correlator").cloned();
+
+    // Endpoint authorisation: the token must carry this API's scope.
+    if let Err(e) = claims.require_scope(QUERY_SCOPE) {
+        return with_correlator(e.into_response(), &correlator);
+    }
+
+    // The request body is required and must parse.
+    let req: ResultQueryRequest = match serde_json::from_slice(&body) {
+        Ok(req) => req,
+        Err(_) => {
+            return invalid_argument(
+                "Request body is not a valid BaseCmpReqProfileResultQueryReq.",
+                &correlator,
+            )
+        }
+    };
+
+    // Syntactic validation (400) before the identifier-driven scenario plane.
+    if let Some(seq) = &req.sequence_num {
+        if !is_valid_sequence_num(seq) {
+            return invalid_argument(
+                "`sequenceNum` must match ^[a-zA-Z0-9_-]{1,64}$.",
+                &correlator,
+            );
+        }
+    }
+
+    // `data.taskId` is required and follows the CAMARA `^[a-zA-Z0-9_-]{1,64}$`
+    // pattern (a query with no task to look up is meaningless).
+    let task_id = match req.data.and_then(|d| d.task_id) {
+        Some(id) if is_valid_sequence_num(&id) => id,
+        _ => {
+            return invalid_argument(
+                "`data.taskId` is required and must match ^[a-zA-Z0-9_-]{1,64}$.",
+                &correlator,
+            )
+        }
+    };
+
+    // The identifier is the control plane (docs/DESIGN.md §7).
+    if let Some(err) = scenarios::reserved_error(&task_id) {
+        return with_correlator(err.into_response(), &correlator);
+    }
+
+    // Happy path: the taskId's trailing three digits pick the task result
+    // (`d % 3`: 0 executing / 1 success / 2 fail — all three reachable). The
+    // device identifiers are synthesised deterministically from the taskId.
+    let d = scenarios::trailing_three_digits(&task_id).unwrap_or(0);
+    let oper_result = (d % 3) as i32;
+    let result_msg = match oper_result {
+        1 => "Operation completed successfully",
+        2 => "Operation failed",
+        _ => "Operation in progress",
+    };
+    let e_id = eid_from_task(&task_id);
+
+    let mut out = json!({
+        "resultCode": RESULT_OK,
+        "resultDesc": "Success",
+        "data": {
+            "taskId": task_id,
+            "imei": imei(&e_id),
+            "iccid": iccid(&e_id, 0),
+            "operResult": oper_result,
+            "eId": e_id,
+            "resultMsg": result_msg,
+        },
+    });
+    // Echo the request's `sequenceNum` when one was supplied.
+    if let Some(seq) = &req.sequence_num {
+        out["sequenceNum"] = json!(seq);
+    }
+
+    with_correlator((StatusCode::OK, Json(out)).into_response(), &correlator)
+}
+
+/// A synthetic device `eId` (32 hex, matching `^[A-Fa-f0-9]{32}$`) derived
+/// deterministically from a `taskId`. The `profileResultQuery` request carries
+/// only a `taskId`, so the device identity it reports is generated from that id
+/// (two 64-bit FNV hashes → 128 bits → 32 hex characters). Stable per taskId.
+fn eid_from_task(task_id: &str) -> String {
+    let hi = fnv1a_64(&format!("eid-hi:{task_id}"));
+    let lo = fnv1a_64(&format!("eid-lo:{task_id}"));
+    format!("{hi:016x}{lo:016x}")
 }
 
 /// Whether `s` is exactly 32 hexadecimal characters (the CAMARA `eId` pattern
@@ -531,6 +667,176 @@ mod tests {
         assert_eq!(
             headers.get("x-correlator").and_then(|v| v.to_str().ok()),
             Some("corr-err")
+        );
+    }
+
+    // --- profileResultQuery -------------------------------------------------
+
+    /// POST to the result-query endpoint with an optional Bearer token and
+    /// optional `x-correlator`. Returns (status, headers, json-or-null).
+    async fn post_query(
+        token: Option<&str>,
+        body: &str,
+        correlator: Option<&str>,
+    ) -> (StatusCode, HeaderMap, Value) {
+        let mut builder = Request::builder()
+            .method("POST")
+            .uri("/esim-remote-management/vwip/profile/result/query")
+            .header("host", HOST)
+            .header("content-type", "application/json");
+        if let Some(t) = token {
+            builder = builder.header("authorization", format!("Bearer {t}"));
+        }
+        if let Some(c) = correlator {
+            builder = builder.header("x-correlator", c);
+        }
+        let response = app()
+            .oneshot(builder.body(Body::from(body.to_string())).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let headers = response.headers().clone();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, headers, json)
+    }
+
+    /// Mint the scoped token and call the query endpoint.
+    async fn query_ok(body: &str) -> (StatusCode, HeaderMap, Value) {
+        let token = mint_token(QUERY_SCOPE).await;
+        post_query(Some(&token), body, None).await
+    }
+
+    fn query_body_for(task_id: &str) -> String {
+        format!(r#"{{"data":{{"taskId":"{task_id}"}}}}"#)
+    }
+
+    // Pure scenario unit: the synthesised eId is 32 hex and stable per taskId.
+    #[test]
+    fn eid_from_task_is_32_hex_and_deterministic() {
+        let e = eid_from_task("task-001");
+        assert!(is_hex32(&e), "eId {e} should be 32 hex characters");
+        assert_eq!(eid_from_task("task-001"), e);
+        assert_ne!(eid_from_task("task-001"), eid_from_task("task-002"));
+    }
+
+    #[tokio::test]
+    async fn executing_result_for_a_000_tail() {
+        // …000 → d % 3 == 0 → executing.
+        let (status, _, body) = query_ok(&query_body_for("task-000")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["resultCode"], "B100000");
+        assert_eq!(body["data"]["taskId"], "task-000");
+        assert_eq!(body["data"]["operResult"], 0);
+        // Device identity is synthesised deterministically from the taskId.
+        assert_eq!(body["data"]["imei"].as_str().unwrap().len(), 15);
+        assert_eq!(body["data"]["iccid"].as_str().unwrap().len(), 20);
+        assert_eq!(body["data"]["eId"].as_str().unwrap().len(), 32);
+    }
+
+    #[tokio::test]
+    async fn success_result_for_a_001_tail() {
+        // …001 → d % 3 == 1 → success.
+        let (status, _, body) = query_ok(&query_body_for("task-001")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["data"]["operResult"], 1);
+    }
+
+    #[tokio::test]
+    async fn failed_result_for_a_002_tail() {
+        // …002 → d % 3 == 2 → fail.
+        let (status, _, body) = query_ok(&query_body_for("task-002")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["data"]["operResult"], 2);
+    }
+
+    #[tokio::test]
+    async fn query_result_is_deterministic() {
+        let (_, _, a) = query_ok(&query_body_for("task-777")).await;
+        let (_, _, b) = query_ok(&query_body_for("task-777")).await;
+        assert_eq!(a, b);
+    }
+
+    #[tokio::test]
+    async fn query_sequence_num_is_echoed_when_supplied() {
+        let token = mint_token(QUERY_SCOPE).await;
+        let body = r#"{"sequenceNum":"seq-77","data":{"taskId":"task-001"}}"#;
+        let (status, _, out) = post_query(Some(&token), body, None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(out["sequenceNum"], "seq-77");
+    }
+
+    #[tokio::test]
+    async fn query_reserved_suffix_selects_a_canonical_camara_error() {
+        // taskId ending …404 → 404 NOT_FOUND (the query itself fails).
+        let (status, _, body) = query_ok(&query_body_for("task-404")).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["code"], "NOT_FOUND");
+        // …503 → 503.
+        let (status, _, body) = query_ok(&query_body_for("task-503")).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["code"], "UNAVAILABLE");
+    }
+
+    #[tokio::test]
+    async fn query_missing_task_id_is_rejected() {
+        let (status, _, body) = query_ok(r#"{"data":{}}"#).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "INVALID_ARGUMENT");
+        // Wholly absent `data` too.
+        let (status, _, _) = query_ok(r#"{"sequenceNum":"s"}"#).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn query_malformed_task_id_is_rejected() {
+        // A space violates the ^[a-zA-Z0-9_-]{1,64}$ pattern.
+        let (status, _, body) = query_ok(&query_body_for("has space")).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "INVALID_ARGUMENT");
+    }
+
+    #[tokio::test]
+    async fn query_unknown_field_is_rejected() {
+        let (status, _, body) = query_ok(r#"{"data":{"taskId":"task-001"},"x":1}"#).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "INVALID_ARGUMENT");
+    }
+
+    #[tokio::test]
+    async fn query_malformed_json_body_is_rejected() {
+        let (status, _, body) = query_ok("not json").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "INVALID_ARGUMENT");
+    }
+
+    #[tokio::test]
+    async fn query_token_without_the_scope_is_forbidden() {
+        // The profileList scope must not grant the query endpoint.
+        let token = mint_token(LIST_SCOPE).await;
+        let (status, _, body) = post_query(Some(&token), &query_body_for("task-001"), None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["code"], "PERMISSION_DENIED");
+    }
+
+    #[tokio::test]
+    async fn query_missing_token_is_unauthenticated() {
+        let (status, _, body) = post_query(None, &query_body_for("task-001"), None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["code"], "UNAUTHENTICATED");
+    }
+
+    #[tokio::test]
+    async fn query_x_correlator_is_echoed() {
+        let token = mint_token(QUERY_SCOPE).await;
+        let (status, headers, _) =
+            post_query(Some(&token), &query_body_for("task-001"), Some("corr-q")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-q")
         );
     }
 }
