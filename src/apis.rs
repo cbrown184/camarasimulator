@@ -105,6 +105,7 @@ pub mod location_verification;
 pub mod media_streaming_rate;
 pub mod most_frequent_location;
 pub mod network_access_devices;
+pub mod network_access_domains;
 pub mod network_health_assessment;
 pub mod network_traffic_analysis;
 pub mod number_recycling;
@@ -183,6 +184,7 @@ pub fn routes() -> Router {
         .merge(application_endpoint_registration::routes())
         .merge(predictive_connectivity_data::routes())
         .merge(network_access_devices::routes())
+        .merge(network_access_domains::routes())
         .merge(short_message_service::routes())
         .merge(capabilities_and_restrictions::routes())
         .merge(dedicated_network_profiles::routes())

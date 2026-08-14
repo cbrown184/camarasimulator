@@ -337,6 +337,11 @@ pub const APIS: &[ApiSpec] = &[
         version: "v1",
         body: include_str!("../specs/in-home-device-management/v1/openapi.yaml"),
     },
+    ApiSpec {
+        name: "network-access-domains",
+        version: "vwip",
+        body: include_str!("../specs/network-access-domains/vwip/openapi.yaml"),
+    },
 ];
 
 #[cfg(test)]

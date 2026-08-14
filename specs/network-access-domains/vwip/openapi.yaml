@@ -1,0 +1,409 @@
+# CamaraSim — Network Access Domains, API version vwip
+# (CAMARA NetworkAccessManagement / Network Access Domains, wip).
+#
+# Vendored from the CAMARA NetworkAccessManagement "Network Access Domains" API
+# (work-in-progress — no released version yet, so mounted at its canonical `vwip`
+# base path `/network-access-domains/vwip`, like its sibling Network Access
+# Devices and the other pre-1.0 wip APIs) and annotated with CamaraSim's
+# functional cases (docs/DESIGN.md §7, §9). Backed by
+# `src/apis/network_access_domains/vwip.rs`; spec and code must not drift.
+#
+# So far this vendored slice serves `GET /trust-domains/capabilities`
+# (getTrustDomainCapabilities) — the provider-level, read-only capabilities
+# document describing which Trust Domain access types and policy limits this API
+# provider supports. It is stateless, has no request body and no device
+# identifier, so — unlike the identifier-keyed APIs — it carries no
+# reserved-error scenario plane: it always answers the same fixed capabilities
+# document (or a resource-server auth error). The Services and Trust Domain CRUD
+# legs remain to be added in later slices.
+openapi: 3.0.3
+info:
+  title: Network Access Domains
+  description: |
+    Service for configuring **home-network access domains** — Trust Domains that
+    group devices under a common access policy (Wi-Fi or Thread) on the
+    subscriber's home network. This is part of the CAMARA Home Devices family and
+    the CamaraSim reference double for the CAMARA NetworkAccessManagement
+    "Network Access Domains" API (wip).
+
+    ## `GET /trust-domains/capabilities`
+
+    Returns the set of Trust Domain configuration capabilities the API provider
+    supports: which access types (Wi-Fi WPA-Personal/Enterprise, Thread) and
+    their properties, plus the policy limits (max devices, per-domain
+    up/downstream bandwidth bands, egress-list constraints) a caller may configure
+    when creating a Trust Domain. It requires the `network-access-domains:trust-domains`
+    scope.
+
+    ## Functional cases — the input is the control plane (docs/DESIGN.md §7)
+
+    Provider capabilities are fixed operator configuration, not keyed to any
+    device or subscriber, so this operation has **no** parameter-driven control
+    plane: given a token carrying the required scope it always answers the same
+    deterministic `TrustDomainCapabilities` document (`200`). Missing/invalid
+    token → `401`; a token without the scope → `403` (both from the shared
+    resource-server layer).
+
+    ## Documented cuts
+
+    - Only the read-only `getTrustDomainCapabilities` leg is implemented in this
+      slice; the `Services` catalog and the stateful Trust Domain / Trust Domain
+      Device CRUD resources are later slices.
+    - The advertised capabilities are a fixed, representative set covering all four
+      CAMARA access-type variants' families (Wi-Fi WPA-Personal, Wi-Fi
+      WPA-Enterprise, Thread) and all four policy capabilities; the exact values
+      are simulator defaults (schema-valid), not negotiated per operator.
+  version: "wip"
+  license:
+    name: Apache-2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0.html
+
+servers:
+  - url: "{apiRoot}/network-access-domains/vwip"
+    variables:
+      apiRoot:
+        default: http://localhost:8080
+        description: API root, e.g. the CamaraSim base URL.
+
+paths:
+  /trust-domains/capabilities:
+    get:
+      operationId: getTrustDomainCapabilities
+      summary: Get Trust Domain capabilities
+      description: |
+        Retrieves the set of Trust Domain configuration capabilities supported by
+        the API provider — the supported access types and their variants, and the
+        policy limits (max devices, per-domain bandwidth bands, egress-list
+        constraints) a caller may configure.
+
+        There is no request body and no device identifier: capabilities are fixed
+        provider configuration, so this operation has no parameter-driven control
+        plane and always returns the same document (docs/DESIGN.md §7).
+      security:
+        - openId:
+            - network-access-domains:trust-domains
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+      responses:
+        "200":
+          description: Trust Domain capabilities supported by this API provider.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TrustDomainCapabilities"
+              examples:
+                capabilities:
+                  summary: The provider's fixed Trust Domain capabilities
+                  value:
+                    supportedAccessTypes:
+                      - accessType: "Wi-Fi:WPA_PERSONAL"
+                        wifiProperties:
+                          ssidRequired: true
+                          supportedSecurityModes:
+                            - WPA2-Personal
+                            - WPA3-Personal
+                            - WPA2-WPA3-Personal
+                          passwordConstraints:
+                            minLength: 8
+                            maxLength: 63
+                            requireSpecialCharacters: false
+                          authServerRequired: false
+                      - accessType: "Wi-Fi:WPA_ENTERPRISE"
+                        wifiProperties:
+                          ssidRequired: true
+                          supportedSecurityModes:
+                            - WPA2-Enterprise
+                            - WPA3-Enterprise
+                          authServerRequired: true
+                      - accessType: "Thread:STRUCTURED"
+                        threadProperties:
+                          supportedChannels:
+                            min: 11
+                            max: 26
+                          networkKeyFormat: "32-hex-digits"
+                          networkNameConstraints:
+                            minLength: 1
+                            maxLength: 16
+                          maxDatasetLength: 254
+                    supportedPolicies:
+                      maxDevices:
+                        minValue: 1
+                        maxValue: 100
+                      maxDomainDownstreamRate:
+                        minValue: 1000000
+                        maxValue: 1000000000
+                      maxDomainUpstreamRate:
+                        minValue: 1000000
+                        maxValue: 1000000000
+                      egressAllowedList:
+                        maxEntries: 50
+                        supportedDestinationTypes:
+                          - IP
+                          - FQDN
+                          - CIDR
+        "400":
+          $ref: "../../shared/errors.yaml#/components/responses/InvalidArgument"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          Provider capabilities are fixed operator configuration with no
+          device/subscriber key, so this operation has no parameter-driven control
+          plane (docs/DESIGN.md §7): a scoped token always yields the same
+          document.
+        cases:
+          - input: a token carrying the network-access-domains:trust-domains scope
+            result: "200 — the fixed TrustDomainCapabilities document"
+          - input: a token without the scope
+            result: "403 PERMISSION_DENIED"
+          - input: no / invalid token
+            result: "401 UNAUTHENTICATED"
+
+components:
+  securitySchemes:
+    openId:
+      $ref: "../../auth/openapi.yaml#/components/securitySchemes/camaraOAuth"
+
+  parameters:
+    XCorrelator:
+      name: x-correlator
+      in: header
+      required: false
+      description: Correlation id for the request, echoed back on the response.
+      schema:
+        type: string
+
+  headers:
+    XCorrelator:
+      description: The `x-correlator` from the request, echoed if one was sent.
+      required: false
+      schema:
+        type: string
+
+  schemas:
+    TrustDomainCapabilities:
+      type: object
+      additionalProperties: false
+      description: |
+        Describes the Trust Domain configuration capabilities supported by this
+        API provider.
+      required:
+        - supportedAccessTypes
+      properties:
+        supportedAccessTypes:
+          type: array
+          minItems: 1
+          maxItems: 4
+          description: List of supported access types and their variants.
+          items:
+            $ref: "#/components/schemas/SupportedAccessType"
+        supportedPolicies:
+          type: object
+          additionalProperties: false
+          description: Map of supported policy types to their capability details.
+          properties:
+            maxDevices:
+              $ref: "#/components/schemas/MaxDevicesPolicyCapability"
+            maxDomainDownstreamRate:
+              $ref: "#/components/schemas/BandwidthPolicyCapability"
+            maxDomainUpstreamRate:
+              $ref: "#/components/schemas/BandwidthPolicyCapability"
+            egressAllowedList:
+              $ref: "#/components/schemas/EgressPolicyCapability"
+
+    SupportedAccessType:
+      type: object
+      description: |
+        A supported access type. `accessType` is the discriminator; the remaining
+        properties belong to the matching variant (Wi-Fi variants carry
+        `wifiProperties`, Thread variants carry `threadProperties`).
+      required:
+        - accessType
+      discriminator:
+        propertyName: accessType
+      properties:
+        accessType:
+          type: string
+          enum:
+            - "Wi-Fi:WPA_PERSONAL"
+            - "Wi-Fi:WPA_ENTERPRISE"
+            - "Thread:STRUCTURED"
+            - "Thread:TLV"
+          description: The access type identifier.
+        wifiProperties:
+          $ref: "#/components/schemas/WiFiAccessTypeProperties"
+        threadProperties:
+          $ref: "#/components/schemas/ThreadAccessTypeProperties"
+
+    WiFiAccessTypeProperties:
+      type: object
+      additionalProperties: false
+      description: The configuration properties supported for a Wi-Fi access type.
+      properties:
+        ssidRequired:
+          type: boolean
+          example: true
+        supportedSecurityModes:
+          type: array
+          maxItems: 5
+          items:
+            type: string
+            enum:
+              - WPA2-Personal
+              - WPA3-Personal
+              - WPA2-WPA3-Personal
+              - WPA2-Enterprise
+              - WPA3-Enterprise
+        passwordConstraints:
+          $ref: "#/components/schemas/PasswordConstraints"
+        authServerRequired:
+          type: boolean
+          example: false
+
+    PasswordConstraints:
+      type: object
+      additionalProperties: false
+      description: The constraints on a Wi-Fi pre-shared-key / password.
+      required:
+        - minLength
+        - maxLength
+      properties:
+        minLength:
+          type: integer
+          format: int32
+          minimum: 8
+          maximum: 63
+          example: 8
+        maxLength:
+          type: integer
+          format: int32
+          minimum: 8
+          maximum: 63
+          example: 63
+        requireSpecialCharacters:
+          type: boolean
+          example: false
+
+    ThreadAccessTypeProperties:
+      type: object
+      additionalProperties: false
+      description: The configuration properties supported for a Thread access type.
+      properties:
+        supportedChannels:
+          type: object
+          additionalProperties: false
+          required:
+            - min
+            - max
+          properties:
+            min:
+              type: integer
+              minimum: 11
+              maximum: 26
+              example: 11
+            max:
+              type: integer
+              minimum: 11
+              maximum: 26
+              example: 26
+        networkKeyFormat:
+          type: string
+          enum:
+            - "32-hex-digits"
+        networkNameConstraints:
+          type: object
+          additionalProperties: false
+          required:
+            - minLength
+            - maxLength
+          properties:
+            minLength:
+              type: integer
+              minimum: 1
+              maximum: 16
+              example: 1
+            maxLength:
+              type: integer
+              minimum: 1
+              maximum: 16
+              example: 16
+        maxDatasetLength:
+          type: integer
+          minimum: 1
+          maximum: 254
+          example: 254
+
+    MaxDevicesPolicyCapability:
+      type: object
+      additionalProperties: false
+      description: The supported range for the max-devices-per-domain policy.
+      required:
+        - maxValue
+        - minValue
+      properties:
+        minValue:
+          type: integer
+          format: int32
+          minimum: 1
+          maximum: 1024
+          example: 1
+        maxValue:
+          type: integer
+          format: int32
+          minimum: 1
+          maximum: 1024
+          example: 100
+
+    BandwidthPolicyCapability:
+      type: object
+      additionalProperties: false
+      description: The supported range (bits/second) for a per-domain bandwidth policy.
+      required:
+        - maxValue
+        - minValue
+      properties:
+        minValue:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 10000000000
+          example: 1000000
+        maxValue:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 10000000000
+          example: 1000000000
+
+    EgressPolicyCapability:
+      type: object
+      additionalProperties: false
+      description: The constraints on a Trust Domain egress allow-list policy.
+      required:
+        - maxEntries
+        - supportedDestinationTypes
+      properties:
+        maxEntries:
+          type: integer
+          format: int32
+          minimum: 1
+          maximum: 1024
+          example: 50
+        supportedDestinationTypes:
+          type: array
+          maxItems: 3
+          items:
+            type: string
+            enum:
+              - IP
+              - FQDN
+              - CIDR

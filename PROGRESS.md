@@ -3059,6 +3059,20 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
         a deleted device → 404). Empty body / `{}` → no-op 200. **Completes
         In-Home Device Management v1** (and the tail of the "Other CAMARA APIs"
         backlog slice).
+  - [~] Network Access Domains vwip (`/network-access-domains/vwip`; CAMARA
+    NetworkAccessManagement / Network Access Domains, wip — the Trust Domain
+    sibling of Network Access Devices in the same repo; mounted at its canonical
+    `vwip` base path):
+    - [x] `GET /trust-domains/capabilities` (`getTrustDomainCapabilities`, scope
+      `network-access-domains:trust-domains`) — the provider-level, read-only
+      capabilities document (supported access types + policy limits). Stateless,
+      no request body and no device identifier, so **no** reserved-error/parameter
+      control plane (DESIGN §7): a scoped token → `200` the fixed
+      `TrustDomainCapabilities` document (three access-type families — Wi-Fi
+      WPA-Personal/Enterprise, Thread STRUCTURED — + all four policy capabilities,
+      schema-valid); no scope → 403, no token → 401 (shared resource-server
+      layer). `x-correlator` echoed. No new dep. The `Services` catalog and the
+      stateful Trust Domain / Trust Domain Device CRUD legs remain later slices.
 
 ## Cross-cutting (do alongside the item that needs it)
 - [~] `errors.rs`: base CAMARA error model done (`src/errors.rs`, `specs/shared/errors.yaml`); per-version catalogs still TODO (DESIGN §8)
@@ -4200,6 +4214,36 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-14 — **new API: Network Access Domains vwip**
+  (`/network-access-domains/vwip`; CAMARA NetworkAccessManagement / Network
+  Access Domains, wip). A fresh survey confirmed the mounted set's remaining
+  backlog leaves are all deferred for real reasons (TLS sink → maintainer rustls
+  decision; the rest → "no live engine / no provisioning worker"), so — the same
+  playbook as the eSIM / In-Home passes — this pass extends **coverage** with a
+  genuinely-unmounted, public-spec CAMARA API. Diffed the mounted set against the
+  live `NetworkAccessManagement` repo (we mount `network-access-devices` but not
+  its sibling `network-access-domains.yaml`) and chose its cleanest **stateless,
+  non-spatial** leg (phase discipline: stateless first): `GET
+  /trust-domains/capabilities` (`getTrustDomainCapabilities`, scope
+  `network-access-domains:trust-domains`) — the provider-level Trust Domain
+  capabilities document. Verified the upstream signature + the
+  `TrustDomainCapabilities` schema against the canonical
+  `code/modules/TrustDomains/TrustDomainCapabilities.yaml`: `supportedAccessTypes`
+  (1–4, discriminated on `accessType` over Wi-Fi WPA-Personal/Enterprise +
+  Thread STRUCTURED/TLV) + `supportedPolicies` (maxDevices, up/downstream
+  bandwidth bands, egress allow-list). Modelled as a fixed, schema-valid document
+  (no request body, no device identifier → no reserved-error/parameter control
+  plane, DESIGN §7): a scoped token → `200` the same document; no scope → 403,
+  no token → 401 (shared resource-server layer); `x-correlator` echoed. New
+  `src/apis/network_access_domains{,.rs}` + `vwip.rs` (mirrors MFL's auth/correlator
+  scaffolding); vendored `specs/network-access-domains/vwip/openapi.yaml` (shared
+  `auth`/`errors.yaml` `$ref`s, inline schemas, `x-camarasim-scenarios`, a 200
+  example); registry + `apis.rs` wired. **No new dependency.** The Services
+  catalog + the stateful Trust Domain / device CRUD legs are later slices. Tests:
+  +6 (2 units: capabilities-document shape + Wi-Fi password-constraint bounds; 4
+  router integration: 200 document, wrong-scope 403, no-token 401, correlator
+  echo). `cargo test` 2417 green (was 2411); `cargo build --release` succeeds.
+  — binary: 4.0M (4108216 B, +23144 B)
 - 2026-08-14 — Click to Dial vwip: implemented the deferred **`callDuration` /
   `recordingResult`** slice — each `…001`/`…003` **success** progression now closes
   with a natural **completion** `status-changed` CloudEvent (a terminal
