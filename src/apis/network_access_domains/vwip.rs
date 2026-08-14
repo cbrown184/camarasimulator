@@ -23,7 +23,10 @@
 //! `getServices` returns the caller's `ServiceList` — the services (each a
 //! logical commercial subscription tied to a `serviceSite`) associated with the
 //! authenticated identity. It requires the `network-access-domains:services:read`
-//! scope.
+//! scope. Each `serviceSite` carries a deterministic `location.geographicPoint`
+//! (a WGS-84 point stable per identity/slot); the canonical `propertyAddress`
+//! (civic address) remains a documented cut. The point is a fixed, renderable
+//! coordinate, not a queryable spatial field, so it is not a control plane.
 //!
 //! Both are protected: they require a valid access token
 //! ([`crate::auth::verify::Claims`]) carrying the endpoint's scope.
@@ -234,6 +237,7 @@ fn services_for(identity: &str) -> Vec<Value> {
 fn service(identity: &str, i: usize) -> Value {
     let (name, description, site_name, site_description) =
         SERVICE_TEMPLATES[i % SERVICE_TEMPLATES.len()];
+    let (latitude, longitude) = deterministic_point(identity, i);
     json!({
         "id": deterministic_uuid("nad-service", identity, i),
         "name": name,
@@ -241,9 +245,34 @@ fn service(identity: &str, i: usize) -> Value {
         "serviceSite": {
             "id": deterministic_uuid("nad-service-site", identity, i),
             "name": site_name,
-            "description": site_description
+            "description": site_description,
+            // The site's physical location (docs/DESIGN.md §7). Only the WGS-84
+            // `geographicPoint` is emitted; the canonical `propertyAddress` (a
+            // 20-field civic address) remains a documented cut. This is a fixed,
+            // representative coordinate the caller can render, not a queryable
+            // spatial field, so it is not a scenario control plane.
+            "location": {
+                "geographicPoint": { "latitude": latitude, "longitude": longitude }
+            }
         }
     })
+}
+
+/// A deterministic WGS-84 point (decimal degrees) for `identity`'s service site
+/// at catalog slot `index`.
+///
+/// Derived from a domain-tagged SHA-256 (a tag distinct from the id tags, so the
+/// coordinate never collides with an id) mapped onto the valid latitude
+/// (`[-90, 90]`) and longitude (`[-180, 180]`) ranges, rounded to five decimal
+/// places (~1 m). Stable per `(identity, slot)` yet unrelated to the ids. No
+/// `rand`/geo dependency (reuses sha2).
+fn deterministic_point(identity: &str, index: usize) -> (f64, f64) {
+    let h = Sha256::digest(format!("nad-service-site-geo:{identity}:{index}").as_bytes());
+    // Two independent unit fractions in `[0, 1]` from disjoint hash bytes.
+    let lat_unit = u16::from_be_bytes([h[0], h[1]]) as f64 / u16::MAX as f64;
+    let lon_unit = u16::from_be_bytes([h[2], h[3]]) as f64 / u16::MAX as f64;
+    let round5 = |x: f64| (x * 1e5).round() / 1e5;
+    (round5(lat_unit * 180.0 - 90.0), round5(lon_unit * 360.0 - 180.0))
 }
 
 /// A deterministic, UUID-shaped id from the first 16 bytes of a domain-tagged
@@ -525,6 +554,29 @@ mod tests {
         assert_ne!(a[0]["id"], services_for("nad-006")[0]["id"]);
     }
 
+    #[test]
+    fn service_site_location_point_is_valid_and_deterministic() {
+        let catalog = services_for("nad-003"); // 3 services → 3 sites
+        assert_eq!(catalog.len(), 3);
+        for svc in &catalog {
+            let point = &svc["serviceSite"]["location"]["geographicPoint"];
+            let lat = point["latitude"].as_f64().unwrap();
+            let lon = point["longitude"].as_f64().unwrap();
+            // Within the WGS-84 valid ranges.
+            assert!((-90.0..=90.0).contains(&lat), "latitude {lat} out of range");
+            assert!((-180.0..=180.0).contains(&lon), "longitude {lon} out of range");
+            // Rounded to at most five decimal places.
+            assert_eq!((lat * 1e5).round() / 1e5, lat);
+            assert_eq!((lon * 1e5).round() / 1e5, lon);
+        }
+        // Deterministic per identity+slot, and distinct across slots (the geo tag
+        // is seeded by the slot index, so sites don't share one coordinate).
+        assert_eq!(deterministic_point("nad-003", 0), deterministic_point("nad-003", 0));
+        assert_ne!(deterministic_point("nad-003", 0), deterministic_point("nad-003", 1));
+        // A different identity yields a different point for the same slot.
+        assert_ne!(deterministic_point("nad-003", 0), deterministic_point("nad-004", 0));
+    }
+
     /// Whether `s` is a lowercase-hex, hyphenated 8-4-4-4-12 UUID string.
     fn is_uuid_shaped(s: &str) -> bool {
         let parts: Vec<&str> = s.split('-').collect();
@@ -579,6 +631,10 @@ mod tests {
         assert_eq!(list.len(), 2);
         assert!(list[0]["id"].is_string());
         assert!(list[0]["serviceSite"]["id"].is_string());
+        // The serviceSite carries a WGS-84 geographicPoint through the router.
+        let point = &list[0]["serviceSite"]["location"]["geographicPoint"];
+        assert!((-90.0..=90.0).contains(&point["latitude"].as_f64().unwrap()));
+        assert!((-180.0..=180.0).contains(&point["longitude"].as_f64().unwrap()));
     }
 
     #[tokio::test]

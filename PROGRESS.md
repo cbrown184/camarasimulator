@@ -4230,6 +4230,22 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-14 — Network Access Domains vwip: enriched the Services read legs with the
+  deterministic **`serviceSite.location.geographicPoint`** (WGS-84 point) — moving it from a
+  documented cut to implemented (a small, stateless, non-spatial slice, phase-disciplined; the
+  API's remaining legs are the stateful Trust Domain CRUD). Each `serviceSite` now carries a
+  `location.geographicPoint{latitude,longitude}` derived from a domain-tagged SHA-256 over
+  `(identity, slot)` (a tag disjoint from the id tags), mapped onto the valid lat `[-90,90]` /
+  lon `[-180,180]` ranges and rounded to 5 dp (~1 m) — stable per identity/slot yet unrelated to
+  the ids. It's a fixed, renderable coordinate, **not** a queryable spatial field, so it adds no
+  new scenario control plane (DESIGN §7). The canonical `location.propertyAddress` (a 20-field
+  civic address) stays a documented cut. **No new dep** (reuses sha2). Spec: added `location` to
+  the `ServiceSite` schema + new `Location` (geographicPoint only) and inline `Point` schemas
+  (repo vendoring convention), extended the `getServices`/`getService` 200 examples, refreshed the
+  "Documented cuts" prose. Tests: +1 fn (a unit asserting range/rounding/determinism across slots
+  & identities) + extended the catalog integration test to assert the point through the router.
+  `cargo test` 2436 green (was 2435); `cargo build --release` succeeds. — binary: 4.0M
+  (4133192 B, +2752 B)
 - 2026-08-14 — Network Access Domains vwip: added the **single-service** read leg
   `GET /services/{serviceId}` (`getService`, scope
   `network-access-domains:services:read`) — the API's cleanest remaining

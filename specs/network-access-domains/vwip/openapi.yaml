@@ -94,8 +94,11 @@ info:
       `getNetworkAccessDevice`.
     - The Services catalog is a deterministic, representative set (no real billing
       backend): the returned service/site names are simulator defaults, keyed only
-      to the identity, and `serviceSite.location` (geo/address) is omitted (both
-      are optional in the schema).
+      to the identity. Each `serviceSite` now carries a deterministic
+      `location.geographicPoint` (a WGS-84 point stable per identity/slot); the
+      canonical `location.propertyAddress` (a civic address) remains omitted (it is
+      optional in the schema). The point is a fixed, renderable coordinate, not a
+      queryable spatial field, so it is not a scenario control plane.
     - The advertised capabilities are a fixed, representative set covering all four
       CAMARA access-type variants' families (Wi-Fi WPA-Personal, Wi-Fi
       WPA-Enterprise, Thread) and all four policy capabilities; the exact values
@@ -254,6 +257,10 @@ paths:
                         id: "123e4567-e89b-12d3-a456-426614174000"
                         name: "Primary Residence"
                         description: "123 Main Street"
+                        location:
+                          geographicPoint:
+                            latitude: 50.735851
+                            longitude: 7.10066
                     - id: "123e4567-e89b-12d3-a456-426614174001"
                       name: "Vacation Home Internet"
                       description: "Internet subscription for vacation home"
@@ -261,6 +268,10 @@ paths:
                         id: "123e4567-e89b-12d3-a456-426614174002"
                         name: "Vacation Home"
                         description: "45 Lakeside Road"
+                        location:
+                          geographicPoint:
+                            latitude: 47.36667
+                            longitude: 8.55
                 empty:
                   summary: An identity with no associated services
                   value: []
@@ -350,6 +361,10 @@ paths:
                       id: "123e4567-e89b-12d3-a456-426614174000"
                       name: "Primary Residence"
                       description: "123 Main Street"
+                      location:
+                        geographicPoint:
+                          latitude: 50.735851
+                          longitude: 7.10066
         "400":
           $ref: "../../shared/errors.yaml#/components/responses/InvalidArgument"
         "401":
@@ -692,3 +707,38 @@ components:
           maxLength: 64
           description: A textual description of the service site.
           example: "123 Main Street"
+        location:
+          $ref: "#/components/schemas/Location"
+
+    Location:
+      type: object
+      description: |
+        The physical location of a service site. The canonical schema carries a
+        WGS-84 `geographicPoint` and a civic `propertyAddress`; CamaraSim emits a
+        deterministic `geographicPoint` only (`propertyAddress` is a documented
+        cut). The point is a fixed, representative coordinate the caller can
+        render, not a queryable spatial field, so it is not a scenario control
+        plane (docs/DESIGN.md §7).
+      properties:
+        geographicPoint:
+          $ref: "#/components/schemas/Point"
+
+    Point:
+      type: object
+      description: A WGS-84 point (decimal degrees).
+      required:
+        - latitude
+        - longitude
+      properties:
+        latitude:
+          type: number
+          format: double
+          minimum: -90
+          maximum: 90
+          example: 50.735851
+        longitude:
+          type: number
+          format: double
+          minimum: -180
+          maximum: 180
+          example: 7.10066
