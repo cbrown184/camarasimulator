@@ -1,6 +1,6 @@
 //! eSIM Remote Management **vwip** (CAMARA eSIM Remote Management, wip).
 //!
-//! Two endpoints so far:
+//! Three endpoints so far:
 //! - `POST /esim-remote-management/vwip/profile/downloaded-list` — list the eSIM
 //!   profiles installed on a device's eUICC (operationId `profileList`).
 //! - `POST /esim-remote-management/vwip/profile/result/query` — query the result
@@ -8,6 +8,17 @@
 //!   `profileResultQuery`). Stateless: the result is deterministic from the
 //!   `taskId` (its trailing three digits pick `operResult` — executing / success
 //!   / fail — with the device `eId`/`imei`/`iccid` synthesised from the id).
+//! - `POST /esim-remote-management/vwip/profile/oper` — perform a lifecycle
+//!   operation on a profile — enable / disable / delete (operationId
+//!   `profileOperation`, scope `esim-remote-management:oper`). CamaraSim models
+//!   the **synchronous acknowledgement** of the command: it validates the request
+//!   and answers `code: 0` with the echoed configuration. The device `eId` (in
+//!   `config.subscriptionDetail`) is the control plane (reserved suffix →
+//!   canonical error, else accepted) and `optType` (1 Enable / 2 Disable / 3
+//!   Delete) is surfaced in the response `message`. The actual eUICC state change
+//!   and any `sink` callback delivery are **documented cuts** (no live eUICC
+//!   engine — mirroring Click-to-Dial's engine cut); the operation's eventual
+//!   result is separately pollable via `profileResultQuery`.
 //!
 //! ## What it does
 //!
@@ -68,6 +79,10 @@ const LIST_SCOPE: &str = "esim-remote-management:downloadedlist";
 /// Remote Management).
 const QUERY_SCOPE: &str = "esim-remote-management:query";
 
+/// The OAuth2 scope the `profileOperation` endpoint requires (CAMARA eSIM
+/// Remote Management).
+const OPER_SCOPE: &str = "esim-remote-management:oper";
+
 /// The success `resultCode` of the base CMP response envelope (`B100000`).
 const RESULT_OK: &str = "B100000";
 
@@ -81,6 +96,10 @@ pub fn routes() -> Router {
         .route(
             "/esim-remote-management/vwip/profile/result/query",
             post(profile_result_query),
+        )
+        .route(
+            "/esim-remote-management/vwip/profile/oper",
+            post(profile_operation),
         )
 }
 
@@ -296,6 +315,220 @@ async fn profile_result_query(claims: Claims, headers: HeaderMap, body: Bytes) -
     with_correlator((StatusCode::OK, Json(out)).into_response(), &correlator)
 }
 
+/// `POST /profile/oper` request body — the base CMP subscription-style envelope
+/// (CAMARA `BaseCmpReqProfileOperReq`). Unlike the read legs (which use the
+/// `timestamp`/`sequenceNum`/`clientId`/`data` CMP envelope), the command legs
+/// wrap their payload in a callback-subscription envelope
+/// (`protocol`/`sink`/`types`/`config`).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProfileOperRequest {
+    /// Callback protocol; the upstream `Protocol` enum admits only `HTTP`.
+    protocol: Option<String>,
+    /// Callback address for asynchronous notification delivery. Accepted and
+    /// validated, but delivery is a documented cut (no live eUICC engine).
+    sink: Option<String>,
+    /// Subscribed event-type identifiers. Accepted for fidelity.
+    types: Option<Vec<String>>,
+    config: Option<ProfileOperConfig>,
+}
+
+/// The `config` payload (CAMARA `ProfileOperReq`).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProfileOperConfig {
+    #[serde(rename = "subscriptionDetail")]
+    subscription_detail: Option<SubscriptionDetail>,
+    #[serde(rename = "initialEvent")]
+    initial_event: Option<bool>,
+    #[serde(rename = "subscriptionMaxEvents")]
+    subscription_max_events: Option<i64>,
+    #[serde(rename = "subscriptionExpireTime")]
+    subscription_expire_time: Option<String>,
+}
+
+/// The device + operation selector inside `config.subscriptionDetail`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SubscriptionDetail {
+    #[serde(rename = "eId")]
+    e_id: Option<String>,
+    imei: Option<String>,
+    iccid: Option<String>,
+    #[serde(rename = "optType")]
+    opt_type: Option<i64>,
+}
+
+/// `POST /esim-remote-management/vwip/profile/oper`.
+///
+/// Performs a lifecycle operation on an eSIM profile — enable (`optType` 1),
+/// disable (`2`), or delete (`3`). The upstream operation is asynchronous (the
+/// eventual result is delivered to a `sink` and pollable via
+/// `profileResultQuery`); CamaraSim models the **synchronous acknowledgement**:
+/// it validates the request and answers `code: 0` echoing the configuration. The
+/// device `eId` (`config.subscriptionDetail.eId`) is the control plane
+/// (docs/DESIGN.md §7) — a reserved error suffix on its trailing three decimal
+/// digits selects a canonical CAMARA error, otherwise the command is accepted.
+/// The actual eUICC state change and any `sink` callback delivery are documented
+/// cuts (no live eUICC engine).
+async fn profile_operation(claims: Claims, headers: HeaderMap, body: Bytes) -> Response {
+    // Optional correlation header, echoed on every response (CAMARA Commonalities).
+    let correlator = headers.get("x-correlator").cloned();
+
+    // Endpoint authorisation: the token must carry this API's scope.
+    if let Err(e) = claims.require_scope(OPER_SCOPE) {
+        return with_correlator(e.into_response(), &correlator);
+    }
+
+    // The request body is required and must parse.
+    let req: ProfileOperRequest = match serde_json::from_slice(&body) {
+        Ok(req) => req,
+        Err(_) => {
+            return invalid_argument(
+                "Request body is not a valid BaseCmpReqProfileOperReq.",
+                &correlator,
+            )
+        }
+    };
+
+    // Envelope-level syntactic validation (400) before the identifier plane.
+    if let Some(p) = &req.protocol {
+        if p != "HTTP" {
+            return invalid_argument("`protocol` must be `HTTP`.", &correlator);
+        }
+    }
+    if let Some(sink) = &req.sink {
+        if !is_http_sink(sink) {
+            return invalid_argument(
+                "`sink` must be an http(s) URL of 1..=256 characters.",
+                &correlator,
+            );
+        }
+    }
+    if let Some(types) = &req.types {
+        if types.len() > 10 || !types.iter().all(|t| is_valid_sequence_num(t)) {
+            return invalid_argument(
+                "`types` admits at most 10 entries, each matching ^[a-zA-Z0-9_-]{1,64}$.",
+                &correlator,
+            );
+        }
+    }
+
+    // `config` and its `subscriptionDetail` are required by CamaraSim (a
+    // documented tightening — a command with no target profile is meaningless).
+    let config = match req.config {
+        Some(c) => c,
+        None => return invalid_argument("`config` is required.", &correlator),
+    };
+    if let Some(max) = config.subscription_max_events {
+        if !(1..=1000).contains(&max) {
+            return out_of_range(
+                "`config.subscriptionMaxEvents` must be within 1..=1000.",
+                &correlator,
+            );
+        }
+    }
+    let detail = match config.subscription_detail {
+        Some(d) => d,
+        None => {
+            return invalid_argument(
+                "`config.subscriptionDetail` is required.",
+                &correlator,
+            )
+        }
+    };
+
+    // The device `eId` is required and must be 32 hex characters.
+    let e_id = match &detail.e_id {
+        Some(id) if is_hex32(id) => id.clone(),
+        _ => {
+            return invalid_argument(
+                "`config.subscriptionDetail.eId` is required and must be 32 hexadecimal characters.",
+                &correlator,
+            )
+        }
+    };
+    // `optType` is required; the upstream enum admits 1 (Enable) / 2 (Disable) /
+    // 3 (Delete). Missing → INVALID_ARGUMENT; present but out of 1..=3 →
+    // OUT_OF_RANGE (mirrors the numeric-bounds convention, DESIGN §7/§8).
+    let opt_type = match detail.opt_type {
+        Some(t) if (1..=3).contains(&t) => t,
+        Some(_) => {
+            return out_of_range(
+                "`config.subscriptionDetail.optType` must be 1 (Enable), 2 (Disable), or 3 (Delete).",
+                &correlator,
+            )
+        }
+        None => {
+            return invalid_argument(
+                "`config.subscriptionDetail.optType` is required.",
+                &correlator,
+            )
+        }
+    };
+    // Optional device identifiers, validated to their CAMARA shapes when supplied.
+    if let Some(imei) = &detail.imei {
+        if !is_digits_len(imei, 15, 15) {
+            return invalid_argument(
+                "`config.subscriptionDetail.imei` must be 15 digits.",
+                &correlator,
+            );
+        }
+    }
+    if let Some(iccid) = &detail.iccid {
+        if !is_digits_len(iccid, 19, 20) {
+            return invalid_argument(
+                "`config.subscriptionDetail.iccid` must be 19 or 20 digits.",
+                &correlator,
+            );
+        }
+    }
+
+    // The identifier is the control plane (docs/DESIGN.md §7).
+    if let Some(err) = scenarios::reserved_error(&e_id) {
+        return with_correlator(err.into_response(), &correlator);
+    }
+
+    // Happy path: acknowledge the accepted command. `optType` selects the
+    // operation name surfaced in `message`; the device identity echoes any
+    // supplied `imei`/`iccid` or synthesises them deterministically from the
+    // `eId` (mirroring `profileList`), so the same device always reports the
+    // same identifiers.
+    let op = match opt_type {
+        1 => "Enable",
+        2 => "Disable",
+        _ => "Delete",
+    };
+    let imei_out = detail.imei.clone().unwrap_or_else(|| imei(&e_id));
+    let iccid_out = detail.iccid.clone().unwrap_or_else(|| iccid(&e_id, 0));
+
+    let sub = json!({
+        "eId": e_id,
+        "imei": imei_out,
+        "iccid": iccid_out,
+        "optType": opt_type,
+    });
+    // Echo the subscription fields only when supplied.
+    let mut config_out = json!({ "subscriptionDetail": sub });
+    if let Some(v) = config.initial_event {
+        config_out["initialEvent"] = json!(v);
+    }
+    if let Some(v) = config.subscription_max_events {
+        config_out["subscriptionMaxEvents"] = json!(v);
+    }
+    if let Some(v) = &config.subscription_expire_time {
+        config_out["subscriptionExpireTime"] = json!(v);
+    }
+
+    let out = json!({
+        "code": 0,
+        "message": format!("{op} operation accepted"),
+        "config": config_out,
+    });
+
+    with_correlator((StatusCode::OK, Json(out)).into_response(), &correlator)
+}
+
 /// A synthetic device `eId` (32 hex, matching `^[A-Fa-f0-9]{32}$`) derived
 /// deterministically from a `taskId`. The `profileResultQuery` request carries
 /// only a `taskId`, so the device identity it reports is generated from that id
@@ -317,6 +550,18 @@ fn is_valid_sequence_num(s: &str) -> bool {
     (1..=64).contains(&s.len())
         && s.bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
+/// Whether `s` is an `http://` or `https://` URL of 1..=256 characters (the
+/// upstream `sink` shape). A light structural check — CamaraSim does not deliver
+/// to the sink (a documented cut), so it validates the surface form only.
+fn is_http_sink(s: &str) -> bool {
+    (1..=256).contains(&s.len()) && (s.starts_with("http://") || s.starts_with("https://"))
+}
+
+/// Whether `s` is all ASCII digits with a length in `min..=max`.
+fn is_digits_len(s: &str, min: usize, max: usize) -> bool {
+    (min..=max).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_digit())
 }
 
 /// The device IMEI for `eid` — 14 digits derived from a stable hash plus a Luhn
@@ -372,6 +617,15 @@ fn fnv1a_64(s: &str) -> u64 {
 /// A 400 `INVALID_ARGUMENT` CAMARA error, with the correlator echoed.
 fn invalid_argument(message: &str, correlator: &Option<HeaderValue>) -> Response {
     with_correlator(CamaraError::invalid_argument(message).into_response(), correlator)
+}
+
+/// A 400 `OUT_OF_RANGE` CAMARA error, with the correlator echoed (used for the
+/// numeric bounds on `optType` / `subscriptionMaxEvents`).
+fn out_of_range(message: &str, correlator: &Option<HeaderValue>) -> Response {
+    with_correlator(
+        CamaraError::new(StatusCode::BAD_REQUEST, "OUT_OF_RANGE", message).into_response(),
+        correlator,
+    )
 }
 
 /// Echo the request's `x-correlator` onto a response, if one was supplied.
@@ -837,6 +1091,283 @@ mod tests {
         assert_eq!(
             headers.get("x-correlator").and_then(|v| v.to_str().ok()),
             Some("corr-q")
+        );
+    }
+
+    // --- profileOperation --------------------------------------------------
+
+    /// POST to the profile-operation endpoint with an optional Bearer token and
+    /// optional `x-correlator`. Returns (status, headers, json-or-null).
+    async fn post_oper(
+        token: Option<&str>,
+        body: &str,
+        correlator: Option<&str>,
+    ) -> (StatusCode, HeaderMap, Value) {
+        let mut builder = Request::builder()
+            .method("POST")
+            .uri("/esim-remote-management/vwip/profile/oper")
+            .header("host", HOST)
+            .header("content-type", "application/json");
+        if let Some(t) = token {
+            builder = builder.header("authorization", format!("Bearer {t}"));
+        }
+        if let Some(c) = correlator {
+            builder = builder.header("x-correlator", c);
+        }
+        let response = app()
+            .oneshot(builder.body(Body::from(body.to_string())).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let headers = response.headers().clone();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, headers, json)
+    }
+
+    /// Mint the scoped token and call the operation endpoint.
+    async fn oper_ok(body: &str) -> (StatusCode, HeaderMap, Value) {
+        let token = mint_token(OPER_SCOPE).await;
+        post_oper(Some(&token), body, None).await
+    }
+
+    /// A minimal `profileOperation` body for `eId` + `optType`.
+    fn oper_body(eid: &str, opt_type: i64) -> String {
+        format!(
+            r#"{{"config":{{"subscriptionDetail":{{"eId":"{eid}","optType":{opt_type}}}}}}}"#
+        )
+    }
+
+    // --- Pure unit ---------------------------------------------------------
+
+    #[test]
+    fn http_sink_and_digit_validators_are_exact() {
+        assert!(is_http_sink("http://a"));
+        assert!(is_http_sink("https://example.com/cb"));
+        assert!(!is_http_sink("ftp://x"));
+        assert!(!is_http_sink("")); // too short
+        assert!(!is_http_sink(&format!("http://{}", "a".repeat(300)))); // too long
+        assert!(is_digits_len("123456789012345", 15, 15));
+        assert!(!is_digits_len("12345", 15, 15));
+        assert!(!is_digits_len("12345678901234a", 15, 15)); // non-digit
+        assert!(is_digits_len("8931089011234567890", 19, 20));
+    }
+
+    // --- Success cases -----------------------------------------------------
+
+    #[tokio::test]
+    async fn enable_operation_is_accepted() {
+        let (status, _, body) = oper_ok(&oper_body(EID_ONE, 1)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["code"], 0);
+        assert_eq!(body["message"], "Enable operation accepted");
+        let detail = &body["config"]["subscriptionDetail"];
+        assert_eq!(detail["eId"], EID_ONE);
+        assert_eq!(detail["optType"], 1);
+        // Device identity is synthesised deterministically from the eId.
+        assert_eq!(detail["imei"].as_str().unwrap().len(), 15);
+        assert_eq!(detail["iccid"].as_str().unwrap().len(), 20);
+    }
+
+    #[tokio::test]
+    async fn disable_and_delete_report_their_operation_names() {
+        let (_, _, disable) = oper_ok(&oper_body(EID_ONE, 2)).await;
+        assert_eq!(disable["message"], "Disable operation accepted");
+        assert_eq!(disable["config"]["subscriptionDetail"]["optType"], 2);
+        let (_, _, delete) = oper_ok(&oper_body(EID_ONE, 3)).await;
+        assert_eq!(delete["message"], "Delete operation accepted");
+        assert_eq!(delete["config"]["subscriptionDetail"]["optType"], 3);
+    }
+
+    #[tokio::test]
+    async fn supplied_imei_and_iccid_are_echoed() {
+        let body = format!(
+            r#"{{"config":{{"subscriptionDetail":{{"eId":"{EID_ONE}","imei":"356938035643809","iccid":"8931089011234567890","optType":1}}}}}}"#
+        );
+        let (status, _, out) = oper_ok(&body).await;
+        assert_eq!(status, StatusCode::OK);
+        let detail = &out["config"]["subscriptionDetail"];
+        assert_eq!(detail["imei"], "356938035643809");
+        assert_eq!(detail["iccid"], "8931089011234567890");
+    }
+
+    #[tokio::test]
+    async fn subscription_fields_are_echoed_when_supplied() {
+        let body = format!(
+            r#"{{"protocol":"HTTP","sink":"https://cb.example/notify","types":["profile-enabled"],"config":{{"subscriptionDetail":{{"eId":"{EID_ONE}","optType":1}},"initialEvent":true,"subscriptionMaxEvents":5,"subscriptionExpireTime":"2026-08-14T12:00:00Z"}}}}"#
+        );
+        let (status, _, out) = oper_ok(&body).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(out["config"]["initialEvent"], true);
+        assert_eq!(out["config"]["subscriptionMaxEvents"], 5);
+        assert_eq!(out["config"]["subscriptionExpireTime"], "2026-08-14T12:00:00Z");
+    }
+
+    #[tokio::test]
+    async fn operation_result_is_deterministic() {
+        let (_, _, a) = oper_ok(&oper_body(EID_ONE, 1)).await;
+        let (_, _, b) = oper_ok(&oper_body(EID_ONE, 1)).await;
+        assert_eq!(a, b);
+    }
+
+    // --- Reserved-error control plane -------------------------------------
+
+    #[tokio::test]
+    async fn oper_reserved_suffix_selects_a_canonical_camara_error() {
+        // eId …404 → 404 NOT_FOUND (the command is rejected).
+        let (status, _, body) = oper_ok(&oper_body("A1B2C3D4E5F600000000000000000404", 1)).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["code"], "NOT_FOUND");
+        // …503 → 503.
+        let (status, _, body) = oper_ok(&oper_body("A1B2C3D4E5F600000000000000000503", 3)).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["code"], "UNAVAILABLE");
+    }
+
+    // --- Validation --------------------------------------------------------
+
+    #[tokio::test]
+    async fn missing_config_is_rejected() {
+        let (status, _, body) = oper_ok(r#"{"protocol":"HTTP"}"#).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "INVALID_ARGUMENT");
+    }
+
+    #[tokio::test]
+    async fn missing_subscription_detail_is_rejected() {
+        let (status, _, body) = oper_ok(r#"{"config":{"initialEvent":true}}"#).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "INVALID_ARGUMENT");
+    }
+
+    #[tokio::test]
+    async fn missing_or_non_hex_eid_is_rejected() {
+        // Missing eId.
+        let (status, _, body) = oper_ok(r#"{"config":{"subscriptionDetail":{"optType":1}}}"#).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "INVALID_ARGUMENT");
+        // Non-hex eId.
+        let (status, _, body) = oper_ok(&oper_body("not-a-valid-eid", 1)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "INVALID_ARGUMENT");
+    }
+
+    #[tokio::test]
+    async fn missing_opt_type_is_invalid_argument() {
+        let (status, _, body) =
+            oper_ok(&format!(r#"{{"config":{{"subscriptionDetail":{{"eId":"{EID_ONE}"}}}}}}"#)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "INVALID_ARGUMENT");
+    }
+
+    #[tokio::test]
+    async fn out_of_range_opt_type_is_out_of_range() {
+        for bad in [0i64, 4, 99] {
+            let (status, _, body) = oper_ok(&oper_body(EID_ONE, bad)).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "optType {bad}");
+            assert_eq!(body["code"], "OUT_OF_RANGE", "optType {bad}");
+        }
+    }
+
+    #[tokio::test]
+    async fn out_of_range_subscription_max_events_is_rejected() {
+        let body = format!(
+            r#"{{"config":{{"subscriptionDetail":{{"eId":"{EID_ONE}","optType":1}},"subscriptionMaxEvents":0}}}}"#
+        );
+        let (status, _, out) = oper_ok(&body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(out["code"], "OUT_OF_RANGE");
+    }
+
+    #[tokio::test]
+    async fn malformed_device_identifiers_are_rejected() {
+        // Bad imei (not 15 digits).
+        let bad_imei = format!(
+            r#"{{"config":{{"subscriptionDetail":{{"eId":"{EID_ONE}","imei":"123","optType":1}}}}}}"#
+        );
+        let (status, _, body) = oper_ok(&bad_imei).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "INVALID_ARGUMENT");
+        // Bad iccid (too short).
+        let bad_iccid = format!(
+            r#"{{"config":{{"subscriptionDetail":{{"eId":"{EID_ONE}","iccid":"123","optType":1}}}}}}"#
+        );
+        let (status, _, body) = oper_ok(&bad_iccid).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "INVALID_ARGUMENT");
+    }
+
+    #[tokio::test]
+    async fn bad_protocol_and_sink_are_rejected() {
+        let bad_proto = format!(
+            r#"{{"protocol":"MQTT","config":{{"subscriptionDetail":{{"eId":"{EID_ONE}","optType":1}}}}}}"#
+        );
+        let (status, _, body) = oper_ok(&bad_proto).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "INVALID_ARGUMENT");
+        let bad_sink = format!(
+            r#"{{"sink":"ftp://x","config":{{"subscriptionDetail":{{"eId":"{EID_ONE}","optType":1}}}}}}"#
+        );
+        let (status, _, body) = oper_ok(&bad_sink).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "INVALID_ARGUMENT");
+    }
+
+    #[tokio::test]
+    async fn oper_unknown_field_and_malformed_json_are_rejected() {
+        let (status, _, body) = oper_ok(&format!(
+            r#"{{"config":{{"subscriptionDetail":{{"eId":"{EID_ONE}","optType":1}}}},"x":1}}"#
+        ))
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "INVALID_ARGUMENT");
+        let (status, _, body) = oper_ok("not json").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "INVALID_ARGUMENT");
+    }
+
+    // --- Auth --------------------------------------------------------------
+
+    #[tokio::test]
+    async fn oper_scope_is_isolated_from_the_read_scopes() {
+        // The query scope must not grant the operation endpoint.
+        let token = mint_token(QUERY_SCOPE).await;
+        let (status, _, body) = post_oper(Some(&token), &oper_body(EID_ONE, 1), None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["code"], "PERMISSION_DENIED");
+    }
+
+    #[tokio::test]
+    async fn oper_missing_token_is_unauthenticated() {
+        let (status, _, body) = post_oper(None, &oper_body(EID_ONE, 1), None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["code"], "UNAUTHENTICATED");
+    }
+
+    // --- Correlator --------------------------------------------------------
+
+    #[tokio::test]
+    async fn oper_x_correlator_is_echoed_on_success_and_error() {
+        let token = mint_token(OPER_SCOPE).await;
+        let (status, headers, _) =
+            post_oper(Some(&token), &oper_body(EID_ONE, 1), Some("corr-op")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-op")
+        );
+        let (status, headers, _) = post_oper(
+            Some(&token),
+            &oper_body("A1B2C3D4E5F600000000000000000404", 1),
+            Some("corr-e"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-e")
         );
     }
 }

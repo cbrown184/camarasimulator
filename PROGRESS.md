@@ -4084,6 +4084,38 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-14 — eSIM Remote Management vwip: added the **command leg**
+  `POST /profile/oper` (`profileOperation`, scope `esim-remote-management:oper`) —
+  a lifecycle operation on an eSIM profile (enable / disable / delete). Verified
+  the upstream CAMARA `eSimRemoteManagement` spec for the exact op path, scope,
+  and envelopes: the command legs use the callback-subscription envelope
+  (`protocol`/`sink`/`types`/`config`), **not** the CMP read envelope, and the
+  response (`code`/`message`/`config`) mirrors the request (no `taskId` field
+  despite the async prose — a wip-spec quirk). Modelled the **synchronous
+  acknowledgement** in the established house style: validate + control-plane +
+  echo. The device `eId` (in `config.subscriptionDetail`) is the control plane
+  (DESIGN §7) — reserved suffix on its trailing three digits → canonical CAMARA
+  error (command rejected), else `code: 0` with `optType` (1 Enable / 2 Disable /
+  3 Delete) surfaced in `message`; the response `imei`/`iccid` echo supplied
+  values or are synthesised from the `eId` (reuses profileList's FNV+Luhn helpers
+  — **no new dependency**). The actual eUICC state change and the `sink` callback
+  delivery are **documented cuts** (no live eUICC engine — mirroring
+  Click-to-Dial's engine cut); the eventual result stays pollable via
+  `profileResultQuery`. Validation: missing `config`/`subscriptionDetail`/`eId`/
+  `optType`, non-32-hex `eId`, bad `imei`/`iccid`/`sink`/`protocol`/`types`,
+  unknown field → 400 INVALID_ARGUMENT; `optType` ∉ 1..=3 or
+  `subscriptionMaxEvents` ∉ 1..=1000 → 400 OUT_OF_RANGE. Spec:
+  `specs/esim-remote-management/vwip/openapi.yaml` — new `/profile/oper` path
+  (full shared error set, `x-camarasim-scenarios`, example) + five new schemas
+  (`Protocol`/`BaseCmpReqProfileOperReq`/`ProfileOperReq`/
+  `BaseCmpRespProfileOperResp`/`ProfileOperResp`); header + `info.description`
+  updated. Tests: +19 (enable/disable/delete happy paths, imei/iccid + subscription
+  echo, determinism, reserved-error, the full 400 validation set incl. OUT_OF_RANGE,
+  scope isolation vs the read scopes, auth, correlator, a sink/digit-validator
+  unit). `cargo test` 2306 green (was 2287); `cargo build --release` succeeds.
+  Remaining eSIM leaf: `profileDownload` (also a `sink`-callback subscription) —
+  still deferred. — binary: 3.8M (3935120 B, +29520 B)
+
 - 2026-08-14 — eSIM Remote Management vwip: added a **second leg**,
   `POST /profile/result/query` (`profileResultQuery`, scope
   `esim-remote-management:query`) — the stateless result-query read that reports
