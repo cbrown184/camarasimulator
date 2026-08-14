@@ -3955,6 +3955,31 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     `[22, 26]`; quoted / non-numeric / no-bound / in-`example` / across-dedent /
     named-`default` skipped; a ≥3 bounded-default non-vacuous floor). Verified true
     across all mounted specs (every numeric default+bound pair in range — no drift).
+  - an example↔type-consistency contract test (`src/registry.rs`
+    `every_example_matches_its_schema_type`) asserts that where a Schema Object declares
+    an inline-scalar `example` beside a scalar `type`, the example conforms to that type
+    (`string`/`integer`/`number`/`boolean`). An `example` is a sample *instance* of the
+    schema, so a value of the wrong JSON type — an unquoted `true`/`5` under
+    `type: string`, a quoted/fractional value under `type: integer` — advertises a sample
+    the field's own type rejects, so a Redoc/Swagger "try it" prefill and a codegen
+    client's generated sample carry an illegal value. The `example` analogue of
+    `every_default_matches_its_schema_type` / `every_enum_value_matches_its_schema_type`;
+    invisible to `no_object_declares_both_example_and_examples` (checks how a sample is
+    *expressed*, never its value) and the type/format tests (check the `type` token or a
+    `format` modifier, never the example a type constrains). New pure
+    `examples_inconsistent_with_type` extractor (no YAML dep; mirrors
+    `defaults_inconsistent_with_type` — same `inconsistent` classifier and same
+    same-indent dedent-bounded `sibling_type` scan, which confines the check to Schema
+    Object examples: a Media Type / Parameter Object `example` has no same-indent `type`
+    and is skipped, as are an `allOf`/`$ref`-inherited example, a block object/array
+    example, a `null`/`~` example, a property named `example`, and an example nested in
+    another example payload — `inside_example` checked before the type scan). Unit-covered
+    (`example_type_consistency_extraction_rules`: string/int/bool/number + quoted-numeric
+    examples pass, a Media Type `example` skipped, an unquoted `true`-on-string / quoted
+    `'1'`- and fractional-on-integer / non-numeric-on-number flagged in document order
+    `[36, 39, 42, 45]`, plus typeless/named-`example`/in-example/`null`/across-dedent
+    skips and a ≥20 scalar-typed-example non-vacuous floor) so the contract can't pass
+    vacuously. Verified true across all mounted specs (no drift to fix).
   Full response-vs-schema validation still TODO (would need a YAML/JSON-Schema
   validator — a dependency trade-off, deferred).
 
@@ -3963,6 +3988,33 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 ## Scan journal
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
+
+- 2026-08-14 — contract-harness: added an **example↔type-consistency** contract test
+  (`src/registry.rs` `every_example_matches_its_schema_type`) asserting that where a
+  Schema Object declares an inline-scalar `example` beside a scalar `type`, the example
+  conforms to that type. An `example` is a sample *instance* of the schema, so a value of
+  the wrong JSON type — an unquoted `true`/`5` under `type: string`, a quoted or
+  fractional value under `type: integer`, a non-numeric under `type: number`, a
+  non-boolean under `type: boolean` — advertises a sample the field's own type would
+  reject, so a Redoc/Swagger "try it" prefill and a codegen client's generated sample
+  carry an illegal value. The `example` analogue of `every_default_matches_its_schema_type`
+  and `every_enum_value_matches_its_schema_type`; invisible to
+  `no_object_declares_both_example_and_examples` (checks how a sample is *expressed*,
+  never its value) and the type/format tests (check the `type` token or `format` modifier,
+  never the example a type constrains). New pure `examples_inconsistent_with_type`
+  extractor (no YAML dep; mirrors `defaults_inconsistent_with_type` — same `inconsistent`
+  classifier and same-indent dedent-bounded `sibling_type` scan, which confines the check
+  to Schema Object examples: a Media Type / Parameter Object `example` has no same-indent
+  `type` and is skipped, as are an `allOf`/`$ref`-inherited example, a block object/array
+  example, a `null`/`~` example, a property named `example`, and an example nested in
+  another example payload — `inside_example` checked before the type scan). Unit-covered
+  (`example_type_consistency_extraction_rules`: matching + quoted-numeric examples pass, a
+  Media Type `example` skipped, four wrong-type examples flagged in document order
+  `[36, 39, 42, 45]`, typeless/named-`example`/in-example/`null`/across-dedent skips, a
+  ≥20 scalar-typed-example non-vacuous floor). Verified true across all mounted specs (no
+  drift to fix). Tests: +2 (1 contract, 1 unit). `cargo test` 2249 green (was 2247);
+  `cargo build --release` succeeds. No new dep; binary unchanged (`#[cfg(test)]`-only). —
+  binary: 3.7M (3851944 B, +0 B)
 
 - 2026-08-14 — contract-harness: added a **`default`-within-numeric-bounds** contract
   test (`src/registry.rs` `every_default_is_within_its_numeric_bounds`) asserting that

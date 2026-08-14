@@ -12189,6 +12189,431 @@ components:
         );
     }
 
+    /// The 1-based line numbers, in document order, of every schema-level `example:`
+    /// whose inline scalar value contradicts its sibling scalar `type:` — without a
+    /// YAML dep.
+    ///
+    /// An OpenAPI Schema Object's `example` is a sample *instance* of that schema, so
+    /// like a `default` it must conform to the schema's own `type`. A value of the
+    /// wrong JSON type — an unquoted `true`/`5` under `type: string` (YAML reads it as
+    /// a boolean/number, not a string), a quoted or fractional value under
+    /// `type: integer`, a non-numeric value under `type: number`, a non-boolean under
+    /// `type: boolean` — is a self-contradictory schema: the sample the field advertises
+    /// is one the type's own validator would reject, so a Redoc/Swagger "try it" prefill
+    /// and a codegen client's generated sample carry a value the field can never legally
+    /// hold.
+    ///
+    /// This is the `example` analogue of `defaults_inconsistent_with_type` — same
+    /// classification (`inconsistent`) and same same-indent, dedent-bounded sibling
+    /// `type:` scan (down through the object's block then up) — so only a schema-level
+    /// `example` with a scalar `type:` sibling (`string`/`integer`/`number`/`boolean`)
+    /// in the *same object* is inspected. That scan is what confines the check to
+    /// Schema Object examples: a **Media Type Object** or **Parameter Object** `example`
+    /// (whose siblings are `schema`/`examples`, never a same-indent `type`) finds no
+    /// sibling type and is skipped, as is an example inherited via `allOf`/`$ref`. Also
+    /// skipped: an `example:` that opens a block (an object/array example, so no inline
+    /// scalar to classify), a `null`/`~` example (JSON null is legal for a nullable
+    /// schema of any type), a property literally named `example`, and an `example:`
+    /// nested inside another `example:`/`examples:` payload (the `inside_example` walk,
+    /// checked before the type scan — so an example object that itself contains a
+    /// `type`/`example` pair never mispairs). A quoted value is a string regardless of
+    /// what its unquoted text would parse as, so quoting is preserved before
+    /// classification.
+    fn examples_inconsistent_with_type(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        // The raw inline value token of a `name:` key (inline comment stripped, quoting
+        // *preserved* so a quoted scalar stays classifiable as a string); `None` when
+        // the line is a different key or opens a block (no inline value).
+        let raw_inline = |l: &str, name: &str| -> Option<String> {
+            let (k, v) = l.trim_start().split_once(':')?;
+            if k.trim() != name {
+                return None;
+            }
+            let v = v.split('#').next().unwrap_or(v).trim();
+            if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            }
+        };
+        // The sibling `type:` scalar in the same object as line `i` (indent `c`): scan
+        // down through the object's block for a same-indent `type`, then up,
+        // dedent-bounded so a nested/following object's `type` never pairs. Mirrors
+        // `defaults_inconsistent_with_type`.
+        let sibling_type = |i: usize, c: usize| -> Option<String> {
+            let scalar_type = |l: &str| -> Option<String> {
+                let (k, v) = l.trim_start().split_once(':')?;
+                if k.trim() != "type" {
+                    return None;
+                }
+                let v = v
+                    .split('#')
+                    .next()
+                    .unwrap_or(v)
+                    .trim()
+                    .trim_matches('"')
+                    .trim_matches('\'');
+                if v.is_empty() {
+                    None
+                } else {
+                    Some(v.to_string())
+                }
+            };
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c {
+                    if let Some(v) = scalar_type(l) {
+                        return Some(v);
+                    }
+                }
+                j += 1;
+            }
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c {
+                    if let Some(v) = scalar_type(l) {
+                        return Some(v);
+                    }
+                }
+            }
+            None
+        };
+        // True when line `i` (indent `c`) sits inside an `example:`/`examples:` payload
+        // — some enclosing container key up the indent ladder is `example`/`examples`.
+        // Mirrors `defaults_inconsistent_with_type`.
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        // Whether the raw (as-written) example token `raw` contradicts scalar type `ty`.
+        // Quoting is significant: a quoted token is always a YAML string, whatever its
+        // inner text would otherwise parse as. Shares the classification rules of
+        // `defaults_inconsistent_with_type::inconsistent`.
+        fn inconsistent(raw: &str, ty: &str) -> bool {
+            let v = raw.trim();
+            if v.is_empty() || v == "null" || v == "~" {
+                return false; // JSON null is legal for a nullable schema of any type
+            }
+            let quoted = v.len() >= 2
+                && ((v.starts_with('"') && v.ends_with('"'))
+                    || (v.starts_with('\'') && v.ends_with('\'')));
+            let is_bool = !quoted
+                && matches!(v, "true" | "false" | "True" | "False" | "TRUE" | "FALSE");
+            let is_int = !quoted && v.parse::<i64>().is_ok();
+            let is_num = !quoted && v.parse::<f64>().is_ok();
+            match ty {
+                "string" => is_bool || is_num, // an unquoted bool/number is not a string
+                "boolean" => !is_bool,
+                "integer" => !is_int,
+                "number" => !is_num,
+                _ => false,
+            }
+        }
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some(raw) = raw_inline(line, "example") else {
+                continue;
+            };
+            let c = indent(line);
+            if inside_example(i, c) {
+                continue;
+            }
+            let Some(ty) = sibling_type(i, c) else {
+                continue;
+            };
+            if !matches!(ty.as_str(), "string" | "integer" | "number" | "boolean") {
+                continue;
+            }
+            if inconsistent(&raw, &ty) {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_example_matches_its_schema_type() {
+        // Contract-harness invariant (OpenAPI 3.0.x / JSON-Schema structural rule):
+        // where a Schema Object declares an `example` beside a scalar `type`, the
+        // example MUST conform to that type. An `example` is a sample *instance* of the
+        // schema, so a value of the wrong JSON type — an unquoted `true`/`5` under
+        // `type: string` (YAML reads it as a boolean/number), a quoted or fractional
+        // value under `type: integer`, a non-numeric value under `type: number`, a
+        // non-boolean under `type: boolean` — is a self-contradictory schema: the
+        // sample the field advertises is one its own type would reject, so a
+        // Redoc/Swagger "try it" prefill and a codegen client's generated sample carry
+        // a value the field can never legally hold.
+        //
+        // This is the `example` analogue of `every_default_matches_its_schema_type`
+        // (the `default` value against its scalar type) and of
+        // `every_enum_value_matches_its_schema_type` (an enum's *members* against a
+        // scalar type). No existing test compares an `example`'s value against its own
+        // `type`: `no_object_declares_both_example_and_examples` checks how a sample is
+        // *expressed* (never its value), and the type/format tests check the `type`
+        // token or a `format` modifier, never the example a type constrains. Only a
+        // schema-level example with a scalar `type:` sibling is inspected — a Media
+        // Type / Parameter Object example (no same-indent `type`), an example inherited
+        // via `allOf`/`$ref`, a block (object/array) example, a `null`/`~` example, a
+        // property named `example`, and an example nested inside another example
+        // payload are skipped. Verified true across all mounted specs before asserting.
+        for api in APIS {
+            let bad = examples_inconsistent_with_type(api.body);
+            assert!(
+                bad.is_empty(),
+                "{} spec declares a schema `example` that contradicts its sibling scalar \
+                 `type:` (e.g. an unquoted bool/number under `type: string`, a quoted or \
+                 fractional value under `type: integer`) at `example:` line(s): {:?}",
+                api.name,
+                bad
+            );
+        }
+    }
+
+    #[test]
+    fn example_type_consistency_extraction_rules() {
+        // Unit-cover `examples_inconsistent_with_type` so the contract test above can't
+        // pass vacuously and its detection is pinned: string/integer/boolean/number
+        // examples that match their type all pass; a quoted numeric example under
+        // `type: string` passes (quoting makes it a string); an unquoted `true` under
+        // `type: string`, a quoted `'1'` and a fractional `2.5` under `type: integer`,
+        // and a non-numeric example under `type: number` are flagged in document order;
+        // a Media Type Object example (no same-indent `type`), a typeless example, a
+        // property literally named `example`, an `example:` inside another example
+        // payload, a `null` example of a nullable schema, and an example whose only
+        // same-indent `type` sits in a following property across a dedent are all
+        // skipped.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: string
+              example: 42
+components:
+  schemas:
+    GoodStr:
+      type: string
+      example: desc
+    GoodInt:
+      type: integer
+      example: 10
+    GoodBool:
+      type: boolean
+      example: false
+    GoodNum:
+      type: number
+      example: 1.5
+    GoodStrQuotedNum:
+      type: string
+      example: '5'
+    BadStrBool:
+      type: string
+      example: true
+    BadIntQuoted:
+      type: integer
+      example: '1'
+    BadIntFrac:
+      type: integer
+      example: 2.5
+    BadNumText:
+      type: number
+      example: notanumber
+    NoType:
+      example: anything
+    NamedExample:
+      type: object
+      properties:
+        example:
+          type: string
+    InExample:
+      type: object
+      example:
+        type: integer
+        example: hi
+    Nullable:
+      type: string
+      example: null
+    Split:
+      type: object
+      properties:
+        a:
+          example: solo
+        b:
+          type: integer
+";
+        // Flagged, in document order: line 36 (`BadStrBool.example: true` — a YAML
+        // boolean, not a string), line 39 (`BadIntQuoted.example: '1'` — a quoted
+        // string, not an integer), line 42 (`BadIntFrac.example: 2.5` — fractional, not
+        // an integer) and line 45 (`BadNumText.example: notanumber` — not a number).
+        // Not flagged: the Media Type Object `example: 42` at line 16 (its siblings are
+        // `schema`, no same-indent `type`); the four Good schemas; `GoodStrQuotedNum`
+        // (`'5'` is a quoted string under `type: string`); `NoType` (no sibling type);
+        // the property literally named `example` (opens a block, no inline scalar); the
+        // `example: hi` inside the `example:` payload (an enclosing `example` key);
+        // `Nullable` (its `null` example is legal for any nullable type); and
+        // `Split.a.example: solo`, whose only candidate `type: integer` sits in the
+        // following property `Split.b` past a dedent, so the two never pair.
+        assert_eq!(examples_inconsistent_with_type(body), vec![36, 39, 42, 45]);
+
+        // Non-vacuous floor: across every registered spec every scalar-typed example
+        // conforms to its type (the invariant the contract test asserts), and the
+        // corpus actually declares many typed examples (an E.164 `phoneNumber`, a port
+        // number, a latitude, a boolean flag) — so the value-comparison path runs on
+        // real data and a broken (always-empty) extractor can't hide behind a corpus
+        // that never pairs an example with a scalar type. Count typed examples with a
+        // presence detector independent of the value comparison: an `example:` inline
+        // scalar whose same-indent object declares a scalar `type:` and which is not
+        // itself inside an `example:`/`examples:` payload.
+        let mut typed_examples = 0usize;
+        for api in APIS {
+            assert!(
+                examples_inconsistent_with_type(api.body).is_empty(),
+                "{}: every scalar-typed example must conform to its type",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            let scalar_type_line = |l: &str| {
+                matches!(
+                    l.trim_start(),
+                    "type: string" | "type: integer" | "type: number" | "type: boolean"
+                )
+            };
+            for (i, l) in lines.iter().enumerate() {
+                let t = l.trim_start();
+                let Some((k, v)) = t.split_once(':') else {
+                    continue;
+                };
+                if k.trim() != "example" || v.split('#').next().unwrap_or(v).trim().is_empty() {
+                    continue;
+                }
+                let c = indent(l);
+                // Skip an example nested inside another example payload (an enclosing
+                // `example`/`examples` key up the indent ladder).
+                let mut in_ex = false;
+                {
+                    let mut level = c;
+                    let mut m = i;
+                    while m > 0 {
+                        m -= 1;
+                        let x = lines[m];
+                        if x.trim().is_empty() {
+                            continue;
+                        }
+                        let li = indent(x);
+                        if li < level {
+                            if let Some((key, _)) = x.trim_start().split_once(':') {
+                                let key = key.trim();
+                                if key == "example" || key == "examples" {
+                                    in_ex = true;
+                                    break;
+                                }
+                            }
+                            level = li;
+                            if li == 0 {
+                                break;
+                            }
+                        }
+                    }
+                }
+                if in_ex {
+                    continue;
+                }
+                // Same-indent scalar `type:` sibling, scanning down then up
+                // (dedent-bounded), independent of the extractor's classification.
+                let mut has = false;
+                let mut j = i + 1;
+                while j < lines.len() {
+                    let x = lines[j];
+                    if x.trim().is_empty() {
+                        j += 1;
+                        continue;
+                    }
+                    if indent(x) < c {
+                        break;
+                    }
+                    if indent(x) == c && scalar_type_line(x) {
+                        has = true;
+                        break;
+                    }
+                    j += 1;
+                }
+                if !has {
+                    let mut m = i;
+                    while m > 0 {
+                        m -= 1;
+                        let x = lines[m];
+                        if x.trim().is_empty() {
+                            continue;
+                        }
+                        if indent(x) < c {
+                            break;
+                        }
+                        if indent(x) == c && scalar_type_line(x) {
+                            has = true;
+                            break;
+                        }
+                    }
+                }
+                if has {
+                    typed_examples += 1;
+                }
+            }
+        }
+        assert!(
+            typed_examples >= 20,
+            "expected many scalar-typed examples across specs, got {typed_examples}"
+        );
+    }
+
     /// The 1-based line numbers, in document order, of every `default:` keyword whose
     /// inline numeric value falls outside a sibling numeric bound — `minimum` or
     /// `maximum` — declared in the same Schema Object, without a YAML dep.
