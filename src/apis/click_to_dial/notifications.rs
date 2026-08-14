@@ -25,10 +25,14 @@
 //! A **simulated successful progression** is also modelled: a `…001` `callee` line
 //! drives an ordered `callingCallee` → `connected` sequence after the create-time
 //! event, delivered off the request path by `super::vwip`'s `spawn_call_progression`
-//! via the awaited [`send`] (so the two steps keep their order on the wire). The
-//! remaining intermediate transitions (`callingCaller`, a spontaneous `failed`), the
-//! `callDuration`, and the `recordingResult` remain documented cuts (no live call
-//! engine; DESIGN §7, §11).
+//! via the awaited [`send`] (so the steps keep their order on the wire), and a `…003`
+//! line drives the full `callingCaller` → `callingCallee` → `connected` front leg.
+//! Each success progression now ends with a **completion** event ([`completed_event`]):
+//! a terminal `disconnected` reflecting the call finishing on its own, carrying the
+//! two end-of-call fields — `callDuration` (whole seconds the call was connected) and
+//! `recordingResult` (whether a recording was captured), both deterministic from the
+//! request (DESIGN §7). The `…002` failure path is already terminal (`failed`) and
+//! emits no completion.
 //!
 //! ## Simulator constraints & documented cuts (shared with QoD / Session Insights)
 //!
@@ -141,6 +145,34 @@ pub fn terminated_event(
 ) -> Value {
     let mut event = status_changed_event(event_id, time, call_id, caller, callee, state);
     event["data"]["status"]["reason"] = json!(reason);
+    event
+}
+
+/// Build the **completion** `status-changed` CloudEvent for a call that connected
+/// and then finished on its own — the natural end of a `…001`/`…003` success
+/// progression, as opposed to the application-driven `terminateCall`.
+///
+/// Same CloudEvents envelope and terminal `disconnected` `state` (+ `reason`) as
+/// [`terminated_event`], but `data.status` also carries the two end-of-call fields
+/// CAMARA reports once a call has actually run: `callDuration` (whole seconds the
+/// call was connected) and `recordingResult` (whether a recording was captured).
+/// These are meaningful only on this completion event — every earlier transition
+/// (`initiating`/`callingCaller`/`callingCallee`/`connected`) omits them. Pure and
+/// directly testable.
+pub fn completed_event(
+    event_id: String,
+    time: String,
+    call_id: &str,
+    caller: &str,
+    callee: &str,
+    reason: &str,
+    call_duration: u64,
+    recording_result: &str,
+) -> Value {
+    let mut event =
+        terminated_event(event_id, time, call_id, caller, callee, "disconnected", reason);
+    event["data"]["status"]["callDuration"] = json!(call_duration);
+    event["data"]["status"]["recordingResult"] = json!(recording_result);
     event
 }
 
@@ -332,6 +364,28 @@ mod tests {
             e["data"]["status"]["reason"],
             "The call was terminated by the application."
         );
+    }
+
+    #[test]
+    fn completed_event_adds_duration_and_recording_result_to_the_disconnect() {
+        let e = completed_event(
+            "evt-done".to_string(),
+            "2024-01-01T00:00:00Z".to_string(),
+            "the-call",
+            "+123456789111",
+            "+123456789001",
+            "The call completed normally.",
+            31,
+            "succeeded",
+        );
+        // Same envelope + terminal disconnected state + reason as the terminate event…
+        assert_eq!(e["type"], EVENT_TYPE);
+        assert_eq!(e["data"]["callId"], "the-call");
+        assert_eq!(e["data"]["status"]["state"], "disconnected");
+        assert_eq!(e["data"]["status"]["reason"], "The call completed normally.");
+        // …plus the two end-of-call fields, present only on the completion event.
+        assert_eq!(e["data"]["status"]["callDuration"], 31);
+        assert_eq!(e["data"]["status"]["recordingResult"], "succeeded");
     }
 
     #[test]

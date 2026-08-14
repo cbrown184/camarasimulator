@@ -128,10 +128,15 @@
 //!   answered — the terminal `failed` step carries a `reason`), and a `…003` callee
 //!   advances `callingCaller` → `callingCallee` → `connected` (the full front leg —
 //!   the platform alerts the caller first, the only path that emits the
-//!   caller-alerting `callingCaller` state). All callbacks are `http://` sinks only,
-//!   with the ACCESSTOKEN `sinkCredential` bearer / PLAIN Basic applied. The
-//!   `callDuration` / `recordingResult` fields — and re-deriving the stored
-//!   `Call.status` — remain deferred: CamaraSim runs no live call engine.
+//!   caller-alerting `callingCaller` state). Each **success** progression
+//!   (`…001`/`…003`) then closes with a natural **completion** event — a terminal
+//!   `disconnected` carrying the two end-of-call fields `callDuration` (deterministic
+//!   from the `callee` digits) and `recordingResult` (`succeeded`/`not_recorded`,
+//!   from `recordingEnabled`); the `…002` failure path is already terminal. All
+//!   callbacks are `http://` sinks only, with the ACCESSTOKEN `sinkCredential` bearer
+//!   / PLAIN Basic applied. Re-deriving the stored `Call.status` past `initiating`
+//!   remains a documented cut: CamaraSim runs no live call engine, so the
+//!   progression is observable only through the delivered events.
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -184,6 +189,12 @@ const TERMINATED_STATE: &str = "disconnected";
 /// The `reason` reported on the terminate-time `status-changed` notification: the
 /// call was ended through the API (`terminateCall`), not by a party hanging up.
 const TERMINATED_REASON: &str = "The call was terminated by the application.";
+
+/// The `reason` reported on the natural **completion** event delivered after a
+/// success progression (`…001`/`…003`): the connected call finished on its own
+/// (the parties hung up), distinct from `terminateCall`'s application-driven
+/// [`TERMINATED_REASON`].
+const COMPLETED_REASON: &str = "The call completed normally.";
 
 /// The trailing-three-digit sentinel that marks a line as unreachable
 /// (`caller`/`callee` not available). Not a reserved *error* suffix, so it is
@@ -257,6 +268,28 @@ const FULL_PROGRESSION: [ProgressionStep; 3] =
 /// `initiating` event is observed first and the steps are spaced. Short — there is
 /// no real call to set up.
 const PROGRESSION_GRACE: Duration = Duration::from_millis(50);
+
+/// The simulated connected-call `callDuration` (whole seconds) reported on the
+/// completion event, deterministic from the `callee` line's trailing three digits
+/// `d` (docs/DESIGN.md §7): `30 + (d % 571)`, a 30–600 s call. So a `…001` callee
+/// reports a 31 s call and a `…003` callee a 33 s call — a stable, input-driven
+/// duration with no live call engine.
+fn completion_duration(digits: u16) -> u64 {
+    30 + (digits % 571) as u64
+}
+
+/// The `recordingResult` reported on the completion event: `"succeeded"` when the
+/// call was created with `recordingEnabled: true` (a recording was captured —
+/// consistent with `getRecording` returning it), else `"not_recorded"`. These are
+/// CamaraSim's two modelled outcomes for this `wip` API (a partial/failed recording
+/// capture is not simulated).
+fn recording_result(recording_enabled: bool) -> &'static str {
+    if recording_enabled {
+        "succeeded"
+    } else {
+        "not_recorded"
+    }
+}
 
 /// Routes for Click to Dial vwip, mounted at their canonical URLs.
 pub fn routes() -> Router {
@@ -442,13 +475,26 @@ async fn create_call(claims: Claims, headers: HeaderMap, body: Bytes) -> Respons
         // Only the happy path reaches here, so the callee tail is already
         // known-good (no reserved-error / not-available / recording-unsupported
         // line has one of these suffixes).
-        let progression = match scenarios::trailing_three_digits(&req.callee.number) {
-            Some(PROGRESSION_TAIL) => Some(&SUCCESS_PROGRESSION[..]),
-            Some(FAILED_TAIL) => Some(&FAILED_PROGRESSION[..]),
-            Some(FULL_PROGRESSION_TAIL) => Some(&FULL_PROGRESSION[..]),
-            _ => None,
-        };
-        if let Some(steps) = progression {
+        // A **success** progression (`…001`/`…003`, ending at `connected`) closes
+        // with a natural completion event carrying the end-of-call fields
+        // (`callDuration`/`recordingResult`); the `…002` **failure** path is already
+        // terminal (`failed`), so it takes no completion.
+        let (steps, completion): (Option<&[ProgressionStep]>, Option<(u64, &'static str)>) =
+            match scenarios::trailing_three_digits(&req.callee.number) {
+                Some(tail @ PROGRESSION_TAIL) | Some(tail @ FULL_PROGRESSION_TAIL) => {
+                    let steps = if tail == PROGRESSION_TAIL {
+                        &SUCCESS_PROGRESSION[..]
+                    } else {
+                        &FULL_PROGRESSION[..]
+                    };
+                    let completion =
+                        (completion_duration(tail), recording_result(recording_enabled));
+                    (Some(steps), Some(completion))
+                }
+                Some(FAILED_TAIL) => (Some(&FAILED_PROGRESSION[..]), None),
+                _ => (None, None),
+            };
+        if let Some(steps) = steps {
             spawn_call_progression(
                 id.clone(),
                 req.caller.number.clone(),
@@ -456,6 +502,7 @@ async fn create_call(claims: Claims, headers: HeaderMap, body: Bytes) -> Respons
                 sink.to_string(),
                 auth,
                 steps,
+                completion,
             );
         }
     }
@@ -487,6 +534,14 @@ async fn create_call(claims: Claims, headers: HeaderMap, body: Bytes) -> Respons
 /// **not** advanced (it stays `initiating`); with no live engine the progression is
 /// observable only through the delivered events — a documented cut mirroring
 /// Traffic Influence's un-re-derived `state` (docs/DESIGN.md §7, §11).
+///
+/// When `completion` is `Some((call_duration, recording_result))` — the success
+/// progressions (`…001`/`…003`), which end at `connected` — a final **completion**
+/// event is delivered after the steps: a terminal `disconnected`
+/// ([`notifications::completed_event`]) modelling the call finishing on its own,
+/// carrying `callDuration`/`recordingResult`. Like every other step it is suppressed
+/// if a concurrent `terminateCall` already ended the call. The `…002` failure path
+/// passes `None` (it is already terminal at `failed`).
 fn spawn_call_progression(
     call_id: String,
     caller: String,
@@ -494,6 +549,7 @@ fn spawn_call_progression(
     sink: String,
     auth: Option<String>,
     steps: &'static [ProgressionStep],
+    completion: Option<(u64, &'static str)>,
 ) {
     tokio::spawn(async move {
         for &(state, reason) in steps {
@@ -517,6 +573,26 @@ fn spawn_call_progression(
             if let Some(reason) = reason {
                 event["data"]["status"]["reason"] = json!(reason);
             }
+            notifications::send(&sink, &event, auth.as_deref()).await;
+        }
+        // A success progression closes with the natural completion event
+        // (terminal `disconnected` + `callDuration`/`recordingResult`), unless a
+        // concurrent `terminateCall` already ended the call.
+        if let Some((call_duration, recording_result)) = completion {
+            tokio::time::sleep(PROGRESSION_GRACE).await;
+            if super::store::get(&call_id).is_none() {
+                return;
+            }
+            let event = notifications::completed_event(
+                notifications::new_event_id(),
+                rfc3339_utc(now_unix_secs()),
+                &call_id,
+                &caller,
+                &callee,
+                COMPLETED_REASON,
+                call_duration,
+                recording_result,
+            );
             notifications::send(&sink, &event, auth.as_deref()).await;
         }
     });
@@ -1977,6 +2053,144 @@ mod tests {
             );
             assert_eq!(event["data"]["status"]["state"], expected);
         }
+    }
+
+    // --- success-progression completion event (callDuration/recordingResult) --
+
+    #[test]
+    fn completion_duration_is_deterministic_from_the_callee_digits() {
+        assert_eq!(completion_duration(1), 31); // …001 → 30 + 1
+        assert_eq!(completion_duration(3), 33); // …003 → 30 + 3
+        assert_eq!(completion_duration(0), 30); // floor
+        assert_eq!(completion_duration(570), 600); // ceiling of the band
+        // The whole scale stays within the documented 30..=600 s band.
+        for d in 0u16..=999 {
+            let v = completion_duration(d);
+            assert!((30..=600).contains(&v), "duration({d}) = {v} out of band");
+        }
+    }
+
+    #[test]
+    fn recording_result_reflects_the_recording_enabled_flag() {
+        assert_eq!(recording_result(true), "succeeded");
+        assert_eq!(recording_result(false), "not_recorded");
+    }
+
+    #[tokio::test]
+    async fn a_001_success_progression_ends_with_a_completion_event() {
+        // After initiating → callingCallee → connected, a `…001` call created with
+        // `recordingEnabled` delivers a terminal completion event: disconnected with
+        // a reason plus the two end-of-call fields (callDuration + recordingResult).
+        use tokio::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let sink = format!("http://{addr}/ctd-complete");
+
+        // A pair distinct from the other …001 tests (callId is derived from both).
+        let body = format!(
+            r#"{{"caller":{{"number":"+123456789112"}},"callee":{{"number":"+123456789001"}},"recordingEnabled":true,"sink":"{sink}"}}"#
+        );
+        let (status, _, created) = call_ok(&body).await;
+        assert_eq!(status, StatusCode::CREATED);
+        let id = created["callId"].as_str().unwrap().to_string();
+
+        // initiating, callingCallee, connected — none carries the end-of-call fields.
+        let (_, _initiating) = read_one_event(&listener).await;
+        let (_, _calling) = read_one_event(&listener).await;
+        let (_, connected) = read_one_event(&listener).await;
+        assert_eq!(connected["data"]["status"]["state"], "connected");
+        assert!(connected["data"]["status"]["callDuration"].is_null());
+        assert!(connected["data"]["status"]["recordingResult"].is_null());
+
+        // …then the natural completion event.
+        let (_, completion) = read_one_event(&listener).await;
+        assert_eq!(completion["type"], notifications::EVENT_TYPE);
+        assert_eq!(completion["data"]["callId"], json!(id));
+        assert_eq!(completion["data"]["status"]["state"], "disconnected");
+        assert_eq!(
+            completion["data"]["status"]["reason"],
+            "The call completed normally."
+        );
+        // callDuration = 30 + (1 % 571) = 31; recording enabled → succeeded.
+        assert_eq!(completion["data"]["status"]["callDuration"], 31);
+        assert_eq!(completion["data"]["status"]["recordingResult"], "succeeded");
+    }
+
+    #[tokio::test]
+    async fn a_003_full_progression_completion_reports_not_recorded_without_recording() {
+        // The full (…003) success path also completes; without `recordingEnabled`
+        // the completion reports `recordingResult: not_recorded`.
+        use tokio::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let sink = format!("http://{addr}/ctd-complete-full");
+
+        let body = format!(
+            r#"{{"caller":{{"number":"+123456789113"}},"callee":{{"number":"+123456789003"}},"sink":"{sink}"}}"#
+        );
+        let (status, _, _) = call_ok(&body).await;
+        assert_eq!(status, StatusCode::CREATED);
+
+        // initiating, callingCaller, callingCallee, connected, then completion.
+        for expected in ["initiating", "callingCaller", "callingCallee", "connected"] {
+            let (_, event) = read_one_event(&listener).await;
+            assert_eq!(event["data"]["status"]["state"], expected);
+        }
+        let (_, completion) = read_one_event(&listener).await;
+        assert_eq!(completion["data"]["status"]["state"], "disconnected");
+        // callDuration = 30 + (3 % 571) = 33; no recording → not_recorded.
+        assert_eq!(completion["data"]["status"]["callDuration"], 33);
+        assert_eq!(completion["data"]["status"]["recordingResult"], "not_recorded");
+    }
+
+    #[tokio::test]
+    async fn the_completion_callback_carries_the_sink_credential_bearer() {
+        // The ACCESSTOKEN sinkCredential authenticates the completion callback too.
+        use tokio::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let sink = format!("http://{addr}/ctd-complete-auth");
+
+        let body = format!(
+            r#"{{"caller":{{"number":"+123456780112"}},"callee":{{"number":"+123456780001"}},"sink":"{sink}","sinkCredential":{{"credentialType":"ACCESSTOKEN","accessToken":"done-secret","accessTokenType":"bearer"}}}}"#
+        );
+        let (status, _, _) = call_ok(&body).await;
+        assert_eq!(status, StatusCode::CREATED);
+
+        // initiating, callingCallee, connected, completion — all bearer-authed.
+        for expected in ["initiating", "callingCallee", "connected", "disconnected"] {
+            let (head, event) = read_one_event(&listener).await;
+            assert!(
+                head.contains("Authorization: Bearer done-secret\r\n"),
+                "completion callback carries the bearer ({expected}): {head}"
+            );
+            assert_eq!(event["data"]["status"]["state"], expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_002_failed_progression_fires_no_completion_event() {
+        // The failure path (…002) is already terminal at `failed`; it must not emit
+        // a later completion event.
+        use tokio::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let sink = format!("http://{addr}/ctd-no-completion");
+
+        let body = format!(
+            r#"{{"caller":{{"number":"+123456789114"}},"callee":{{"number":"+123456789002"}},"sink":"{sink}"}}"#
+        );
+        let (status, _, _) = call_ok(&body).await;
+        assert_eq!(status, StatusCode::CREATED);
+
+        // initiating, callingCallee, failed — three events, then silence.
+        let (_, _initiating) = read_one_event(&listener).await;
+        let (_, _calling) = read_one_event(&listener).await;
+        let (_, failed) = read_one_event(&listener).await;
+        assert_eq!(failed["data"]["status"]["state"], "failed");
+        let accepted =
+            tokio::time::timeout(std::time::Duration::from_millis(400), listener.accept()).await;
+        assert!(accepted.is_err(), "a failed progression must fire no completion event");
     }
 
     // --- status-changed CloudEvents on `sink` (terminate-time event) -------

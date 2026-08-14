@@ -2269,7 +2269,7 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
       now returns the removed `Call` so the participants can be read for the event.
       `http://` only (`https://`/no-sink → 204 with no event); exactly-once vs a
       concurrent terminate (atomic `remove`). No new dep.
-    - [~] *intermediate* lifecycle transitions (`callingCaller`/`callingCallee`/
+    - [x] *intermediate* lifecycle transitions (`callingCaller`/`callingCallee`/
       `connected`, a spontaneous `failed`, with `callDuration`/`recordingResult`):
       - [x] simulated **successful progression** — a `…001` `callee` line on a
         call created with an `http://` `sink` advances `callingCallee` →
@@ -2298,7 +2298,15 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
         delivery, `http://`-only, ACCESSTOKEN Bearer / PLAIN Basic credential,
         `terminateCall` halt); `…003` is a non-reserved-error suffix, so it is free.
         The stored `Call.status` stays `initiating` (documented cut).
-      - [ ] `callDuration` / `recordingResult` — still deferred (no live call engine).
+      - [x] `callDuration` / `recordingResult` — each `…001`/`…003` **success**
+        progression now closes with a natural **completion** event (a terminal
+        `disconnected` after `connected`) carrying `callDuration` (whole seconds,
+        deterministic `30 + (callee-digits % 571)`, 30–600 s) and `recordingResult`
+        (`succeeded` when `recordingEnabled`, else `not_recorded`). Delivered in
+        order off the request path by `spawn_call_progression` (guarded by store
+        presence, so a concurrent `terminateCall` suppresses it); the `…002` failure
+        path is already terminal and fires none. Stored `Call.status` still not
+        re-derived (documented cut). No new dep.
     - [ ] TLS (`https://` sink) delivery (needs a rustls TLS client).
 - [x] Most Frequent Location vwip (`/most-frequent-location/vwip`; CAMARA
   MostFrequentLocation `wip` — no released version, mounted at its canonical
@@ -4192,6 +4200,28 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-14 — Click to Dial vwip: implemented the deferred **`callDuration` /
+  `recordingResult`** slice — each `…001`/`…003` **success** progression now closes
+  with a natural **completion** `status-changed` CloudEvent (a terminal
+  `disconnected` after `connected`) carrying `callDuration` (whole seconds,
+  deterministic `30 + (callee-digits % 571)` → 31 s for `…001`, 33 s for `…003`) and
+  `recordingResult` (`succeeded` when the call was created with `recordingEnabled`,
+  else `not_recorded`). New `notifications::completed_event` builder; `spawn_call_
+  progression` gained a `completion: Option<(u64, &str)>` arg and delivers it after
+  the const steps, guarded by store presence so a concurrent `terminateCall`
+  suppresses it (exactly one terminal outcome); the `…002` failure path passes `None`
+  (already terminal at `failed`). Stored `Call.status` still not re-derived past
+  `initiating` (documented cut — no live engine). New pure helpers `completion_
+  duration`/`recording_result`. No new dependency (reuses serde_json). Spec: added
+  `callDuration` (int32) + `recordingResult` (enum succeeded/not_recorded) to
+  `CallEventData.status`, refreshed `StatusChangedEvent`/`CallStatus`/callback
+  descriptions + header prose (removed the "deferred slice" language), and added
+  three `x-camarasim-scenarios` completion cases. Tests: +7 (2 units:
+  completion_duration band + recording_result; 1 notifications unit:
+  completed_event fields; 4 router integration: …001 completion succeeded, …003
+  completion not_recorded, completion callback bearer, …002 fires no completion).
+  `cargo test` 2411 green (was 2404); `cargo build --release` succeeds. — binary:
+  3.9M (4085072 B, +3384 B)
 - 2026-08-14 — In-Home Device Management v1: added the **`updateDevice`** leg
   (`PATCH /devices/{deviceId}`, scope `inhome.device.write`) — the API's **second
   mutation** and its **last remaining leg**, so the API is now complete. The public

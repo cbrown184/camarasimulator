@@ -134,8 +134,10 @@ info:
       (RFC 6750), `PLAIN` → `Basic base64(identifier:secret)` (RFC 7617) —
       `REFRESHTOKEN` remains a cut. The stored `Call.status` is **not** advanced by
       the progression (it stays `initiating`) — with no live call engine the
-      progression is observable only through the delivered events. The
-      `callDuration`/`recordingResult` fields remain a deferred slice.
+      progression is observable only through the delivered events. Each success
+      progression (`…001`/`…003`) closes with a natural completion event — a terminal
+      `disconnected` carrying `callDuration` (deterministic from the callee digits)
+      and `recordingResult` (`succeeded`/`not_recorded`).
 
     CamaraSim exposes the full shared reserved-error set here so every reserved
     suffix is reachable; canonical Click to Dial declares a subset.
@@ -318,8 +320,9 @@ paths:
                 (success) progression, a `…002` callee a `callingCallee` →
                 `failed` (failure, with a `reason`) progression, and a `…003`
                 callee the full `callingCaller` → `callingCallee` → `connected`
-                front-leg progression. The `callDuration`/`recordingResult`
-                fields are a deferred slice.
+                front-leg progression. Each success progression (`…001`/`…003`)
+                closes with a natural completion event — a terminal `disconnected`
+                carrying `callDuration` and `recordingResult`.
               requestBody:
                 required: true
                 content:
@@ -352,9 +355,15 @@ paths:
             result: >-
               201; after the create-time initiating event, a simulated progression
               delivers callingCallee then connected status-changed CloudEvents (in
-              order); the stored Call.status stays initiating
+              order), then a natural completion event (terminal disconnected with a
+              reason, callDuration = 30 + (001 % 571) = 31, and recordingResult);
+              the stored Call.status stays initiating
+          - input: "a callee number ending 001 created with recordingEnabled true"
+            result: "the completion event reports recordingResult = succeeded"
+          - input: "a callee number ending 001/003 created without recordingEnabled"
+            result: "the completion event reports recordingResult = not_recorded"
           - input: "a callee number ending 001 whose call is terminated mid-progression"
-            result: "the progression halts — no connected event after the terminal disconnected"
+            result: "the progression halts — no connected/completion event after the terminal disconnected"
           - input: "a happy-path create with a callee number ending 002 and an http:// sink"
             result: >-
               201; after the create-time initiating event, a simulated progression
@@ -365,8 +374,9 @@ paths:
             result: >-
               201; after the create-time initiating event, a simulated full
               progression delivers callingCaller then callingCallee then connected
-              status-changed CloudEvents (in order); none carries a reason; the
-              stored Call.status stays initiating
+              status-changed CloudEvents (in order); none of those carries a reason;
+              then a natural completion event (terminal disconnected with callDuration
+              = 33 and recordingResult); the stored Call.status stays initiating
           - input: "a create that supplies an https:// sink, or that errors before 201"
             result: "201 (https no-op cut) / the error — no CloudEvent is delivered"
           - input: "a re-create of a still-live call for the same caller/callee pair"
@@ -767,7 +777,8 @@ components:
       description: >-
         The lifecycle state of the call. CamaraSim's `createCall` always returns
         `initiating`; `disconnected` is reached when the call is ended by
-        `terminateCall` (carried by the terminal `status-changed` notification). A
+        `terminateCall` — or when a `…001`/`…003` success progression completes on
+        its own (both carried by a terminal `status-changed` notification). A
         `…001` callee drives a simulated **success** progression through
         `callingCallee` and `connected`, a `…002` callee a simulated **failure**
         progression through `callingCallee` and `failed`, and a `…003` callee the
@@ -829,12 +840,13 @@ components:
         changes (`type: org.camaraproject.click-to-dial.v0.status-changed`).
         CamaraSim delivers a create-time event reflecting the `initiating` state,
         one at `terminateCall` reflecting the terminal `disconnected` state (with a
-        `reason` in `data.status`), and — for a `…001` callee — a simulated
-        `callingCallee` → `connected` (success) progression or — for a `…002` callee
-        — a `callingCallee` → `failed` (failure, with a `reason`) progression. The
-        remaining transition (`callingCaller`), `callDuration`, and
-        `recordingResult` become meaningful only once a live call engine progresses
-        the call — a deferred slice.
+        `reason` in `data.status`), and — for a `…001`/`…003` callee — a simulated
+        `callingCallee` → `connected` (success) progression that closes with a
+        natural **completion** event (terminal `disconnected` carrying
+        `callDuration` + `recordingResult`), or — for a `…002` callee — a
+        `callingCallee` → `failed` (failure, with a `reason`) progression. Re-deriving
+        the stored `Call.status` past `initiating` remains a documented cut (no live
+        call engine).
       required:
         - id
         - source
@@ -896,10 +908,31 @@ components:
               type: string
               description: >-
                 The transition reason, present on a terminal state. CamaraSim
-                populates it on the `terminateCall` event (`state: disconnected`)
-                and on the simulated `…002` terminal `failed` step; it is absent on
-                the create-time event and on non-terminal transitions
-                (`callingCallee`/`connected`).
+                populates it on the `terminateCall` event (`state: disconnected`),
+                on the simulated `…002` terminal `failed` step, and on the natural
+                completion event that closes a `…001`/`…003` success progression;
+                it is absent on the create-time event and on non-terminal
+                transitions (`callingCallee`/`connected`).
+            callDuration:
+              type: integer
+              format: int32
+              minimum: 0
+              description: >-
+                The connected-call duration in whole seconds, reported only on the
+                natural completion event that closes a `…001`/`…003` success
+                progression. CamaraSim derives it deterministically from the
+                `callee` line's trailing three digits `d` as `30 + (d % 571)` (a
+                30–600 s call); it is absent on every non-completion event.
+            recordingResult:
+              type: string
+              enum:
+                - succeeded
+                - not_recorded
+              description: >-
+                Whether a recording was captured, reported only on the completion
+                event. `succeeded` when the call was created with
+                `recordingEnabled: true` (consistent with `getRecording`
+                returning the recording), else `not_recorded`.
 
     ClickToDialError:
       description: >-
