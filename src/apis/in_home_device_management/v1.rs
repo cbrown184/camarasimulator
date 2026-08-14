@@ -10,6 +10,12 @@
 //!   `deviceId` (operationId `getDevice`, scope `inhome.device.read`). Stateless:
 //!   the roster is regenerated from the `ssid` and the matching device returned,
 //!   else `404 NOT_FOUND`.
+//! - `GET /in-home-device-management/v1/devices/{deviceId}/network-health` — read
+//!   the network-health telemetry of a single household device (operationId
+//!   `getDeviceNetworkHealth`, scope `inhome.device.read`). Stateless, mirroring
+//!   `getDevice`: the roster is regenerated from the `ssid`, the matching device
+//!   looked up, and a deterministic [`DeviceNetworkHealth`] derived from it, else
+//!   `404 NOT_FOUND`.
 //!
 //! ## What it does
 //!
@@ -46,6 +52,8 @@
 //! devices; `ssid=Home-404` → `404 NOT_FOUND`; `ssid=Home-005&connectionStatus=blocked`
 //! → only the blocked devices of that household.
 
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use axum::extract::{Path, RawQuery};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -70,6 +78,10 @@ pub fn routes() -> Router {
         .route(
             "/in-home-device-management/v1/devices/:device_id",
             get(get_device),
+        )
+        .route(
+            "/in-home-device-management/v1/devices/:device_id/network-health",
+            get(get_device_network_health),
         )
 }
 
@@ -178,6 +190,75 @@ async fn get_device(
         Some(device) => {
             with_correlator((StatusCode::OK, Json(device)).into_response(), &correlator)
         }
+        None => with_correlator(
+            CamaraError::not_found("No device found for the provided id on this household.")
+                .into_response(),
+            &correlator,
+        ),
+    }
+}
+
+/// `GET /in-home-device-management/v1/devices/{deviceId}/network-health` — read a
+/// household device's network-health telemetry (`getDeviceNetworkHealth`).
+///
+/// Like [`get_device`], CamaraSim implements this **statelessly**: a household's
+/// roster is fully deterministic from its `ssid` ([`household`]), so the endpoint
+/// regenerates the roster, finds the device whose `deviceId` matches the path
+/// parameter, and derives a deterministic [`DeviceNetworkHealth`] from it. The
+/// `ssid` query parameter is **required** (it names the household).
+///
+/// Two control planes (docs/DESIGN.md §7), identical to `getDevice`:
+///
+/// 1. **Reserved error suffix (`ssid`).** A household-level plane, checked first:
+///    if the `ssid`'s trailing three digits name a reserved CAMARA status, the
+///    endpoint answers that canonical error regardless of the id.
+/// 2. **The `deviceId` vs the household's roster.** A member id → `200` with that
+///    device's `DeviceNetworkHealth`; any other id (unknown, another household's,
+///    or malformed) → `404 NOT_FOUND`.
+///
+/// The telemetry itself is derived deterministically from the matched device (its
+/// opaque `deviceId`, `interfaceType`, and `connectionStatus`), so the health
+/// figures are stable and reproducible from the input — a wired gateway reports
+/// an Ethernet link (no radio), a Wi-Fi client reports a band, RSSI and Wi-Fi
+/// generation, and a blocked/disconnected or weakly-signalled device reports
+/// `red` congestion.
+async fn get_device_network_health(
+    claims: Claims,
+    headers: HeaderMap,
+    Path(device_id): Path<String>,
+    RawQuery(query): RawQuery,
+) -> Response {
+    // Optional correlation header, echoed on every response (CAMARA Commonalities).
+    let correlator = headers.get("x-correlator").cloned();
+
+    // Endpoint authorisation: the token must carry this API's scope.
+    if let Err(e) = claims.require_scope(READ_SCOPE) {
+        return with_correlator(e.into_response(), &correlator);
+    }
+
+    // The `ssid` query parameter is required (it names the household).
+    let ssid = match parse_ssid(query.as_deref(), &correlator) {
+        Ok(s) => s,
+        Err(response) => return response,
+    };
+
+    // Error plane: a reserved trailing-three-digit suffix on the `ssid` selects a
+    // canonical CAMARA error (household-level, checked first — mirrors getDevice).
+    if let Some(err) = scenarios::reserved_error(&ssid) {
+        return with_correlator(err.into_response(), &correlator);
+    }
+
+    // Regenerate the household roster, find the addressed device, and derive its
+    // network-health telemetry. An id that is not one of this household's devices
+    // is a `404 NOT_FOUND` (there is no store to distinguish the reasons).
+    match household(&ssid)
+        .into_iter()
+        .find(|d| d["deviceId"] == json!(device_id))
+    {
+        Some(device) => with_correlator(
+            (StatusCode::OK, Json(network_health(&device))).into_response(),
+            &correlator,
+        ),
         None => with_correlator(
             CamaraError::not_found("No device found for the provided id on this household.")
                 .into_response(),
@@ -359,6 +440,119 @@ fn title_case(s: &str) -> String {
         Some(first) => first.to_ascii_uppercase().to_string() + chars.as_str(),
         None => String::new(),
     }
+}
+
+/// Derive a deterministic `DeviceNetworkHealth` for a household device
+/// (`getDeviceNetworkHealth`).
+///
+/// The telemetry is a pure function of the matched device: its opaque `deviceId`
+/// (hashed for the variable figures), its `interfaceType` (a wired gateway
+/// reports an Ethernet link with no radio; a Wi-Fi client reports a band, RSSI
+/// and a Wi-Fi generation), and its `connectionStatus` (a blocked or
+/// disconnected device — or a weak Wi-Fi signal — reports `red` congestion). Only
+/// `networkCongestion` is required by the CAMARA schema; the radio fields are
+/// present for Wi-Fi devices and omitted for wired ones. `measuredAt` is the
+/// current instant (the simulator always treats telemetry as fresh).
+fn network_health(device: &Value) -> Value {
+    let device_id = device["deviceId"].as_str().unwrap_or_default();
+    let ssid = device["ssid"].as_str().unwrap_or_default();
+    let interface = device["interfaceType"].as_str().unwrap_or("wifi");
+    let status = device["connectionStatus"].as_str().unwrap_or("connected");
+    // A device that is off the network reports congestion regardless of its link.
+    let down = matches!(status, "disconnected" | "blocked");
+    let h = fnv1a(device_id, 0, 0x03);
+
+    let mut health = json!({
+        "deviceId": device_id,
+        "ssid": ssid,
+        "interfaceType": interface,
+        "measuredAt": rfc3339_utc(now_unix_secs()),
+    });
+    let obj = health.as_object_mut().expect("network_health is a JSON object");
+
+    // Echo the infrastructure class on infra devices (the household gateway).
+    if let Some(infra) = device.get("infraDevice") {
+        obj.insert("infraDevice".into(), infra.clone());
+    }
+
+    if interface == "ethernet" {
+        // A wired link: no radio metrics; a steady high physical rate.
+        obj.insert("maxPhyRateMbps".into(), json!(1000.0));
+        obj.insert(
+            "lastNetworkSpeedMbps".into(),
+            json!((300 + h % 700) as f64),
+        );
+        // Wired links seldom congest; only a down device (or a hashed minority) is red.
+        let congested = down || h % 8 == 0;
+        obj.insert(
+            "networkCongestion".into(),
+            json!(if congested { "red" } else { "green" }),
+        );
+    } else {
+        // A Wi-Fi link: band, signal strength and Wi-Fi generation.
+        let band = ["2.4", "5", "6"][(h % 3) as usize];
+        let rssi = -30 - (h % 60) as i64; // −30 dBm (strong) … −89 dBm (weak)
+        let compat = ["wifi4", "wifi5", "wifi6", "wifi7"][((h >> 3) % 4) as usize];
+        // Peak physical rate climbs with the band.
+        let max_phy: f64 = match band {
+            "2.4" => 300.0,
+            "5" => 1200.0,
+            _ => 2400.0,
+        };
+        obj.insert("radioFrequency".into(), json!(band));
+        obj.insert("rssiDbm".into(), json!(rssi as f64));
+        obj.insert("wifiCompatibility".into(), json!(compat));
+        obj.insert("maxPhyRateMbps".into(), json!(max_phy));
+        // Achieved speed is a fraction (40–89 %) of the peak, scaled by the hash.
+        let frac = 40 + h % 50;
+        obj.insert(
+            "lastNetworkSpeedMbps".into(),
+            json!((max_phy * frac as f64 / 100.0).round()),
+        );
+        // A down device, or a weak signal (< −75 dBm), reports congestion.
+        let congested = down || rssi < -75;
+        obj.insert(
+            "networkCongestion".into(),
+            json!(if congested { "red" } else { "green" }),
+        );
+    }
+
+    health
+}
+
+/// Seconds since the Unix epoch, UTC. `SystemTime` never blocks; a clock before
+/// the epoch (impossible in practice) clamps to 0.
+fn now_unix_secs() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// Format a Unix timestamp (seconds, UTC) as an RFC 3339 / ISO 8601 instant with
+/// a `Z` offset, e.g. `2024-01-01T14:27:08Z`. Self-contained so CamaraSim needs
+/// no date/time dependency (mirrors `device_data_volume::vwip`).
+fn rfc3339_utc(unix_secs: i64) -> String {
+    let days = unix_secs.div_euclid(86_400);
+    let secs_of_day = unix_secs.rem_euclid(86_400);
+    let (y, m, d) = civil_from_days(days);
+    let (hh, mm, ss) = (secs_of_day / 3600, (secs_of_day % 3600) / 60, secs_of_day % 60);
+    format!("{y:04}-{m:02}-{d:02}T{hh:02}:{mm:02}:{ss:02}Z")
+}
+
+/// Convert a count of days since 1970-01-01 to a `(year, month, day)` civil date
+/// (Howard Hinnant's `civil_from_days`, proleptic Gregorian, valid for any date).
+fn civil_from_days(z: i64) -> (i64, u32, u32) {
+    let z = z + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64; // [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365; // [0, 399]
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11]
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32; // [1, 31]
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32; // [1, 12]
+    (if m <= 2 { y + 1 } else { y }, m, d)
 }
 
 /// A 400 `INVALID_ARGUMENT` CAMARA error, with the correlator echoed.
@@ -747,6 +941,171 @@ mod tests {
         assert_eq!(
             headers.get("x-correlator").and_then(|v| v.to_str().ok()),
             Some("corr-get")
+        );
+    }
+
+    // --- getDeviceNetworkHealth: GET /devices/{deviceId}/network-health -----
+
+    #[test]
+    fn network_health_of_a_wired_gateway_reports_ethernet_no_radio() {
+        // The gateway is index 0, an `other`/`modem` device on Ethernet.
+        let gateway = &household("Home-005")[0];
+        let health = network_health(gateway);
+        assert_eq!(health["interfaceType"], "ethernet");
+        assert_eq!(health["infraDevice"], "modem");
+        // Wired → no radio metrics.
+        assert!(health.get("radioFrequency").is_none());
+        assert!(health.get("rssiDbm").is_none());
+        assert!(health.get("wifiCompatibility").is_none());
+        // Required field present and a valid enum value.
+        assert!(["green", "red"].contains(&health["networkCongestion"].as_str().unwrap()));
+        assert_eq!(health["deviceId"], gateway["deviceId"]);
+        assert_eq!(health["ssid"], "Home-005");
+        assert!(health["measuredAt"].as_str().unwrap().ends_with('Z'));
+    }
+
+    #[test]
+    fn network_health_of_a_wifi_client_reports_the_radio() {
+        // Find a Wi-Fi client in a populated household.
+        let roster = household("Home-005");
+        let wifi = roster
+            .iter()
+            .find(|d| d["interfaceType"] == "wifi")
+            .expect("Home-005 has a wifi client");
+        let health = network_health(wifi);
+        assert_eq!(health["interfaceType"], "wifi");
+        assert!(["2.4", "5", "6"].contains(&health["radioFrequency"].as_str().unwrap()));
+        assert!(health["rssiDbm"].is_number());
+        assert!(["wifi4", "wifi5", "wifi6", "wifi7"]
+            .contains(&health["wifiCompatibility"].as_str().unwrap()));
+        assert!(health["maxPhyRateMbps"].as_f64().unwrap() > 0.0);
+        assert!(health["lastNetworkSpeedMbps"].as_f64().unwrap() >= 0.0);
+        assert!(["green", "red"].contains(&health["networkCongestion"].as_str().unwrap()));
+    }
+
+    #[test]
+    fn network_health_is_deterministic() {
+        let a = &household("MyHouse-005")[1];
+        assert_eq!(network_health(a), network_health(a));
+    }
+
+    #[test]
+    fn a_device_off_the_network_reports_red_congestion() {
+        // Build a disconnected client and confirm the congestion verdict follows.
+        let down = json!({
+            "deviceId": "dev-000000000000beef",
+            "ssid": "Home-005",
+            "connectionStatus": "disconnected",
+            "interfaceType": "wifi",
+        });
+        assert_eq!(network_health(&down)["networkCongestion"], "red");
+    }
+
+    async fn get_health(
+        token: Option<&str>,
+        device_id: &str,
+        query: &str,
+        correlator: Option<&str>,
+    ) -> (StatusCode, HeaderMap, Value) {
+        let mut builder = Request::builder()
+            .method("GET")
+            .uri(format!(
+                "/in-home-device-management/v1/devices/{device_id}/network-health?{query}"
+            ))
+            .header("host", HOST);
+        if let Some(t) = token {
+            builder = builder.header("authorization", format!("Bearer {t}"));
+        }
+        if let Some(c) = correlator {
+            builder = builder.header("x-correlator", c);
+        }
+        let response = app()
+            .oneshot(builder.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let headers = response.headers().clone();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, headers, json)
+    }
+
+    async fn get_health_ok(device_id: &str, query: &str) -> (StatusCode, HeaderMap, Value) {
+        let token = mint_token(READ_SCOPE).await;
+        get_health(Some(&token), device_id, query, None).await
+    }
+
+    #[tokio::test]
+    async fn get_network_health_returns_the_matching_device_health() {
+        let roster = household("Home-005");
+        let target = &roster[2]; // a client device
+        let id = target["deviceId"].as_str().unwrap();
+
+        let (status, _, body) = get_health_ok(id, "ssid=Home-005").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["deviceId"], target["deviceId"]);
+        assert_eq!(body["ssid"], "Home-005");
+        assert_eq!(body["interfaceType"], target["interfaceType"]);
+        assert!(["green", "red"].contains(&body["networkCongestion"].as_str().unwrap()));
+    }
+
+    #[tokio::test]
+    async fn get_network_health_unknown_id_is_404() {
+        let (status, _, body) =
+            get_health_ok("dev-000000000000dead", "ssid=Home-005").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn get_network_health_reserved_ssid_suffix_selects_a_canonical_camara_error() {
+        // The household-level error plane fires before the id lookup (mirrors getDevice).
+        let (status, _, body) = get_health_ok("dev-anything", "ssid=Home-429").await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(body["code"], "TOO_MANY_REQUESTS");
+    }
+
+    #[tokio::test]
+    async fn get_network_health_missing_ssid_is_400() {
+        let (status, _, body) = get_health_ok("dev-abc", "").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "INVALID_ARGUMENT");
+    }
+
+    #[tokio::test]
+    async fn get_network_health_scope_and_auth_are_enforced() {
+        let id = household("Home-005")[0]["deviceId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // No token → 401.
+        let (status, _, body) = get_health(None, &id, "ssid=Home-005", None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["code"], "UNAUTHENTICATED");
+
+        // Token without the scope → 403.
+        let token = mint_token("some:other-scope").await;
+        let (status, _, body) = get_health(Some(&token), &id, "ssid=Home-005", None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["code"], "PERMISSION_DENIED");
+    }
+
+    #[tokio::test]
+    async fn get_network_health_echoes_the_correlator() {
+        let id = household("Home-005")[0]["deviceId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let token = mint_token(READ_SCOPE).await;
+        let (status, headers, _) =
+            get_health(Some(&token), &id, "ssid=Home-005", Some("corr-nh")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-nh")
         );
     }
 }

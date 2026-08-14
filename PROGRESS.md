@@ -3001,8 +3001,20 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
         (unknown / other household / malformed) → `404 NOT_FOUND` (the opaque
         `dev-…` id is not itself a plane). Missing/empty `ssid` → 400
         INVALID_ARGUMENT. `x-correlator` echoed.
-      - [ ] `updateDevice` / `deleteDevice` / `performDeviceAction` /
-        `getDeviceNetworkHealth` — a later stateful slice.
+      - [x] `GET /devices/{deviceId}/network-health` (`getDeviceNetworkHealth`,
+        `inhome.device.read`) — the matched device's network-health telemetry,
+        derived deterministically from it (stateless, mirroring `getDevice`):
+        regenerate the `ssid` roster, find the device, derive a
+        `DeviceNetworkHealth`. Two control planes (DESIGN §7): the `ssid`
+        reserved-error suffix → canonical CAMARA error (household-level, checked
+        first) and the `deviceId` vs the roster (member → 200, else 404). The
+        telemetry is a pure function of the device — a wired gateway reports an
+        Ethernet link (no radio, `infraDevice` echoed), a Wi-Fi client reports
+        band/`rssiDbm`/`wifiCompatibility`/`maxPhyRateMbps`, and a blocked/
+        disconnected device or a weak signal (< −75 dBm) → `networkCongestion:
+        red`. `measuredAt` = now (self-contained RFC 3339 formatter, no new dep).
+      - [ ] `updateDevice` / `deleteDevice` / `performDeviceAction` — a later
+        stateful slice.
 
 ## Cross-cutting (do alongside the item that needs it)
 - [~] `errors.rs`: base CAMARA error model done (`src/errors.rs`, `specs/shared/errors.yaml`); per-version catalogs still TODO (DESIGN §8)
@@ -4144,6 +4156,22 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-14 — In-Home Device Management v1: added the **`getDeviceNetworkHealth`**
+  leg (`GET /devices/{deviceId}/network-health`, scope `inhome.device.read`) —
+  the matched device's network-health telemetry. Confirmed the upstream signature
+  against the canonical CAMARA `InHomeDeviceManagement.yaml` (`GET
+  /v1/devices/{deviceId}/network-health`, required `ssid` query + `deviceId` path,
+  `DeviceNetworkHealth` schema: required `networkCongestion` green/red +
+  rssiDbm/maxPhyRateMbps/radioFrequency/interfaceType/infraDevice/
+  lastNetworkSpeedMbps/wifiCompatibility/measuredAt). Implemented **statelessly**
+  (mirroring `getDevice`): regenerate the `ssid` roster, find the device, derive a
+  deterministic `DeviceNetworkHealth` from it (wired gateway → Ethernet no-radio;
+  Wi-Fi client → band/rssi/compat; down device or weak signal → `red`). Two
+  control planes: `ssid` reserved-error suffix (checked first) + `deviceId` vs
+  roster (member → 200, else 404). `measuredAt` via a self-contained RFC 3339
+  formatter (no new dep). Spec: new path + `DeviceNetworkHealth`/`RadioFrequency`/
+  `WifiCompatibility`/`NetworkCongestion` schemas + scenarios. 10 new tests (33
+  in module); full suite 2362 green. — binary: 3.9M (4026584 B)
 - 2026-08-14 — In-Home Device Management v1: added the **`getDevice`** leg
   (`GET /devices/{deviceId}`, scope `inhome.device.read`) — single-device read of
   the household named by the required `ssid` query param. Confirmed the upstream
