@@ -8,6 +8,8 @@
 //! - `GET /network-access-domains/vwip/services` — the caller's **Services**
 //!   catalog (operationId `getServices`): the logical commercial subscriptions /
 //!   account relationships the authenticated identity holds.
+//! - `GET /network-access-domains/vwip/services/{serviceId}` — a single
+//!   **Service** from that catalog by id (operationId `getService`).
 //!
 //! ## What they do
 //!
@@ -41,10 +43,20 @@
 //! `200 []` (nothing associated; a list never 404s), else `((d - 1) % 3) + 1`
 //! services (1–3), each with a deterministic UUID-shaped `id` and `serviceSite`.
 //!
-//! For both, a missing/invalid token → `401 UNAUTHENTICATED`; a token without the
-//! endpoint's scope → `403 PERMISSION_DENIED` (both from the shared
+//! **`getService`** (`GET /services/{serviceId}`) reads a single `Service` from
+//! that same identity-keyed catalog. It regenerates the subject's catalog (no
+//! store) and matches the `serviceId` path parameter. Two control planes (DESIGN
+//! §7): the subject's reserved error suffix → the canonical CAMARA error (an
+//! account-level plane, checked first, mirroring `getServices`); otherwise the
+//! `serviceId` vs the catalog — an id the identity holds → `200` that `Service`,
+//! any other id (unknown / another identity's / malformed) → `404 NOT_FOUND`
+//! (the opaque id is not itself a plane, so malformed folds into the `404`).
+//!
+//! For all three, a missing/invalid token → `401 UNAUTHENTICATED`; a token
+//! without the endpoint's scope → `403 PERMISSION_DENIED` (both from the shared
 //! resource-server layer). `x-correlator` is echoed on every response.
 
+use axum::extract::Path;
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
@@ -53,6 +65,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 use crate::auth::verify::Claims;
+use crate::errors::CamaraError;
 use crate::scenarios;
 
 /// The OAuth2 scope the `GET /trust-domains/capabilities` endpoint requires
@@ -72,6 +85,10 @@ pub fn routes() -> Router {
         .route(
             "/network-access-domains/vwip/services",
             get(get_services),
+        )
+        .route(
+            "/network-access-domains/vwip/services/:service_id",
+            get(get_service),
         )
 }
 
@@ -116,6 +133,63 @@ async fn get_services(claims: Claims, headers: HeaderMap) -> Response {
 
     let list = Value::Array(services_for(identity));
     with_correlator((StatusCode::OK, Json(list)).into_response(), &correlator)
+}
+
+/// `GET /network-access-domains/vwip/services/{serviceId}`.
+///
+/// Reads a single `Service` from the caller's catalog by id (operationId
+/// `getService`). The caller's `ServiceList` is fully deterministic from the
+/// token subject (see [`services_for`]), so — mirroring the sibling
+/// `getNetworkAccessDevice` — this endpoint needs no store: it regenerates the
+/// subject's catalog and returns the service whose `id` matches the path
+/// parameter. Two control planes (docs/DESIGN.md §7):
+///
+/// - **Reserved error suffix (subject)** — an account-level plane, mirroring
+///   `getServices`: if the subject's trailing three digits name a reserved CAMARA
+///   status, the endpoint answers that canonical error regardless of the id.
+/// - **The `serviceId` vs the subject's catalog** — an id drawn from the
+///   subject's deterministic catalog → `200` with that `Service`; any other id
+///   (unknown, belonging to a different identity, or malformed) → `404
+///   NOT_FOUND`. The id is opaque to the caller (SHA-256-derived UUID), so it is
+///   not itself a scenario plane (there is no store to distinguish an unknown id
+///   from a malformed one — both fold into the `404`, mirroring
+///   `getNetworkAccessDevice`).
+///
+/// Requires a token carrying the `network-access-domains:services:read` scope.
+async fn get_service(
+    claims: Claims,
+    headers: HeaderMap,
+    Path(service_id): Path<String>,
+) -> Response {
+    // Optional correlation header, echoed on every response (CAMARA Commonalities).
+    let correlator = headers.get("x-correlator").cloned();
+
+    // Endpoint authorisation: the token must carry this API's scope.
+    if let Err(e) = claims.require_scope(SERVICES_SCOPE) {
+        return with_correlator(e.into_response(), &correlator);
+    }
+
+    // The token subject is the account-level control plane (docs/DESIGN.md §7):
+    // a reserved suffix takes the whole account into a canonical error, matching
+    // the listing endpoint.
+    let identity = claims.subject().unwrap_or("");
+    if let Some(err) = scenarios::reserved_error(identity) {
+        return with_correlator(err.into_response(), &correlator);
+    }
+
+    // Regenerate the subject's deterministic catalog and look the id up. An id
+    // that is not one of this identity's services — unknown, another identity's,
+    // or malformed — is a `404 NOT_FOUND` (there is no store to distinguish them).
+    match services_for(identity)
+        .into_iter()
+        .find(|svc| svc["id"] == json!(service_id))
+    {
+        Some(svc) => with_correlator((StatusCode::OK, Json(svc)).into_response(), &correlator),
+        None => with_correlator(
+            CamaraError::not_found("No service found for the provided id.").into_response(),
+            &correlator,
+        ),
+    }
 }
 
 /// Fixed service templates `(name, description, siteName, siteDescription)`, one
@@ -548,6 +622,148 @@ mod tests {
         assert_eq!(
             headers.get("x-correlator").and_then(|v| v.to_str().ok()),
             Some("corr-svc")
+        );
+    }
+
+    // === getService (single-service read) =================================
+
+    /// GET `/services/{serviceId}` with an optional Bearer token and optional
+    /// `x-correlator`. Returns (status, headers, json-or-null).
+    async fn get_service_req(
+        service_id: &str,
+        token: Option<&str>,
+        correlator: Option<&str>,
+    ) -> (StatusCode, HeaderMap, Value) {
+        let mut builder = Request::builder()
+            .method("GET")
+            .uri(format!("/network-access-domains/vwip/services/{service_id}"))
+            .header("host", HOST);
+        if let Some(t) = token {
+            builder = builder.header("authorization", format!("Bearer {t}"));
+        }
+        if let Some(c) = correlator {
+            builder = builder.header("x-correlator", c);
+        }
+        let response = app()
+            .oneshot(builder.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let headers = response.headers().clone();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, headers, json)
+    }
+
+    #[tokio::test]
+    async fn service_read_returns_a_member_of_the_identitys_catalog() {
+        // sub = "nad-005" → 2 services; read the first back by its id.
+        let catalog = services_for("nad-005");
+        let wanted = catalog[0].clone();
+        let id = wanted["id"].as_str().unwrap();
+
+        let token = mint_token_as("nad-005", SERVICES_SCOPE).await;
+        let (status, _, body) = get_service_req(id, Some(&token), None).await;
+        assert_eq!(status, StatusCode::OK);
+        // The read returns exactly the same Service the catalog listing holds.
+        assert_eq!(body, wanted);
+        assert_eq!(body["id"].as_str().unwrap(), id);
+        assert!(body["serviceSite"]["id"].is_string());
+    }
+
+    #[tokio::test]
+    async fn service_read_unknown_id_is_not_found() {
+        // A well-formed but unowned id → 404 (a list read of the catalog never
+        // holds this id).
+        let token = mint_token_as("nad-005", SERVICES_SCOPE).await;
+        let (status, _, body) =
+            get_service_req("00000000-0000-0000-0000-000000000000", Some(&token), None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn service_read_of_another_identitys_service_is_not_found() {
+        // An id that belongs to a *different* identity's catalog is not this
+        // caller's → 404 (the catalog is per-identity).
+        let other_id = services_for("nad-006")[0]["id"].as_str().unwrap().to_string();
+        let token = mint_token_as("nad-005", SERVICES_SCOPE).await;
+        let (status, _, body) = get_service_req(&other_id, Some(&token), None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn service_read_malformed_id_is_not_found() {
+        // A malformed (non-UUID) id folds into the same 404 (the opaque id is not
+        // a plane; mirrors getNetworkAccessDevice).
+        let token = mint_token_as("nad-005", SERVICES_SCOPE).await;
+        let (status, _, body) = get_service_req("not-a-uuid", Some(&token), None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn service_read_empty_catalog_identity_is_not_found() {
+        // sub = "nad-000" → empty catalog, so any id → 404.
+        let token = mint_token_as("nad-000", SERVICES_SCOPE).await;
+        let (status, _, body) =
+            get_service_req("3fa85f64-5717-4562-b3fc-2c963f66afa6", Some(&token), None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn service_read_reserved_error_suffix_on_the_subject() {
+        // sub = "nad-404" → reserved suffix → canonical 404, regardless of the id.
+        let token = mint_token_as("nad-404", SERVICES_SCOPE).await;
+        let (status, _, body) =
+            get_service_req("3fa85f64-5717-4562-b3fc-2c963f66afa6", Some(&token), None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn service_read_reserved_429_suffix_beats_a_valid_id() {
+        // sub = "nad-429" → reserved suffix → 429, even for an otherwise-valid id.
+        // (The …429 catalog would hold a service, but the account-level plane wins.)
+        let catalog = services_for("nad-429");
+        assert!(!catalog.is_empty(), "…429 tail yields a non-empty catalog");
+        let id = catalog[0]["id"].as_str().unwrap().to_string();
+        let token = mint_token_as("nad-429", SERVICES_SCOPE).await;
+        let (status, _, body) = get_service_req(&id, Some(&token), None).await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(body["code"], "TOO_MANY_REQUESTS");
+    }
+
+    #[tokio::test]
+    async fn service_read_token_without_the_scope_is_forbidden() {
+        let id = services_for("nad-005")[0]["id"].as_str().unwrap().to_string();
+        let token = mint_token_as("nad-005", "some:other-scope").await;
+        let (status, _, body) = get_service_req(&id, Some(&token), None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["code"], "PERMISSION_DENIED");
+    }
+
+    #[tokio::test]
+    async fn service_read_missing_token_is_unauthenticated() {
+        let (status, _, body) =
+            get_service_req("3fa85f64-5717-4562-b3fc-2c963f66afa6", None, None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["code"], "UNAUTHENTICATED");
+    }
+
+    #[tokio::test]
+    async fn service_read_x_correlator_is_echoed() {
+        let id = services_for("nad-005")[0]["id"].as_str().unwrap().to_string();
+        let token = mint_token_as("nad-005", SERVICES_SCOPE).await;
+        let (status, headers, _) = get_service_req(&id, Some(&token), Some("corr-svc-1")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-svc-1")
         );
     }
 }

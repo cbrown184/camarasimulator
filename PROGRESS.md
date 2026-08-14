@@ -3071,8 +3071,24 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
       `TrustDomainCapabilities` document (three access-type families — Wi-Fi
       WPA-Personal/Enterprise, Thread STRUCTURED — + all four policy capabilities,
       schema-valid); no scope → 403, no token → 401 (shared resource-server
-      layer). `x-correlator` echoed. No new dep. The `Services` catalog and the
-      stateful Trust Domain / Trust Domain Device CRUD legs remain later slices.
+      layer). `x-correlator` echoed. No new dep.
+    - [x] `GET /services` (`getServices`, scope `network-access-domains:services:read`)
+      — the caller's Services catalog. Stateless; the **token subject** is the
+      control plane (DESIGN §7): reserved error suffix → canonical CAMARA error;
+      else the subject's trailing three digits `d` fix the `ServiceList`
+      (`…000`/no-digits → `200 []`, a list never 404s; else `((d-1) % 3) + 1`
+      services, 1–3), each a deterministic UUID-shaped `id` + `serviceSite`
+      (SHA-256, no new dep).
+    - [x] `GET /services/{serviceId}` (`getService`, scope
+      `network-access-domains:services:read`) — single-service read, stateless
+      (regenerates the subject's catalog, mirroring the sibling
+      `getNetworkAccessDevice`). Two control planes (DESIGN §7): the subject's
+      reserved-error suffix → canonical CAMARA error (account-level, checked
+      first); else the `serviceId` vs the catalog — a held id → `200` that
+      `Service`, any other id (unknown / another identity's / malformed) → `404
+      NOT_FOUND` (malformed folds into 404 — no store to distinguish it). No new
+      dep. The stateful Trust Domain / Trust Domain Device CRUD legs remain later
+      slices.
 
 ## Cross-cutting (do alongside the item that needs it)
 - [~] `errors.rs`: base CAMARA error model done (`src/errors.rs`, `specs/shared/errors.yaml`); per-version catalogs still TODO (DESIGN §8)
@@ -4214,6 +4230,28 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-14 — Network Access Domains vwip: added the **single-service** read leg
+  `GET /services/{serviceId}` (`getService`, scope
+  `network-access-domains:services:read`) — the API's cleanest remaining
+  **stateless** leg (phase discipline: stateless before the Trust Domain CRUD).
+  It regenerates the subject's deterministic Services catalog (no store, mirroring
+  the sibling `getNetworkAccessDevice`) and matches the `serviceId` path param.
+  Two control planes (DESIGN §7): the token subject's reserved-error suffix →
+  canonical CAMARA error (account-level, checked first, so a `…404` subject → 404
+  and a `…429` subject → 429 even for an otherwise-valid id); else the `serviceId`
+  vs the catalog — a held id → `200` that `Service` (identical to the listing's
+  entry), any other id (unknown / another identity's / malformed) → `404
+  NOT_FOUND` (the opaque SHA-256-derived id is not itself a plane, so malformed
+  folds into 404 — no store to distinguish it). Spec: new `/services/{serviceId}`
+  path (op, `serviceId` path param → `ServiceId`, 200 example, reserved-error +
+  standard responses, `x-camarasim-scenarios`); refreshed header + description +
+  documented cuts (reuses the existing `Service`/`ServiceId` schemas — no schema
+  churn). **No new dep** (reuses `services_for`/sha2). Tests: +10 router
+  integration (200 catalog member = listing entry, well-formed-unknown 404,
+  other-identity 404, malformed-id 404, empty-catalog 404, reserved-`…404` 404,
+  reserved-`…429` beats a valid id → 429, wrong-scope 403, no-token 401,
+  correlator echo). `cargo test` 2435 green (was 2425); `cargo build --release`
+  succeeds. — binary: 4.0M (4130440 B, +9240 B)
 - 2026-08-14 — Network Access Domains vwip: added the **Services catalog** read
   leg `GET /services` (`getServices`, scope `network-access-domains:services:read`)
   — the second endpoint of the API and its cleanest remaining **stateless**,
