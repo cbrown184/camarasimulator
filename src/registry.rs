@@ -12189,6 +12189,334 @@ components:
         );
     }
 
+    /// The 1-based line numbers, in document order, of every `default:` keyword whose
+    /// inline numeric value falls outside a sibling numeric bound — `minimum` or
+    /// `maximum` — declared in the same Schema Object, without a YAML dep.
+    ///
+    /// In OpenAPI 3.0.x (JSON Schema) a `default` is a fall-back *instance* of the
+    /// schema, so it MUST satisfy the schema's own constraints. Where the object bounds
+    /// a numeric value with `minimum`/`maximum`, a numeric `default` below the `minimum`
+    /// or above the `maximum` is a self-contradictory schema: the schema pre-supplies a
+    /// value its own validator rejects, so a Redoc/Swagger form pre-fills a control with
+    /// an out-of-range value and a codegen client's default fails the bound's own check
+    /// exactly where a caller reads or builds the payload.
+    ///
+    /// Only a `default` carrying an inline *unquoted numeric* scalar and at least one
+    /// same-object numeric bound sibling is inspected; each bound is scanned at the
+    /// default's own indent, down through the object's block then up, dedent-bounded
+    /// exactly like `schema_bounds_inverted` / `defaults_inconsistent_with_type`, so a
+    /// nested or following sibling object's bound never pairs. Skipped: a `default:`
+    /// that opens a block (an object/array default, or a property literally named
+    /// `default`); a quoted or non-numeric default (a numeric bound constrains only
+    /// numbers — a mistyped default is `defaults_inconsistent_with_type`'s concern); a
+    /// default with no numeric bound sibling; and a `default:` inside an
+    /// `example:`/`examples:` payload. The comparison is inclusive — only a value
+    /// strictly below `minimum` or strictly above `maximum` is flagged — so an
+    /// exclusive-bound (`exclusiveMinimum`/`exclusiveMaximum`) equality edge is never a
+    /// false positive (that strictness refinement is out of scope).
+    fn defaults_outside_their_numeric_bounds(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        // The inline scalar of a `name:` key (inline comment stripped; surrounding
+        // quotes preserved so a quoted token stays distinguishable from a bare number);
+        // `None` when the line is a different key or opens a block (no inline value).
+        let raw_inline = |l: &str, name: &str| -> Option<String> {
+            let (k, v) = l.trim_start().split_once(':')?;
+            if k.trim() != name {
+                return None;
+            }
+            let v = v.split('#').next().unwrap_or(v).trim();
+            if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            }
+        };
+        // A same-indent numeric bound sibling `key` in the same object as line `i`
+        // (indent `c`): scan down through the object's block then up, dedent-bounded so
+        // a nested or following object's bound never pairs. Returns the parsed number
+        // only for an unquoted numeric scalar (a quoted or non-numeric bound has no
+        // magnitude to compare against and is treated as absent here).
+        let sibling_num = |i: usize, c: usize, key: &str| -> Option<f64> {
+            let parse_num = |l: &str| -> Option<f64> {
+                let raw = raw_inline(l, key)?;
+                if raw.starts_with('"') || raw.starts_with('\'') {
+                    return None; // quoted → not a number
+                }
+                raw.parse::<f64>().ok()
+            };
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c {
+                    if let Some(n) = parse_num(l) {
+                        return Some(n);
+                    }
+                }
+                j += 1;
+            }
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c {
+                    if let Some(n) = parse_num(l) {
+                        return Some(n);
+                    }
+                }
+            }
+            None
+        };
+        // True when line `i` (indent `c`) sits inside an `example:`/`examples:` payload
+        // — some enclosing container key up the indent ladder is `example`/`examples`
+        // (mirroring `defaults_inconsistent_with_type`).
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some(raw) = raw_inline(line, "default") else {
+                continue;
+            };
+            // Only an unquoted numeric default can violate a numeric bound; a quoted or
+            // non-numeric default is `defaults_inconsistent_with_type`'s concern.
+            if raw.starts_with('"') || raw.starts_with('\'') {
+                continue;
+            }
+            let Ok(val) = raw.parse::<f64>() else {
+                continue;
+            };
+            let c = indent(line);
+            if inside_example(i, c) {
+                continue;
+            }
+            let min = sibling_num(i, c, "minimum");
+            let max = sibling_num(i, c, "maximum");
+            if min.is_none() && max.is_none() {
+                continue;
+            }
+            let below = min.is_some_and(|m| val < m);
+            let above = max.is_some_and(|m| val > m);
+            if below || above {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_default_is_within_its_numeric_bounds() {
+        // Contract-harness invariant (OpenAPI 3.0.x / JSON-Schema structural rule):
+        // where a Schema Object declares a numeric `default` beside a `minimum` and/or
+        // `maximum`, the default MUST lie within those bounds. A `default` is a
+        // fall-back *instance* of the schema, so a value below the `minimum` or above
+        // the `maximum` — a `default: 0` under `minimum: 1`, a `default: 300` under
+        // `maximum: 240` — is a self-contradictory schema: the schema pre-supplies a
+        // value its own validator rejects, so a Redoc/Swagger form pre-fills a control
+        // with an out-of-range value and a codegen client's default fails the bound's
+        // own check at the point a caller reads or builds the payload.
+        //
+        // A routine hazard in these scenario-table-heavy specs, where a bounded,
+        // defaulted control param is hand-tuned per API (a `maxAge` 1..2400 default
+        // 240, a page size 1..100 default 20): a bound narrowed after the default was
+        // set, or a default pasted from a sibling with a different range, leaves the two
+        // disagreeing. It is the numeric-range complement of
+        // `every_default_is_a_member_of_its_enum` (which checks a default against a
+        // sibling *enum*) and `every_default_matches_its_schema_type` (which checks a
+        // default's *type*, never its magnitude); the numeric-bound test
+        // (`every_numeric_bound_is_ordered_low_to_high`) compares the two bounds to each
+        // other but never against a default. No existing test compares a `default`'s
+        // value against its own bounds. Verified true across all mounted specs before
+        // asserting.
+        for api in APIS {
+            let offenders = defaults_outside_their_numeric_bounds(api.body);
+            assert!(
+                offenders.is_empty(),
+                "{} spec declares a numeric `default` outside its sibling `minimum`/\
+                 `maximum` bound (a value the bound's own validator would reject) at \
+                 `default:` line(s): {:?}",
+                api.name,
+                offenders
+            );
+        }
+    }
+
+    #[test]
+    fn default_numeric_bound_extraction_rules() {
+        // Unit-cover `defaults_outside_their_numeric_bounds` so the contract test above
+        // can't pass vacuously and its detection is pinned: a default within its bounds
+        // passes; a default below a `minimum` (declared above it) and one above a
+        // `maximum` (declared above it) are flagged in document order; a default equal
+        // to a bound passes (inclusive); a `minimum` declared *below* the default is
+        // still paired (down-scan); a quoted or non-numeric default is skipped (nothing
+        // numeric to compare); a default with no bound sibling is skipped; a `default:`
+        // inside an `example:` payload is skipped; a default in one property never pairs
+        // with a following property's bound across the dedent; and a `default:` opening
+        // a block (a property literally named `default`) is skipped.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    GoodRange:
+      type: integer
+      minimum: 1
+      maximum: 10
+      default: 5
+    BadBelow:
+      type: integer
+      minimum: 100
+      default: 1
+    BadAbove:
+      type: integer
+      maximum: 10
+      default: 99
+    MinOnlyGood:
+      type: integer
+      default: 7
+      minimum: 1
+    Equal:
+      type: integer
+      minimum: 5
+      maximum: 5
+      default: 5
+    Quoted:
+      type: string
+      minimum: 1
+      default: '0'
+    NonNumeric:
+      type: string
+      minimum: 1
+      default: hello
+    NoBound:
+      type: integer
+      default: 42
+    InExample:
+      type: object
+      example:
+        minimum: 100
+        default: 1
+    Split:
+      type: object
+      properties:
+        a:
+          default: 0
+        b:
+          type: integer
+          minimum: 100
+    NamedDefault:
+      type: object
+      properties:
+        default:
+          type: integer
+          minimum: 100
+";
+        // Flagged, in document order: line 22 (`BadBelow.default: 1` < its
+        // `minimum: 100` sibling above) and line 26 (`BadAbove.default: 99` > its
+        // `maximum: 10` sibling above). Not flagged: `GoodRange` (5 in [1,10]);
+        // `MinOnlyGood` (7 >= a `minimum: 1` declared *below* it — down-scan);
+        // `Equal` (5 == both bounds, inclusive); `Quoted` (`'0'` is a quoted string,
+        // not a number, though 0 < 1); `NonNumeric` (`hello` isn't numeric);
+        // `NoBound` (no bound sibling); `InExample` (its `default: 1` sits inside the
+        // `example:` payload); `Split.a.default: 0`, whose only candidate `minimum: 100`
+        // sits in the following property `Split.b` past a dedent, so the two never pair;
+        // and `NamedDefault` (a `default:` opening a block has no inline scalar).
+        assert_eq!(defaults_outside_their_numeric_bounds(body), vec![22, 26]);
+
+        // Non-vacuous floor: across every registered spec every numeric default with a
+        // sibling bound lies within it (the invariant the contract test asserts), and
+        // the corpus actually declares several bounded defaults (a `maxAge`, a page
+        // size, an array-window cap) — so the magnitude-comparison path runs on real
+        // data and a broken (always-empty) extractor can't hide behind a corpus that
+        // never pairs a default with a bound. Count pairs with a window detector
+        // independent of the extractor's magnitude comparison.
+        let mut bounded_defaults = 0usize;
+        for api in APIS {
+            assert!(
+                defaults_outside_their_numeric_bounds(api.body).is_empty(),
+                "{}: every numeric default must lie within its sibling min/max bound",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            let is_num_key = |l: &str, name: &str| {
+                l.trim_start().split_once(':').is_some_and(|(k, v)| {
+                    k.trim() == name
+                        && v.split('#')
+                            .next()
+                            .unwrap_or(v)
+                            .trim()
+                            .parse::<f64>()
+                            .is_ok()
+                })
+            };
+            for (i, l) in lines.iter().enumerate() {
+                if !is_num_key(l, "default") {
+                    continue;
+                }
+                let c = indent(l);
+                let lo = i.saturating_sub(8);
+                let hi = (i + 8).min(lines.len());
+                let has_bound = (lo..hi).any(|j| {
+                    j != i
+                        && indent(lines[j]) == c
+                        && (is_num_key(lines[j], "minimum") || is_num_key(lines[j], "maximum"))
+                });
+                if has_bound {
+                    bounded_defaults += 1;
+                }
+            }
+        }
+        assert!(
+            bounded_defaults >= 3,
+            "expected several numeric default+bound sibling pairs across specs, got {bounded_defaults}"
+        );
+    }
+
     /// The 1-based line numbers, in document order, of every `properties:` mapping
     /// opener whose sibling `type:` scalar names a JSON type other than `object` —
     /// without a YAML dep.

@@ -3936,6 +3936,25 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     ≥50 non-vacuous floor of block-form `items:` keys over all specs) so the contract
     can't pass vacuously. Verified true (87 block-form `items:` across the mounted
     specs, all single schemas — no drift to fix) before asserting.
+  - a `default`-within-numeric-bounds contract test (`src/registry.rs`
+    `every_default_is_within_its_numeric_bounds`) asserts every Schema Object's numeric
+    `default` lies within its sibling `minimum`/`maximum`. A `default` is a fall-back
+    *instance* of the schema, so a value below the `minimum` or above the `maximum` (a
+    `default: 0` under `minimum: 1`) is self-contradictory — the schema pre-supplies a
+    value its own validator rejects. The numeric-range complement of
+    `every_default_is_a_member_of_its_enum` (default vs sibling *enum*) and
+    `every_default_matches_its_schema_type` (default's *type*, never magnitude);
+    `every_numeric_bound_is_ordered_low_to_high` compares the two bounds to each other
+    but never against a default — so a bounded default's magnitude escaped every prior
+    check. New pure `defaults_outside_their_numeric_bounds` extractor (no YAML dep;
+    reuses `raw_inline`, the dedent-bounded down-then-up `sibling_num` scan, and the
+    `inside_example` walk of `defaults_inconsistent_with_type`; inclusive comparison, so
+    an exclusive-bound equality edge is never a false positive — a documented cut).
+    Unit-covered (`default_numeric_bound_extraction_rules`: in-range / equal /
+    min-declared-below pass; below-`minimum` + above-`maximum` flagged in document order
+    `[22, 26]`; quoted / non-numeric / no-bound / in-`example` / across-dedent /
+    named-`default` skipped; a ≥3 bounded-default non-vacuous floor). Verified true
+    across all mounted specs (every numeric default+bound pair in range — no drift).
   Full response-vs-schema validation still TODO (would need a YAML/JSON-Schema
   validator — a dependency trade-off, deferred).
 
@@ -3944,6 +3963,33 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 ## Scan journal
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
+
+- 2026-08-14 — contract-harness: added a **`default`-within-numeric-bounds** contract
+  test (`src/registry.rs` `every_default_is_within_its_numeric_bounds`) asserting that
+  where a Schema Object declares a numeric `default` beside a `minimum` and/or `maximum`,
+  the default lies within those bounds. A `default` is a fall-back *instance* of the
+  schema, so a value below the `minimum` or above the `maximum` (a `default: 0` under
+  `minimum: 1`) is self-contradictory — the schema pre-supplies a value its own validator
+  rejects, so a Redoc/Swagger form pre-fills an out-of-range control and a codegen
+  client's default fails the bound's own check where a caller reads/builds the payload.
+  The numeric-range complement of the two existing default tests:
+  `every_default_is_a_member_of_its_enum` (checks a default against a sibling *enum*,
+  never a bound) and `every_default_matches_its_schema_type` (checks a default's *type*,
+  never its magnitude); `every_numeric_bound_is_ordered_low_to_high` compares the two
+  bounds to each other but never against a default — so a bounded default's magnitude
+  escaped every prior check. New pure `defaults_outside_their_numeric_bounds` extractor
+  (no YAML dep; reuses the `raw_inline` value reader, the dedent-bounded down-then-up
+  `sibling_num` scan, and the `inside_example` ancestor walk of
+  `defaults_inconsistent_with_type`; inclusive comparison, so an exclusive-bound equality
+  edge is never a false positive — a documented scope cut). Unit-covered
+  (`default_numeric_bound_extraction_rules`: in-range/equal/min-declared-below defaults
+  pass; below-`minimum` + above-`maximum` flagged in document order `[22, 26]`; quoted/
+  non-numeric/no-bound/in-`example`/across-dedent/named-`default` skipped; a ≥3
+  bounded-default non-vacuous floor). Verified true across all mounted specs (every
+  numeric default+bound pair — `maxAge` 1..2400 default 240, page sizes, array-window
+  caps — sits in range; no drift to fix). Tests: +2 (1 contract, 1 unit). `cargo test`
+  2247 green (was 2245); `cargo build --release` succeeds. No new dep; binary unchanged
+  (`#[cfg(test)]`-only). — binary: 3.7M (3851944 B, +0 B)
 
 - 2026-08-14 00:58Z — contract-harness: added a **single-schema-`items`** contract test
   (`src/registry.rs` `every_items_declares_a_single_schema`) asserting every Schema Object
