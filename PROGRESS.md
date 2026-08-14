@@ -2768,7 +2768,7 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
         POLYGON query areas a documented cut. **Completes Dedicated Network — Areas
         vwip.**
 - [~] Other CAMARA APIs as capacity allows
-  - [~] eSIM Remote Management vwip (`/esim-remote-management/vwip`; CAMARA
+  - [x] eSIM Remote Management vwip (`/esim-remote-management/vwip`; CAMARA
     eSimRemoteManagement `wip` — no released version, mounted at its canonical
     `vwip` base path; OEM/eIM remote eUICC profile management, base "CMP"
     request/response envelope):
@@ -2794,9 +2794,29 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
       are synthesised deterministically from the `taskId` (reusing profileList's
       FNV+Luhn helpers, no new dep). Missing/malformed `taskId` or `sequenceNum`
       → 400 INVALID_ARGUMENT. `x-correlator` echoed.
-    - [ ] the async command legs (`profileDownload` / `profileOperation`) —
-      task-oriented, deferred (no live eUICC engine; they create the task that
-      `profileResultQuery` reports on).
+    - [x] `POST /profile/oper` (`profileOperation`, `esim-remote-management:oper`)
+      — a lifecycle command (enable/disable/delete) on a profile. Uses the
+      callback-subscription envelope (`protocol`/`sink`/`types`/`config`), not the
+      CMP read envelope. CamaraSim models the **synchronous acknowledgement**
+      (`code: 0`, echoed config): `config.subscriptionDetail.eId` is the control
+      plane (reserved suffix → canonical error, else accepted), `optType`
+      (1 Enable / 2 Disable / 3 Delete) surfaced in `message`; `imei`/`iccid` echo
+      or synthesise from the `eId`. Validation → 400 (missing config/detail/eId,
+      non-hex eId, bad imei/iccid/sink/protocol/types), 400 OUT_OF_RANGE
+      (`optType` ∉ 1..=3, `subscriptionMaxEvents` ∉ 1..=1000). eUICC state change +
+      `sink` delivery documented cuts; result pollable via `profileResultQuery`.
+    - [x] `POST /profile/download` (`profileDownload`,
+      `esim-remote-management:download`) — download (and optionally auto-enable) a
+      new profile onto the eUICC. Same callback-subscription envelope + synchronous
+      acknowledgement model as `profileOperation`: `config.subscriptionDetail.eId`
+      is the control plane (reserved suffix → canonical error, else accepted),
+      `autoEnableType` (only `1` — download-and-enable) surfaced in `message` and
+      echoed only when supplied; `imei`/`iccid` echo or synthesise from the `eId`.
+      Validation → 400 (missing config/detail/eId, non-hex eId, bad imei/iccid/
+      sink/protocol/types), 400 OUT_OF_RANGE (`autoEnableType` ≠ 1,
+      `subscriptionMaxEvents` ∉ 1..=1000). eUICC state change + `sink` delivery
+      documented cuts. **Completes the eSIM Remote Management vwip surface (all
+      four upstream legs).**
   - [~] Edge Application Management vwip (`/edge-application-management/vwip`;
     CAMARA EdgeApplicationManagement `wip` — no released version, mounted at its
     canonical `vwip` base path like the other unreleased EdgeCloud APIs; the
@@ -4094,6 +4114,40 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 ## Scan journal
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
+
+- 2026-08-14 — eSIM Remote Management vwip: added the **fourth and final leg**
+  `POST /profile/download` (`profileDownload`, scope
+  `esim-remote-management:download`) — download (and optionally auto-enable) a new
+  eSIM profile onto the device's eUICC. Verified the upstream CAMARA
+  `esim-remote-management.yaml` for the exact op path, scope, and schemas: it uses
+  the same callback-subscription envelope (`protocol`/`sink`/`types`/`config`) as
+  `profileOperation`, differing only in the `subscriptionDetail` selector —
+  `autoEnableType` (int, `1` = download-and-enable) in place of `optType`.
+  Modelled it identically to the just-landed `profileOperation` as a **synchronous
+  acknowledgement** in the house style: `config.subscriptionDetail.eId` is the
+  control plane (DESIGN §7) — reserved suffix on its trailing three decimal digits
+  → canonical CAMARA error (full shared set; 409/422/429 CamaraSim extensions per
+  the upstream "non-exhaustive errors" note), else `code: 0` with the message
+  reflecting `autoEnableType` (`Profile download` vs `Profile download and enable
+  accepted`); `imei`/`iccid` echo supplied values or are synthesised from the `eId`
+  (reuses profileList's FNV+Luhn helpers — **no new dependency**). `autoEnableType`
+  is optional and echoed only when supplied; present-but-≠1 → 400 OUT_OF_RANGE.
+  Validation: missing `config`/`subscriptionDetail`/`eId`, non-32-hex `eId`, bad
+  `imei`/`iccid`/`sink`/`protocol`/`types`, unknown field → 400 INVALID_ARGUMENT;
+  `subscriptionMaxEvents` ∉ 1..=1000 → 400 OUT_OF_RANGE. The actual profile
+  download / eUICC state change and the `sink` callback delivery are **documented
+  cuts** (no live eUICC engine — mirroring `profileOperation`); the eventual result
+  stays pollable via `profileResultQuery`. **Completes the eSIM Remote Management
+  vwip surface (all four upstream legs).** Spec:
+  `specs/esim-remote-management/vwip/openapi.yaml` — new `/profile/download` path
+  (full shared error set, `x-camarasim-scenarios`, two examples) + four new schemas
+  (`BaseCmpReqProfileDownloadReq`/`ProfileDownloadReq`/
+  `BaseCmpRespProfileDownloadResp`/`ProfileDownloadResp`); header + `info.description`
+  updated. Tests: +16 (plain / auto-enable happy paths, imei/iccid + subscription
+  echo, determinism, reserved-error, the full 400 validation set incl.
+  OUT_OF_RANGE, scope isolation vs `oper`, auth, correlator). `cargo test` 2329
+  green (was 2313); `cargo build --release` succeeds.
+  — binary: 3.8M (3974560 B, +28320 B)
 
 - 2026-08-14 — Sponsored Data vwip: implemented the previously-deferred
   **end-of-session `webhookUrl` callback** on `revokeSponsorship`. A successful

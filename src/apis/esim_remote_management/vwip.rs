@@ -1,6 +1,6 @@
 //! eSIM Remote Management **vwip** (CAMARA eSIM Remote Management, wip).
 //!
-//! Three endpoints so far:
+//! Four endpoints so far:
 //! - `POST /esim-remote-management/vwip/profile/downloaded-list` — list the eSIM
 //!   profiles installed on a device's eUICC (operationId `profileList`).
 //! - `POST /esim-remote-management/vwip/profile/result/query` — query the result
@@ -19,6 +19,17 @@
 //!   and any `sink` callback delivery are **documented cuts** (no live eUICC
 //!   engine — mirroring Click-to-Dial's engine cut); the operation's eventual
 //!   result is separately pollable via `profileResultQuery`.
+//! - `POST /esim-remote-management/vwip/profile/download` — download (and
+//!   optionally auto-enable) a new profile onto the device's eUICC (operationId
+//!   `profileDownload`, scope `esim-remote-management:download`). Modelled like
+//!   `profileOperation` as a **synchronous acknowledgement**: it validates the
+//!   request and answers `code: 0` echoing the configuration, with the device
+//!   `eId` (in `config.subscriptionDetail`) as the control plane (reserved
+//!   suffix → canonical error, else accepted). `autoEnableType` (only `1`,
+//!   download-and-enable) is surfaced in the response `message`. The actual
+//!   profile download / eUICC state change and any `sink` callback delivery are
+//!   documented cuts (no live eUICC engine); the eventual result is separately
+//!   pollable via `profileResultQuery`.
 //!
 //! ## What it does
 //!
@@ -83,6 +94,10 @@ const QUERY_SCOPE: &str = "esim-remote-management:query";
 /// Remote Management).
 const OPER_SCOPE: &str = "esim-remote-management:oper";
 
+/// The OAuth2 scope the `profileDownload` endpoint requires (CAMARA eSIM
+/// Remote Management).
+const DOWNLOAD_SCOPE: &str = "esim-remote-management:download";
+
 /// The success `resultCode` of the base CMP response envelope (`B100000`).
 const RESULT_OK: &str = "B100000";
 
@@ -100,6 +115,10 @@ pub fn routes() -> Router {
         .route(
             "/esim-remote-management/vwip/profile/oper",
             post(profile_operation),
+        )
+        .route(
+            "/esim-remote-management/vwip/profile/download",
+            post(profile_download),
         )
 }
 
@@ -523,6 +542,214 @@ async fn profile_operation(claims: Claims, headers: HeaderMap, body: Bytes) -> R
     let out = json!({
         "code": 0,
         "message": format!("{op} operation accepted"),
+        "config": config_out,
+    });
+
+    with_correlator((StatusCode::OK, Json(out)).into_response(), &correlator)
+}
+
+/// `POST /profile/download` request body — the base CMP subscription-style
+/// envelope (CAMARA `BaseCmpReqProfileDownloadReq`), identical in shape to the
+/// `profileOperation` envelope (`protocol` / `sink` / `types` / `config`).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProfileDownloadRequest {
+    /// Callback protocol; the upstream `Protocol` enum admits only `HTTP`.
+    protocol: Option<String>,
+    /// Callback address for asynchronous notification delivery. Accepted and
+    /// validated, but delivery is a documented cut (no live eUICC engine).
+    sink: Option<String>,
+    /// Subscribed event-type identifiers. Accepted for fidelity.
+    types: Option<Vec<String>>,
+    config: Option<ProfileDownloadConfig>,
+}
+
+/// The `config` payload (CAMARA `ProfileDownloadReq`).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProfileDownloadConfig {
+    #[serde(rename = "subscriptionDetail")]
+    subscription_detail: Option<DownloadSubscriptionDetail>,
+    #[serde(rename = "initialEvent")]
+    initial_event: Option<bool>,
+    #[serde(rename = "subscriptionMaxEvents")]
+    subscription_max_events: Option<i64>,
+    #[serde(rename = "subscriptionExpireTime")]
+    subscription_expire_time: Option<String>,
+}
+
+/// The device + download selector inside `config.subscriptionDetail`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DownloadSubscriptionDetail {
+    #[serde(rename = "eId")]
+    e_id: Option<String>,
+    imei: Option<String>,
+    iccid: Option<String>,
+    #[serde(rename = "autoEnableType")]
+    auto_enable_type: Option<i64>,
+}
+
+/// `POST /esim-remote-management/vwip/profile/download`.
+///
+/// Downloads (and optionally auto-enables) a new eSIM profile onto the device
+/// named by `config.subscriptionDetail.eId`. The upstream operation is
+/// asynchronous (its eventual result is delivered to a `sink` and pollable via
+/// `profileResultQuery`); CamaraSim models the **synchronous acknowledgement**:
+/// it validates the request and answers `code: 0` echoing the configuration. The
+/// device `eId` is the control plane (docs/DESIGN.md §7) — a reserved error
+/// suffix on its trailing three decimal digits selects a canonical CAMARA error,
+/// otherwise the command is accepted. When `autoEnableType` is `1` the
+/// acknowledgement reports a download-and-enable (the eUICC single-active rule);
+/// otherwise a plain download. The actual profile download / eUICC state change
+/// and any `sink` callback delivery are documented cuts (no live eUICC engine).
+async fn profile_download(claims: Claims, headers: HeaderMap, body: Bytes) -> Response {
+    // Optional correlation header, echoed on every response (CAMARA Commonalities).
+    let correlator = headers.get("x-correlator").cloned();
+
+    // Endpoint authorisation: the token must carry this API's scope.
+    if let Err(e) = claims.require_scope(DOWNLOAD_SCOPE) {
+        return with_correlator(e.into_response(), &correlator);
+    }
+
+    // The request body is required and must parse.
+    let req: ProfileDownloadRequest = match serde_json::from_slice(&body) {
+        Ok(req) => req,
+        Err(_) => {
+            return invalid_argument(
+                "Request body is not a valid BaseCmpReqProfileDownloadReq.",
+                &correlator,
+            )
+        }
+    };
+
+    // Envelope-level syntactic validation (400) before the identifier plane.
+    if let Some(p) = &req.protocol {
+        if p != "HTTP" {
+            return invalid_argument("`protocol` must be `HTTP`.", &correlator);
+        }
+    }
+    if let Some(sink) = &req.sink {
+        if !is_http_sink(sink) {
+            return invalid_argument(
+                "`sink` must be an http(s) URL of 1..=256 characters.",
+                &correlator,
+            );
+        }
+    }
+    if let Some(types) = &req.types {
+        if types.len() > 10 || !types.iter().all(|t| is_valid_sequence_num(t)) {
+            return invalid_argument(
+                "`types` admits at most 10 entries, each matching ^[a-zA-Z0-9_-]{1,64}$.",
+                &correlator,
+            );
+        }
+    }
+
+    // `config` and its `subscriptionDetail` are required by CamaraSim (a
+    // documented tightening — a download with no target eUICC is meaningless).
+    let config = match req.config {
+        Some(c) => c,
+        None => return invalid_argument("`config` is required.", &correlator),
+    };
+    if let Some(max) = config.subscription_max_events {
+        if !(1..=1000).contains(&max) {
+            return out_of_range(
+                "`config.subscriptionMaxEvents` must be within 1..=1000.",
+                &correlator,
+            );
+        }
+    }
+    let detail = match config.subscription_detail {
+        Some(d) => d,
+        None => {
+            return invalid_argument(
+                "`config.subscriptionDetail` is required.",
+                &correlator,
+            )
+        }
+    };
+
+    // The device `eId` is required and must be 32 hex characters.
+    let e_id = match &detail.e_id {
+        Some(id) if is_hex32(id) => id.clone(),
+        _ => {
+            return invalid_argument(
+                "`config.subscriptionDetail.eId` is required and must be 32 hexadecimal characters.",
+                &correlator,
+            )
+        }
+    };
+    // `autoEnableType` is optional; the upstream enum admits only `1` (download
+    // and enable). Present but ≠ 1 → OUT_OF_RANGE (mirrors `optType`'s bounds).
+    if let Some(t) = detail.auto_enable_type {
+        if t != 1 {
+            return out_of_range(
+                "`config.subscriptionDetail.autoEnableType` must be 1 (download and enable).",
+                &correlator,
+            );
+        }
+    }
+    // Optional device identifiers, validated to their CAMARA shapes when supplied.
+    if let Some(imei) = &detail.imei {
+        if !is_digits_len(imei, 15, 15) {
+            return invalid_argument(
+                "`config.subscriptionDetail.imei` must be 15 digits.",
+                &correlator,
+            );
+        }
+    }
+    if let Some(iccid) = &detail.iccid {
+        if !is_digits_len(iccid, 19, 20) {
+            return invalid_argument(
+                "`config.subscriptionDetail.iccid` must be 19 or 20 digits.",
+                &correlator,
+            );
+        }
+    }
+
+    // The identifier is the control plane (docs/DESIGN.md §7).
+    if let Some(err) = scenarios::reserved_error(&e_id) {
+        return with_correlator(err.into_response(), &correlator);
+    }
+
+    // Happy path: acknowledge the accepted download. `autoEnableType: 1` marks a
+    // download-and-enable; otherwise a plain download. The device identity echoes
+    // any supplied `imei`/`iccid` or synthesises them deterministically from the
+    // `eId` (mirroring `profileList`/`profileOperation`).
+    let auto_enable = detail.auto_enable_type == Some(1);
+    let message = if auto_enable {
+        "Profile download and enable accepted"
+    } else {
+        "Profile download accepted"
+    };
+    let imei_out = detail.imei.clone().unwrap_or_else(|| imei(&e_id));
+    let iccid_out = detail.iccid.clone().unwrap_or_else(|| iccid(&e_id, 0));
+
+    let mut sub = json!({
+        "eId": e_id,
+        "imei": imei_out,
+        "iccid": iccid_out,
+    });
+    // Echo `autoEnableType` only when supplied (it is optional upstream).
+    if let Some(t) = detail.auto_enable_type {
+        sub["autoEnableType"] = json!(t);
+    }
+    // Echo the subscription fields only when supplied.
+    let mut config_out = json!({ "subscriptionDetail": sub });
+    if let Some(v) = config.initial_event {
+        config_out["initialEvent"] = json!(v);
+    }
+    if let Some(v) = config.subscription_max_events {
+        config_out["subscriptionMaxEvents"] = json!(v);
+    }
+    if let Some(v) = &config.subscription_expire_time {
+        config_out["subscriptionExpireTime"] = json!(v);
+    }
+
+    let out = json!({
+        "code": 0,
+        "message": message,
         "config": config_out,
     });
 
@@ -1368,6 +1595,260 @@ mod tests {
         assert_eq!(
             headers.get("x-correlator").and_then(|v| v.to_str().ok()),
             Some("corr-e")
+        );
+    }
+
+    // --- profileDownload ---------------------------------------------------
+
+    /// POST to the profile-download endpoint with an optional Bearer token and
+    /// optional `x-correlator`. Returns (status, headers, json-or-null).
+    async fn post_download(
+        token: Option<&str>,
+        body: &str,
+        correlator: Option<&str>,
+    ) -> (StatusCode, HeaderMap, Value) {
+        let mut builder = Request::builder()
+            .method("POST")
+            .uri("/esim-remote-management/vwip/profile/download")
+            .header("host", HOST)
+            .header("content-type", "application/json");
+        if let Some(t) = token {
+            builder = builder.header("authorization", format!("Bearer {t}"));
+        }
+        if let Some(c) = correlator {
+            builder = builder.header("x-correlator", c);
+        }
+        let response = app()
+            .oneshot(builder.body(Body::from(body.to_string())).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let headers = response.headers().clone();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, headers, json)
+    }
+
+    /// Mint the scoped token and call the download endpoint.
+    async fn download_ok(body: &str) -> (StatusCode, HeaderMap, Value) {
+        let token = mint_token(DOWNLOAD_SCOPE).await;
+        post_download(Some(&token), body, None).await
+    }
+
+    /// A minimal `profileDownload` body for `eId` (no `autoEnableType`).
+    fn download_body(eid: &str) -> String {
+        format!(r#"{{"config":{{"subscriptionDetail":{{"eId":"{eid}"}}}}}}"#)
+    }
+
+    // --- Success cases -----------------------------------------------------
+
+    #[tokio::test]
+    async fn plain_download_is_accepted() {
+        let (status, _, body) = download_ok(&download_body(EID_ONE)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["code"], 0);
+        assert_eq!(body["message"], "Profile download accepted");
+        let detail = &body["config"]["subscriptionDetail"];
+        assert_eq!(detail["eId"], EID_ONE);
+        // No autoEnableType supplied → none echoed.
+        assert!(detail["autoEnableType"].is_null());
+        // Device identity is synthesised deterministically from the eId.
+        assert_eq!(detail["imei"].as_str().unwrap().len(), 15);
+        assert_eq!(detail["iccid"].as_str().unwrap().len(), 20);
+    }
+
+    #[tokio::test]
+    async fn auto_enable_download_reports_and_echoes_the_flag() {
+        let body = format!(
+            r#"{{"config":{{"subscriptionDetail":{{"eId":"{EID_ONE}","autoEnableType":1}}}}}}"#
+        );
+        let (status, _, out) = download_ok(&body).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(out["message"], "Profile download and enable accepted");
+        assert_eq!(out["config"]["subscriptionDetail"]["autoEnableType"], 1);
+    }
+
+    #[tokio::test]
+    async fn download_supplied_imei_and_iccid_are_echoed() {
+        let body = format!(
+            r#"{{"config":{{"subscriptionDetail":{{"eId":"{EID_ONE}","imei":"356938035643809","iccid":"8931089011234567890"}}}}}}"#
+        );
+        let (status, _, out) = download_ok(&body).await;
+        assert_eq!(status, StatusCode::OK);
+        let detail = &out["config"]["subscriptionDetail"];
+        assert_eq!(detail["imei"], "356938035643809");
+        assert_eq!(detail["iccid"], "8931089011234567890");
+    }
+
+    #[tokio::test]
+    async fn download_subscription_fields_are_echoed_when_supplied() {
+        let body = format!(
+            r#"{{"protocol":"HTTP","sink":"https://cb.example/notify","types":["profile-downloaded"],"config":{{"subscriptionDetail":{{"eId":"{EID_ONE}","autoEnableType":1}},"initialEvent":true,"subscriptionMaxEvents":5,"subscriptionExpireTime":"2026-08-14T12:00:00Z"}}}}"#
+        );
+        let (status, _, out) = download_ok(&body).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(out["config"]["initialEvent"], true);
+        assert_eq!(out["config"]["subscriptionMaxEvents"], 5);
+        assert_eq!(out["config"]["subscriptionExpireTime"], "2026-08-14T12:00:00Z");
+    }
+
+    #[tokio::test]
+    async fn download_result_is_deterministic() {
+        let (_, _, a) = download_ok(&download_body(EID_ONE)).await;
+        let (_, _, b) = download_ok(&download_body(EID_ONE)).await;
+        assert_eq!(a, b);
+    }
+
+    // --- Reserved-error control plane -------------------------------------
+
+    #[tokio::test]
+    async fn download_reserved_suffix_selects_a_canonical_camara_error() {
+        // eId …404 → 404 NOT_FOUND (the command is rejected).
+        let (status, _, body) =
+            download_ok(&download_body("A1B2C3D4E5F600000000000000000404")).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["code"], "NOT_FOUND");
+        // …503 → 503.
+        let (status, _, body) =
+            download_ok(&download_body("A1B2C3D4E5F600000000000000000503")).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["code"], "UNAVAILABLE");
+    }
+
+    // --- Validation --------------------------------------------------------
+
+    #[tokio::test]
+    async fn download_missing_config_and_subscription_detail_are_rejected() {
+        let (status, _, body) = download_ok(r#"{"protocol":"HTTP"}"#).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "INVALID_ARGUMENT");
+        let (status, _, body) = download_ok(r#"{"config":{"initialEvent":true}}"#).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "INVALID_ARGUMENT");
+    }
+
+    #[tokio::test]
+    async fn download_missing_or_non_hex_eid_is_rejected() {
+        // Missing eId.
+        let (status, _, body) =
+            download_ok(r#"{"config":{"subscriptionDetail":{"autoEnableType":1}}}"#).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "INVALID_ARGUMENT");
+        // Non-hex eId.
+        let (status, _, body) = download_ok(&download_body("not-a-valid-eid")).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "INVALID_ARGUMENT");
+    }
+
+    #[tokio::test]
+    async fn download_out_of_range_auto_enable_type_is_out_of_range() {
+        for bad in [0i64, 2, 99] {
+            let body = format!(
+                r#"{{"config":{{"subscriptionDetail":{{"eId":"{EID_ONE}","autoEnableType":{bad}}}}}}}"#
+            );
+            let (status, _, out) = download_ok(&body).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "autoEnableType {bad}");
+            assert_eq!(out["code"], "OUT_OF_RANGE", "autoEnableType {bad}");
+        }
+    }
+
+    #[tokio::test]
+    async fn download_out_of_range_subscription_max_events_is_rejected() {
+        let body = format!(
+            r#"{{"config":{{"subscriptionDetail":{{"eId":"{EID_ONE}"}},"subscriptionMaxEvents":0}}}}"#
+        );
+        let (status, _, out) = download_ok(&body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(out["code"], "OUT_OF_RANGE");
+    }
+
+    #[tokio::test]
+    async fn download_malformed_device_identifiers_are_rejected() {
+        let bad_imei = format!(
+            r#"{{"config":{{"subscriptionDetail":{{"eId":"{EID_ONE}","imei":"123"}}}}}}"#
+        );
+        let (status, _, body) = download_ok(&bad_imei).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "INVALID_ARGUMENT");
+        let bad_iccid = format!(
+            r#"{{"config":{{"subscriptionDetail":{{"eId":"{EID_ONE}","iccid":"123"}}}}}}"#
+        );
+        let (status, _, body) = download_ok(&bad_iccid).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "INVALID_ARGUMENT");
+    }
+
+    #[tokio::test]
+    async fn download_bad_protocol_and_sink_are_rejected() {
+        let bad_proto = format!(
+            r#"{{"protocol":"MQTT","config":{{"subscriptionDetail":{{"eId":"{EID_ONE}"}}}}}}"#
+        );
+        let (status, _, body) = download_ok(&bad_proto).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "INVALID_ARGUMENT");
+        let bad_sink = format!(
+            r#"{{"sink":"ftp://x","config":{{"subscriptionDetail":{{"eId":"{EID_ONE}"}}}}}}"#
+        );
+        let (status, _, body) = download_ok(&bad_sink).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "INVALID_ARGUMENT");
+    }
+
+    #[tokio::test]
+    async fn download_unknown_field_and_malformed_json_are_rejected() {
+        let (status, _, body) = download_ok(&format!(
+            r#"{{"config":{{"subscriptionDetail":{{"eId":"{EID_ONE}"}}}},"x":1}}"#
+        ))
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "INVALID_ARGUMENT");
+        let (status, _, body) = download_ok("not json").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "INVALID_ARGUMENT");
+    }
+
+    // --- Auth --------------------------------------------------------------
+
+    #[tokio::test]
+    async fn download_scope_is_isolated_from_the_other_scopes() {
+        // The operation scope must not grant the download endpoint.
+        let token = mint_token(OPER_SCOPE).await;
+        let (status, _, body) = post_download(Some(&token), &download_body(EID_ONE), None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["code"], "PERMISSION_DENIED");
+    }
+
+    #[tokio::test]
+    async fn download_missing_token_is_unauthenticated() {
+        let (status, _, body) = post_download(None, &download_body(EID_ONE), None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["code"], "UNAUTHENTICATED");
+    }
+
+    // --- Correlator --------------------------------------------------------
+
+    #[tokio::test]
+    async fn download_x_correlator_is_echoed_on_success_and_error() {
+        let token = mint_token(DOWNLOAD_SCOPE).await;
+        let (status, headers, _) =
+            post_download(Some(&token), &download_body(EID_ONE), Some("corr-dl")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-dl")
+        );
+        let (status, headers, _) = post_download(
+            Some(&token),
+            &download_body("A1B2C3D4E5F600000000000000000404"),
+            Some("corr-de"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-de")
         );
     }
 }
