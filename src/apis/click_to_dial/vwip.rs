@@ -119,16 +119,17 @@
 //!   `createCall` that supplies a `sink` delivers one create-time `status-changed`
 //!   CloudEvent reflecting the call's initial `initiating` state, and
 //!   `terminateCall` delivers a terminal one reflecting the `disconnected` state
-//!   (with a `reason`); see [`super::notifications`]. Additionally, a `…001`
-//!   `callee` line requests a **simulated successful progression** — after the
-//!   create-time event the call advances `callingCallee` → `connected`, each
-//!   delivered off the request path by [`spawn_call_progression`] (mirroring QoD's
-//!   `…001` `NETWORK_TERMINATED` timer); a concurrent `terminateCall` halts it.
-//!   All callbacks are `http://` sinks only, with the ACCESSTOKEN `sinkCredential`
-//!   bearer / PLAIN Basic applied. The remaining intermediate transitions
-//!   (`callingCaller`, a spontaneous `failed`, `callDuration` / `recordingResult`)
-//!   and re-deriving the stored `Call.status` remain deferred — CamaraSim runs no
-//!   live call engine.
+//!   (with a `reason`); see [`super::notifications`]. Additionally, the `callee`
+//!   line's tail requests a **simulated progression** delivered off the request
+//!   path by [`spawn_call_progression`] (mirroring QoD's `…001` `NETWORK_TERMINATED`
+//!   timer), a concurrent `terminateCall` halting it: a `…001` callee advances
+//!   `callingCallee` → `connected` (success), and a `…002` callee advances
+//!   `callingCallee` → `failed` (the network reaches the callee but the call is not
+//!   answered — the terminal `failed` step carries a `reason`). All callbacks are
+//!   `http://` sinks only, with the ACCESSTOKEN `sinkCredential` bearer / PLAIN
+//!   Basic applied. The remaining intermediate transition (`callingCaller`) and the
+//!   `callDuration` / `recordingResult` fields — and re-deriving the stored
+//!   `Call.status` — remain deferred: CamaraSim runs no live call engine.
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -191,6 +192,12 @@ const NOT_AVAILABLE_TAIL: u16 = 0;
 /// non-recordable (only relevant when `recordingEnabled` is `true`).
 const RECORDING_UNSUPPORTED_TAIL: u16 = 777;
 
+/// A single simulated progression step delivered by [`spawn_call_progression`]:
+/// the CAMARA `CallStatus` to report and an optional transition `reason`. The
+/// `reason` is populated on a **terminal** step (`failed`, mirroring the
+/// terminate-time `disconnected` event) and `None` on a non-terminal transition.
+type ProgressionStep = (&'static str, Option<&'static str>);
+
 /// The trailing-three-digit sentinel on the `callee` line that requests a
 /// simulated **successful call progression**: after the create-time `initiating`
 /// event, the call advances `callingCallee` → `connected`, each step delivered as
@@ -199,10 +206,31 @@ const RECORDING_UNSUPPORTED_TAIL: u16 = 777;
 /// (`NETWORK_TERMINATED`) / geofencing's `…001` (`area-entered`) convention.
 const PROGRESSION_TAIL: u16 = 1;
 
-/// The ordered intermediate states delivered by [`spawn_call_progression`] after
-/// the create-time `initiating` event — the network reaching the callee, then the
-/// two parties connecting (both valid CAMARA `CallStatus` values).
-const PROGRESSION_STATES: [&str; 2] = ["callingCallee", "connected"];
+/// The ordered steps delivered for a [`PROGRESSION_TAIL`] callee after the
+/// create-time `initiating` event — the network reaching the callee, then the two
+/// parties connecting (both valid CAMARA `CallStatus` values, no `reason`).
+const SUCCESS_PROGRESSION: [ProgressionStep; 2] =
+    [("callingCallee", None), ("connected", None)];
+
+/// The trailing-three-digit sentinel on the `callee` line that requests a
+/// simulated **failed call progression**: after the create-time `initiating`
+/// event, the call advances `callingCallee` → `failed` — the network reaches the
+/// callee but the call cannot be completed (e.g. the callee does not answer). Not
+/// a reserved *error* suffix, so it is free for this API's use (mirrors
+/// [`PROGRESSION_TAIL`]); the terminal `failed` step carries a [`FAILED_REASON`].
+const FAILED_TAIL: u16 = 2;
+
+/// The `reason` reported on the terminal `failed` progression step — the callee's
+/// line rang but the call was not answered (a party-side failure, distinct from
+/// `terminateCall`'s application-side `disconnected`).
+const FAILED_REASON: &str = "The callee did not answer the call.";
+
+/// The ordered steps delivered for a [`FAILED_TAIL`] callee after the create-time
+/// `initiating` event — the network reaching the callee, then the call failing
+/// (the terminal `failed` step carries [`FAILED_REASON`], like the terminate-time
+/// `disconnected` event).
+const FAILED_PROGRESSION: [ProgressionStep; 2] =
+    [("callingCallee", None), ("failed", Some(FAILED_REASON))];
 
 /// The fixed grace before each simulated progression step, so the create-time
 /// `initiating` event is observed first and the steps are spaced. Short — there is
@@ -384,19 +412,26 @@ async fn create_call(claims: Claims, headers: HeaderMap, body: Bytes) -> Respons
         );
         notifications::spawn_delivery(sink.to_string(), event, auth.clone());
 
-        // A `…001` callee line additionally requests a simulated successful
-        // progression: after the create-time `initiating` event, the call
-        // advances `callingCallee` → `connected`, each delivered off the request
-        // path (docs/DESIGN.md §7). Only the happy path reaches here, so the
-        // callee tail is already known-good (no reserved-error / not-available /
-        // recording-unsupported line has this suffix).
-        if scenarios::trailing_three_digits(&req.callee.number) == Some(PROGRESSION_TAIL) {
+        // The callee tail additionally selects a simulated post-create
+        // progression, each step delivered off the request path (docs/DESIGN.md
+        // §7): `…001` → a successful `callingCallee` → `connected`; `…002` → a
+        // failed `callingCallee` → `failed` (the terminal step carrying a reason).
+        // Only the happy path reaches here, so the callee tail is already
+        // known-good (no reserved-error / not-available / recording-unsupported
+        // line has one of these suffixes).
+        let progression = match scenarios::trailing_three_digits(&req.callee.number) {
+            Some(PROGRESSION_TAIL) => Some(&SUCCESS_PROGRESSION[..]),
+            Some(FAILED_TAIL) => Some(&FAILED_PROGRESSION[..]),
+            _ => None,
+        };
+        if let Some(steps) = progression {
             spawn_call_progression(
                 id.clone(),
                 req.caller.number.clone(),
                 req.callee.number.clone(),
                 sink.to_string(),
                 auth,
+                steps,
             );
         }
     }
@@ -404,24 +439,27 @@ async fn create_call(claims: Claims, headers: HeaderMap, body: Bytes) -> Respons
     with_correlator((StatusCode::CREATED, Json(call)).into_response(), &correlator)
 }
 
-/// Simulate a **successful call progression** for a call created with an `http://`
-/// `sink` and a `callee` line ending `…001` ([`PROGRESSION_TAIL`]).
+/// Simulate a **call progression** for a call created with an `http://` `sink` and
+/// a `callee` line ending `…001` ([`PROGRESSION_TAIL`], the
+/// [`SUCCESS_PROGRESSION`] → `connected`) or `…002` ([`FAILED_TAIL`], the
+/// [`FAILED_PROGRESSION`] → `failed`).
 ///
-/// A fire-and-forget timer (off the request path) delivers the ordered
-/// intermediate [`PROGRESSION_STATES`] (`callingCallee` → `connected`) as
-/// `status-changed` CloudEvents to the sink, each after a short
-/// [`PROGRESSION_GRACE`], modelling the network reaching the callee and the two
-/// parties connecting. This mirrors QoD's `spawn_network_termination` and
-/// geofencing's `spawn_movement` — CamaraSim has no live call engine, so a
-/// deterministic identifier tail drives the transition instead.
+/// A fire-and-forget timer (off the request path) delivers the given ordered
+/// `steps` as `status-changed` CloudEvents to the sink, each after a short
+/// [`PROGRESSION_GRACE`], modelling the network reaching the callee and then the
+/// two parties connecting (or the call failing). This mirrors QoD's
+/// `spawn_network_termination` and geofencing's `spawn_movement` — CamaraSim has no
+/// live call engine, so a deterministic identifier tail drives the transition
+/// instead. A step whose `reason` is `Some` (the terminal `failed` state) carries
+/// it on `data.status.reason`, like the terminate-time `disconnected` event.
 ///
 /// The steps are delivered **in order from a single task** ([`notifications::send`]
-/// is awaited, not spawned) so `callingCallee` precedes `connected` on the wire.
-/// Each step is delivered only while the call is still live: a concurrent
+/// is awaited, not spawned) so `callingCallee` precedes the terminal state on the
+/// wire. Each step is delivered only while the call is still live: a concurrent
 /// `terminateCall` evicts the call and fires the terminal `disconnected` event, and
 /// the next progression step then finds the call gone and stops — so a terminated
-/// call never emits a later `connected`. The stored `Call.status` is **not**
-/// advanced (it stays `initiating`); with no live engine the progression is
+/// call never emits a later `connected`/`failed`. The stored `Call.status` is
+/// **not** advanced (it stays `initiating`); with no live engine the progression is
 /// observable only through the delivered events — a documented cut mirroring
 /// Traffic Influence's un-re-derived `state` (docs/DESIGN.md §7, §11).
 fn spawn_call_progression(
@@ -430,16 +468,17 @@ fn spawn_call_progression(
     callee: String,
     sink: String,
     auth: Option<String>,
+    steps: &'static [ProgressionStep],
 ) {
     tokio::spawn(async move {
-        for state in PROGRESSION_STATES {
+        for &(state, reason) in steps {
             tokio::time::sleep(PROGRESSION_GRACE).await;
             // Stop if a concurrent `terminateCall` already ended the call — its
             // terminal `disconnected` event has fired; don't emit a later state.
             if super::store::get(&call_id).is_none() {
                 return;
             }
-            let event = notifications::status_changed_event(
+            let mut event = notifications::status_changed_event(
                 notifications::new_event_id(),
                 rfc3339_utc(now_unix_secs()),
                 &call_id,
@@ -447,6 +486,12 @@ fn spawn_call_progression(
                 &callee,
                 state,
             );
+            // A terminal `failed` step carries a `reason` (mirroring the
+            // terminate-time `disconnected` event); a non-terminal transition
+            // (`callingCallee`/`connected`) does not.
+            if let Some(reason) = reason {
+                event["data"]["status"]["reason"] = json!(reason);
+            }
             notifications::send(&sink, &event, auth.as_deref()).await;
         }
     });
@@ -1766,6 +1811,76 @@ mod tests {
         let accepted =
             tokio::time::timeout(std::time::Duration::from_millis(400), listener.accept()).await;
         assert!(accepted.is_err(), "a non-001 callee must fire no progression event");
+    }
+
+    // --- simulated call progression (…002 callee → failed) -----------------
+
+    #[tokio::test]
+    async fn a_002_callee_progresses_calling_callee_then_failed() {
+        // A `…002` callee line requests a simulated *failed* progression: after
+        // the create-time `initiating` event, the call advances `callingCallee`
+        // → `failed`, the terminal step carrying a `reason` (the callee did not
+        // answer) — distinct from the `…001` `connected` success path.
+        use tokio::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let sink = format!("http://{addr}/ctd-fail");
+
+        let body = format!(
+            r#"{{"caller":{{"number":"+123456789111"}},"callee":{{"number":"+123456789002"}},"sink":"{sink}"}}"#
+        );
+        let (status, _, created) = call_ok(&body).await;
+        assert_eq!(status, StatusCode::CREATED);
+        // The stored resource is created `initiating` (progression is not
+        // re-derived onto it — a documented cut, as for the success path).
+        assert_eq!(created["status"], "initiating");
+        let id = created["callId"].as_str().unwrap().to_string();
+
+        // Events arrive in order: initiating (create-time), callingCallee, failed.
+        let (_, first) = read_one_event(&listener).await;
+        let (_, second) = read_one_event(&listener).await;
+        let (_, third) = read_one_event(&listener).await;
+        for e in [&first, &second, &third] {
+            assert_eq!(e["type"], notifications::EVENT_TYPE);
+            assert_eq!(e["data"]["callId"], json!(id));
+            assert_eq!(e["data"]["caller"]["number"], "+123456789111");
+            assert_eq!(e["data"]["callee"]["number"], "+123456789002");
+        }
+        assert_eq!(first["data"]["status"]["state"], "initiating");
+        // The create-time event carries no reason (non-terminal).
+        assert!(first["data"]["status"]["reason"].is_null());
+        assert_eq!(second["data"]["status"]["state"], "callingCallee");
+        assert!(second["data"]["status"]["reason"].is_null());
+        // The terminal `failed` step carries a reason (like the disconnect event).
+        assert_eq!(third["data"]["status"]["state"], "failed");
+        assert_eq!(third["data"]["status"]["reason"], FAILED_REASON);
+    }
+
+    #[tokio::test]
+    async fn the_failed_progression_callbacks_carry_the_sink_credential_bearer() {
+        // The ACCESSTOKEN sinkCredential authenticates every failed-progression
+        // callback too, including the terminal `failed` event.
+        use tokio::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let sink = format!("http://{addr}/ctd-fail-auth");
+
+        // A distinct pair whose callee still ends `…002` (tail == FAILED_TAIL).
+        let body = format!(
+            r#"{{"caller":{{"number":"+123456780111"}},"callee":{{"number":"+123456780002"}},"sink":"{sink}","sinkCredential":{{"credentialType":"ACCESSTOKEN","accessToken":"fail-secret","accessTokenType":"bearer"}}}}"#
+        );
+        let (status, _, _) = call_ok(&body).await;
+        assert_eq!(status, StatusCode::CREATED);
+
+        // initiating, then callingCallee, then failed — all bearer-authenticated.
+        for expected in ["initiating", "callingCallee", "failed"] {
+            let (head, event) = read_one_event(&listener).await;
+            assert!(
+                head.contains("Authorization: Bearer fail-secret\r\n"),
+                "failed-progression callback carries the bearer ({expected}): {head}"
+            );
+            assert_eq!(event["data"]["status"]["state"], expected);
+        }
     }
 
     // --- status-changed CloudEvents on `sink` (terminate-time event) -------

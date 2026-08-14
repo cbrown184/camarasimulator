@@ -1137,8 +1137,14 @@ fire-and-forget timer mirroring QoD's `…001` `NETWORK_TERMINATED` and geofenci
 applied; a concurrent `terminateCall` halts it (store-presence guard, so a
 terminated call never emits a later `connected`). The stored `Call.status` stays
 `initiating` (no live call engine — a documented cut, mirroring Traffic Influence's
-un-re-derived `state`). The remaining transitions (`callingCaller`, a spontaneous
-`failed`, `callDuration`/`recordingResult`) stay deferred.
+un-re-derived `state`). A **simulated failed progression** is now modelled too: a
+`…002` `callee` line advances `callingCallee` → `failed` (the network reaches the
+callee but the call is not answered), the terminal `failed` step carrying a
+`data.status.reason` like the `terminateCall` event. Both paths share the
+generalised `spawn_call_progression` (an ordered `(state, reason?)` step list), so
+`…001`→`connected` and `…002`→`failed` reuse one timer/delivery/halt path. The
+remaining transition (`callingCaller`) and the `callDuration`/`recordingResult`
+fields stay deferred.
 
 ## In progress (claimed this pass)
 
@@ -2242,8 +2248,17 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
         `terminateCall` halts it (guarded by store presence). The stored
         `Call.status` is not advanced (no live engine — documented cut, mirroring
         Traffic Influence's un-re-derived `state`).
-      - [ ] `callingCaller`, a spontaneous `failed`, `callDuration` /
-        `recordingResult` — still deferred (no live call engine).
+      - [x] simulated **failed progression** — a `…002` `callee` line advances
+        `callingCallee` → `failed` (the network reaches the callee but the call
+        is not answered) after the create-time `initiating` event, the terminal
+        `failed` step carrying a `reason` (like the `terminateCall` event). Shares
+        the generalised `vwip::spawn_call_progression` (now a `(state, reason?)`
+        step list) with the `…001` success path — same in-order off-request-path
+        delivery, `http://`-only, ACCESSTOKEN Bearer / PLAIN Basic credential, and
+        `terminateCall` halt; the stored `Call.status` stays `initiating`
+        (documented cut). `…002` is a non-reserved-error suffix, so it is free.
+      - [ ] `callingCaller`, `callDuration` / `recordingResult` — still deferred
+        (no live call engine).
     - [ ] TLS (`https://` sink) delivery (needs a rustls TLS client).
 - [x] Most Frequent Location vwip (`/most-frequent-location/vwip`; CAMARA
   MostFrequentLocation `wip` — no released version, mounted at its canonical
@@ -4010,6 +4025,28 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 ## Scan journal
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
+
+- 2026-08-14 — Click to Dial vwip: simulated **failed call progression** (the
+  sibling backlog leaf to the previous pass's success progression). A `…002`
+  `callee` line on a call created with an `http://` `sink` now advances
+  `callingCallee` → `failed` after the create-time `initiating` event — the
+  network reaches the callee but the call is not answered — the terminal `failed`
+  step carrying a `data.status.reason` (like the `terminateCall` `disconnected`
+  event). Generalised `vwip::spawn_call_progression` to take an ordered
+  `(state, reason?)` step list, so the `…001` success (`callingCallee`→`connected`,
+  no reason) and the new `…002` failure (`callingCallee`→`failed`, with reason)
+  share one timer/delivery path (in-order off the request path, `http://`-only,
+  ACCESSTOKEN Bearer / PLAIN Basic `sinkCredential` applied, `terminateCall`-halt
+  guarded by store presence). The stored `Call.status` stays `initiating` (no live
+  engine — documented cut, mirroring the success path). `…002` is a
+  non-reserved-error suffix, so it is free for this use. No new dependency (raw-TCP
+  CloudEvents, unchanged). Spec: `specs/click-to-dial/vwip/openapi.yaml` — updated
+  the overview / `createCall` callback summary / `CallStatus` / `StatusChangedEvent`
+  / `CallEventData.reason` prose, and added a `…002` `x-camarasim-scenarios` case.
+  Tests: +2 (failed progression order + terminal reason + data; ACCESSTOKEN bearer
+  on every failed-progression callback incl. the terminal `failed`). `cargo test`
+  2254 green (was 2252); `cargo build --release` succeeds. — binary: 3.7M
+  (3860688 B, +1752 B)
 
 - 2026-08-14 — Click to Dial vwip: simulated **successful call progression** (a
   genuine backlog leaf, not another contract-lint test — the prior pass's survey

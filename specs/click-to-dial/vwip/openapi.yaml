@@ -115,21 +115,24 @@ info:
       CloudEvent reflecting the call's initial `initiating` state (documented by the
       `createCall` callback), and `terminateCall` delivers a terminal one
       reflecting the `disconnected` state (with a `reason` in `data.status`).
-      Additionally, a `callee` line ending `…001` requests a **simulated successful
-      progression**: after the create-time event the call advances `callingCallee`
-      → `connected`, each delivered as a `status-changed` CloudEvent in order (a
-      deterministic identifier tail drives the transition, mirroring Quality on
-      Demand's `…001` `NETWORK_TERMINATED`); a concurrent `terminateCall` halts it,
-      so a terminated call never emits a later `connected`. Delivery is
-      fire-and-forget over raw TCP to `http://` sinks only (no TLS client — an
+      Additionally, the `callee` line's trailing three digits request a **simulated
+      progression** after the create-time event, each step delivered as a
+      `status-changed` CloudEvent in order (a deterministic identifier tail drives
+      the transition, mirroring Quality on Demand's `…001` `NETWORK_TERMINATED`); a
+      concurrent `terminateCall` halts it, so a terminated call never emits a later
+      step: a `…001` callee advances `callingCallee` → `connected` (**success**),
+      and a `…002` callee advances `callingCallee` → `failed` (**failure** — the
+      network reaches the callee but the call is not answered; the terminal `failed`
+      step carries a `reason` in `data.status`, like the terminate event). Delivery
+      is fire-and-forget over raw TCP to `http://` sinks only (no TLS client — an
       `https://` sink is a no-op cut); a `sinkCredential` is applied to every
       callback's `Authorization` header — `ACCESSTOKEN` → `Bearer <accessToken>`
       (RFC 6750), `PLAIN` → `Basic base64(identifier:secret)` (RFC 7617) —
       `REFRESHTOKEN` remains a cut. The stored `Call.status` is **not** advanced by
       the progression (it stays `initiating`) — with no live call engine the
       progression is observable only through the delivered events. The remaining
-      intermediate transitions (`callingCaller`, a spontaneous `failed`, with
-      `callDuration`/`recordingResult`) remain a deferred slice.
+      intermediate transition (`callingCaller`) and the
+      `callDuration`/`recordingResult` fields remain a deferred slice.
 
     CamaraSim exposes the full shared reserved-error set here so every reserved
     suffix is reachable; canonical Click to Dial declares a subset.
@@ -309,7 +312,9 @@ paths:
                 Call status-changed notification (CloudEvents). CamaraSim delivers
                 one create-time event reflecting the `initiating` state; a `…001`
                 callee also drives a simulated `callingCallee` → `connected`
-                progression. The remaining transitions are a deferred slice.
+                (success) progression, and a `…002` callee a `callingCallee` →
+                `failed` (failure, with a `reason`) progression. The remaining
+                transitions are a deferred slice.
               requestBody:
                 required: true
                 content:
@@ -345,6 +350,12 @@ paths:
               order); the stored Call.status stays initiating
           - input: "a callee number ending 001 whose call is terminated mid-progression"
             result: "the progression halts — no connected event after the terminal disconnected"
+          - input: "a happy-path create with a callee number ending 002 and an http:// sink"
+            result: >-
+              201; after the create-time initiating event, a simulated progression
+              delivers callingCallee then failed status-changed CloudEvents (in
+              order); the terminal failed event carries a data.status.reason; the
+              stored Call.status stays initiating
           - input: "a create that supplies an https:// sink, or that errors before 201"
             result: "201 (https no-op cut) / the error — no CloudEvent is delivered"
           - input: "a re-create of a still-live call for the same caller/callee pair"
@@ -746,11 +757,12 @@ components:
         The lifecycle state of the call. CamaraSim's `createCall` always returns
         `initiating`; `disconnected` is reached when the call is ended by
         `terminateCall` (carried by the terminal `status-changed` notification). A
-        `…001` callee drives a simulated progression through `callingCallee` and
-        `connected` (carried by the progression `status-changed` notifications; the
-        stored resource `status` stays `initiating`). The remaining intermediate
-        states (`callingCaller`, a spontaneous `failed`) need a live call engine —
-        a deferred slice.
+        `…001` callee drives a simulated **success** progression through
+        `callingCallee` and `connected`, and a `…002` callee a simulated **failure**
+        progression through `callingCallee` and `failed` (both carried by the
+        progression `status-changed` notifications; the stored resource `status`
+        stays `initiating`). The remaining intermediate state (`callingCaller`)
+        needs a live call engine — a deferred slice.
       enum:
         - initiating
         - callingCaller
@@ -806,9 +818,11 @@ components:
         CamaraSim delivers a create-time event reflecting the `initiating` state,
         one at `terminateCall` reflecting the terminal `disconnected` state (with a
         `reason` in `data.status`), and — for a `…001` callee — a simulated
-        `callingCallee` → `connected` progression. The remaining transitions,
-        `callDuration`, and `recordingResult` become meaningful only once a live
-        call engine progresses the call — a deferred slice.
+        `callingCallee` → `connected` (success) progression or — for a `…002` callee
+        — a `callingCallee` → `failed` (failure, with a `reason`) progression. The
+        remaining transition (`callingCaller`), `callDuration`, and
+        `recordingResult` become meaningful only once a live call engine progresses
+        the call — a deferred slice.
       required:
         - id
         - source
@@ -869,9 +883,11 @@ components:
             reason:
               type: string
               description: >-
-                The disconnection reason, present on a terminal state. CamaraSim
-                populates it on the `terminateCall` event
-                (`state: disconnected`); it is absent on the create-time event.
+                The transition reason, present on a terminal state. CamaraSim
+                populates it on the `terminateCall` event (`state: disconnected`)
+                and on the simulated `…002` terminal `failed` step; it is absent on
+                the create-time event and on non-terminal transitions
+                (`callingCallee`/`connected`).
 
     ClickToDialError:
       description: >-
