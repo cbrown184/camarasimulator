@@ -2433,7 +2433,10 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     - [ ] ongoing state-change stream + `subscriptionExpireTime` /
       `subscriptionMaxEvents` lifecycle + the `TrafficInfluenceNotification` extras
       (`selected_appInstanceId` / `deviceResponse`) — deferred (no provisioning worker).
-    - [ ] TLS (`https://` sink) delivery (needs a rustls TLS client)
+    - [x] TLS (`https://` sink) delivery — reuses the QoD / Click to Dial rustls
+      (ring) + bundled Mozilla roots (`webpki-roots`) stack; `parse_sink` +
+      `deliver_tls` + generic `write_request<W>` mirror the siblings; server cert
+      verified. Closes traffic-influence's `http://`-only cut.
 - [x] Application Endpoint Discovery vwip (`/application-endpoint-discovery/vwip`;
   CAMARA ApplicationEndpointDiscovery `wip`; stateless, non-spatial, device-keyed
   EdgeCloud discovery — the endpoint-level successor to Simple/Optimal Edge
@@ -4318,6 +4321,29 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-15 — Traffic Influence vwip: extended CloudEvents sink delivery to
+  `https://` (TLS) sinks — the last sink API on the `http://`-only cut (the prior
+  Click to Dial pass flagged it). Applied the exact rustls (ring) + bundled Mozilla
+  roots (`webpki-roots`) pattern the sibling sink APIs use. `notifications.rs` now
+  parses the sink scheme (`parse_sink` → `SinkTarget{tls,host,port,path}`, default
+  port 80/443, replacing the http-only `parse_http_sink`) and, for `https://`, POSTs
+  the `traffic-influence-change` initial-event CloudEvent over a verified TLS session
+  (`deliver_tls`/`tls_connector`; server cert checked against the bundled roots)
+  instead of raw TCP; the inline HTTP writer factored to a generic
+  `write_request<W: AsyncWrite>` shared by the TCP and TLS paths (own cached
+  connector — mirror-don't-share). No new dependency (`tokio-rustls`/`webpki-roots`
+  already linked; dev-only `rcgen` for the test cert). vwip.rs prose (validate/
+  handler/`is_valid_sink`) updated http-only→http+https; the "https no-op" handler
+  test renamed to assert an unreachable https sink still returns 201 (best-effort).
+  Spec: `traffic-influence/vwip/openapi.yaml` header + `sink` schema prose now
+  describe http (raw TCP) + https (verified rustls TLS) delivery (removed the "no TLS
+  client" cut); scenarios split the old "false/https no-op" case into an https-TLS
+  delivery case + an initialEvent-false case. Tests: real TLS round-trip (rustls
+  server with an rcgen self-signed 127.0.0.1 cert, client trusting only it),
+  `write_request` byte-format, `parse_sink` http/https/port-443/reject (replacing the
+  old `parse_http_sink` test). `cargo test` 2506 green (was 2502); `cargo build
+  --release` succeeds. Every sink-emitting API now delivers over http+https. —
+  binary: 5.0M (5,180,664 B, +2,944 B — TLS stack already linked)
 - 2026-08-15 — Click to Dial vwip: extended CloudEvents sink delivery to `https://`
   (TLS) sinks, adopting the rustls TLS client QoD/Session Insights/QoS Booking/QoS
   Provisioning/Geofencing introduced (the follow-up the Session Insights pass flagged

@@ -33,15 +33,16 @@
 #     modelled for the **initial event** only (`config.initialEvent: true`): a
 #     single `org.camaraproject.traffic-influence.v1.traffic-influence-change`
 #     CloudEvent is POSTed to the `sink` on create, reflecting the new resource's
-#     `state` (its `data` is the created `TrafficInfluence`). Fire-and-forget over
-#     raw TCP (no HTTP-client dep); `http://` sinks only (an `https://` sink is a
-#     no-op cut — no TLS client), `protocol: HTTP` only. A `sinkCredential` is
+#     `state` (its `data` is the created `TrafficInfluence`). Fire-and-forget, no
+#     HTTP-client dep: an `http://` sink is POSTed over raw TCP, an `https://` sink
+#     over a verified `rustls` TLS session (server cert checked against the bundled
+#     Mozilla roots; default port 443). `protocol: HTTP` only. A `sinkCredential` is
 #     applied to the callback `Authorization` header: `ACCESSTOKEN` →
 #     `Bearer <accessToken>` (RFC 6750), `PLAIN` →
 #     `Basic base64(identifier:secret)` (RFC 7617); `REFRESHTOKEN` a cut. The ongoing
-#     state-change stream, `subscriptionExpireTime` / `subscriptionMaxEvents`
-#     lifecycle, and TLS (`https://`) delivery are deferred (like QoD's first
-#     pass; see PROGRESS.md). The `TrafficInfluenceNotification` extras
+#     state-change stream, and the `subscriptionExpireTime` / `subscriptionMaxEvents`
+#     lifecycle, are deferred (like QoD's first pass; see PROGRESS.md). The
+#     `TrafficInfluenceNotification` extras
 #     (`selected_appInstanceId` / `deviceResponse`) are omitted (documented cut).
 #   - The created resource `state` is one of `ordered` / `created` / `active` at
 #     create time; the `error` / `deletion in progress` / `deleted` states are
@@ -232,13 +233,15 @@ paths:
           - input: "sourcePort or destinationPort outside 0..=65535"
             result: "400 OUT_OF_RANGE"
           - input: "a valid subscriptionRequest with config.initialEvent: true and an http:// sink"
-            result: "201, plus a traffic-influence-change CloudEvent POSTed to the sink whose data is the created resource (fire-and-forget)"
+            result: "201, plus a traffic-influence-change CloudEvent POSTed to the sink over raw TCP whose data is the created resource (fire-and-forget)"
+          - input: "a valid subscriptionRequest with config.initialEvent: true and an https:// sink"
+            result: "201, plus the same CloudEvent POSTed over a verified rustls TLS session (server cert checked against the bundled Mozilla roots; default port 443); an unreachable https sink still returns 201 (delivery is best-effort)"
           - input: "a valid subscriptionRequest with an ACCESSTOKEN sinkCredential"
             result: "the initial-event callback carries Authorization: Bearer <token> (the secret is never echoed)"
           - input: "a valid subscriptionRequest with a PLAIN sinkCredential (identifier + secret)"
             result: "the initial-event callback carries Authorization: Basic base64(identifier:secret) (RFC 7617; the secret is never echoed)"
-          - input: "config.initialEvent absent/false, or an https:// sink"
-            result: "201 with no delivered event (initial event only; https is a no-op TLS cut)"
+          - input: "config.initialEvent absent/false"
+            result: "201 with no delivered event (initial event only)"
           - input: "subscriptionRequest missing sink/protocol/types/config or config.subscriptionDetail, protocol not HTTP, or types not the single change event"
             result: "400 INVALID_ARGUMENT"
 
@@ -762,8 +765,9 @@ components:
         stream, `subscriptionExpireTime` / `subscriptionMaxEvents` lifecycle, and
         non-`HTTP` `protocol`s are documented cuts. The upstream `sink` pattern is
         `^https://.+$`; CamaraSim additionally accepts `http://` for loopback
-        receivers and delivers only to `http://` (no TLS client — an `https://`
-        sink is a no-op cut).
+        receivers. An `https://` sink is delivered to over a verified `rustls` TLS
+        session (server cert checked against the bundled Mozilla roots); an
+        `http://` sink is delivered over raw TCP.
       required:
         - sink
         - protocol

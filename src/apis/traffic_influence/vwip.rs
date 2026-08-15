@@ -463,9 +463,9 @@ fn validate_base(
 /// requires `protocol: HTTP` (the only delivery protocol it implements — raw-TCP,
 /// no message brokers) and the single `types` value
 /// (`org.camaraproject.traffic-influence.v1.traffic-influence-change`). The `sink`
-/// is accepted as `http://` (loopback receivers) or `https://` (upstream mandates
-/// `https://`), though only `http://` is delivered to (no TLS client — a documented
-/// cut). Any problem → `400 INVALID_ARGUMENT`.
+/// is accepted as `http://` (loopback receivers, raw TCP) or `https://` (upstream
+/// mandates `https://`, delivered over verified `rustls` TLS). Any problem →
+/// `400 INVALID_ARGUMENT`.
 fn validate_subscription(
     sr: SubscriptionRequest,
     correlator: &Option<HeaderValue>,
@@ -616,7 +616,7 @@ fn finalize(input: ValidInput, correlator: &Option<HeaderValue>) -> Response {
     // event, deliver a single `traffic-influence-change` CloudEvent reflecting the
     // created resource's current state to the sink (fire-and-forget, off the
     // request path; ACCESSTOKEN Bearer / PLAIN Basic `sinkCredential` applied;
-    // `http://` only).
+    // `http://` over raw TCP, `https://` over verified rustls TLS).
     if let Some(sub) = &input.subscription {
         if sub.initial_event {
             let event = notifications::traffic_influence_change_event(
@@ -1076,9 +1076,8 @@ fn mint_id() -> String {
 }
 
 /// Whether `s` is a callback `sink` CamaraSim accepts: an `http://` (loopback
-/// receivers) or `https://` (upstream mandates `https://`) URL with a non-empty
-/// authority. Only `http://` is actually delivered to (no TLS client — an
-/// `https://` sink is a documented no-op cut). Mirrors
+/// receivers, raw TCP) or `https://` (upstream mandates `https://`, delivered over
+/// verified `rustls` TLS) URL with a non-empty authority. Mirrors
 /// `qos_provisioning::v0_3::is_valid_sink`.
 fn is_valid_sink(s: &str) -> bool {
     let rest = s
@@ -2428,10 +2427,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_https_sink_initial_event_still_returns_201_and_is_not_delivered() {
-        // https sink is accepted at validation but never delivered to (no TLS
-        // client — a documented no-op cut). The create still succeeds and does not
-        // hang on the missing TLS delivery.
+    async fn an_unreachable_https_sink_initial_event_still_returns_201() {
+        // https sinks are now delivered to over verified rustls TLS (see
+        // `notifications::deliver_tls_posts_a_cloudevent_over_a_verified_tls_session`
+        // for the round-trip). Delivery is fire-and-forget off the request path, so
+        // an unresolvable/unreachable https sink fails silently and never blocks or
+        // fails the `201`.
         let body = create_body_sub(APP_ACTIVE, sub_request("https://sink.example.test/cb", true, None));
         let (status, _, _) = post(Some(&token().await), None, body).await;
         assert_eq!(status, StatusCode::CREATED);
