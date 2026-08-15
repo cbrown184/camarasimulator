@@ -12310,6 +12310,326 @@ components:
         );
     }
 
+    /// Returns the 1-based line numbers of every `example:` scalar whose schema
+    /// object also declares a sibling `enum:` list that does **not** contain the
+    /// example's value — the `example` analogue of `defaults_outside_their_enum`.
+    ///
+    /// An `example` is a sample *instance* of the schema, so beside an `enum` —
+    /// the closed set the field may take — it MUST be one of the enum's values. A
+    /// non-member is a sample the field's own validator rejects: a Redoc/Swagger
+    /// "try it" prefill and a codegen client's generated sample carry a value the
+    /// enum can never legally hold.
+    ///
+    /// Pure and YAML-dep-free; the body mirrors `defaults_outside_their_enum`
+    /// exactly (only the pivot key differs — `example:` for `default:`): for each
+    /// `example:` key with an inline scalar value at indent `c`, scan its object's
+    /// block (down then up, each bounded by the first line indented *below* `c`,
+    /// the dedent that closes the object) for an `enum:` key at *exactly* `c`. When
+    /// one is found, collect that enum's values (the flow `enum: [A, B]` and block
+    /// `enum:`/`- A` forms, unquoted and comment-trimmed) and flag the `example`
+    /// when its normalized value is absent from them. The exact-indent,
+    /// dedent-bounded match keeps an `example` in one property from pairing with a
+    /// following sibling property's `enum`. Skipped (nothing to compare, or not a
+    /// Schema Object example): an `example:` that opens a block rather than holding
+    /// an inline scalar (an object/array example, or a property literally named
+    /// `example`), an `example` with no sibling `enum` (a Media Type / Parameter
+    /// Object example, or an unconstrained schema example — always valid), and an
+    /// `enum:` sibling that is a mapping named `enum` rather than a value list (its
+    /// collected value set is empty).
+    fn examples_outside_their_enum(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        // Unquote a scalar and trim a trailing ` # comment`.
+        let norm = |raw: &str| -> String {
+            let mut v = raw.trim();
+            if let Some(pos) = v.find(" #") {
+                v = v[..pos].trim_end();
+            }
+            let v = v.trim();
+            let unq = v
+                .strip_prefix('"')
+                .and_then(|s| s.strip_suffix('"'))
+                .or_else(|| v.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')))
+                .unwrap_or(v);
+            unq.trim().to_string()
+        };
+        // The inline scalar value of a `name:` key. `None` when the line is a
+        // different key or opens a block (no inline value after the colon).
+        let inline_val = |l: &str, name: &str| -> Option<String> {
+            let (k, v) = l.trim_start().split_once(':')?;
+            if k.trim() != name {
+                return None;
+            }
+            let n = norm(v);
+            if n.is_empty() {
+                None
+            } else {
+                Some(n)
+            }
+        };
+        // The values of the enum whose `enum:` key sits at line index `e`.
+        let enum_values_at = |e: usize| -> Vec<String> {
+            let line = lines[e];
+            let rest = line.trim_start()["enum:".len()..].trim_start();
+            if rest.starts_with('[') {
+                // Flow list — gather across lines until the closing `]`.
+                let mut buf = rest.to_string();
+                let mut k = e;
+                while !buf.contains(']') && k + 1 < lines.len() {
+                    k += 1;
+                    buf.push(' ');
+                    buf.push_str(lines[k].trim());
+                }
+                let open = buf.find('[').map(|x| x + 1).unwrap_or(0);
+                let close = buf.rfind(']').unwrap_or(buf.len());
+                let inner = if close >= open { &buf[open..close] } else { "" };
+                if inner.trim().is_empty() {
+                    Vec::new()
+                } else {
+                    inner.split(',').map(|s| norm(s)).filter(|v| !v.is_empty()).collect()
+                }
+            } else if rest.is_empty() || rest.starts_with('#') {
+                // Block list — `- ` children at a deeper indent, but only when the
+                // first child is a `-` item (else it is a property named `enum`).
+                let base = indent(line);
+                let mut values: Vec<String> = Vec::new();
+                let mut first_child_seen = false;
+                let mut j = e + 1;
+                while j < lines.len() {
+                    let l = lines[j];
+                    if l.trim().is_empty() || l.trim_start().starts_with('#') {
+                        j += 1;
+                        continue;
+                    }
+                    if indent(l) <= base {
+                        break;
+                    }
+                    let item = l.trim_start();
+                    if !first_child_seen {
+                        first_child_seen = true;
+                        if !item.starts_with('-') {
+                            break;
+                        }
+                    }
+                    if !item.starts_with('-') {
+                        break;
+                    }
+                    let val = norm(item[1..].trim_start());
+                    if !val.is_empty() {
+                        values.push(val);
+                    }
+                    j += 1;
+                }
+                values
+            } else {
+                Vec::new()
+            }
+        };
+        let is_enum_key =
+            |l: &str| l.trim_start().starts_with("enum:") && !l.trim_start().starts_with("enums");
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some(ev) = inline_val(line, "example") else { continue };
+            let c = indent(line);
+            let mut e = None;
+            // Scan down through this object's block for a sibling `enum:`.
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_enum_key(l) {
+                    e = Some(j);
+                    break;
+                }
+                j += 1;
+            }
+            // The enum may be declared before the example; scan up too.
+            if e.is_none() {
+                let mut k = i;
+                while k > 0 {
+                    k -= 1;
+                    let l = lines[k];
+                    if l.trim().is_empty() {
+                        continue;
+                    }
+                    if indent(l) < c {
+                        break;
+                    }
+                    if indent(l) == c && is_enum_key(l) {
+                        e = Some(k);
+                        break;
+                    }
+                }
+            }
+            let Some(e) = e else { continue };
+            let values = enum_values_at(e);
+            if !values.is_empty() && !values.iter().any(|v| v == &ev) {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_example_is_a_member_of_its_enum() {
+        // Contract-harness invariant (OpenAPI 3.0.x / JSON-Schema structural rule):
+        // where a Schema Object declares BOTH an `example` and an `enum`, the
+        // example MUST be one of the enum's values. An `enum` fixes the closed set
+        // a field may take; an `example` outside that set advertises a sample the
+        // field's own validator rejects, so a Redoc/Swagger "try it" prefill and a
+        // codegen client's generated sample carry a value the field can never
+        // legally hold.
+        //
+        // A routine hazard in these scenario-table-heavy specs, where enum/example
+        // pairs are hand-authored per API (a `connectedNetworkType` `5G`, a
+        // `qosStatus` `AVAILABLE`, a security-mode `WPA3-Enterprise`): an example
+        // typed from memory, or an enum member renamed after the example was set,
+        // leaves the two disagreeing. It is the `example` analogue of
+        // `every_default_is_a_member_of_its_enum` (which pins the *default* against
+        // its enum) and invisible to every other existing test — the enum test
+        // checks a value list's own members (unique/non-empty),
+        // `every_example_matches_its_schema_type` checks the example's JSON *type*
+        // not its enum membership, and the identity/wiring/`$ref` tests never
+        // compare an example against its enum. Verified true across all mounted
+        // specs before asserting.
+        for api in APIS {
+            let offenders = examples_outside_their_enum(api.body);
+            assert!(
+                offenders.is_empty(),
+                "{} spec declares an `example` outside its sibling `enum` (a value \
+                 the enum's own validator would reject) at line(s): {:?}",
+                api.name,
+                offenders
+            );
+        }
+    }
+
+    #[test]
+    fn example_enum_membership_extraction_rules() {
+        // Unit-cover the `examples_outside_their_enum` extractor so the contract
+        // test above can't pass vacuously and its detection is pinned: an `example`
+        // is flagged only when a same-indent sibling `enum` (declared before OR
+        // after it) omits the example's value; quotes/comments are normalized on
+        // both sides before comparison; an `example` with no sibling enum (a Media
+        // Type / Parameter Object example, or an unconstrained schema one) is never
+        // flagged; an `example` in one property never pairs with a following
+        // property's enum across the dedent; and an `example:` that opens a block
+        // (an object/array example or a property literally named `example`) is
+        // skipped.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    GoodFlow:
+      type: string
+      enum: [asc, desc]
+      example: desc
+    BadAfter:
+      type: string
+      enum: [red, green]
+      example: blue
+    GoodBefore:
+      type: string
+      example: left
+      enum:
+        - left
+        - right
+    BadBefore:
+      type: string
+      example: up
+      enum:
+        - left
+        - right
+    NoEnum:
+      type: string
+      example: anything
+    Quoted:
+      type: string
+      enum: [asc, desc]
+      example: \"asc\"
+    Split:
+      type: object
+      properties:
+        a:
+          type: string
+          example: solo
+        b:
+          type: string
+          enum: [x, y]
+    NamedExample:
+      type: object
+      properties:
+        example:
+          type: string
+";
+        // Flagged, in document order: line 21 (`BadAfter.example: blue`, whose
+        // `enum: [red, green]` sibling above omits it) and line 30
+        // (`BadBefore.example: up`, whose block `enum` below omits it). Not flagged:
+        // `GoodFlow`/`GoodBefore` (example in enum, after / before it), `Quoted`
+        // (`\"asc\"` normalizes into `[asc, desc]`), `NoEnum` (no sibling enum),
+        // `Split.a.example: solo` (property `b`'s enum sits past the dedent, never
+        // pairs), and `NamedExample` (an `example:` opening a block has no inline
+        // scalar to compare).
+        assert_eq!(examples_outside_their_enum(body), vec![21, 30]);
+
+        // Non-vacuous floor: across every registered spec every example with a
+        // sibling enum is a member of it (the invariant the contract test asserts),
+        // and the corpus actually declares many enum-bearing examples (status
+        // enums, network-type enums, security-mode enums), so the membership path
+        // runs on real data and a broken (always-empty) extractor can't hide behind
+        // a corpus that never pairs an example with an enum. Count pairs with a
+        // window detector independent of the extractor's membership comparison.
+        let mut pairs = 0usize;
+        for api in APIS {
+            assert!(
+                examples_outside_their_enum(api.body).is_empty(),
+                "{}: every example with a sibling enum must be one of its values",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            for (i, l) in lines.iter().enumerate() {
+                let t = l.trim_start();
+                if !t.starts_with("example:") {
+                    continue;
+                }
+                let v = t["example:".len()..].trim();
+                if v.is_empty() || v.starts_with('#') {
+                    continue;
+                }
+                let c = indent(l);
+                let lo = i.saturating_sub(8);
+                let hi = (i + 8).min(lines.len());
+                let has_enum = (lo..hi).any(|j| {
+                    j != i && indent(lines[j]) == c && lines[j].trim_start().starts_with("enum:")
+                });
+                if has_enum {
+                    pairs += 1;
+                }
+            }
+        }
+        assert!(
+            pairs >= 10,
+            "expected several example+enum sibling pairs across specs, got {pairs}"
+        );
+    }
+
     /// Line numbers (1-based) of `default:` keywords whose inline scalar value
     /// contradicts the sibling scalar `type:` in the same Schema Object — the
     /// `default` analogue of `enum_values_inconsistent_with_type`, without a YAML dep.

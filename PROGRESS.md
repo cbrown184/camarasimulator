@@ -4464,6 +4464,30 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     ≥100 judged-object non-vacuous floor via an independent minimal sibling scan) so the
     contract can't pass vacuously. Verified true across all mounted specs (224 judged
     objects, no `required` entry names an undeclared property — no drift to fix).
+  - an example-in-enum contract test (`src/registry.rs`
+    `every_example_is_a_member_of_its_enum`) asserts that wherever a Schema Object
+    declares BOTH an `example` and an `enum`, the example is one of the enum's
+    values. An `enum` fixes the closed set the field may take, so an `example`
+    outside it advertises a sample the field's own validator rejects — a
+    Redoc/Swagger "try it" prefill and a codegen client's generated sample carry a
+    value the field can never legally hold. The **`example` analogue** of
+    `every_default_is_a_member_of_its_enum` (which pins the *default* against its
+    enum) and invisible to every other sibling: the enum test checks a value list's
+    own members (unique/non-empty), `every_example_matches_its_schema_type` checks
+    the example's JSON *type* not its enum membership, and the identity/wiring/`$ref`
+    tests never compare an example against its enum. New pure
+    `examples_outside_their_enum` extractor (no YAML dep) mirrors
+    `defaults_outside_their_enum` exactly (only the pivot key differs — `example:`
+    for `default:`): same-indent dedent-bounded sibling-`enum:` pairing (scan down
+    then up), same flow-`[…]`/block-`- item` enum-value collection + quote/comment
+    normalization; an `example` opening a block (object/array example or a property
+    literally named `example`) and an `example` with no sibling enum (a Media Type /
+    Parameter Object example) are skipped. Unit-covered
+    (`example_enum_membership_extraction_rules`: member/non-member, example-before/
+    after-enum, quoted normalization, cross-property non-pairing, block-example skip;
+    ≥10 example+enum pair non-vacuous floor). Verified true across all mounted specs
+    (every enum-bearing example — network-type `5G`, `qosStatus` `AVAILABLE`,
+    security-mode `WPA3-Enterprise`, the status enums — is a member; no drift to fix).
   Full response-vs-schema validation still TODO (would need a YAML/JSON-Schema
   validator — a dependency trade-off, deferred).
 
@@ -4471,6 +4495,29 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-15 — Contract-test harness: added an **example-in-enum** spec-structural
+  contract test (`src/registry.rs` `every_example_is_a_member_of_its_enum`) — where
+  a Schema Object declares BOTH an `example` and an `enum`, the example must be one
+  of the enum's values, else the documented sample is a value the enum's own
+  validator rejects (a Redoc/Swagger "try it" prefill / codegen sample the field can
+  never legally hold). The `example` analogue of the existing
+  `every_default_is_a_member_of_its_enum`; invisible to its siblings
+  (`every_example_matches_its_schema_type` checks the example's JSON *type* not its
+  enum membership; the enum test checks a value list's own members; the default test
+  checks the *default* not the *example*). New pure `examples_outside_their_enum`
+  extractor mirrors `defaults_outside_their_enum` exactly (only the pivot key differs
+  — `example:` for `default:`): same-indent dedent-bounded sibling-`enum:` pairing
+  (down then up), same flow-`[…]`/block-`- item` value collection + quote/comment
+  normalization; a block-opening `example` (object/array example or a property named
+  `example`) and an `example` with no sibling enum (Media Type / Parameter Object
+  example) are skipped. Surveyed the corpus first (all 20+ enum-bearing examples —
+  network-type `5G`, `qosStatus` `AVAILABLE`, security-mode `WPA3-Enterprise`, the
+  status enums — are members) → no drift to fix. Tests: +2 (the contract test +
+  `example_enum_membership_extraction_rules`: member/non-member, before/after,
+  quoted-normalization, cross-property non-pairing, block-example skip, ≥10
+  example+enum pair floor). `cargo test` 2603 green (was 2601); `cargo build
+  --release` succeeds, no warnings. No new dependency; test-only change. — binary:
+  5.1M (5,314,968 B; unchanged)
 - 2026-08-15 — Contract-test harness: added a **required-entry-names-a-declared-property**
   spec-structural contract test (`src/registry.rs`
   `every_required_entry_names_a_declared_property`) — every entry of an object-schema
