@@ -40,13 +40,17 @@
 //!   ([`spawn_delivery`]) so it never sits on the API request path — a slow or
 //!   unreachable `sink` cannot delay the `201`. Best-effort: any transport error is
 //!   dropped (CAMARA defines no retry contract the simulator must honour).
-//! - **No new dependency.** The POST is written directly over a `tokio` TCP stream
-//!   ([`deliver`]) rather than pulling in an HTTP client, keeping the binary small
-//!   (docs/DESIGN.md §11).
-//! - **`http://` sinks only.** A raw TCP POST cannot do TLS and CamaraSim adds no
-//!   TLS client, so an `https://` (or otherwise non-`http`) `sink` is parsed and
-//!   **not delivered to** — a deliberate cut (test receivers run on `http://`
-//!   loopback), matching QoD / Session Insights / Traffic Influence.
+//! - **No new dependency.** The POST is written directly over the (for `https://`,
+//!   TLS-wrapped) `tokio` stream ([`deliver`]) rather than pulling in an HTTP client,
+//!   keeping the binary small (docs/DESIGN.md §11).
+//! - **`http://` and `https://` sinks.** An `http://` sink is POSTed over a raw TCP
+//!   stream; an `https://` sink is POSTed over a `rustls` TLS session (server
+//!   certificate verified against the bundled Mozilla root store, `webpki-roots`;
+//!   default port `443`). DESIGN §11 prefers `rustls` over OpenSSL to stay static and
+//!   small; the `ClientConfig` is built once and cached ([`tls_connector`]). Any other
+//!   scheme (or an unparseable sink) is a no-op success — not delivered to (a
+//!   documented cut). Mirrors QoD / Session Insights / QoS Booking / QoS Provisioning
+//!   / Geofencing.
 //! - **`sinkCredential` (ACCESSTOKEN / PLAIN) auth.** When the create carries a
 //!   `sinkCredential`, its credential is applied to the `status-changed` callback's
 //!   `Authorization` header ([`sink_authorization`]): a `credentialType: ACCESSTOKEN`
@@ -57,13 +61,17 @@
 //!   is a documented cut → the callback is sent unauthenticated.
 
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
 
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
+use tokio_rustls::rustls::pki_types::ServerName;
+use tokio_rustls::rustls::{ClientConfig, RootCertStore};
+use tokio_rustls::TlsConnector;
 
 /// The CloudEvent `type` for a call status change (CAMARA click-to-dial v0,
 /// canonical `org.camaraproject.<api>.v<n>.<event>` shape).
@@ -236,24 +244,85 @@ pub async fn send(sink: &str, event: &Value, auth: Option<&str>) {
     let _ = deliver(sink, event, auth).await;
 }
 
-/// POST `event` to an `http://` `sink` as `application/cloudevents+json`.
+/// A parsed delivery target: scheme (TLS or not), host, port, and request path.
+#[derive(Debug, PartialEq)]
+struct SinkTarget {
+    /// `true` for an `https://` sink (deliver over TLS), `false` for `http://`.
+    tls: bool,
+    host: String,
+    port: u16,
+    /// The request path, including any query string (defaults to `/`).
+    path: String,
+}
+
+impl SinkTarget {
+    /// The `Host` header value: the bare host when the port is the scheme default
+    /// (`80` for http, `443` for https), otherwise `host:port`.
+    fn host_header(&self) -> String {
+        let default = if self.tls { 443 } else { 80 };
+        if self.port == default {
+            self.host.clone()
+        } else {
+            format!("{}:{}", self.host, self.port)
+        }
+    }
+}
+
+/// POST `event` to an `http://` or `https://` `sink` as
+/// `application/cloudevents+json`.
 ///
-/// Writes a minimal HTTP/1.1 request over a `tokio` TCP stream and returns once the
-/// body is flushed (the stream is dropped on return, closing the connection so the
-/// receiver sees EOF; `Connection: close` is advertised). When `auth` is `Some`, it
-/// is sent as the `Authorization` header. A non-`http` sink is a no-op success (see
-/// the module docs' documented cut). The response is not read — delivery is
-/// best-effort.
+/// An `http://` sink is written over a raw `tokio` TCP stream; an `https://` sink is
+/// written over a `rustls` TLS session (server cert verified against the bundled
+/// Mozilla roots). In both cases a minimal HTTP/1.1 request is sent and the call
+/// returns once the body is flushed (`Connection: close` is advertised; the stream
+/// is dropped on return so the receiver sees EOF). When `auth` is `Some`, it is sent
+/// as the `Authorization` header. Any other scheme (or an unparseable sink) is a
+/// no-op success (see the module docs' documented cut). The response is not read —
+/// delivery is best-effort.
 async fn deliver(sink: &str, event: &Value, auth: Option<&str>) -> std::io::Result<()> {
-    let Some((host, port, path)) = parse_http_sink(sink) else {
-        return Ok(()); // non-http sink: not delivered (documented cut)
+    let Some(target) = parse_sink(sink) else {
+        return Ok(()); // unsupported scheme: not delivered (documented cut)
     };
-    let body = serde_json::to_vec(event).unwrap_or_default();
-    let host_header = if port == 80 {
-        host.clone()
+    if target.tls {
+        deliver_tls(tls_connector(), &target, event, auth).await
     } else {
-        format!("{host}:{port}")
-    };
+        let mut stream = TcpStream::connect((target.host.as_str(), target.port)).await?;
+        write_request(&mut stream, &target.host_header(), &target.path, event, auth).await
+    }
+}
+
+/// Deliver to an `https://` `target` over a TLS session established with
+/// `connector`. Factored out (and taking the connector explicitly) so the test can
+/// drive it with a connector trusting a throwaway self-signed cert while production
+/// uses the cached Mozilla-roots connector ([`tls_connector`]).
+async fn deliver_tls(
+    connector: TlsConnector,
+    target: &SinkTarget,
+    event: &Value,
+    auth: Option<&str>,
+) -> std::io::Result<()> {
+    let server_name = ServerName::try_from(target.host.clone())
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+    let tcp = TcpStream::connect((target.host.as_str(), target.port)).await?;
+    let mut stream = connector.connect(server_name, tcp).await?;
+    write_request(&mut stream, &target.host_header(), &target.path, event, auth).await?;
+    // Send `close_notify` so the peer sees a clean TLS shutdown before EOF.
+    stream.shutdown().await.ok();
+    Ok(())
+}
+
+/// Write the CloudEvent HTTP/1.1 POST for `event` to any async stream (a plain TCP
+/// stream or a TLS session). When `auth` is `Some`, it is sent as the
+/// `Authorization` header. Pure over the stream, so it is unit-tested against an
+/// in-memory buffer.
+async fn write_request<W: AsyncWrite + Unpin>(
+    stream: &mut W,
+    host_header: &str,
+    path: &str,
+    event: &Value,
+    auth: Option<&str>,
+) -> std::io::Result<()> {
+    let body = serde_json::to_vec(event).unwrap_or_default();
     let auth_header = match auth {
         Some(a) => format!("Authorization: {a}\r\n"),
         None => String::new(),
@@ -267,32 +336,73 @@ async fn deliver(sink: &str, event: &Value, auth: Option<&str>) -> std::io::Resu
          Connection: close\r\n\r\n",
         body.len()
     );
-    let mut stream = TcpStream::connect((host.as_str(), port)).await?;
     stream.write_all(head.as_bytes()).await?;
     stream.write_all(&body).await?;
     stream.flush().await?;
     Ok(())
 }
 
-/// Parse an `http://host[:port][/path]` sink into `(host, port, path)`.
+/// The shared `rustls` client connector, built once from the bundled Mozilla root
+/// store and cached (building a `ClientConfig` parses every trust anchor, so it is
+/// not repeated per notification).
+fn tls_connector() -> TlsConnector {
+    static CONFIG: OnceLock<Arc<ClientConfig>> = OnceLock::new();
+    let config = CONFIG.get_or_init(|| Arc::new(build_client_config(webpki_root_store())));
+    TlsConnector::from(config.clone())
+}
+
+/// A [`RootCertStore`] holding the bundled Mozilla server-auth roots.
+fn webpki_root_store() -> RootCertStore {
+    let mut roots = RootCertStore::empty();
+    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    roots
+}
+
+/// Build a `rustls` `ClientConfig` for the given trust anchors, pinned to the `ring`
+/// crypto provider (the one feature-selected in `Cargo.toml`) and the default safe
+/// protocol versions (TLS 1.2 + 1.3). No client authentication — CAMARA sinks
+/// authenticate the *caller* via the `sinkCredential`, not mTLS.
+fn build_client_config(roots: RootCertStore) -> ClientConfig {
+    ClientConfig::builder_with_provider(Arc::new(
+        tokio_rustls::rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .expect("ring provider supports the default TLS protocol versions")
+    .with_root_certificates(roots)
+    .with_no_client_auth()
+}
+
+/// Parse an `http://` or `https://` `host[:port][/path]` sink into a [`SinkTarget`].
 ///
-/// Returns `None` for a non-`http` scheme (e.g. `https://` — no TLS client, a
-/// documented cut), an empty host, or an unparseable port. The default port is
-/// `80`; the returned `path` includes any query string, defaulting to `/`.
-fn parse_http_sink(sink: &str) -> Option<(String, u16, String)> {
-    let rest = sink.strip_prefix("http://")?;
+/// Returns `None` for any other scheme (a documented cut — not delivered to), an
+/// empty host, or an unparseable port. The default port is `80` for `http` and `443`
+/// for `https`; the returned `path` includes any query string, defaulting to `/`.
+fn parse_sink(sink: &str) -> Option<SinkTarget> {
+    let (tls, rest) = if let Some(rest) = sink.strip_prefix("https://") {
+        (true, rest)
+    } else if let Some(rest) = sink.strip_prefix("http://") {
+        (false, rest)
+    } else {
+        return None;
+    };
     let (authority, path) = match rest.find('/') {
         Some(i) => (&rest[..i], rest[i..].to_string()),
         None => (rest, "/".to_string()),
     };
+    let default_port = if tls { 443 } else { 80 };
     let (host, port) = match authority.rsplit_once(':') {
         Some((h, p)) => (h, p.parse::<u16>().ok()?),
-        None => (authority, 80),
+        None => (authority, default_port),
     };
     if host.is_empty() {
         return None;
     }
-    Some((host.to_string(), port, path))
+    Some(SinkTarget {
+        tls,
+        host: host.to_string(),
+        port,
+        path,
+    })
 }
 
 #[cfg(test)]
@@ -388,22 +498,90 @@ mod tests {
         assert_eq!(e["data"]["status"]["recordingResult"], "succeeded");
     }
 
+    fn target(tls: bool, host: &str, port: u16, path: &str) -> SinkTarget {
+        SinkTarget {
+            tls,
+            host: host.to_string(),
+            port,
+            path: path.to_string(),
+        }
+    }
+
     #[test]
-    fn parse_http_sink_handles_host_port_and_path_and_rejects_non_http() {
+    fn parse_sink_handles_http_host_port_and_path() {
         assert_eq!(
-            parse_http_sink("http://127.0.0.1:8080/notify?x=1"),
-            Some(("127.0.0.1".to_string(), 8080, "/notify?x=1".to_string()))
+            parse_sink("http://127.0.0.1:8080/notify?x=1"),
+            Some(target(false, "127.0.0.1", 8080, "/notify?x=1"))
+        );
+        // Default port (80) and default path (/).
+        assert_eq!(
+            parse_sink("http://example.test"),
+            Some(target(false, "example.test", 80, "/"))
         );
         assert_eq!(
-            parse_http_sink("http://example.test"),
-            Some(("example.test".to_string(), 80, "/".to_string()))
+            parse_sink("http://example.test/cb"),
+            Some(target(false, "example.test", 80, "/cb"))
         );
-        // https → not delivered (no TLS client); other junk → None.
-        assert!(parse_http_sink("https://example.test/cb").is_none());
-        assert!(parse_http_sink("ftp://example.test").is_none());
-        assert!(parse_http_sink("http://").is_none());
-        assert!(parse_http_sink("http://:80/x").is_none());
-        assert!(parse_http_sink("http://host:notaport/x").is_none());
+    }
+
+    #[test]
+    fn parse_sink_handles_https_and_defaults_to_port_443() {
+        // https → TLS target, default port 443.
+        assert_eq!(
+            parse_sink("https://example.test/cb"),
+            Some(target(true, "example.test", 443, "/cb"))
+        );
+        // Explicit https port is honoured.
+        assert_eq!(
+            parse_sink("https://example.test:8443/cb?y=2"),
+            Some(target(true, "example.test", 8443, "/cb?y=2"))
+        );
+        // The Host header omits the default port but keeps a non-default one.
+        assert_eq!(parse_sink("https://h/x").unwrap().host_header(), "h");
+        assert_eq!(parse_sink("https://h:8443/x").unwrap().host_header(), "h:8443");
+        assert_eq!(parse_sink("http://h:8080/x").unwrap().host_header(), "h:8080");
+    }
+
+    #[test]
+    fn parse_sink_rejects_unsupported_schemes_and_malformed_authority() {
+        assert!(parse_sink("ftp://example.test").is_none());
+        assert!(parse_sink("not-a-url").is_none());
+        assert!(parse_sink("http://").is_none());
+        assert!(parse_sink("https://").is_none());
+        assert!(parse_sink("http://:80/x").is_none());
+        assert!(parse_sink("http://host:notaport/x").is_none());
+    }
+
+    #[tokio::test]
+    async fn write_request_formats_the_post_with_and_without_auth() {
+        let event = status_changed_event(
+            "evt-w".to_string(),
+            "2024-01-01T00:00:00Z".to_string(),
+            "cid",
+            "+123456789111",
+            "+123456789012",
+            "initiating",
+        );
+        let mut buf = Vec::new();
+        write_request(&mut buf, "h:8443", "/cb", &event, Some("Basic abc"))
+            .await
+            .unwrap();
+        let raw = String::from_utf8(buf).unwrap();
+        let (head, body) = raw.split_once("\r\n\r\n").unwrap();
+        assert!(head.starts_with("POST /cb HTTP/1.1\r\n"));
+        assert!(head.contains("Host: h:8443\r\n"));
+        assert!(head.contains("Authorization: Basic abc\r\n"));
+        assert!(head.contains("Content-Type: application/cloudevents+json\r\n"));
+        assert!(head.contains(&format!("Content-Length: {}\r\n", body.len())));
+        assert!(head.ends_with("Connection: close"));
+        let parsed: Value = serde_json::from_str(body).unwrap();
+        assert_eq!(parsed["data"]["status"]["state"], "initiating");
+
+        // Without auth, no Authorization header is written.
+        let mut buf = Vec::new();
+        write_request(&mut buf, "h", "/", &event, None).await.unwrap();
+        let raw = String::from_utf8(buf).unwrap();
+        assert!(!raw.contains("Authorization:"));
     }
 
     #[test]
@@ -538,9 +716,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn deliver_to_a_non_http_sink_is_a_noop_success() {
-        // No TLS client, so an https sink is silently not delivered — and no
-        // connection is attempted — yet Ok (documented cut).
+    async fn deliver_to_an_unsupported_scheme_is_a_noop_success() {
+        // Only http:// and https:// are delivered to; any other scheme (or junk) is
+        // parsed to None and silently not delivered — and no connection is attempted
+        // — yet Ok (best-effort). `https://` is now delivered (see the TLS test).
         let event = status_changed_event(
             "evt-4".to_string(),
             "2024-01-01T00:00:00Z".to_string(),
@@ -549,7 +728,72 @@ mod tests {
             "+123456789012",
             "initiating",
         );
-        assert!(deliver("https://example.test/cb", &event, None).await.is_ok());
+        assert!(deliver("ftp://example.test/cb", &event, None).await.is_ok());
         assert!(deliver("not-a-url", &event, None).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn deliver_tls_posts_a_cloudevent_over_a_verified_tls_session() {
+        use tokio_rustls::rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
+        use tokio_rustls::rustls::ServerConfig;
+        use tokio_rustls::TlsAcceptor;
+
+        // Throwaway self-signed cert with a `127.0.0.1` IP SAN, so the client can
+        // both connect to and verify the loopback server with no DNS (rcgen is a
+        // dev-dependency — never in the release binary).
+        let cert = rcgen::generate_simple_self_signed(vec!["127.0.0.1".to_string()]).unwrap();
+        let cert_der = CertificateDer::from(cert.cert.der().to_vec());
+        let key_der = PrivatePkcs8KeyDer::from(cert.key_pair.serialize_der());
+
+        // TLS server presenting that cert (ring provider, matching the runtime).
+        let server_config = ServerConfig::builder_with_provider(Arc::new(
+            tokio_rustls::rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_no_client_auth()
+        .with_single_cert(vec![cert_der.clone()], key_der.into())
+        .unwrap();
+        let acceptor = TlsAcceptor::from(Arc::new(server_config));
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        // Client connector that trusts only the throwaway cert (real verification —
+        // a wrong/untrusted cert would fail the handshake).
+        let mut roots = RootCertStore::empty();
+        roots.add(cert_der).unwrap();
+        let connector = TlsConnector::from(Arc::new(build_client_config(roots)));
+
+        let event = status_changed_event(
+            "evt-tls".to_string(),
+            "2024-01-01T00:00:00Z".to_string(),
+            "tls-call",
+            "+123456789111",
+            "+123456789012",
+            "initiating",
+        );
+        let target = target(true, "127.0.0.1", port, "/notify");
+
+        let send = tokio::spawn(async move {
+            deliver_tls(connector, &target, &event, Some("Bearer sekret")).await
+        });
+
+        let (tcp, _) = listener.accept().await.unwrap();
+        let mut tls = acceptor.accept(tcp).await.expect("server-side handshake");
+        let mut buf = Vec::new();
+        tls.read_to_end(&mut buf).await.unwrap();
+        send.await.unwrap().expect("tls delivery succeeds");
+
+        let raw = String::from_utf8(buf).unwrap();
+        let (head, body) = raw.split_once("\r\n\r\n").expect("headers then body");
+        assert!(head.starts_with("POST /notify HTTP/1.1\r\n"), "request line: {head}");
+        assert!(head.contains("Content-Type: application/cloudevents+json"));
+        assert!(head.contains(&format!("Host: 127.0.0.1:{port}")));
+        assert!(head.contains("Authorization: Bearer sekret\r\n"));
+        let parsed: Value = serde_json::from_str(body).expect("body is JSON");
+        assert_eq!(parsed["type"], EVENT_TYPE);
+        assert_eq!(parsed["data"]["callId"], "tls-call");
+        assert_eq!(parsed["data"]["status"]["state"], "initiating");
     }
 }

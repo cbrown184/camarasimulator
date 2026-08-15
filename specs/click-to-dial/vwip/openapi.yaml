@@ -128,8 +128,10 @@ info:
       **full front leg** — the platform alerts the caller first, then reaches the
       callee, then the parties connect; the only path that emits the caller-alerting
       `callingCaller` state). Delivery
-      is fire-and-forget over raw TCP to `http://` sinks only (no TLS client — an
-      `https://` sink is a no-op cut); a `sinkCredential` is applied to every
+      is fire-and-forget, off the request path: an `http://` sink is POSTed over
+      raw TCP and an `https://` sink over a `rustls` TLS session (server cert
+      verified against the bundled Mozilla roots); any other scheme is a no-op cut.
+      A `sinkCredential` is applied to every
       callback's `Authorization` header — `ACCESSTOKEN` → `Bearer <accessToken>`
       (RFC 6750), `PLAIN` → `Basic base64(identifier:secret)` (RFC 7617) —
       `REFRESHTOKEN` remains a cut. The stored `Call.status` is **not** advanced by
@@ -347,6 +349,8 @@ paths:
             result: "201 { Call, status = initiating }"
           - input: "a happy-path create that supplies a `sink` (http://)"
             result: "201, plus a create-time status-changed CloudEvent delivered to the sink"
+          - input: "a happy-path create that supplies an https:// sink"
+            result: "201, plus a create-time status-changed CloudEvent delivered over a verified rustls TLS session"
           - input: "a happy-path create with an ACCESSTOKEN sinkCredential"
             result: "201; the callback carries Authorization: Bearer <accessToken> (RFC 6750)"
           - input: "a happy-path create with a PLAIN sinkCredential (identifier + secret)"
@@ -377,8 +381,8 @@ paths:
               status-changed CloudEvents (in order); none of those carries a reason;
               then a natural completion event (terminal disconnected with callDuration
               = 33 and recordingResult); the stored Call.status stays initiating
-          - input: "a create that supplies an https:// sink, or that errors before 201"
-            result: "201 (https no-op cut) / the error — no CloudEvent is delivered"
+          - input: "a create that supplies a non-http(s) sink (e.g. ftp://), or that errors before 201"
+            result: "201 (unsupported-scheme no-op cut) / the error — no CloudEvent is delivered"
           - input: "a re-create of a still-live call for the same caller/callee pair"
             result: "409 ALREADY_EXISTS (store-keyed; not an overwrite)"
           - input: callee number ending 000
@@ -480,7 +484,8 @@ paths:
         When the call was created with a `sink`, terminating it delivers a single
         **terminal** `status-changed` CloudEvent to that sink reflecting the
         `disconnected` state (with a `reason`) — fire-and-forget, off the request
-        path; `http://` only; the `sinkCredential` recorded at create time applied
+        path; delivered over raw TCP (`http://`) or a verified `rustls` TLS session
+        (`https://`); the `sinkCredential` recorded at create time applied
         (ACCESSTOKEN → `Bearer`, PLAIN → `Basic`). This mirrors QoD's `deleteSession` →
         `DELETE_REQUESTED` event. It is **not** modelled as an OpenAPI `callbacks`
         object here because the callback target (`sink`) was supplied on the
@@ -526,17 +531,18 @@ paths:
           Result selected from the store state only (docs/DESIGN.md §7). The
           `callId` is opaque, so there is no reserved-identifier plane: a stored
           id is evicted and returns 204, an unknown/already-terminated id is a
-          404. A terminated call that was created with an `http://` `sink` also
-          delivers one terminal `status-changed` CloudEvent (`disconnected`).
+          404. A terminated call that was created with an `http://` or `https://`
+          `sink` also delivers one terminal `status-changed` CloudEvent
+          (`disconnected`).
         cases:
           - input: a callId returned by a prior createCall (not yet terminated)
             result: "204 No Content (the call is evicted)"
-          - input: "a terminated call created with an http:// sink"
+          - input: "a terminated call created with an http:// or https:// sink"
             result: "204, plus a terminal status-changed CloudEvent (state=disconnected, with reason)"
           - input: "a terminated call whose create recorded an ACCESSTOKEN/PLAIN sinkCredential"
             result: "204; the terminal callback carries Authorization: Bearer/Basic accordingly"
-          - input: "a terminated call created with an https:// sink, or with no sink"
-            result: "204 — no CloudEvent is delivered (https no-op cut / no sink recorded)"
+          - input: "a terminated call created with a non-http(s) sink, or with no sink"
+            result: "204 — no CloudEvent is delivered (unsupported-scheme no-op cut / no sink recorded)"
           - input: an unknown, never-created, or already-terminated callId
             result: "404 NOT_FOUND (no CloudEvent — the eviction is single-use)"
 
@@ -696,8 +702,9 @@ components:
           format: uri
           description: >-
             Optional callback URL for `status-changed` notifications. CamaraSim
-            delivers the create-time event to an `http://` sink (an `https://`
-            sink is accepted but a no-op — no TLS client).
+            delivers to an `http://` sink over raw TCP and to an `https://` sink
+            over a verified `rustls` TLS session; any other scheme is accepted but
+            a no-op cut.
           maxLength: 2048
         sinkCredential:
           allOf:

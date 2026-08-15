@@ -82,7 +82,8 @@
 //! token carrying the `click-to-dial:calls:delete` scope. When the call was
 //! created with a `sink`, terminating it delivers a single **terminal**
 //! `status-changed` CloudEvent reflecting the `disconnected` state (with a
-//! `reason`) — fire-and-forget, off the request path; `http://` only; the
+//! `reason`) — fire-and-forget, off the request path; delivered over raw TCP
+//! (`http://`) or a verified `rustls` TLS session (`https://`); the
 //! ACCESSTOKEN `sinkCredential` bearer applied (both recorded at create time). A
 //! call created without a `sink` signals nothing. This mirrors QoD's
 //! `deleteSession` → `DELETE_REQUESTED` event.
@@ -133,7 +134,8 @@
 //!   `disconnected` carrying the two end-of-call fields `callDuration` (deterministic
 //!   from the `callee` digits) and `recordingResult` (`succeeded`/`not_recorded`,
 //!   from `recordingEnabled`); the `…002` failure path is already terminal. All
-//!   callbacks are `http://` sinks only, with the ACCESSTOKEN `sinkCredential` bearer
+//!   callbacks are delivered to `http://` (raw TCP) or `https://` (verified `rustls`
+//!   TLS) sinks, with the ACCESSTOKEN `sinkCredential` bearer
 //!   / PLAIN Basic applied. Re-deriving the stored `Call.status` past `initiating`
 //!   remains a documented cut: CamaraSim runs no live call engine, so the
 //!   progression is observable only through the delivered events.
@@ -326,7 +328,8 @@ struct CreateCallRequest {
     recording_enabled: Option<bool>,
     /// Optional callback URL. When present, a create-time `status-changed`
     /// CloudEvent is delivered to it (fire-and-forget, off the request path;
-    /// `http://` only — see [`super::notifications`]).
+    /// `http://` over raw TCP or `https://` over verified TLS — see
+    /// [`super::notifications`]).
     sink: Option<String>,
     /// Optional credential the platform presents on the `sink` callback. An
     /// `ACCESSTOKEN` credential's bearer token → `Authorization: Bearer` and a
@@ -443,7 +446,8 @@ async fn create_call(claims: Claims, headers: HeaderMap, body: Bytes) -> Respons
     // The call was newly created (its `status` is `initiating`). When the request
     // supplied a `sink`, deliver a single create-time `status-changed` CloudEvent
     // to it, reflecting that initial state — fire-and-forget, off the request path;
-    // `http://` only; an ACCESSTOKEN `sinkCredential` bearer applied. Later
+    // over raw TCP (`http://`) or verified TLS (`https://`); an ACCESSTOKEN
+    // `sinkCredential` bearer applied. Later
     // lifecycle transitions are a documented cut (no live call engine). See
     // [`super::notifications`].
     if let Some(sink) = req.sink.as_deref() {
@@ -662,7 +666,8 @@ async fn terminate_call(
 
     // When the call was created with a `sink`, deliver a single terminal
     // `status-changed` CloudEvent reflecting the `disconnected` state — fire-and-
-    // forget, off the request path; `http://` only; an ACCESSTOKEN `sinkCredential`
+    // forget, off the request path; over raw TCP (`http://`) or verified TLS
+    // (`https://`); an ACCESSTOKEN `sinkCredential`
     // bearer applied (both recorded at create time). A call created without a
     // `sink` has no side-store entry, so nothing is delivered. The participants
     // come from the just-removed `Call` (the callId itself is opaque).
@@ -1786,14 +1791,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_https_sink_creates_the_call_but_delivers_nothing() {
-        // No TLS client, so an `https://` sink is a documented no-op cut: the call
-        // is still created (201) but no callback connection is attempted.
+    async fn an_unsupported_scheme_sink_creates_the_call_but_delivers_nothing() {
+        // `http://` and `https://` sinks are delivered to (TLS delivery is covered by
+        // the notifications module's `deliver_tls` round-trip test); any other scheme
+        // is a documented no-op cut: the call is still created (201) but no callback
+        // connection is attempted.
         use tokio::net::TcpListener;
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        // Point an https URL at the live listener; delivery must still not connect.
-        let sink = format!("https://{addr}/ctd-tls");
+        // Point an ftp URL at the live listener; delivery must not connect.
+        let sink = format!("ftp://{addr}/ctd-noop");
 
         let body = format!(
             r#"{{"caller":{{"number":"+123456789111"}},"callee":{{"number":"+123456789019"}},"sink":"{sink}"}}"#
@@ -1803,7 +1810,7 @@ mod tests {
 
         let accepted =
             tokio::time::timeout(std::time::Duration::from_millis(400), listener.accept()).await;
-        assert!(accepted.is_err(), "https sink must not be delivered to (no TLS client)");
+        assert!(accepted.is_err(), "an unsupported-scheme sink must not be delivered to");
     }
 
     #[tokio::test]
@@ -2286,13 +2293,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn terminate_with_an_https_sink_delivers_nothing() {
-        // No TLS client, so an `https://` sink is a documented no-op cut on both
-        // legs: create is 201 and terminate is 204, but no callback connects.
+    async fn terminate_with_an_unsupported_scheme_sink_delivers_nothing() {
+        // An unsupported-scheme sink (neither http nor https) is a documented no-op
+        // cut on both legs: create is 201 and terminate is 204, but no callback
+        // connects. (http/https delivery is covered elsewhere.)
         use tokio::net::TcpListener;
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let sink = format!("https://{addr}/ctd-term-tls");
+        let sink = format!("ftp://{addr}/ctd-term-noop");
 
         let create = mint_token(CREATE_SCOPE).await;
         let body = format!(
@@ -2308,6 +2316,6 @@ mod tests {
 
         let accepted =
             tokio::time::timeout(std::time::Duration::from_millis(400), listener.accept()).await;
-        assert!(accepted.is_err(), "https sink must not be delivered to on terminate");
+        assert!(accepted.is_err(), "an unsupported-scheme sink must not be delivered to on terminate");
     }
 }

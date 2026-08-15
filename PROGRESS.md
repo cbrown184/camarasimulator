@@ -2233,7 +2233,7 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
       empty array, `totalCount:0` (a list never 404s). Malformed path ids → 400
       INVALID_ARGUMENT. `x-correlator` echoed. No new dep.
     - [ ] `configureAlerts` / `manageCampaign` — deferred.
-- [~] Click to Dial vwip (`/click-to-dial/vwip`; CAMARA ClickToDial `wip`;
+- [x] Click to Dial vwip (`/click-to-dial/vwip`; CAMARA ClickToDial `wip`;
   two-legged, business-facing call origination):
   - [x] `POST /calls` (`createCall`, `click-to-dial:calls:create`) — create a
     call between `caller` and `callee` → `201` `Call { status: initiating }`.
@@ -2278,7 +2278,7 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     atomic `store::insert_new` (check-and-insert under one lock hold, no new dep);
     the pair is creatable again once `terminateCall` evicts it. A `callee` reserved
     suffix `…409` still yields the canonical `CONFLICT` (distinct code).
-  - [~] `status-changed` CloudEvents on `sink`
+  - [x] `status-changed` CloudEvents on `sink`
     (`src/apis/click_to_dial/notifications.rs`; event type
     `org.camaraproject.click-to-dial.v0.status-changed`, mirroring QoD /
     Session Insights):
@@ -2338,7 +2338,15 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
         presence, so a concurrent `terminateCall` suppresses it); the `…002` failure
         path is already terminal and fires none. Stored `Call.status` still not
         re-derived (documented cut). No new dep.
-    - [ ] TLS (`https://` sink) delivery (needs a rustls TLS client).
+    - [x] TLS (`https://` sink) delivery — `notifications.rs` now parses the sink
+      scheme (`parse_sink` → `SinkTarget{tls,host,port,path}`, replacing the
+      http-only `parse_http_sink`) and, for an `https://` sink, POSTs the CloudEvent
+      over a rustls TLS session (`deliver_tls`/`tls_connector`, server cert verified
+      against the bundled Mozilla roots), reusing the QoD/Session Insights stack;
+      the HTTP writer was factored to a generic `write_request<W: AsyncWrite>`
+      shared by the TCP and TLS paths. All create-time / terminate / progression /
+      completion `status-changed` callbacks now deliver over http+https. No new dep.
+      **Completes Click to Dial vwip's `status-changed` CloudEvents.**
 - [x] Most Frequent Location vwip (`/most-frequent-location/vwip`; CAMARA
   MostFrequentLocation `wip` — no released version, mounted at its canonical
   `vwip` base path like Device Visit Location / Session Insights; stateless,
@@ -4309,6 +4317,33 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 ---
 
 ## Scan journal
+
+- 2026-08-15 — Click to Dial vwip: extended CloudEvents sink delivery to `https://`
+  (TLS) sinks, adopting the rustls TLS client QoD/Session Insights/QoS Booking/QoS
+  Provisioning/Geofencing introduced (the follow-up the Session Insights pass flagged
+  for the remaining sink APIs), **completing Click to Dial vwip**. `notifications.rs`
+  now parses the sink scheme (`parse_sink` → `SinkTarget{tls,host,port,path}`, default
+  port 80/443, replacing the http-only `parse_http_sink`) and, for an `https://` sink,
+  POSTs the CloudEvent over a rustls TLS session (`deliver_tls`/`tls_connector`; server
+  cert verified against the bundled Mozilla roots, `webpki-roots`) instead of raw TCP;
+  the inline HTTP writer in `deliver` was factored to a generic
+  `write_request<W: AsyncWrite>` shared by the TCP and TLS paths (mirror-don't-share;
+  click_to_dial keeps its own cached connector, and the awaited `send` used by the
+  simulated progression path gets TLS for free). No new dependency (`tokio-rustls`/
+  `webpki-roots` already linked; dev-only `rcgen` for the test cert). Closes the
+  `http://`-only cut on Click to Dial — every `status-changed` callback (create-time,
+  terminate, `…001`/`…002`/`…003` progression steps, and the completion event) now
+  delivers over http+https. Spec: click-to-dial `openapi.yaml` — header notification
+  prose, `createCall`/`terminateCall` prose + `sink` schema note now describe
+  http+https delivery (removed the "no TLS client" cuts); the createCall scenarios gain
+  an https-delivery case and the old "https no-op" cases became "unsupported-scheme
+  no-op". Tests: real TLS round-trip (rustls server with an rcgen self-signed 127.0.0.1
+  cert, client trusting only it), `write_request` byte-format, `parse_sink`
+  http/https/port-443/reject cases (replacing the old `parse_http_sink` test); the two
+  vwip handler-level "https no-op" tests were repointed at `ftp://` (an unsupported
+  scheme) since `https://` is now delivered. `cargo test` 2502 green (was 2498);
+  `cargo build --release` succeeds. Traffic Influence is the last sink API awaiting
+  TLS. — binary: 5.0M (5177720 B, +3008 B — TLS stack already linked)
 
 - 2026-08-15 — Session Insights vwip: extended CloudEvents sink delivery to `https://`
   (TLS) sinks, adopting the rustls TLS client QoD/Geofencing/QoS Provisioning/QoS
