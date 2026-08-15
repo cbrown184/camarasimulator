@@ -7810,6 +7810,489 @@ components:
         );
     }
 
+    /// Enumerate every object-schema `required:` entry a spec declares that names a
+    /// property the *same object* does not define under its sibling `properties:`
+    /// block — reported as `"required '<entry>' not in properties [<keys>]"` in
+    /// document order, without a YAML dep.
+    ///
+    /// A JSON-Schema / OpenAPI object schema's `required` array names properties an
+    /// instance MUST carry, and those names are only meaningful against the object's
+    /// `properties`: a `required` entry that matches no declared property is an
+    /// **unsatisfiable** constraint — the schema demands a field it never defines, so
+    /// no payload validates and a codegen client emits a presence check on a member it
+    /// can't generate. The live drift it catches: a `required:` block pasted from a
+    /// sibling schema and only half-edited, or a property since renamed while its
+    /// `required` entry was left stale (`phoneNumber` required, `phone_number`
+    /// defined). This is invisible to every sibling test — the distinct-entries test
+    /// checks a `required` array's names are *unique*, the distinct-property-names test
+    /// checks a `properties` block's keys are unique, but neither ever *cross-checks*
+    /// the two, and the parameter/response/enum/`$ref` tests look elsewhere entirely.
+    ///
+    /// Scope, to stay false-positive-free on composed schemas: a `required` array is
+    /// judged only when the object declares a sibling `properties:` block (else the
+    /// list can't be resolved — skipped) and is **not** part of a schema composition,
+    /// where a required name may legitimately be defined in a *different* branch. Both
+    /// forms are excluded: an ancestor `allOf`/`oneOf`/`anyOf` up the indent ladder
+    /// (mirroring the `example:` ancestor walk in `facet_keyword_type_mismatches`) —
+    /// so an `allOf` member's `required` referencing an inherited property is not
+    /// flagged — and a sibling `allOf`/`oneOf`/`anyOf` at the object's own level. The
+    /// scalar `required: true`/`false` flag (a parameter/requestBody boolean, not a
+    /// schema's property list) is never read as an array. Names and property keys are
+    /// unquoted and a trailing ` #` comment trimmed. Whole-document scan (required
+    /// arrays live under `components.schemas` and inline request/response schemas
+    /// alike), mirroring the enum / required-uniqueness tests.
+    fn required_entries_without_a_declared_property(body: &str) -> Vec<String> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        // Unquote a scalar and trim a trailing ` # comment`.
+        let norm = |raw: &str| -> String {
+            let mut v = raw.trim();
+            if let Some(pos) = v.find(" #") {
+                v = v[..pos].trim_end();
+            }
+            let v = v.trim();
+            let unq = v
+                .strip_prefix('"')
+                .and_then(|s| s.strip_suffix('"'))
+                .or_else(|| v.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')))
+                .unwrap_or(v);
+            unq.trim().to_string()
+        };
+        // The trimmed mapping-key of a line (text before its first `:`), or `None` for
+        // a sequence item (`- …`) or a non-key line.
+        let key_of = |l: &str| -> Option<String> {
+            let t = l.trim_start();
+            if t.starts_with('-') {
+                return None;
+            }
+            let (k, _) = t.split_once(':')?;
+            let k = k.trim();
+            if k.is_empty() {
+                None
+            } else {
+                Some(k.to_string())
+            }
+        };
+        // True when line `i` (indent `c`) sits inside a schema-composition subtree —
+        // some enclosing container key up the indent ladder is `allOf`/`oneOf`/`anyOf`
+        // — so a `required` entry there may name a property inherited from a *sibling*
+        // composition branch, not the local `properties` block (mirrors the ancestor
+        // walk in `facet_keyword_type_mismatches`).
+        let inside_composition = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some(key) = key_of(l) {
+                        if key == "allOf" || key == "oneOf" || key == "anyOf" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        // The direct property keys of the sibling `properties:` block in the same object
+        // as line `i` (indent `c`): scan down then up at exactly indent `c`, dedent-
+        // bounded (mirroring the sibling-`type` scan in `facet_keyword_type_mismatches`),
+        // for a block-form `properties:` opener; then collect its first-child-indent
+        // mapping keys. `None` when the object declares no sibling `properties` block
+        // (the required list can't be resolved), an inline (flow) `properties:` value
+        // (not enumerable line-by-line), or a sibling `allOf`/`oneOf`/`anyOf` (a
+        // property may be composed in) — all "can't judge" outcomes.
+        let sibling_property_keys = |i: usize, c: usize| -> Option<Vec<String>> {
+            let props_line_from = |l: &str| -> Option<Option<()>> {
+                // Some(Some(())) => a block-form `properties:` opener; Some(None) => an
+                // inline `properties: {…}` (abort); None => not a `properties` key.
+                let key = key_of(l)?;
+                if key != "properties" {
+                    return None;
+                }
+                let after = l
+                    .trim_start()
+                    .split_once(':')
+                    .map(|(_, v)| v)
+                    .unwrap_or("");
+                let after = after.split('#').next().unwrap_or("").trim();
+                Some(if after.is_empty() { Some(()) } else { None })
+            };
+            let mut props_line: Option<usize> = None;
+            // Down-scan the rest of the object.
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                let li = indent(l);
+                if li < c {
+                    break;
+                }
+                if li == c {
+                    if let Some(key) = key_of(l) {
+                        if key == "allOf" || key == "oneOf" || key == "anyOf" {
+                            return None;
+                        }
+                    }
+                    match props_line_from(l) {
+                        Some(Some(())) if props_line.is_none() => props_line = Some(j),
+                        Some(None) => return None, // inline properties — can't judge
+                        _ => {}
+                    }
+                }
+                j += 1;
+            }
+            // Up-scan the earlier keys of the same object.
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < c {
+                    break;
+                }
+                if li == c {
+                    if let Some(key) = key_of(l) {
+                        if key == "allOf" || key == "oneOf" || key == "anyOf" {
+                            return None;
+                        }
+                    }
+                    match props_line_from(l) {
+                        Some(Some(())) if props_line.is_none() => props_line = Some(k),
+                        Some(None) => return None,
+                        _ => {}
+                    }
+                }
+            }
+            let p = props_line?;
+            let cp = indent(lines[p]);
+            // Collect the property block's direct children (its first, shallowest child
+            // indent); deeper lines are a property's own schema, not a property key.
+            let mut child_indent: Option<usize> = None;
+            let mut keys: Vec<String> = Vec::new();
+            let mut j = p + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() || l.trim_start().starts_with('#') {
+                    j += 1;
+                    continue;
+                }
+                let li = indent(l);
+                if li <= cp {
+                    break;
+                }
+                let ci = *child_indent.get_or_insert(li);
+                if li < ci {
+                    break;
+                }
+                if li == ci {
+                    if let Some(key) = key_of(l) {
+                        keys.push(norm(&key));
+                    }
+                }
+                j += 1;
+            }
+            Some(keys)
+        };
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < lines.len() {
+            let line = lines[i];
+            let t = line.trim_start();
+            if !t.starts_with("required:") {
+                i += 1;
+                continue;
+            }
+            let c = indent(line);
+            let rest = t["required:".len()..].trim_start();
+            let ri = i;
+            let mut entries: Vec<String> = Vec::new();
+            if rest.starts_with('[') {
+                // Flow list — gather across lines to the closing `]`.
+                let mut buf = rest.to_string();
+                let mut kk = i;
+                while !buf.contains(']') && kk + 1 < lines.len() {
+                    kk += 1;
+                    buf.push(' ');
+                    buf.push_str(lines[kk].trim());
+                }
+                let open = buf.find('[').map(|x| x + 1).unwrap_or(0);
+                let close = buf.rfind(']').unwrap_or(buf.len());
+                let inner = if close >= open { &buf[open..close] } else { "" };
+                if !inner.trim().is_empty() {
+                    entries = inner.split(',').map(|s| norm(s)).filter(|v| !v.is_empty()).collect();
+                }
+                i = kk + 1;
+            } else if rest.is_empty() || rest.starts_with('#') {
+                // Block list — `- name` children at a deeper indent, only when the first
+                // non-blank child is a `-` item (else a scalar/mapping, not an array).
+                let base = c;
+                let mut first_child_seen = false;
+                let mut is_list = false;
+                let mut j = i + 1;
+                while j < lines.len() {
+                    let l = lines[j];
+                    if l.trim().is_empty() || l.trim_start().starts_with('#') {
+                        j += 1;
+                        continue;
+                    }
+                    if indent(l) <= base {
+                        break;
+                    }
+                    let item = l.trim_start();
+                    if !first_child_seen {
+                        first_child_seen = true;
+                        is_list = item.starts_with('-');
+                        if !is_list {
+                            break;
+                        }
+                    }
+                    if !item.starts_with('-') {
+                        break;
+                    }
+                    let val = norm(item[1..].trim_start());
+                    if !val.is_empty() {
+                        entries.push(val);
+                    }
+                    j += 1;
+                }
+                if !is_list {
+                    entries.clear();
+                }
+                i = j;
+            } else {
+                // Scalar `required: true`/`false` — a boolean flag, not an array.
+                i += 1;
+                continue;
+            }
+            if entries.is_empty() {
+                continue;
+            }
+            if inside_composition(ri, c) {
+                continue;
+            }
+            let Some(keys) = sibling_property_keys(ri, c) else {
+                continue;
+            };
+            let kset: std::collections::HashSet<&str> = keys.iter().map(|s| s.as_str()).collect();
+            for e in &entries {
+                if !kset.contains(e.as_str()) {
+                    out.push(format!("required '{}' not in properties [{}]", e, keys.join(", ")));
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_required_entry_names_a_declared_property() {
+        // Contract-harness invariant (OpenAPI / JSON-Schema structural rule): every
+        // entry of an object-schema `required:` array a mounted spec declares MUST name
+        // a property that same object defines under `properties:`. A `required` name
+        // with no matching property is an *unsatisfiable* schema — the object demands a
+        // field it never declares, so no payload validates and a codegen client emits a
+        // presence check on a member it can't generate.
+        //
+        // Cross-checks the two halves no sibling test connects: the distinct-entries
+        // test pins a `required` array's names are unique, the distinct-property-names
+        // test pins a `properties` block's keys are unique, but neither ever matches one
+        // against the other — so a `required:` block pasted from a sibling and
+        // half-edited, or a property renamed while its `required` entry was left stale,
+        // is invisible to both (and to the parameter/response/enum/`$ref` tests).
+        // Composed schemas are excluded (a required name may live in another `allOf`/
+        // `oneOf`/`anyOf` branch), as are objects with no `properties` sibling.
+        // Verified true across all mounted specs before asserting.
+        for api in APIS {
+            let bad = required_entries_without_a_declared_property(api.body);
+            assert!(
+                bad.is_empty(),
+                "{} spec declares `required` entr(y/ies) naming no declared property \
+                 (a schema's required names must be defined in its properties): {:?}",
+                api.name,
+                bad
+            );
+        }
+    }
+
+    #[test]
+    fn required_entry_property_membership_extraction_rules() {
+        // Unit-cover the `required_entries_without_a_declared_property` extractor so the
+        // contract test above can't pass vacuously and its detection is pinned: a block
+        // required array and a flow required array each naming a property the object
+        // does not declare are flagged (with the offending name + the available keys),
+        // in document order; a required name defined in a *sibling* `allOf` branch (the
+        // object is a composition member) is NOT flagged; an object that both composes
+        // and lists its own `required`/`properties` is NOT flagged (a property may be
+        // composed in); a scalar `required: true` is never read as an array; and an
+        // object with a `required` array but no `properties` sibling is skipped (the
+        // list can't be resolved).
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /x:
+    get:
+      operationId: getX
+      parameters:
+        - name: q
+          in: query
+          required: true
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    Good:
+      type: object
+      required:
+        - device
+      properties:
+        device:
+          type: string
+    Bad:
+      type: object
+      required:
+        - device
+        - missing
+      properties:
+        device:
+          type: string
+    FlowBad:
+      type: object
+      required: [a, b]
+      properties:
+        a:
+          type: string
+    Composed:
+      allOf:
+        - $ref: '#/components/schemas/Good'
+        - type: object
+          required:
+            - networkId
+            - id
+          properties:
+            id:
+              type: string
+    SelfComposer:
+      allOf:
+        - type: object
+      required:
+        - ghost
+      properties:
+        other:
+          type: string
+    NoProps:
+      type: object
+      required:
+        - lonely
+";
+        // Flagged, in document order: `Bad`'s `missing` (block array; `device` is
+        // declared, `missing` is not) and `FlowBad`'s `b` (flow array; `a` is declared,
+        // `b` is not). Not flagged: `Good` (device declared), `Composed` (`networkId`
+        // is inherited from the `$ref` branch — the required sits inside an `allOf`
+        // subtree), `SelfComposer` (a sibling `allOf` — a property may be composed in),
+        // the parameter's scalar `required: true`, and `NoProps` (no `properties`
+        // sibling to resolve against).
+        assert_eq!(
+            required_entries_without_a_declared_property(body),
+            vec![
+                "required 'missing' not in properties [device]".to_string(),
+                "required 'b' not in properties [a]".to_string(),
+            ]
+        );
+
+        // Non-vacuous floor: across every registered spec no `required` entry names an
+        // undeclared property (the invariant the contract test asserts), and the corpus
+        // actually declares many judged objects — a `required` array with a sibling
+        // `properties` block, outside any composition — so a broken extractor can't hide
+        // behind an empty scan. Count them with an independent minimal sibling-scan.
+        let mut judged = 0usize;
+        for api in APIS {
+            assert!(
+                required_entries_without_a_declared_property(api.body).is_empty(),
+                "{}: every `required` entry must name a declared property",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            for (idx, line) in lines.iter().enumerate() {
+                let t = line.trim_start();
+                let Some(rest) = t.strip_prefix("required:") else { continue };
+                let rest = rest.trim_start();
+                let is_array = rest.starts_with('[')
+                    || ((rest.is_empty() || rest.starts_with('#'))
+                        && lines[idx + 1..]
+                            .iter()
+                            .map(|l| l.trim())
+                            .find(|l| !l.is_empty() && !l.starts_with('#'))
+                            .is_some_and(|l| l.starts_with('-')));
+                if !is_array {
+                    continue;
+                }
+                let c = indent(line);
+                // A sibling `properties:` at exactly indent `c`, scanning down then up,
+                // dedent-bounded (independent of the extractor's own scan).
+                let mut has_props = false;
+                let mut composed = false;
+                for dir in [true, false] {
+                    let mut j = idx;
+                    loop {
+                        if dir {
+                            j += 1;
+                            if j >= lines.len() {
+                                break;
+                            }
+                        } else if j == 0 {
+                            break;
+                        } else {
+                            j -= 1;
+                        }
+                        let l = lines[j];
+                        if l.trim().is_empty() {
+                            continue;
+                        }
+                        let li = indent(l);
+                        if li < c {
+                            break;
+                        }
+                        if li == c {
+                            let k = l.trim_start();
+                            if k.starts_with("properties:") {
+                                has_props = true;
+                            }
+                            if k.starts_with("allOf:") || k.starts_with("oneOf:") || k.starts_with("anyOf:") {
+                                composed = true;
+                            }
+                        }
+                    }
+                }
+                if has_props && !composed {
+                    judged += 1;
+                }
+            }
+        }
+        assert!(
+            judged >= 100,
+            "expected many judged `required`+`properties` objects across specs, got {judged}"
+        );
+    }
+
     #[test]
     fn every_parameter_array_lists_distinct_name_location_pairs() {
         // Contract-harness invariant (OpenAPI structural rule): within a

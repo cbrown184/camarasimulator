@@ -4437,6 +4437,33 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     `[36, 39, 42, 45]`, plus typeless/named-`example`/in-example/`null`/across-dedent
     skips and a ≥20 scalar-typed-example non-vacuous floor) so the contract can't pass
     vacuously. Verified true across all mounted specs (no drift to fix).
+  - a required-entry-names-a-declared-property contract test (`src/registry.rs`
+    `every_required_entry_names_a_declared_property`) asserts every entry of an
+    object-schema `required:` array a mounted spec declares names a property that same
+    object defines under `properties:`. A `required` name matching no declared property
+    is an **unsatisfiable** schema — the object demands a field it never declares, so no
+    payload validates and a codegen client emits a presence check on a member it can't
+    generate; the live drift is a `required:` block pasted from a sibling and half-edited,
+    or a property renamed while its `required` entry was left stale. Cross-checks the two
+    halves no sibling test connects: `every_required_array_lists_distinct_entries` pins a
+    `required` array's names are *unique* and `every_properties_object_lists_distinct_
+    property_names` pins a `properties` block's keys are *unique*, but neither ever
+    matches one against the other (and the parameter/response/enum/`$ref` tests look
+    elsewhere). Composition-safe: a `required` array is judged only when the object has a
+    sibling `properties:` block and is **not** part of an `allOf`/`oneOf`/`anyOf` — an
+    ancestor composer up the indent ladder (so an `allOf` member's `required` referencing
+    an inherited property is not flagged) or a sibling composer at its own level — both
+    "can't judge" and skipped, as are objects with no `properties` sibling and the scalar
+    `required: true`/`false` flag. A pure `required_entries_without_a_declared_property`
+    extractor (no YAML dep; mirrors `required_arrays_with_duplicate_entries`' flow/block
+    array parse, the `facet_keyword_type_mismatches` ancestor walk for composition, and
+    its dedent-bounded down-then-up sibling scan for the `properties:` block) is
+    unit-covered (`required_entry_property_membership_extraction_rules`: a block and a
+    flow orphan flagged in document order, an `allOf`-member and a self-composing object
+    not flagged, a scalar `required: true` and a no-`properties` object skipped, plus a
+    ≥100 judged-object non-vacuous floor via an independent minimal sibling scan) so the
+    contract can't pass vacuously. Verified true across all mounted specs (224 judged
+    objects, no `required` entry names an undeclared property — no drift to fix).
   Full response-vs-schema validation still TODO (would need a YAML/JSON-Schema
   validator — a dependency trade-off, deferred).
 
@@ -4444,6 +4471,29 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-15 — Contract-test harness: added a **required-entry-names-a-declared-property**
+  spec-structural contract test (`src/registry.rs`
+  `every_required_entry_names_a_declared_property`) — every entry of an object-schema
+  `required:` array must name a property the same object defines under `properties:`; an
+  orphan is an *unsatisfiable* schema (demands a field it never declares → no payload
+  validates). Fills the one gap between the two existing uniqueness tests
+  (`…_required_array_lists_distinct_entries` / `…_properties_object_lists_distinct_
+  property_names`), which each check *within* one collection but never cross-check
+  `required`↔`properties`. New pure `required_entries_without_a_declared_property`
+  extractor (no YAML dep): reuses the flow/block `required` array parse, a
+  `facet_keyword_type_mismatches`-style ancestor walk to skip composition subtrees
+  (an `allOf`/`oneOf`/`anyOf` member's `required` may name an inherited property), a
+  sibling-composer skip, and a dedent-bounded down-then-up scan for the sibling
+  `properties:` block + its first-child-indent keys. Feature-API backlog stays exhausted
+  (every leaf `[x]` bar the intentionally-deferred provisioning-worker notification
+  streams), so this advanced the cross-cutting contract-test harness (`[~]`), the topmost
+  actionable work. Surveyed the corpus first (224 judged plain objects, 0 orphans) →
+  no drift to fix. Tests: +2 (the contract test + a `required_entry_property_membership_
+  extraction_rules` unit test — block/flow orphans flagged in document order, allOf-member
+  + self-composer + scalar-`required: true` + no-`properties` all correctly skipped, ≥100
+  judged-object non-vacuous floor via an independent sibling scan). `cargo test` 2601 green
+  (was 2599); `cargo build --release` succeeds, no warnings. No new dependency; test-only
+  change. — binary: 5.1M (5,314,968 B; unchanged)
 - 2026-08-15 — Carrier Billing v0.5: added **TLS (`https://`) sink delivery** to
   the charging notifications (`src/apis/carrier_billing/notifications.rs`) — the
   **last** CamaraSim notification module still `http://`-only (every other —
