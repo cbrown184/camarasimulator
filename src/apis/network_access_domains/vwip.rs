@@ -150,6 +150,10 @@ pub fn routes() -> Router {
             post(create_trust_domain_device),
         )
         .route(
+            "/network-access-domains/vwip/trust-domains/:trust_domain_id/devices/:device_id",
+            get(get_trust_domain_device),
+        )
+        .route(
             "/network-access-domains/vwip/services",
             get(get_services),
         )
@@ -369,6 +373,55 @@ async fn create_trust_domain_device(
         (StatusCode::CREATED, Json(device)).into_response(),
         &correlator,
     )
+}
+
+/// `GET /network-access-domains/vwip/trust-domains/{trustDomainId}/devices/{deviceId}`
+/// (`getTrustDomainDevice`).
+///
+/// Reads a Trust Domain Device back by its opaque, server-minted `deviceId` inside
+/// its owning `trustDomainId`. Like `getTrustDomain`, the `deviceId` is not
+/// derivable by the caller (it is a SHA-256-derived UUID over the
+/// `(trustDomainId, deviceName)` pair, see [`trust_domain_device_id`]), so — unlike
+/// the device *create* leg, which keys off the token subject to reach the
+/// account-level reserved-error set — the **in-memory device store is the only
+/// control plane** (docs/DESIGN.md §7): a stored `(trustDomainId, deviceId)` pair →
+/// `200` with the persisted `TrustDomainDevice` verbatim (write-only
+/// `deviceCredential` already stripped at create); any other pair → `404
+/// NOT_FOUND`. Because the store is keyed by the full pair, an unknown parent Trust
+/// Domain, an unknown device, a device that belongs to a *different* Trust Domain,
+/// and a malformed id all fold into the same `404` (one store lookup, mirroring
+/// `getTrustDomain`).
+///
+/// Requires a token carrying the `network-access-domains:devices` scope (the same
+/// scope guards `createTrustDomainDevice`). `x-correlator` is echoed on every
+/// response.
+async fn get_trust_domain_device(
+    claims: Claims,
+    headers: HeaderMap,
+    Path((trust_domain_id, device_id)): Path<(String, String)>,
+) -> Response {
+    // Optional correlation header, echoed on every response (CAMARA Commonalities).
+    let correlator = headers.get("x-correlator").cloned();
+
+    // Endpoint authorisation: the token must carry the device scope.
+    if let Err(e) = claims.require_scope(DEVICES_SCOPE) {
+        return with_correlator(e.into_response(), &correlator);
+    }
+
+    // Store state is the only control plane — the opaque minted device id has no
+    // reserved-suffix plane. A hit renders the stored TrustDomainDevice; a miss
+    // (unknown parent Trust Domain, unknown/other-domain device, or malformed id)
+    // is a 404.
+    match store::get_device(&trust_domain_id, &device_id) {
+        Some(device) => {
+            with_correlator((StatusCode::OK, Json(device)).into_response(), &correlator)
+        }
+        None => with_correlator(
+            CamaraError::not_found("No device found for the provided id in the Trust Domain.")
+                .into_response(),
+            &correlator,
+        ),
+    }
 }
 
 /// `GET /network-access-domains/vwip/trust-domains/{trustDomainId}`
@@ -2376,6 +2429,214 @@ mod tests {
         assert_eq!(
             headers.get("x-correlator").and_then(|v| v.to_str().ok()),
             Some("corr-tdd-1")
+        );
+    }
+
+    // === getTrustDomainDevice (GET /trust-domains/{id}/devices/{deviceId}) ==
+
+    /// GET `/trust-domains/{td}/devices/{dev}` with an optional Bearer token and
+    /// optional `x-correlator`. Returns (status, headers, json-or-null).
+    async fn get_device_req(
+        token: Option<&str>,
+        trust_domain_id: &str,
+        device_id: &str,
+        correlator: Option<&str>,
+    ) -> (StatusCode, HeaderMap, Value) {
+        let mut builder = Request::builder()
+            .method("GET")
+            .uri(format!(
+                "/network-access-domains/vwip/trust-domains/{trust_domain_id}/devices/{device_id}"
+            ))
+            .header("host", HOST);
+        if let Some(t) = token {
+            builder = builder.header("authorization", format!("Bearer {t}"));
+        }
+        if let Some(c) = correlator {
+            builder = builder.header("x-correlator", c);
+        }
+        let response = app().oneshot(builder.body(Body::empty()).unwrap()).await.unwrap();
+        let status = response.status();
+        let headers = response.headers().clone();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, headers, json)
+    }
+
+    /// Create a Trust Domain + a device inside it, returning `(trustDomainId,
+    /// deviceId)` for the read-leg tests.
+    async fn make_device(subject: &str, service_id: &str, td_name: &str, device_name: &str)
+        -> (String, String) {
+        let td_id = make_trust_domain(subject, service_id, td_name).await;
+        let token = mint_token_as(subject, DEVICES_SCOPE).await;
+        let (status, _, dev) =
+            post_device(Some(&token), &td_id, Some(&device_body(device_name)), None).await;
+        assert_eq!(status, StatusCode::CREATED);
+        (td_id, dev["id"].as_str().unwrap().to_string())
+    }
+
+    #[tokio::test]
+    async fn read_device_returns_the_created_device() {
+        let (td_id, dev_id) = make_device(
+            "nad-005",
+            "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+            "TDD read ok",
+            "Read Laptop",
+        )
+        .await;
+        let token = mint_token_as("nad-005", DEVICES_SCOPE).await;
+
+        let (status, _, got) = get_device_req(Some(&token), &td_id, &dev_id, None).await;
+        assert_eq!(status, StatusCode::OK);
+        // Returned verbatim: the persisted id/name/lifecycle flags, no credential.
+        assert_eq!(got["id"], json!(dev_id));
+        assert_eq!(got["deviceName"], json!("Read Laptop"));
+        assert_eq!(got["enabled"], json!(true));
+        assert_eq!(got["connected"], json!(false));
+        assert_eq!(got["associated"], json!(false));
+        assert!(got.get("deviceCredential").is_none(), "credential must not be echoed");
+    }
+
+    #[tokio::test]
+    async fn read_device_unknown_id_is_not_found() {
+        let (td_id, _) = make_device(
+            "nad-005",
+            "123e4567-e89b-12d3-a456-426614174000",
+            "TDD read unknown",
+            "Present",
+        )
+        .await;
+        let token = mint_token_as("nad-005", DEVICES_SCOPE).await;
+        // A well-formed but never-minted device id in an existing Trust Domain → 404.
+        let (status, _, err) = get_device_req(
+            Some(&token),
+            &td_id,
+            "00000000-0000-4000-8000-000000000000",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(err["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn read_device_in_unknown_trust_domain_is_not_found() {
+        // The device store is keyed by the full (trustDomainId, deviceId) pair, so a
+        // valid-shaped but unknown parent id finds nothing → 404.
+        let token = mint_token_as("nad-005", DEVICES_SCOPE).await;
+        let (status, _, err) = get_device_req(
+            Some(&token),
+            "11111111-1111-4111-8111-111111111111",
+            "22222222-2222-4222-8222-222222222222",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(err["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn read_device_of_another_trust_domain_is_not_found() {
+        // A device that exists in Trust Domain A is not visible under Trust Domain B
+        // (the key mismatch folds into the same 404).
+        let (_td_a, dev_id) = make_device(
+            "nad-005",
+            "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+            "TDD owner A",
+            "Owned",
+        )
+        .await;
+        let td_b = make_trust_domain(
+            "nad-005",
+            "9d5e6f70-1a2b-4c3d-8e4f-5a6b7c8d9e0f",
+            "TDD owner B",
+        )
+        .await;
+        let token = mint_token_as("nad-005", DEVICES_SCOPE).await;
+        let (status, _, err) = get_device_req(Some(&token), &td_b, &dev_id, None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(err["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn read_device_malformed_id_is_not_found() {
+        let (td_id, _) = make_device(
+            "nad-005",
+            "123e4567-e89b-12d3-a456-426614174000",
+            "TDD read malformed",
+            "Present2",
+        )
+        .await;
+        let token = mint_token_as("nad-005", DEVICES_SCOPE).await;
+        // A malformed device id has no store entry to distinguish it → 404 (folded).
+        let (status, _, err) = get_device_req(Some(&token), &td_id, "not-a-uuid", None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(err["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn read_device_ignores_the_subject_reserved_suffix_plane() {
+        // Unlike the create leg, the read leg is store-only (mirroring getTrustDomain):
+        // the token subject is not a control plane, so a reserved-suffix subject that
+        // would 429 on create still reads an existing device as 200.
+        let (td_id, dev_id) = make_device(
+            "nad-005",
+            "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+            "TDD read no-subject-plane",
+            "Shared",
+        )
+        .await;
+        let token = mint_token_as("nad-429", DEVICES_SCOPE).await;
+        let (status, _, got) = get_device_req(Some(&token), &td_id, &dev_id, None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(got["id"], json!(dev_id));
+    }
+
+    #[tokio::test]
+    async fn read_device_token_without_the_scope_is_forbidden() {
+        let (td_id, dev_id) = make_device(
+            "nad-005",
+            "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+            "TDD read forbidden",
+            "Guarded",
+        )
+        .await;
+        let token = mint_token_as("nad-005", "some:other-scope").await;
+        let (status, _, err) = get_device_req(Some(&token), &td_id, &dev_id, None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(err["code"], "PERMISSION_DENIED");
+    }
+
+    #[tokio::test]
+    async fn read_device_missing_token_is_unauthenticated() {
+        let (status, _, err) = get_device_req(
+            None,
+            "11111111-1111-4111-8111-111111111111",
+            "22222222-2222-4222-8222-222222222222",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(err["code"], "UNAUTHENTICATED");
+    }
+
+    #[tokio::test]
+    async fn read_device_x_correlator_is_echoed() {
+        let (td_id, dev_id) = make_device(
+            "nad-005",
+            "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+            "TDD read corr",
+            "Corr Device",
+        )
+        .await;
+        let token = mint_token_as("nad-005", DEVICES_SCOPE).await;
+        let (status, headers, _) =
+            get_device_req(Some(&token), &td_id, &dev_id, Some("corr-tdd-read-1")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-tdd-read-1")
         );
     }
 

@@ -3201,8 +3201,20 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
         `connected`/`associated` `false` with no assigned `ipv4Address`/`ipv6Address`
         (no live onboarding — documented cut); the write-only `deviceCredential` is
         stripped from the echo, and `bootstrappingInfo`/`deviceCredential` contents
-        are validated only for object shape. `x-correlator` echoed. The device
-        read/list/update/delete legs remain a later slice.
+        are validated only for object shape. `x-correlator` echoed.
+      - [x] `GET /trust-domains/{trustDomainId}/devices/{deviceId}`
+        (`getTrustDomainDevice`, scope `network-access-domains:devices`) — reads a
+        created device back by its opaque, server-minted `deviceId` inside its
+        owning `trustDomainId`. Unlike the create leg it is **store-only**
+        (mirroring `getTrustDomain`): the device store is keyed by the full
+        `(trustDomainId, deviceId)` pair and the `deviceId` is a SHA-256-derived
+        UUID, so the token subject is **not** a control plane — store state is the
+        sole plane (DESIGN §7): a stored pair → `200` the persisted
+        `TrustDomainDevice` verbatim (write-only `deviceCredential` already stripped
+        at create); any other pair (unknown parent, unknown device, another Trust
+        Domain's device, or a malformed id) → `404 NOT_FOUND` (folded, one store
+        lookup via the now-ungated `store::get_device`). `x-correlator` echoed. No
+        new dep. The device list/update/delete legs remain a later slice.
 
 ## Cross-cutting (do alongside the item that needs it)
 - [~] `errors.rs`: base CAMARA error model done (`src/errors.rs`, `specs/shared/errors.yaml`); per-version catalogs still TODO (DESIGN §8)
@@ -4342,6 +4354,24 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-15 — Network Access Domains vwip: added the Trust Domain **Device**
+  read leg `GET /trust-domains/{trustDomainId}/devices/{deviceId}`
+  (`getTrustDomainDevice`, scope `network-access-domains:devices`) — the read leg
+  the prior create-leg pass flagged as a later slice. Store-only, mirroring
+  `getTrustDomain`: un-gated `store::get_device` (removed its `#[cfg(test)]`) and
+  the handler does a single `(trustDomainId, deviceId)` lookup — hit → `200` the
+  persisted `TrustDomainDevice` verbatim, miss (unknown parent / unknown device /
+  another Trust Domain's device / malformed id, all folded) → `404 NOT_FOUND`.
+  Unlike the create leg the token subject is **not** a control plane (the opaque
+  minted `deviceId` has no reserved-suffix plane). New route on the `:device_id`
+  param path (`get(get_trust_domain_device)`). Spec:
+  `network-access-domains/vwip/openapi.yaml` — added the `.../devices/{deviceId}`
+  path + GET op with `x-camarasim-scenarios`, header + info.description + a
+  documented-cuts line updated (create+read done, list/update/delete remain).
+  Tests: +9 (200 verbatim / unknown-id 404 / unknown-parent 404 / other-domain
+  404 / malformed 404 / subject-reserved-suffix ignored / 403 / 401 /
+  x-correlator). `cargo test` 2528 green (was 2519); `cargo build --release`
+  succeeds, no warnings. No new dependency. — binary: 5.0M (5,217,440 B)
 - 2026-08-15 — Network Access Domains vwip: began the Trust Domain **Device**
   sub-resource (the "later slice" the trust-domain CRUD passes flagged) with its
   create leg `POST /trust-domains/{trustDomainId}/devices`

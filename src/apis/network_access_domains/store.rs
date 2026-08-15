@@ -135,11 +135,13 @@ pub fn insert_device(trust_domain_id: &str, device_id: &str, device: Value) -> b
 }
 
 /// Fetch the `TrustDomainDevice` stored under `(trust_domain_id, device_id)`, or
-/// `None` if no such device exists. Currently only the tests that assert a created
-/// device persists use this; the later `getTrustDomainDevice` read leg will
-/// un-gate it (so it is `#[cfg(test)]` for now to keep the release build
-/// warning-free).
-#[cfg(test)]
+/// `None` if no such device exists. Backs the `getTrustDomainDevice` read leg
+/// (`GET /trust-domains/{trustDomainId}/devices/{deviceId}`) — a hit renders `200`
+/// with the persisted device, a miss (unknown Trust Domain *or* unknown device)
+/// the CAMARA `404` — and the tests that assert a created device persists. Because
+/// the key is the full `(trustDomainId, deviceId)` pair, a device is only found via
+/// its owning Trust Domain: an unknown parent id yields the same `None` as an
+/// unknown device id.
 pub fn get_device(trust_domain_id: &str, device_id: &str) -> Option<Value> {
     let key = (trust_domain_id.to_owned(), device_id.to_owned());
     device_store()
