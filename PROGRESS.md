@@ -3161,6 +3161,17 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
       derived from that pair, so a duplicate collides). Write-only WPA `password`
       stripped from the response. Nested access-detail *values* + `policies`
       contents validated only for presence/shape (documented cut).
+    - [x] `GET /trust-domains` (`getTrustDomains`, scope
+      `network-access-domains:trust-domains`) — the collection **list** leg.
+      Store-only (mirroring `getTrustDomainDevices`/`getApps`/`getAppDeployments`):
+      a scan of the in-memory store returns every created Trust Domain as a
+      `TrustDomainList` (a plain array of `TrustDomain`, maxItems 100, no page
+      wrapper), sorted by minted `id`, write-only WPA `password` stripped; no
+      Trust Domains → `200 []` (a list never 404s). The token subject is **not** a
+      control plane (store-only), and CamaraSim doesn't scope Trust Domains per
+      subscriber, so the CAMARA per-caller narrowing + the
+      `…:trust-domains:read-all` scope variant are a documented cut (base scope
+      returns the whole store). `x-correlator` echoed. No new dep.
     - [x] `GET /trust-domains/{trustDomainId}` (`getTrustDomain`, scope
       `network-access-domains:trust-domains`) — reads a created Trust Domain back
       by its opaque, server-minted `trustDomainId`. Store state is the only
@@ -4405,6 +4416,28 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-15 — Network Access Domains vwip: added the Trust Domain **collection
+  list** leg `GET /trust-domains` (`getTrustDomains`, scope
+  `network-access-domains:trust-domains`) — the one missing trust-domain leg (the
+  collection route carried only `POST`). Verified against the upstream CAMARA
+  NetworkAccessManagement spec (WebFetch): operationId `getTrustDomains`, `200` =
+  an array of `TrustDomain` (maxItems 100, no page wrapper, no query params); the
+  spec's per-caller narrowing + `…:trust-domains:read-all` scope variant are a
+  documented CamaraSim cut (no per-subscriber scoping). Store-only, mirroring the
+  sibling list legs (`getTrustDomainDevices`/`getApps`/`getAppDeployments`): new
+  `store::all()` scans the in-memory trust-domain store and returns the roster
+  sorted by minted `id` (write-only WPA `password` already stripped at create) —
+  no Trust Domains → `200 []` (a list never 404s); the token subject is not a
+  control plane. Route: added `.get(get_trust_domains)` to the existing
+  `/trust-domains` collection path (alongside `post`). Spec:
+  `network-access-domains/vwip/openapi.yaml` — added the GET op (params, 200
+  example one+empty, `x-camarasim-scenarios`) + a new `TrustDomainList` schema
+  (`$ref` TrustDomain, maxItems 100), refreshed the header comment + module doc.
+  Tests: +6 (contains-created-sorted-stripped / reflects-a-delete /
+  subject-reserved-suffix-ignored 200 / 403 / 401 / x-correlator; list assertions
+  are containment-based since the store is process-global across tests). `cargo
+  test` 2577 green (was 2571); `cargo build --release` succeeds, no warnings. No
+  new dependency. — binary: 5.1M (5,283,512 B; +9,736 B)
 - 2026-08-15 — Sponsored Data vwip: added the campaign **alert-subscription** leg
   `POST /campaign/{sponsorId}/{campaignId}/alert-subscription` (`configureAlerts`,
   new CamaraSim scope `sponsored-data:campaign:alerts`) — the first of the two

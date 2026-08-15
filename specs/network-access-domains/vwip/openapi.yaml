@@ -21,7 +21,8 @@
 #     returned ServiceList deterministically.
 # It also serves the single-service `GET /services/{serviceId}` read
 # (getService), the stateful Trust Domain create leg
-# `POST /trust-domains` (createTrustDomain), its read-back
+# `POST /trust-domains` (createTrustDomain), the collection list leg
+# `GET /trust-domains` (getTrustDomains), its read-back
 # `GET /trust-domains/{trustDomainId}` (getTrustDomain), its in-place update leg
 # `PATCH /trust-domains/{trustDomainId}` (updateTrustDomain), and its delete leg
 # `DELETE /trust-domains/{trustDomainId}` (deleteTrustDomain), backed by the
@@ -470,6 +471,92 @@ paths:
             result: "404 NOT_FOUND (reserved error suffix, account-level)"
           - input: "the token subject trailing digits are …429"
             result: "429 TOO_MANY_REQUESTS (reserved error suffix, account-level)"
+          - input: a token without the network-access-domains:trust-domains scope
+            result: "403 PERMISSION_DENIED"
+          - input: no / invalid token
+            result: "401 UNAUTHENTICATED"
+    get:
+      operationId: getTrustDomains
+      summary: List the caller's Trust Domains
+      description: |
+        Lists every Trust Domain created so far as a `TrustDomainList` — a plain
+        array of `TrustDomain` (there is no page wrapper and no query parameter).
+
+        There is no request body, so the outcome keys only on state
+        (docs/DESIGN.md §7):
+
+        - **The in-memory store** is the sole control plane. A scan returns the
+          created Trust Domains, each rendered verbatim (the write-only WPA
+          `password` was already stripped at create). With no Trust Domain created
+          yet → `200 []` (a list never `404`s on an empty result).
+
+        Unlike `createTrustDomain`, the token subject is **not** a control plane
+        (the read is store-only). CamaraSim does not scope Trust Domains per
+        subscriber, so the CAMARA per-caller narrowing — and the broader
+        `network-access-domains:trust-domains:read-all` scope variant — are a
+        documented cut: the base scope returns the whole store. The list is
+        returned sorted by Trust Domain `id` for a stable order (CAMARA declares
+        no ordering for the Trust Domain list).
+      security:
+        - openId:
+            - network-access-domains:trust-domains
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+      responses:
+        "200":
+          description: The created Trust Domains (possibly empty).
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TrustDomainList"
+              examples:
+                one:
+                  summary: One created Trust Domain (write-only password omitted)
+                  value:
+                    - id: "b1e0f6a2-9c3d-5e4f-8a1b-2c3d4e5f6a7b"
+                      serviceId: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+                      name: "Primary WiFi Network"
+                      description: "Primary home WiFi Network for all devices"
+                      enabled: true
+                      accessDetails:
+                        - accessType: "Wi-Fi:WPA_PERSONAL"
+                          ssid: "my-ssid"
+                          securityMode:
+                            securityModeType: "WPA3-Personal"
+                      createdAt: "2024-01-01T09:00:00Z"
+                      createdBy: "4a7c9e2d-1b3f-5a6c-9d8e-0f1a2b3c4d5e"
+                      modifiedAt: "2024-01-01T09:00:00Z"
+                      modifiedBy: "4a7c9e2d-1b3f-5a6c-9d8e-0f1a2b3c4d5e"
+                empty:
+                  summary: No Trust Domains created yet
+                  value: []
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          getTrustDomains is keyed only to state (docs/DESIGN.md §7): the
+          in-memory store supplies the roster. The opaque server-minted
+          trustDomainId has no reserved-suffix plane and the token subject is not
+          consulted (the read is store-only). With no Trust Domains created it
+          lists 200 []; the write-only WPA password is stripped at create so it
+          never leaks. Per-caller scoping and the read-all scope variant are a
+          documented cut — the base scope returns the whole store.
+        cases:
+          - input: "one or more Trust Domains created"
+            result: "200 — a TrustDomainList array of every created Trust Domain (WPA password stripped)"
+          - input: "no Trust Domains created yet"
+            result: "200 — an empty array (a list never 404s on an empty result)"
           - input: a token without the network-access-domains:trust-domains scope
             result: "403 PERMISSION_DENIED"
           - input: no / invalid token
@@ -2362,6 +2449,18 @@ components:
         response the write-only `deviceCredential` is omitted, and
         `connected`/`associated` are `false` with no assigned `ipv4Address`/
         `ipv6Address` until the device associates.
+
+    TrustDomainList:
+      type: array
+      description: |
+        A list of the caller's Trust Domains — the `200` body of `getTrustDomains`
+        (`GET /trust-domains`). A plain array of `TrustDomain` (no page wrapper);
+        empty when no Trust Domain has been created yet. Each Trust Domain has its
+        write-only WPA `password` stripped (as at create). CamaraSim returns the
+        array sorted by each Trust Domain's `id` for a stable order.
+      items:
+        $ref: "#/components/schemas/TrustDomain"
+      maxItems: 100
 
     TrustDomainDeviceList:
       type: array

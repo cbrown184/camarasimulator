@@ -62,6 +62,33 @@ pub fn get(id: &str) -> Option<Value> {
         .cloned()
 }
 
+/// List every `TrustDomain` created so far, as a `Vec` of the rendered
+/// `TrustDomain` JSON. Backs the `getTrustDomains` list leg (`GET
+/// /trust-domains`): with no Trust Domain created yet the `Vec` is empty, and the
+/// leg renders `200 []` (a list never `404`s on an empty result). The write-only
+/// WPA `password` was already stripped at create, so it never leaks here.
+///
+/// The result is sorted by each Trust Domain's minted `id` so the list is stable
+/// across calls (the underlying `HashMap` has no inherent order); CAMARA declares
+/// no ordering for the Trust Domain list, so any deterministic order is canonical
+/// (mirroring [`list_devices`]). The lock is held only for the scan (never across
+/// an `.await`).
+pub fn all() -> Vec<Value> {
+    let mut domains: Vec<Value> = store()
+        .lock()
+        .expect("network-access-domains trust-domain store not poisoned")
+        .values()
+        .cloned()
+        .collect();
+    domains.sort_by(|a, b| {
+        a["id"]
+            .as_str()
+            .unwrap_or_default()
+            .cmp(b["id"].as_str().unwrap_or_default())
+    });
+    domains
+}
+
 /// Atomically update the `TrustDomain` stored under `id` by applying `apply` to a
 /// mutable reference to it, returning the updated `TrustDomain` (a clone taken
 /// after the mutation) or `None` if no Trust Domain exists under `id`. Backs the

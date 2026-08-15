@@ -13,6 +13,8 @@
 //! - `POST /network-access-domains/vwip/trust-domains` — the first **stateful**
 //!   leg: create a Trust Domain (operationId `createTrustDomain`), persisted in
 //!   the in-memory [`store`].
+//! - `GET /network-access-domains/vwip/trust-domains` — list every created Trust
+//!   Domain (operationId `getTrustDomains`), a store-only scan of [`store`].
 //!
 //! ## What they do
 //!
@@ -137,7 +139,7 @@ pub fn routes() -> Router {
         )
         .route(
             "/network-access-domains/vwip/trust-domains",
-            post(create_trust_domain),
+            post(create_trust_domain).get(get_trust_domains),
         )
         .route(
             "/network-access-domains/vwip/trust-domains/:trust_domain_id",
@@ -661,6 +663,42 @@ async fn get_trust_domain(
             &correlator,
         ),
     }
+}
+
+/// `GET /network-access-domains/vwip/trust-domains` (`getTrustDomains`).
+///
+/// Lists every Trust Domain created so far as a `TrustDomainList` — a plain array
+/// of `TrustDomain` (maxItems 100, no page wrapper, no query params: the canonical
+/// shape). **Store-only**, mirroring the repo's other collection list legs
+/// (`getTrustDomainDevices`, `getApps`, `getAppDeployments`): the in-memory
+/// [`store`] is the sole control plane (docs/DESIGN.md §7) — a scan returns the
+/// created Trust Domains (each with its write-only WPA `password` already stripped
+/// at create), and with none created it returns `200 []` (a list never `404`s on an
+/// empty result). Unlike `createTrustDomain`, the token subject is **not** a
+/// control plane here (a store-only list): CamaraSim does not scope Trust Domains
+/// per subscriber, so the CAMARA per-caller narrowing — and the broader
+/// `network-access-domains:trust-domains:read-all` scope variant — are a documented
+/// cut; the base scope returns the whole store.
+///
+/// Requires a token carrying the `network-access-domains:trust-domains` scope (the
+/// same scope guards `createTrustDomain` / `getTrustDomain`). `x-correlator` is
+/// echoed on every response.
+async fn get_trust_domains(claims: Claims, headers: HeaderMap) -> Response {
+    // Optional correlation header, echoed on every response (CAMARA Commonalities).
+    let correlator = headers.get("x-correlator").cloned();
+
+    // Endpoint authorisation: the token must carry this API's Trust Domain scope.
+    if let Err(e) = claims.require_scope(TRUST_DOMAINS_SCOPE) {
+        return with_correlator(e.into_response(), &correlator);
+    }
+
+    // Store state is the only control plane — a scan of every created Trust
+    // Domain, sorted by minted id for a stable order. No Trust Domains → `200 []`.
+    let domains = store::all();
+    with_correlator(
+        (StatusCode::OK, Json(Value::Array(domains))).into_response(),
+        &correlator,
+    )
 }
 
 /// `DELETE /network-access-domains/vwip/trust-domains/{trustDomainId}`
@@ -3360,6 +3398,158 @@ mod tests {
         assert_eq!(
             headers.get("x-correlator").and_then(|v| v.to_str().ok()),
             Some("corr-tdd-list-1")
+        );
+    }
+
+    // === getTrustDomains (GET /trust-domains) ================================
+
+    /// Drive `GET /trust-domains` (the collection list leg) through the real router.
+    async fn list_trust_domains_req(
+        token: Option<&str>,
+        correlator: Option<&str>,
+    ) -> (StatusCode, HeaderMap, Value) {
+        let mut builder = Request::builder()
+            .method("GET")
+            .uri("/network-access-domains/vwip/trust-domains")
+            .header("host", HOST);
+        if let Some(t) = token {
+            builder = builder.header("authorization", format!("Bearer {t}"));
+        }
+        if let Some(c) = correlator {
+            builder = builder.header("x-correlator", c);
+        }
+        let response = app().oneshot(builder.body(Body::empty()).unwrap()).await.unwrap();
+        let status = response.status();
+        let headers = response.headers().clone();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, headers, json)
+    }
+
+    #[tokio::test]
+    async fn list_trust_domains_contains_created_domains_sorted_and_stripped() {
+        // Create two Trust Domains, then list. The store is process-global (shared
+        // across tests), so we assert the list CONTAINS our two — not an exact
+        // length — and that every entry is a full TrustDomain with the write-only
+        // WPA password stripped and the array sorted by id.
+        let id_a = make_trust_domain(
+            "nad-005",
+            "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+            "TD list A",
+        )
+        .await;
+        let id_b = make_trust_domain(
+            "nad-005",
+            "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+            "TD list B",
+        )
+        .await;
+        let token = mint_token_as("nad-005", TRUST_DOMAINS_SCOPE).await;
+
+        let (status, _, list) = list_trust_domains_req(Some(&token), None).await;
+        assert_eq!(status, StatusCode::OK);
+        let items = list.as_array().expect("TrustDomainList is a JSON array");
+
+        let ids: Vec<&str> = items.iter().map(|d| d["id"].as_str().unwrap()).collect();
+        assert!(ids.contains(&id_a.as_str()), "list must contain domain A");
+        assert!(ids.contains(&id_b.as_str()), "list must contain domain B");
+
+        // Every entry is a full TrustDomain with the write-only WPA password gone.
+        for d in items {
+            assert!(d["id"].as_str().map(is_uuid_shaped).unwrap_or(false));
+            assert!(d["name"].is_string());
+            assert!(d["serviceId"].is_string());
+            for detail in d["accessDetails"].as_array().into_iter().flatten() {
+                assert!(
+                    detail["securityMode"].get("password").is_none(),
+                    "write-only WPA password must not be echoed in the list"
+                );
+            }
+        }
+
+        // The array is sorted by id ascending (a stable order over the store).
+        let sorted = {
+            let mut s = ids.clone();
+            s.sort_unstable();
+            s
+        };
+        assert_eq!(ids, sorted, "the list is sorted by Trust Domain id");
+    }
+
+    #[tokio::test]
+    async fn list_trust_domains_reflects_a_delete() {
+        // A created domain lists; after deleteTrustDomain it drops out (store-only).
+        let id = make_trust_domain(
+            "nad-005",
+            "123e4567-e89b-12d3-a456-426614174000",
+            "TD list del",
+        )
+        .await;
+        let token = mint_token_as("nad-005", TRUST_DOMAINS_SCOPE).await;
+
+        let (_, _, before) = list_trust_domains_req(Some(&token), None).await;
+        let present = |list: &Value, id: &str| {
+            list.as_array()
+                .unwrap()
+                .iter()
+                .any(|d| d["id"].as_str() == Some(id))
+        };
+        assert!(present(&before, &id), "domain lists before delete");
+
+        assert!(store::remove(&id), "the domain existed and is evicted");
+
+        let (status, _, after) = list_trust_domains_req(Some(&token), None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(!present(&after, &id), "domain is gone from the list after delete");
+    }
+
+    #[tokio::test]
+    async fn list_trust_domains_ignores_the_subject_reserved_suffix_plane() {
+        // The list is store-only, so a reserved-error suffix on the token subject
+        // (…429) does not shape it — a …429 token still lists (200), unlike
+        // createTrustDomain where …429 → 429.
+        let id = make_trust_domain(
+            "nad-005",
+            "9d5e6f70-1a2b-4c3d-8e4f-5a6b7c8d9e0f",
+            "TD list subj",
+        )
+        .await;
+        let token = mint_token_as("nad-429", TRUST_DOMAINS_SCOPE).await;
+        let (status, _, list) = list_trust_domains_req(Some(&token), None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            list.as_array()
+                .unwrap()
+                .iter()
+                .any(|d| d["id"].as_str() == Some(id.as_str())),
+            "the domain lists regardless of the subject suffix"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_trust_domains_token_without_the_scope_is_forbidden() {
+        let token = mint_token_as("nad-005", "some:other:scope").await;
+        let (status, _, _) = list_trust_domains_req(Some(&token), None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn list_trust_domains_missing_token_is_unauthenticated() {
+        let (status, _, _) = list_trust_domains_req(None, None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn list_trust_domains_x_correlator_is_echoed() {
+        let token = mint_token_as("nad-005", TRUST_DOMAINS_SCOPE).await;
+        let (status, headers, _) =
+            list_trust_domains_req(Some(&token), Some("corr-td-list-1")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-td-list-1")
         );
     }
 
