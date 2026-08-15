@@ -108,8 +108,10 @@ info:
     trailing three digits: an **even** tail → the device is inside →
     `area-entered`; an **odd** tail → the device is outside → `area-left`. The
     event is delivered only when that event type is among the subscription's
-    `types` (a consumer receives only the events it subscribed to), and only to an
-    `http://` sink (no TLS client — a documented cut). An `ACTIVATION_REQUESTED`
+    `types` (a consumer receives only the events it subscribed to). Delivery is to
+    an `http://` sink (over raw TCP) or an `https://` sink (over a `rustls` TLS
+    session, server certificate verified against the bundled Mozilla roots),
+    reusing the TLS client first built for QoD. An `ACTIVATION_REQUESTED`
     subscription reports no state (it is not yet active), so no initial event
     fires. See the `createSubscription` `callbacks`.
 
@@ -121,8 +123,9 @@ info:
     device *enters* the area → `area-entered`; **`…002`** → the device *leaves* →
     `area-left`. The event is delivered by a short fire-and-forget timer (a
     documented ~1 s grace after the `201`), only for an `ACTIVE` subscription, only
-    when the crossing's type is among the subscription's `types`, and only to an
-    `http://` sink, with the ACCESSTOKEN `sinkCredential` bearer applied. The
+    when the crossing's type is among the subscription's `types`, and to an
+    `http://` or `https://` sink, with the ACCESSTOKEN `sinkCredential` bearer
+    applied. The
     subscription stays `ACTIVE` after the movement event unless it exhausts the
     subscription's `subscriptionMaxEvents` budget (see below), in which case the
     subscription ends. A crossing is not delivered for a subscription that a
@@ -271,8 +274,9 @@ paths:
           subscription is evicted and a `subscription-ended` (`MAX_EVENTS_REACHED`)
           CloudEvent is POSTed after it (unbounded when unset). Documented cuts: only
           `protocol: HTTP` is supported; the REFRESHTOKEN `sinkCredential` type is
-          accepted but not applied (unauthenticated); only `http://` sinks are delivered
-          to (no TLS client); a non-`Z` expire time arms no timer; DELETE emits no
+          accepted but not applied (unauthenticated); `http://` and `https://` sinks
+          are delivered to (`https://` over rustls TLS, server cert verified against
+          the bundled Mozilla roots); a non-`Z` expire time arms no timer; DELETE emits no
           `subscription-ended` event. 409/500 are CamaraSim extensions of the shared
           error set so every reserved suffix is reachable.
         cases:
@@ -296,6 +300,8 @@ paths:
             result: "201; area-left movement CloudEvent POSTed to the sink after a short grace"
           - input: movement (…001/…002) delivered with an ACCESSTOKEN `sinkCredential`
             result: "movement callback carries `Authorization: Bearer <accessToken>` (RFC 6750)"
+          - input: "`sink` is an `https://` URL"
+            result: "CloudEvent POSTed over a rustls TLS session (server cert verified against the bundled Mozilla roots; default port 443)"
           - input: "`config.subscriptionExpireTime` set (UTC `…Z`), reached (or already past)"
             result: "subscription evicted; `subscription-ended` (SUBSCRIPTION_EXPIRED) CloudEvent POSTed to the sink"
           - input: "`config.subscriptionExpireTime` with a numeric offset (e.g. +01:00)"
@@ -337,8 +343,9 @@ paths:
                 domain event (`terminationReason: MAX_EVENTS_REACHED`), it is evicted
                 and a `subscription-ended` CloudEvent is POSTed — for the max-events
                 case, in order immediately after the triggering event. Delivery is
-                best-effort, fire-and-forget, and only to an `http://` sink (no TLS
-                client). When the subscription carries an ACCESSTOKEN `sinkCredential`,
+                best-effort, fire-and-forget, over an `http://` sink (raw TCP) or an
+                `https://` sink (rustls TLS, server cert verified against the bundled
+                Mozilla roots). When the subscription carries an ACCESSTOKEN `sinkCredential`,
                 each callback is authenticated with an `Authorization: Bearer
                 <accessToken>` header (RFC 6750), and with a PLAIN `sinkCredential`
                 (an `identifier` + `secret` pair) with an `Authorization: Basic
@@ -590,7 +597,10 @@ components:
         sink:
           type: string
           format: uri
-          description: The callback URL notifications would be POSTed to.
+          description: >-
+            The callback URL notifications would be POSTed to. CamaraSim delivers
+            to an `http://` sink (raw TCP) or an `https://` sink (rustls TLS,
+            server certificate verified against the bundled Mozilla roots).
           example: "https://example.com/callback"
         sinkCredential:
           type: object
@@ -688,8 +698,8 @@ components:
             `sink` (see the `createSubscription` `callbacks`): the identifier's
             trailing three digits pick the current position — even → inside →
             `area-entered`, odd → outside → `area-left` — filtered to the
-            subscribed `types`, and delivered only to an `http://` sink. Echoed
-            back if supplied.
+            subscribed `types`, and delivered to an `http://` or `https://` sink.
+            Echoed back if supplied.
           example: false
 
     SubscriptionDetail:

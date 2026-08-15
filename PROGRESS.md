@@ -334,7 +334,11 @@ CloudEvent (`terminationReason: MAX_EVENTS_REACHED`) POSTed in order right after
 triggering event (new `notifications::spawn_delivery_seq`), the ACCESSTOKEN
 `sinkCredential` bearer applied. Eviction is synchronous, so a still-pending
 movement/expiry timer becomes a no-op (exactly one terminal outcome). An unset
-`subscriptionMaxEvents` is unbounded.
+`subscriptionMaxEvents` is unbounded. **`https://` (TLS) sink delivery** is now in
+place too: geofencing's `notifications::deliver` adopts QoD's rustls TLS client
+(`parse_sink`/`deliver_tls`, server cert verified against the bundled Mozilla roots),
+so every geofencing callback (initial / movement / `subscription-ended`) is POSTed
+over `http://` (raw TCP) or `https://` (TLS), closing geofencing's `http://`-only cut.
 
 **Phase 5 (payments) has begun.** **Carrier Billing v0.5** `POST /payments` is
 live at `/carrier-billing/v0.5/payments` (scope `carrier-billing:payments:create`,
@@ -1225,9 +1229,9 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
       → `Authorization: Basic base64(identifier:secret)` (RFC 7617) on the callbacks
       (in-memory credential; REFRESHTOKEN deferred — needs a token-exchange round trip)
     - [x] TLS (`https://` sink) delivery — rustls (ring provider) + bundled Mozilla
-      roots (`webpki-roots`); server cert verified. QoD only for now; the identical
-      `http://`-only cut on geofencing (and the Phase 5 sink APIs) is a follow-up now
-      that the TLS client exists.
+      roots (`webpki-roots`); server cert verified. Geofencing has since adopted the
+      same TLS delivery (see Phase 4); the Phase 5 sink APIs (Carrier Billing etc.)
+      remain a follow-up now that the TLS client exists.
 
 ### Phase 4 — Spatial
 - [x] Device Location Verification v3 — `POST /verify` (`/location-verification/v3`;
@@ -1253,6 +1257,9 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     - [x] `subscriptionMaxEvents` enforcement (count delivered domain events;
       the Nth event ends the subscription → `subscription-ended`
       `MAX_EVENTS_REACHED` + eviction; `<1` → 400 OUT_OF_RANGE)
+    - [x] TLS (`https://` sink) delivery — reuses QoD's rustls (ring) + bundled
+      Mozilla roots (`webpki-roots`); server cert verified; `parse_sink` +
+      `deliver_tls` mirror QoD. Closes geofencing's `http://`-only cut.
 
 ### Phase 5 — Remaining
 - [~] Carrier Billing v0.5 (`/carrier-billing/v0.5`; CAMARA 0.5.0, release r3.2):
@@ -4288,6 +4295,28 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-15 — Geofencing Subscriptions v0.4: extended CloudEvents sink delivery to
+  `https://` (TLS) sinks, adopting the rustls TLS client QoD's prior pass introduced
+  (the follow-up that pass flagged). `notifications.rs` now parses the sink scheme
+  (`parse_sink` → `SinkTarget{tls,host,port,path}`, default port 80/443, replacing the
+  http-only `parse_http_sink`) and, for an `https://` sink, POSTs the CloudEvent over a
+  rustls TLS session (`deliver_tls`/`tls_connector`) instead of raw TCP; the server
+  certificate is verified against the bundled Mozilla roots (`webpki-roots`). The HTTP
+  request writer was factored to a generic `write_request<W: AsyncWrite>` shared by the
+  TCP and TLS paths — mirroring QoD (the repo's mirror-don't-share convention; geofencing
+  keeps its own cached connector so the two APIs stay decoupled). No new dependency
+  (`tokio-rustls`/`webpki-roots` already linked by QoD; dev-only `rcgen` for the test
+  cert). This closes the `http://`-only cut on geofencing; the initial/movement/expiry/
+  max-events callbacks all now deliver over http+https. Spec: geofencing `openapi.yaml`
+  — header prose (initial/movement events), the `createSubscription` description +
+  `notifications` callback + documented-cuts, the `sink`/`initialEvent` schema notes now
+  describe http+https delivery (removed the "no TLS client" cut); added an https-sink
+  functional case. Tests: real TLS round-trip (rustls server with an rcgen self-signed
+  127.0.0.1 cert, client trusting only it), `parse_sink` http/https/port-443/reject cases
+  (replacing the old `parse_http_sink` test); the non-http no-op test now uses `ftp://`
+  since `https://` is delivered. `cargo test` 2486 green (was 2483; +3 net); `cargo build
+  --release` succeeds. Phase-5 sink APIs (Carrier Billing etc.) can still adopt TLS as a
+  follow-up. — binary: 5.0M (5161592 B, +4288 B — TLS stack already linked by QoD)
 - 2026-08-15 — QoD: implemented TLS (`https://`) CloudEvents sink delivery, closing
   the last open Phase 3 item. `notifications::deliver` now parses the sink scheme
   (`parse_sink` → `SinkTarget{tls,host,port,path}`, default port 80/443) and, for an
