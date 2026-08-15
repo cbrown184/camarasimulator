@@ -1633,7 +1633,7 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     cuts: `POLYGON`, async `sink`/CloudEvents (202 flow), hourly time-slicing, and
     the ±3-month absolute start-time checks. `x-correlator` echoed. No new dep.
     **Completes Population Density Data vwip.**
-- [~] QoS Provisioning v0.3 (`/qos-provisioning/v0.3`; CAMARA qos-provisioning
+- [x] QoS Provisioning v0.3 (`/qos-provisioning/v0.3`; CAMARA qos-provisioning
   0.3.0, release r3.2 — part of the QualityOnDemand repo; the *provisioning*
   (open-ended) counterpart of Quality on Demand's bounded sessions; stateful,
   resource-oriented, in-memory assignment store):
@@ -1672,7 +1672,7 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     (checked first, mirroring QoD's retrieve-by-device); else the in-memory store
     scanned by device echo (new `store::find_by_device`). One provisioning per
     device → a single `AssignmentInfo`.
-  - [~] CloudEvents notifications on `sink` (status transitions)
+  - [x] CloudEvents notifications on `sink` (status transitions)
     (`src/apis/qos_provisioning/notifications.rs`; event type
     `org.camaraproject.qos-provisioning.v0.status-changed`, mirroring QoD):
     - [x] `DELETE_REQUESTED` `status-changed` on `revokeQosAssignment` — a revoked
@@ -1696,7 +1696,15 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
       `sinkCredential` bearer is applied to every callback — *peeked*
       (`store::peek_credential`) on the non-terminal AVAILABLE event so a later
       terminal event still authenticates, *taken* single-use on the terminal one.
-    - [ ] TLS (`https://` sink) delivery (needs a rustls TLS client)
+    - [x] TLS (`https://` sink) delivery — `notifications.rs` now parses the sink
+      scheme (`parse_sink` → `SinkTarget{tls,host,port,path}`, default port 80/443,
+      replacing the http-only `parse_http_sink`) and, for an `https://` sink, POSTs
+      the CloudEvent over a rustls TLS session (`deliver_tls`/`tls_connector`,
+      server cert verified against the bundled Mozilla roots), reusing the
+      `tokio-rustls` (ring) + `webpki-roots` stack QoD/Geofencing already link. The
+      HTTP writer was factored to a generic `write_request<W: AsyncWrite>` shared by
+      the TCP and TLS paths (mirror-don't-share; own cached connector). No new dep.
+      **Completes QoS Provisioning v0.3.**
 - [~] QoS Booking vwip (`/qos-booking/vwip`; CAMARA qos-booking, wip — part of the
   ConnectivityQualityManagement subproject; the *time-boxed booking* sibling of
   Quality on Demand (immediate sessions) and QoS Provisioning (open-ended); stateful,
@@ -4295,6 +4303,27 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-15 — QoS Provisioning v0.3: extended CloudEvents sink delivery to `https://`
+  (TLS) sinks, adopting the rustls TLS client QoD/Geofencing introduced (the follow-up
+  those passes flagged for Phase-5 sink APIs). `notifications.rs` now parses the sink
+  scheme (`parse_sink` → `SinkTarget{tls,host,port,path}`, default port 80/443, replacing
+  the http-only `parse_http_sink`) and, for `https://`, POSTs the CloudEvent over a rustls
+  TLS session (`deliver_tls`/`tls_connector`; server cert verified against the bundled
+  Mozilla roots, `webpki-roots`) instead of raw TCP; the HTTP writer was factored to a
+  generic `write_request<W: AsyncWrite>` shared by the TCP and TLS paths (mirroring QoD;
+  own cached connector so the APIs stay decoupled). No new dependency (`tokio-rustls`/
+  `webpki-roots` already linked; dev-only `rcgen` for the test cert). Closes the
+  `http://`-only cut on QoS Provisioning — the AVAILABLE/NETWORK_TERMINATED/DELETE_REQUESTED
+  callbacks all now deliver over http+https. Spec: qos-provisioning `openapi.yaml` — header
+  comment, the `createQosAssignment` description + `notifications` callback + revoke prose,
+  and the `sink` schema note now describe http+https delivery (removed the "no TLS client"
+  cuts); added an https-sink functional case. Tests: real TLS round-trip (rustls server with
+  an rcgen self-signed 127.0.0.1 cert, client trusting only it), `write_request` byte-format,
+  `parse_sink` http/https/port-443/reject cases (replacing the old `parse_http_sink` test);
+  the non-http no-op test now uses `ftp://` since `https://` is delivered. Completes QoS
+  Provisioning v0.3. `cargo test` 2490 green (was 2486); `cargo build --release` succeeds.
+  QoS Booking / Session Insights / Click to Dial / Traffic Influence sink APIs can adopt TLS
+  next. — binary: 5.0M (5164600 B, +3008 B — TLS stack already linked)
 - 2026-08-15 — Geofencing Subscriptions v0.4: extended CloudEvents sink delivery to
   `https://` (TLS) sinks, adopting the rustls TLS client QoD's prior pass introduced
   (the follow-up that pass flagged). `notifications.rs` now parses the sink scheme

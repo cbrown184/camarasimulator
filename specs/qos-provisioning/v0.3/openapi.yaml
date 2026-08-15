@@ -17,7 +17,8 @@
 # transition is delivered when a sink-bearing assignment provisions active; the
 # `NETWORK_TERMINATED` transition when a `…001` `AVAILABLE` assignment is dropped
 # early by the (simulated) network; and the `DELETE_REQUESTED` transition on
-# revoke. Only TLS (`https://` sink) delivery remains a documented cut.
+# revoke. Delivery is over `http://` (raw TCP) and `https://` (rustls TLS, the
+# server certificate verified against the bundled Mozilla roots).
 openapi: 3.0.3
 info:
   title: QoS Provisioning
@@ -71,8 +72,9 @@ info:
     - **`sink`** — optional; when present it must be a well-formed `http://` or
       `https://` callback URL → else `400 INVALID_SINK`. CAMARA's schema requires
       `https://`; CamaraSim also accepts `http://` so a loopback receiver can
-      observe callbacks, and delivers only to `http://` (no TLS client — an
-      `https://` sink is a documented no-op cut, mirroring QoD). A recorded `sink`
+      observe callbacks. An `http://` sink is delivered over raw TCP; an
+      `https://` sink is delivered over a `rustls` TLS session (server certificate
+      verified against the bundled Mozilla roots), mirroring QoD. A recorded `sink`
       receives `status-changed` CloudEvents: on provisioning an `AVAILABLE`
       assignment fires `status: AVAILABLE` (no `statusInfo`); a `…001` `AVAILABLE`
       assignment is instead dropped early by the network → `status: UNAVAILABLE`,
@@ -276,6 +278,11 @@ paths:
             result: >-
               "201, and a status-changed CloudEvent (status AVAILABLE, no
               statusInfo) delivered to the sink, fire-and-forget"
+          - input: "`https://` `sink` on an AVAILABLE assignment (not …001)"
+            result: >-
+              "201, and the AVAILABLE status-changed CloudEvent delivered to the
+              sink over a rustls TLS session (server certificate verified against
+              the bundled Mozilla roots), fire-and-forget"
           - input: "`http://` `sink` on a `…001` AVAILABLE assignment"
             result: >-
               "201, then the network drops it early — a status-changed CloudEvent
@@ -312,8 +319,9 @@ paths:
                 provisioning, the `NETWORK_TERMINATED` transition when a `…001`
                 `AVAILABLE` assignment is dropped early, and the `DELETE_REQUESTED`
                 transition on revoke (both `UNAVAILABLE`). Delivery is over
-                `http://` only (no TLS client — an `https://` sink is a documented
-                no-op cut); a `sinkCredential` is applied to every callback's
+                `http://` (raw TCP) and `https://` (rustls TLS, the server
+                certificate verified against the bundled Mozilla roots); a
+                `sinkCredential` is applied to every callback's
                 `Authorization` header — an `ACCESSTOKEN` credential as
                 `Authorization: Bearer <token>` (RFC 6750), a `PLAIN` credential as
                 `Authorization: Basic <base64(identifier:secret)>` (RFC 7617).
@@ -439,10 +447,10 @@ paths:
           there is no reserved-identifier plane): an existing assignment is
           evicted and revoked (single-use), an unknown/already-revoked id
           returns 404 NOT_FOUND. The `x-correlator` is echoed on the 204. If the
-          revoked assignment recorded an `http://` `sink`, a `status-changed`
-          CloudEvent (`status: UNAVAILABLE`, `statusInfo: DELETE_REQUESTED`) is
-          delivered to it fire-and-forget (an `https://` sink is not delivered —
-          no TLS client — a documented cut).
+          revoked assignment recorded an `http://` or `https://` `sink`, a
+          `status-changed` CloudEvent (`status: UNAVAILABLE`, `statusInfo:
+          DELETE_REQUESTED`) is delivered to it fire-and-forget (`https://` over a
+          rustls TLS session, the server certificate verified).
         cases:
           - input: a known assignmentId with no sink
             result: "204 No Content — the assignment is revoked and no longer reads back"
@@ -633,10 +641,11 @@ components:
           description: >-
             A callback URL for asynchronous CloudEvents notifications. CAMARA's
             schema requires `https://`; CamaraSim also accepts `http://` so a
-            loopback receiver can observe callbacks, and delivers only to
-            `http://` (no TLS client — an `https://` sink is a documented no-op
-            cut, mirroring QoD). On revoke a recorded sink receives a
-            `status-changed` CloudEvent (`DELETE_REQUESTED`).
+            loopback receiver can observe callbacks. An `http://` sink is
+            delivered over raw TCP; an `https://` sink over a `rustls` TLS session
+            (server certificate verified against the bundled Mozilla roots),
+            mirroring QoD. On revoke a recorded sink receives a `status-changed`
+            CloudEvent (`DELETE_REQUESTED`).
           pattern: '^https?:\/\/.+$'
           example: "https://application-server.example.com/notifications"
         sinkCredential:
