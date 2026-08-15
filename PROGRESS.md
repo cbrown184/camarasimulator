@@ -2207,7 +2207,7 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     `404`s). Natural-end webhooks (`validity_expired`/`data_exhausted`) stay
     deferred (no background expiry worker). Spec: `SessionEndedNotification`
     schema + a `callbacks` block on `startSponsorship` + revoke scenarios.
-  - [~] campaign operations (`/campaign/…`):
+  - [x] campaign operations (`/campaign/…`):
     - [x] `GET /campaign/{sponsorId}/{campaignId}/campaign-status`
       (`getCampaignStatus`, `sponsored-data:campaign:read`) — reports a whole
       campaign's operational state, distinct from a single session. No campaign
@@ -2245,7 +2245,17 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
       campaignId UUID reserved-error suffix → canonical CAMARA error (mirrors
       `getCampaignStatus`). Natural-end alert callbacks a documented cut.
       `x-correlator` echoed. No new dep.
-    - [ ] `manageCampaign` — deferred (pause/resume; no campaign store).
+    - [x] `POST /campaign/management` (`manageCampaign`, scope
+      `sponsored-data:campaign:manage`) — pause/resume a campaign. `sponsorId`/
+      `campaignId`/`action` ride in the body (not the path). No campaign store, so
+      — like `configureAlerts` — a **stateless synchronous acknowledgement**:
+      `200 {sponsorId, campaignId, requestResult, startTime, status}` with `status`
+      reflecting the action (`pause`→`paused`, `resume`→`resumed`; terminal
+      `completed` a documented cut). Two control planes (DESIGN §7): body validated
+      first (well-formed ids + `action` ∈ {pause,resume} → 400 INVALID_ARGUMENT, so
+      a body 400 beats a reserved 404), then the campaignId UUID reserved-error
+      suffix → canonical CAMARA error (mirrors `getCampaignStatus`). `x-correlator`
+      echoed. **Completes the Sponsored Data campaign operations.** No new dep.
 - [x] Click to Dial vwip (`/click-to-dial/vwip`; CAMARA ClickToDial `wip`;
   two-legged, business-facing call origination):
   - [x] `POST /calls` (`createCall`, `click-to-dial:calls:create`) — create a
@@ -4416,6 +4426,37 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-15 — Sponsored Data vwip: added the campaign **management** leg
+  `POST /campaign/management` (`manageCampaign`, new CamaraSim scope
+  `sponsored-data:campaign:manage`) — the second (and last) deferred
+  campaign-management operation, **completing the Sponsored Data campaign
+  operations**. Confirmed the canonical shape against the upstream CAMARA
+  SponsoredData `wip` spec (WebFetch): `POST /campaign/management`, requestBody
+  `{sponsorId, campaignId, action: enum[pause,resume]}` (ids ride in the body, not
+  the path — unlike the other campaign ops), success `200`
+  `{requestResult, sponsorId, campaignId, startTime, status: enum[paused,resumed,
+  completed]}`; the `wip` contract declares no securityScheme (CamaraSim-assigned
+  scope). Modelled as a **stateless synchronous acknowledgement** (no campaign
+  store — mirroring the just-added `configureAlerts` / In-Home
+  `performDeviceAction` / eSIM `profileOperation`): nothing persisted, so a repeat
+  is idempotent and the acknowledged `status` reflects the action directly
+  (`pause`→`paused`, `resume`→`resumed`; the terminal `completed` unreachable
+  without a store — a documented cut). Two control planes (DESIGN §7): request body
+  validated first (well-formed `sponsorId`/`campaignId`, `action` ∈ {pause,resume}
+  → 400 INVALID_ARGUMENT, so a body 400 beats a reserved 404), then the campaignId's
+  embedded-UUID reserved-error suffix → canonical CAMARA error (`…404` → 404
+  campaign-not-found, mirrors `getCampaignStatus`/`configureAlerts`). New static
+  route `/campaign/management` (2 path segments, no conflict with the 4-segment
+  `/campaign/{sponsorId}/{campaignId}/…` routes). `x-correlator` echoed on every
+  response. Spec: `sponsored-data/vwip/openapi.yaml` — added the path (op +
+  `ManageCampaignRequest` requestBody + `ManageCampaignResult` response + full
+  scenario table), two new schemas, refreshed the header comment / served-op list /
+  scope-divergence note. Tests: +8 (1 unit — ack body pause/resume shape; 7
+  integration — happy pause / happy resume / reserved 404+429 / bad-body 400
+  [missing sponsorId, missing campaignId, malformed campaignId, missing action,
+  unknown action, non-JSON] / body-400-beats-reserved-404 / 401+403 / x-correlator
+  on success+error). `cargo test` 2585 green (was 2577); `cargo build --release`
+  succeeds, no warnings. No new dependency. — binary: 5.1M (5,298,736 B; +15,224 B)
 - 2026-08-15 — Network Access Domains vwip: added the Trust Domain **collection
   list** leg `GET /trust-domains` (`getTrustDomains`, scope
   `network-access-domains:trust-domains`) — the one missing trust-domain leg (the

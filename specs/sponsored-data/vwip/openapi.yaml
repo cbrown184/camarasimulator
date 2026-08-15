@@ -13,17 +13,20 @@
 # (`revokeSponsorship`),
 # `GET /campaign/{sponsorId}/{campaignId}/campaign-status` (`getCampaignStatus`),
 # `GET /campaign/{sponsorId}/{campaignId}/active-sponsorships`
-# (`getActiveSponsorships`) and
-# `POST /campaign/{sponsorId}/{campaignId}/alert-subscription` (`configureAlerts`).
+# (`getActiveSponsorships`),
+# `POST /campaign/{sponsorId}/{campaignId}/alert-subscription` (`configureAlerts`)
+# and `POST /campaign/management` (`manageCampaign`).
 #
 # Divergences from the upstream CAMARA source (documented cuts):
 #   - The sponsorship **start**, **session-status** read and **revoke**, plus the
 #     campaign **status** (`getCampaignStatus`), **active-sponsorships** list
-#     (`getActiveSponsorships`) and **alert-subscription** (`configureAlerts`), are
-#     mounted. `configureAlerts` is a stateless acknowledgement — nothing is
-#     persisted (no alert worker), and the natural-end alert callbacks are a cut.
-#     The remaining upstream campaign-management operation (`manageCampaign`) is
-#     deferred to a later pass (see PROGRESS.md).
+#     (`getActiveSponsorships`), **alert-subscription** (`configureAlerts`) and
+#     **management** (`manageCampaign`), are mounted. `configureAlerts` and
+#     `manageCampaign` are stateless acknowledgements — nothing is persisted (no
+#     campaign store, no alert worker); the natural-end alert callbacks are a cut,
+#     and `manageCampaign`'s acknowledged `status` reflects the requested `action`
+#     directly (`pause`→`paused`, `resume`→`resumed`; the upstream terminal
+#     `completed` state is unreachable without a store).
 #     `startSponsorship` persists the granted session in an in-memory store so
 #     `getSessionStatus` can read it back, `revokeSponsorship` can evict it, and
 #     `getActiveSponsorships` can scan it for a campaign's active sessions.
@@ -46,8 +49,9 @@
 #     `sponsored-data:sponsorship:create` (start),
 #     `sponsored-data:sponsorship:read` (session-status),
 #     `sponsored-data:sponsorship:delete` (revoke),
-#     `sponsored-data:campaign:read` (campaign-status / active-sponsorships) and
-#     `sponsored-data:campaign:alerts` (alert-subscription), resolved against the
+#     `sponsored-data:campaign:read` (campaign-status / active-sponsorships),
+#     `sponsored-data:campaign:alerts` (alert-subscription) and
+#     `sponsored-data:campaign:manage` (management), resolved against the
 #     shared auth spec.
 #   - CamaraSim inlines the request/response schemas and `$ref`s the shared error
 #     model (`../../shared/errors.yaml`) so the served spec resolves without
@@ -778,6 +782,102 @@ paths:
           - input: "a valid webhookUrl (+ optional callbackToken / boolean alert flags)"
             result: "200 {sponsorId, campaignId, requestResult} (acknowledged, not persisted)"
 
+  /campaign/management:
+    post:
+      operationId: manageCampaign
+      summary: Pause or resume a campaign
+      description: |
+        Pause or resume a campaign. Unlike the other campaign operations the
+        `sponsorId`/`campaignId` ride in the request body (with the `action`), not
+        the path (upstream `POST /campaign/management`).
+
+        **CamaraSim behaviour.** There is no campaign store, so — like
+        `configureAlerts` — the operation is a stateless synchronous acknowledgement
+        (like the In-Home `performDeviceAction` / eSIM `profileOperation` legs):
+        nothing is persisted (a repeat is idempotent) and the acknowledged `status`
+        reflects the requested `action` directly (`pause` → `paused`, `resume` →
+        `resumed`). The upstream terminal `completed` state is unreachable without a
+        store (a documented cut).
+
+        Two control planes (docs/DESIGN.md §7): the request body is validated first
+        (well-formed `sponsorId`/`campaignId`, `action` ∈ {`pause`,`resume`}) → `400
+        INVALID_ARGUMENT` on a malformed request; then a reserved trailing-digit
+        suffix on the campaignId's embedded UUID selects a canonical CAMARA error
+        (`…404` → 404 campaign-not-found, as with `getCampaignStatus`), else `200`
+        with `{ sponsorId, campaignId, requestResult, startTime, status }`. Body
+        validation runs before the reserved-error plane, so a malformed body is a
+        `400` even on a `…404` campaign.
+      security:
+        - openId:
+            - sponsored-data:campaign:manage
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ManageCampaignRequest"
+            examples:
+              pause:
+                summary: Pause a campaign
+                value:
+                  sponsorId: acme@sponsor.example.com
+                  campaignId: 123e4567-e89b-12d3-a456-426614174000@sponsor.example.com
+                  action: pause
+      responses:
+        "200":
+          description: The campaign management action was acknowledged.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ManageCampaignResult"
+              examples:
+                paused:
+                  summary: Campaign paused
+                  value:
+                    sponsorId: acme@sponsor.example.com
+                    campaignId: 123e4567-e89b-12d3-a456-426614174000@sponsor.example.com
+                    requestResult: "CAMPAIGN PAUSED SUCCESSFULLY"
+                    startTime: "2024-06-01T00:00:00Z"
+                    status: paused
+        "400":
+          $ref: "../../shared/errors.yaml#/components/responses/InvalidArgument"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "409":
+          $ref: "../../shared/errors.yaml#/components/responses/Conflict"
+        "422":
+          $ref: "../../shared/errors.yaml#/components/responses/ServiceNotApplicable"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          Result selected from the request body and the campaignId's embedded UUID
+          (docs/DESIGN.md §7). The body is validated first; otherwise a reserved
+          trailing-digit suffix on the UUID selects a canonical CAMARA error, else
+          the action is acknowledged. Nothing is persisted (no campaign store).
+        cases:
+          - input: "malformed body, sponsorId not local@domain, campaignId not UUID@domain, or action not in {pause,resume}"
+            result: "400 INVALID_ARGUMENT (validated before the reserved-error plane)"
+          - input: "campaignId UUID trailing three digits in {400,401,403,404,409,422,429,500,503}"
+            result: "the matching canonical CAMARA error (e.g. …404 -> 404 NOT_FOUND)"
+          - input: "action=pause on a valid campaign"
+            result: "200 {status: paused, requestResult: 'CAMPAIGN PAUSED SUCCESSFULLY', …} (acknowledged, not persisted)"
+          - input: "action=resume on a valid campaign"
+            result: "200 {status: resumed, requestResult: 'CAMPAIGN RESUMED SUCCESSFULLY', …} (acknowledged, not persisted)"
+
 components:
   securitySchemes:
     openId:
@@ -1235,6 +1335,61 @@ components:
           type: string
           description: Human-readable outcome of the subscription request.
           example: "Campaign notifications subscription - SUCCESS"
+
+    ManageCampaignRequest:
+      type: object
+      description: >-
+        Parameters to manage (pause/resume) a campaign. The `sponsorId`/`campaignId`
+        ride in the body here (not the path). CamaraSim requires all three fields.
+      required:
+        - sponsorId
+        - campaignId
+        - action
+      properties:
+        sponsorId:
+          $ref: "#/components/schemas/SponsorId"
+        campaignId:
+          $ref: "#/components/schemas/CampaignId"
+        action:
+          type: string
+          description: The action to perform on the campaign.
+          enum:
+            - pause
+            - resume
+          example: pause
+
+    ManageCampaignResult:
+      type: object
+      additionalProperties: false
+      description: The acknowledgement of a campaign management action.
+      required:
+        - sponsorId
+        - campaignId
+        - requestResult
+        - startTime
+        - status
+      properties:
+        sponsorId:
+          $ref: "#/components/schemas/SponsorId"
+        campaignId:
+          $ref: "#/components/schemas/CampaignId"
+        requestResult:
+          type: string
+          description: Human-readable outcome of the management request.
+          example: "CAMPAIGN PAUSED SUCCESSFULLY"
+        startTime:
+          $ref: "#/components/schemas/Time"
+        status:
+          type: string
+          description: >-
+            The campaign's status after the action. CamaraSim reflects the requested
+            action directly (`pause`→`paused`, `resume`→`resumed`); the upstream
+            terminal `completed` state is unreachable without a campaign store.
+          enum:
+            - paused
+            - resumed
+            - completed
+          example: paused
 
     SponsoredDataError:
       description: >-

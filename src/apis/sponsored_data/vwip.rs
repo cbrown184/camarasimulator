@@ -1,6 +1,6 @@
 //! Sponsored Data **vwip** (CAMARA Sponsored Data, work-in-progress).
 //!
-//! Six endpoints:
+//! Seven endpoints:
 //! - `POST /sponsored-data/vwip/sponsorship` — start a data-sponsorship session
 //!   for a subscriber in a campaign (operationId `startSponsorship`).
 //! - `GET /sponsored-data/vwip/sponsorship/{sponsorId}/{campaignId}/{sessionId}/session-status`
@@ -16,6 +16,8 @@
 //! - `POST /sponsored-data/vwip/campaign/{sponsorId}/{campaignId}/alert-subscription`
 //!   — subscribe a campaign's webhook to alert notifications (operationId
 //!   `configureAlerts`), acknowledged statelessly.
+//! - `POST /sponsored-data/vwip/campaign/management` — pause/resume a campaign
+//!   (operationId `manageCampaign`), acknowledged statelessly.
 //!
 //! ## What it does
 //!
@@ -144,8 +146,23 @@
 //! campaignId's embedded UUID selects a canonical CAMARA error (as with
 //! `getCampaignStatus`); otherwise the request body is validated (a required,
 //! non-empty `webhookUrl`; an optional non-empty `callbackToken`; optional boolean
-//! alert flags) → `400 INVALID_ARGUMENT` on a malformed request, else `200`. The
-//! remaining campaign operation (`manageCampaign`) stays deferred to a later pass.
+//! alert flags) → `400 INVALID_ARGUMENT` on a malformed request, else `200`.
+//!
+//! ## Managing a campaign (`manageCampaign`)
+//!
+//! `POST …/campaign/management` (scope [`CAMPAIGN_MANAGE_SCOPE`]) pauses or resumes
+//! a campaign. Unlike the other campaign operations the `sponsorId`/`campaignId`
+//! ride in the request body (with the `action`), not the path. There is no campaign
+//! store, so — like `configureAlerts` — the operation is a stateless synchronous
+//! acknowledgement: nothing is persisted (a repeat is idempotent) and the
+//! acknowledged `status` reflects the requested `action` directly (`pause` →
+//! `paused`, `resume` → `resumed`; the upstream terminal `completed` state is
+//! unreachable without a store — a documented cut). Two control planes
+//! (docs/DESIGN.md §7): the request body is validated first (well-formed
+//! `sponsorId`/`campaignId`, `action` ∈ {`pause`,`resume`} → `400 INVALID_ARGUMENT`
+//! otherwise); then a reserved trailing-digit suffix on the campaignId's embedded
+//! UUID selects a canonical CAMARA error (as with `getCampaignStatus`), else `200`
+//! with `{ sponsorId, campaignId, requestResult, startTime, status }`.
 
 use axum::body::Bytes;
 use axum::extract::Path;
@@ -183,6 +200,11 @@ const CAMPAIGN_READ_SCOPE: &str = "sponsored-data:campaign:read";
 /// operation, so it carries its own `…:campaign:alerts` scope distinct from the
 /// read scope above.
 const CAMPAIGN_ALERTS_SCOPE: &str = "sponsored-data:campaign:alerts";
+/// Scope required to pause/resume a campaign (CamaraSim-assigned; the upstream
+/// `wip` contract declares no `securitySchemes`). A write-shaped lifecycle
+/// operation, so it carries its own `…:campaign:manage` scope distinct from the
+/// read/alerts scopes above.
+const CAMPAIGN_MANAGE_SCOPE: &str = "sponsored-data:campaign:manage";
 
 /// The sponsored data volume (MB) granted when the request omits `dataVolume` —
 /// the campaign's onboarding default (the spec's `50 MB` example).
@@ -233,6 +255,10 @@ pub fn routes() -> Router {
         .route(
             "/sponsored-data/vwip/campaign/:sponsor_id/:campaign_id/alert-subscription",
             post(configure_alerts),
+        )
+        .route(
+            "/sponsored-data/vwip/campaign/management",
+            post(manage_campaign),
         )
 }
 
@@ -900,6 +926,112 @@ fn configure_alerts_body(sponsor_id: &str, campaign_id: &str) -> Value {
         "sponsorId": sponsor_id,
         "campaignId": campaign_id,
         "requestResult": "Campaign notifications subscription - SUCCESS",
+    })
+}
+
+/// The `manageCampaign` request body — a lifecycle command (pause/resume) on a
+/// campaign. Unlike the other campaign operations the ids ride in the body, not
+/// the path (upstream `POST /campaign/management`). All three fields are required.
+#[derive(Deserialize)]
+struct ManageCampaign {
+    #[serde(rename = "sponsorId")]
+    sponsor_id: Option<String>,
+    #[serde(rename = "campaignId")]
+    campaign_id: Option<String>,
+    action: Option<String>,
+}
+
+/// `POST /sponsored-data/vwip/campaign/management` (operationId `manageCampaign`).
+///
+/// Pauses or resumes a campaign. There is no campaign store, so — like
+/// `configureAlerts` — the operation is a **stateless synchronous acknowledgement**
+/// (mirroring the In-Home `performDeviceAction` / eSIM `profileOperation` legs):
+/// nothing is persisted, so a repeat is idempotent and the acknowledged `status`
+/// reflects the requested `action` directly (`pause` → `paused`, `resume` →
+/// `resumed`; the upstream terminal `completed` state is unreachable without a
+/// store — a documented cut). Requires a token carrying [`CAMPAIGN_MANAGE_SCOPE`].
+///
+/// Two control planes (docs/DESIGN.md §7):
+/// - **Request body.** Required, well-formed `sponsorId`/`campaignId` and an
+///   `action` of `pause`|`resume`; a malformed body or field → `400
+///   INVALID_ARGUMENT`.
+/// - **`campaignId` reserved-error suffix.** As with `getCampaignStatus`, a
+///   reserved trailing-digit suffix on the campaignId's embedded UUID selects a
+///   canonical CAMARA error (e.g. `…404` → `404 NOT_FOUND`, campaign not found).
+///
+/// Body validation runs before the reserved-error plane (a malformed request is a
+/// `400` even on a `…404` campaign, mirroring `configureAlerts`). `x-correlator` is
+/// echoed on every response.
+async fn manage_campaign(claims: Claims, headers: HeaderMap, body: Bytes) -> Response {
+    // Optional correlation header, echoed on every response (CAMARA Commonalities).
+    let correlator = headers.get("x-correlator").cloned();
+
+    // Endpoint authorisation: the token must carry the campaign manage scope.
+    if let Err(e) = claims.require_scope(CAMPAIGN_MANAGE_SCOPE) {
+        return with_correlator(e.into_response(), &correlator);
+    }
+
+    // Body is mandatory (ids + action ride in the body, not the path); parse strictly.
+    let req: ManageCampaign = match serde_json::from_slice(&body) {
+        Ok(req) => req,
+        Err(_) => {
+            return invalid_argument(
+                "Request body is not a valid campaign management request.",
+                &correlator,
+            )
+        }
+    };
+
+    // Required fields, each with its schema pattern.
+    let sponsor_id = match req.sponsor_id.as_deref() {
+        Some(s) if is_sponsor_id(s) => s.to_string(),
+        Some(_) => {
+            return invalid_argument(
+                "`sponsorId` must be `local@domain.tld` (e.g. acme@sponsor.example.com).",
+                &correlator,
+            )
+        }
+        None => return invalid_argument("`sponsorId` is required.", &correlator),
+    };
+    let campaign_id = match req.campaign_id.as_deref() {
+        Some(c) if is_campaign_id(c) => c.to_string(),
+        Some(_) => return invalid_argument("`campaignId` must be `UUID@domain.tld`.", &correlator),
+        None => return invalid_argument("`campaignId` is required.", &correlator),
+    };
+    let action = match req.action.as_deref() {
+        Some("pause") | Some("resume") => req.action.unwrap(),
+        Some(_) => return invalid_argument("`action` must be `pause` or `resume`.", &correlator),
+        None => return invalid_argument("`action` is required.", &correlator),
+    };
+
+    // Reserved-error plane on the campaignId's embedded UUID (mirrors
+    // getCampaignStatus): the UUID part is used, not the whole string, so a sponsor
+    // domain that happens to carry digits never perturbs the case.
+    let uuid_part = campaign_id.split('@').next().unwrap_or(campaign_id.as_str());
+    if let Some(err) = scenarios::reserved_error(uuid_part) {
+        return with_correlator(err.into_response(), &correlator);
+    }
+
+    let body = manage_campaign_body(&sponsor_id, &campaign_id, &action, unix_now());
+    with_correlator((StatusCode::OK, Json(body)).into_response(), &correlator)
+}
+
+/// Build the `200` `manageCampaign` acknowledgement. Pure over its inputs (the
+/// clock is passed as `now`) so the shape is exactly unit-testable. `pause` →
+/// `status: paused`, `resume` → `status: resumed`; `startTime` is the moment the
+/// command was acknowledged.
+fn manage_campaign_body(sponsor_id: &str, campaign_id: &str, action: &str, now: i64) -> Value {
+    let (request_result, status) = if action == "pause" {
+        ("CAMPAIGN PAUSED SUCCESSFULLY", "paused")
+    } else {
+        ("CAMPAIGN RESUMED SUCCESSFULLY", "resumed")
+    };
+    json!({
+        "sponsorId": sponsor_id,
+        "campaignId": campaign_id,
+        "requestResult": request_result,
+        "startTime": rfc3339_utc(now),
+        "status": status,
     })
 }
 
@@ -2413,6 +2545,184 @@ mod tests {
         assert_eq!(
             headers.get("x-correlator").and_then(|v| v.to_str().ok()),
             Some("corr-alerts-err")
+        );
+    }
+
+    // --- manageCampaign ----------------------------------------------------
+
+    /// The campaign-management URL (ids ride in the body, not the path).
+    const MANAGE_URL: &str = "/sponsored-data/vwip/campaign/management";
+
+    /// A `manageCampaign` request body for `action` on the given campaign.
+    fn manage_body(sponsor: &str, campaign: &str, action: &str) -> String {
+        json!({ "sponsorId": sponsor, "campaignId": campaign, "action": action }).to_string()
+    }
+
+    /// The `manageCampaign` acknowledgement maps the action to its result/status,
+    /// echoes the ids and stamps the acknowledgement time — a pure unit.
+    #[test]
+    fn manage_campaign_body_pause_and_resume() {
+        // 2024-06-01T00:00:00Z is 1717200000 unix seconds.
+        let now = 1_717_200_000;
+        let paused = manage_campaign_body(SPONSOR, CAMPAIGN, "pause", now);
+        assert_eq!(paused["sponsorId"], SPONSOR);
+        assert_eq!(paused["campaignId"], CAMPAIGN);
+        assert_eq!(paused["requestResult"], "CAMPAIGN PAUSED SUCCESSFULLY");
+        assert_eq!(paused["status"], "paused");
+        assert_eq!(paused["startTime"], "2024-06-01T00:00:00Z");
+
+        let resumed = manage_campaign_body(SPONSOR, CAMPAIGN, "resume", now);
+        assert_eq!(resumed["requestResult"], "CAMPAIGN RESUMED SUCCESSFULLY");
+        assert_eq!(resumed["status"], "resumed");
+    }
+
+    #[tokio::test]
+    async fn manage_campaign_pause_is_200() {
+        let token = mint_token(CAMPAIGN_MANAGE_SCOPE).await;
+        let (status, _, body) =
+            post_url(Some(&token), MANAGE_URL, &manage_body(SPONSOR, CAMPAIGN, "pause"), None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["sponsorId"], SPONSOR);
+        assert_eq!(body["campaignId"], CAMPAIGN);
+        assert_eq!(body["status"], "paused");
+        assert_eq!(body["requestResult"], "CAMPAIGN PAUSED SUCCESSFULLY");
+        assert!(body["startTime"].is_string());
+    }
+
+    #[tokio::test]
+    async fn manage_campaign_resume_is_200() {
+        let token = mint_token(CAMPAIGN_MANAGE_SCOPE).await;
+        let (status, _, body) =
+            post_url(Some(&token), MANAGE_URL, &manage_body(SPONSOR, CAMPAIGN, "resume"), None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["status"], "resumed");
+        assert_eq!(body["requestResult"], "CAMPAIGN RESUMED SUCCESSFULLY");
+    }
+
+    #[tokio::test]
+    async fn manage_campaign_reserved_suffix_selects_a_canonical_camara_error() {
+        let token = mint_token(CAMPAIGN_MANAGE_SCOPE).await;
+        for (tail, code, http) in [
+            ("404", "NOT_FOUND", StatusCode::NOT_FOUND),
+            ("429", "TOO_MANY_REQUESTS", StatusCode::TOO_MANY_REQUESTS),
+        ] {
+            let body = manage_body(SPONSOR, &campaign_tail(tail), "pause");
+            let (status, _, json) = post_url(Some(&token), MANAGE_URL, &body, None).await;
+            assert_eq!(status, http, "tail {tail}");
+            assert_eq!(json["code"], code, "tail {tail}");
+        }
+    }
+
+    #[tokio::test]
+    async fn manage_campaign_bad_body_is_400() {
+        let token = mint_token(CAMPAIGN_MANAGE_SCOPE).await;
+
+        // Missing sponsorId.
+        let (status, _, body) = post_url(
+            Some(&token),
+            MANAGE_URL,
+            &json!({ "campaignId": CAMPAIGN, "action": "pause" }).to_string(),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "INVALID_ARGUMENT");
+
+        // Missing campaignId.
+        let (status, _, _) = post_url(
+            Some(&token),
+            MANAGE_URL,
+            &json!({ "sponsorId": SPONSOR, "action": "pause" }).to_string(),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        // Malformed campaignId.
+        let (status, _, _) = post_url(
+            Some(&token),
+            MANAGE_URL,
+            &manage_body(SPONSOR, "not-a-uuid@sponsor.example.com", "pause"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        // Missing action.
+        let (status, _, _) = post_url(
+            Some(&token),
+            MANAGE_URL,
+            &json!({ "sponsorId": SPONSOR, "campaignId": CAMPAIGN }).to_string(),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        // Unknown action (not pause/resume).
+        let (status, _, _) =
+            post_url(Some(&token), MANAGE_URL, &manage_body(SPONSOR, CAMPAIGN, "stop"), None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        // Not JSON.
+        let (status, _, _) = post_url(Some(&token), MANAGE_URL, "not json", None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn manage_campaign_bad_body_beats_reserved_suffix() {
+        // An unknown action on a …404 campaign is a 400, not the reserved 404.
+        let token = mint_token(CAMPAIGN_MANAGE_SCOPE).await;
+        let (status, _, body) = post_url(
+            Some(&token),
+            MANAGE_URL,
+            &manage_body(SPONSOR, &campaign_tail("404"), "stop"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "INVALID_ARGUMENT");
+    }
+
+    #[tokio::test]
+    async fn manage_campaign_auth_is_enforced() {
+        let body = manage_body(SPONSOR, CAMPAIGN, "pause");
+        // No token → 401.
+        let (status, _, _) = post_url(None, MANAGE_URL, &body, None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        // The campaign *read* scope does not carry the manage scope → 403.
+        let read = mint_token(CAMPAIGN_READ_SCOPE).await;
+        let (status, _, _) = post_url(Some(&read), MANAGE_URL, &body, None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn manage_campaign_echoes_x_correlator() {
+        let token = mint_token(CAMPAIGN_MANAGE_SCOPE).await;
+        // Success path echoes.
+        let (status, headers, _) = post_url(
+            Some(&token),
+            MANAGE_URL,
+            &manage_body(SPONSOR, CAMPAIGN, "pause"),
+            Some("corr-manage-ok"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-manage-ok")
+        );
+        // Error (404) path echoes too.
+        let (status, headers, _) = post_url(
+            Some(&token),
+            MANAGE_URL,
+            &manage_body(SPONSOR, &campaign_tail("404"), "pause"),
+            Some("corr-manage-err"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-manage-err")
         );
     }
 }
