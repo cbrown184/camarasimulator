@@ -27,9 +27,23 @@ sha2 = { version = "0.10", features = ["oid"] }
 # control over OAuth2 error responses. Already compiled transitively by axum's
 # `Form`, so this adds no binary size — it only makes the dependency direct.
 serde_urlencoded = "0.7"
+# TLS client for `https://` CloudEvents notification sinks (QoD, DESIGN §11 —
+# "prefer rustls over OpenSSL to stay static and small"). Default features are
+# disabled to select the `ring` crypto provider instead of the default
+# `aws-lc-rs`, which needs a C toolchain (cmake + compiler) — `ring` ships
+# pre-built assembly and keeps the build self-contained. Notifications are still
+# written directly over the (TLS-wrapped) stream, so no HTTP-client dep is added.
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+# The Mozilla root CA bundle as static data, so `https://` sink verification needs
+# no access to the host's certificate store (single-node, self-contained).
+webpki-roots = "0.26"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
+# Generate a throwaway self-signed cert for the end-to-end `https://` sink test.
+# `ring` backend (not the default `aws_lc_rs`) to match the runtime and avoid a C
+# toolchain. Dev-only — it never enters the release binary.
+rcgen = { version = "0.13", default-features = false, features = ["ring"] }
 
 # Optimise the release binary for size (see docs/DESIGN.md §11).
 [profile.release]

@@ -15,9 +15,10 @@
 # `…001` `AVAILABLE` session early (see the `notifications` callback). An
 # `ACCESSTOKEN` `sinkCredential` authenticates those callbacks with an
 # `Authorization: Bearer` header, and a `PLAIN` one with an
-# `Authorization: Basic` header (in-memory only, never echoed). TLS
-# (`https://` sink) delivery and the `REFRESHTOKEN` credential type remain
-# deferred. The served spec covers only what is implemented.
+# `Authorization: Basic` header (in-memory only, never echoed). Both `http://`
+# (raw TCP) and `https://` (rustls TLS, server cert verified against the bundled
+# Mozilla roots) sinks are delivered to. Only the `REFRESHTOKEN` credential type
+# remains deferred. The served spec covers only what is implemented.
 openapi: 3.0.3
 info:
   title: Quality On Demand
@@ -64,7 +65,8 @@ info:
     when no session exists for the id. `deleteSession` evicts the session and
     returns `204 No Content`, or `404 NOT_FOUND` for an unknown id; if the session
     was created with a `sink`, it delivers a `qos-status-changed` CloudEvent
-    (`DELETE_REQUESTED`) to that sink (best-effort, `http://` only). Separately, an
+    (`DELETE_REQUESTED`) to that sink (best-effort; `http://` and `https://`).
+    Separately, an
     `AVAILABLE` session created with a `sink` delivers a `DURATION_EXPIRED`
     `qos-status-changed` CloudEvent when it reaches its `expiresAt` (the grant
     lapses and the session is evicted), or — for a `…001` identifier — a
@@ -234,9 +236,9 @@ paths:
           them with an `Authorization: Basic <base64(identifier:secret)>` header
           (RFC 7617); credentials are kept in memory only, never echoed.
           `REFRESHTOKEN` (which needs a token-exchange round trip) is accepted but not
-          applied (documented cut). Delivery is best-effort and only to an
-          `http://` sink — CamaraSim has no TLS client, so an `https://` sink is not
-          delivered to (documented cut).
+          applied (documented cut). Delivery is best-effort to an `http://` sink (raw
+          TCP) or an `https://` sink (rustls TLS; the server certificate is verified
+          against the bundled Mozilla root store).
         cases:
           - input: identifier ending in a reserved error suffix (e.g. …409)
             result: the canonical CAMARA error for that status (…409 → 409 CONFLICT)
@@ -250,6 +252,8 @@ paths:
             result: "the CloudEvent callback carries Authorization: Bearer <accessToken>"
           - input: session created with a sink and a PLAIN sinkCredential (identifier + secret)
             result: "the CloudEvent callback carries Authorization: Basic <base64(identifier:secret)>"
+          - input: session created with an https:// sink
+            result: "the CloudEvent callback is POSTed over rustls TLS (server cert verified against the bundled Mozilla roots)"
           - input: valid request, identifier tail …000 (or no digits)
             result: "201 SessionInfo, qosStatus REQUESTED, no startedAt/expiresAt"
           - input: duration < 1
@@ -276,7 +280,8 @@ paths:
                 reaches its `expiresAt`, and `statusInfo: NETWORK_TERMINATED`
                 shortly after creation for a `…001` `AVAILABLE` session (the
                 simulated network drops it early). Delivery is best-effort,
-                fire-and-forget, and only to an `http://` sink (no TLS client). When
+                fire-and-forget, over an `http://` (raw TCP) or `https://` (rustls
+                TLS, server cert verified against the bundled Mozilla roots) sink. When
                 the session was created with an `ACCESSTOKEN` `sinkCredential`, the
                 request carries an `Authorization: Bearer <accessToken>` header
                 (RFC 6750); with a `PLAIN` `sinkCredential` it carries an
@@ -388,7 +393,7 @@ paths:
           Keyed on the `sessionId` path parameter against the in-memory store:
           delete is single-use, so a second delete of the same id is 404. When a
           deleted session recorded a `sink`, a `qos-status-changed` CloudEvent
-          (`DELETE_REQUESTED`) is delivered to it (best-effort, `http://` only).
+          (`DELETE_REQUESTED`) is delivered to it (best-effort; `http://` or `https://`).
         cases:
           - input: a sessionId of a session that currently exists (created with a sink)
             result: "204 No Content; DELETE_REQUESTED CloudEvent POSTed to the sink"
@@ -654,9 +659,10 @@ components:
             session is deleted, a `DURATION_EXPIRED` event when an `AVAILABLE`
             session reaches its `expiresAt`, and a `NETWORK_TERMINATED` event
             shortly after creation for a `…001` `AVAILABLE` session (the simulated
-            network drops it early); delivery is best-effort and only to an
-            `http://` sink (no TLS client), so an `https://` sink is not delivered to.
-          example: "http://application-server.example.com/notifications"
+            network drops it early); delivery is best-effort to an `http://` sink
+            (raw TCP) or an `https://` sink (rustls TLS, server certificate verified
+            against the bundled Mozilla root store).
+          example: "https://application-server.example.com/notifications"
         sinkCredential:
           type: object
           description: >-

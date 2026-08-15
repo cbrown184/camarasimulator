@@ -201,9 +201,9 @@ CloudEvents notifications on `sink` have begun (`src/apis/quality_on_demand/
 notifications.rs`): deleting a session that was created with a `sink` delivers a
 `qos-status-changed` CloudEvent (`qosStatus: UNAVAILABLE`, `statusInfo:
 DELETE_REQUESTED`) to it — a best-effort, fire-and-forget HTTP POST written over a
-raw `tokio` TCP stream (no HTTP-client dependency; off the request path). Only
-`http://` sinks are delivered to (no TLS client) and delivery is unauthenticated
-(`sinkCredential` unused). The **`DURATION_EXPIRED`** transition is now in place
+raw `tokio` TCP stream (no HTTP-client dependency; off the request path). At this
+point only `http://` sinks were delivered to and delivery was unauthenticated
+(`sinkCredential` unused; both since addressed — see below). The **`DURATION_EXPIRED`** transition is now in place
 too: creating an `AVAILABLE`, sink-bearing session spawns a fire-and-forget async
 timer (`v1::spawn_expiry`, off the request path) that waits until the session's
 `expiresAt`, re-reading it on each wake so an `extend` that pushed the expiry out is
@@ -224,10 +224,14 @@ in a process-global in-memory side-store keyed by `sessionId`
 map so the secret is never echoed by `GET`/`retrieve-sessions`; it is taken
 (single-use) at delivery time, so it drops from memory as the session ends. The
 `PLAIN`/`REFRESHTOKEN` credential types are accepted but not applied (documented
-cut). Only TLS (`https://` sink) delivery remains to complete QoD (deferred — it needs
-a rustls TLS client whose crypto backend pulls a C/cmake toolchain and a large binary
-regression, a dependency trade-off that deserves a deliberate decision, not an
-automated pass).
+cut; `PLAIN` was implemented in a later pass). **TLS (`https://` sink) delivery is
+now in place**, completing QoD and **Phase 3**: `notifications::deliver` parses the
+sink scheme and POSTs an `https://` CloudEvent over a rustls TLS session
+(`deliver_tls`), verifying the server certificate against the bundled Mozilla roots
+(`webpki-roots`); the shared request writer (`write_request<W: AsyncWrite>`) serves
+both the TCP and TLS paths. The rustls `ring` crypto provider is feature-selected
+(not the default `aws-lc-rs`) so the build needs no C/cmake toolchain; the TLS stack
+adds ~965 KB to the release binary. Only `REFRESHTOKEN` remains a documented cut.
 
 **Phase 4 (spatial) has begun.** **Device Location Verification v3** `POST /verify` is
 live at `/location-verification/v3/verify` (scope `location-verification:verify`,
@@ -1220,7 +1224,10 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     - [x] `sinkCredential` auth — ACCESSTOKEN → `Authorization: Bearer` and PLAIN
       → `Authorization: Basic base64(identifier:secret)` (RFC 7617) on the callbacks
       (in-memory credential; REFRESHTOKEN deferred — needs a token-exchange round trip)
-    - [ ] TLS (`https://` sink) delivery (needs a rustls TLS client)
+    - [x] TLS (`https://` sink) delivery — rustls (ring provider) + bundled Mozilla
+      roots (`webpki-roots`); server cert verified. QoD only for now; the identical
+      `http://`-only cut on geofencing (and the Phase 5 sink APIs) is a follow-up now
+      that the TLS client exists.
 
 ### Phase 4 — Spatial
 - [x] Device Location Verification v3 — `POST /verify` (`/location-verification/v3`;
@@ -4281,6 +4288,25 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-15 — QoD: implemented TLS (`https://`) CloudEvents sink delivery, closing
+  the last open Phase 3 item. `notifications::deliver` now parses the sink scheme
+  (`parse_sink` → `SinkTarget{tls,host,port,path}`, default port 80/443) and, for an
+  `https://` sink, POSTs the CloudEvent over a rustls TLS session
+  (`deliver_tls`/`tls_connector`) instead of raw TCP; the server certificate is
+  verified against the bundled Mozilla roots (`webpki-roots`). The HTTP request
+  writer was factored to a generic `write_request<W: AsyncWrite>` shared by the TCP
+  and TLS paths. New deps: `tokio-rustls` (ring provider, not the default aws-lc-rs
+  → no C toolchain; `default-features = false`) + `webpki-roots`; dev-only `rcgen`
+  (ring) for the end-to-end test cert. DESIGN §11-sanctioned (rustls over OpenSSL).
+  Spec: QoD `openapi.yaml` — header note, `createSession`/`deleteSession` prose, the
+  `notifications` callback, and the `sink` schema now describe http+https delivery
+  (removed the "no TLS client" cut); added an https-sink functional case; example
+  sink switched to https. Tests: real TLS round-trip (rustls server with an rcgen
+  self-signed 127.0.0.1 cert, client trusting only it), `write_request` byte-format
+  (auth/no-auth), `parse_sink` http/https/port-443/reject cases. `cargo test` 2483
+  green (was 2479); `cargo build --release` succeeds. Only `REFRESHTOKEN` remains a
+  QoD cut; geofencing/Phase-5 sink APIs can now adopt TLS as a follow-up. — binary:
+  5.0M (5157304 B, +964912 B — the rustls+ring+webpki-roots TLS stack)
 - 2026-08-15 — Network Access Domains vwip: added the Trust Domain update leg
   `PATCH /trust-domains/{trustDomainId}` (`updateTrustDomain`, scope
   `network-access-domains:trust-domains`), the natural next slice after
