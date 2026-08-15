@@ -20,7 +20,10 @@
 #     the canonical CAMARA error; else the subject's trailing three digits fix the
 #     returned ServiceList deterministically.
 # It also serves the single-service `GET /services/{serviceId}` read
-# (getService). The Trust Domain CRUD legs remain to be added in later slices.
+# (getService) and the first stateful Trust Domain leg
+# `POST /trust-domains` (createTrustDomain), backed by the in-memory
+# trust-domain store. The remaining Trust Domain read/update/delete legs and the
+# Trust Domain Device CRUD resource remain to be added in later slices.
 openapi: 3.0.3
 info:
   title: Network Access Domains
@@ -51,6 +54,15 @@ info:
 
     Returns a single **Service** from that catalog by id. It requires the same
     `network-access-domains:services:read` scope.
+
+    ## `POST /trust-domains`
+
+    Creates a **Trust Domain** for one of the caller's services (a `serviceId`, a
+    `name`, an `enabled` flag, and 1-4 `accessDetails`), mints a server-assigned
+    `trustDomainId`, and returns the full `TrustDomain` (`201`). It requires the
+    `network-access-domains:trust-domains` scope. This is CamaraSim's first
+    stateful Trust Domain leg — the created Trust Domain is held in an in-memory
+    store so later read/update/delete legs can address it.
 
     ## Functional cases — the input is the control plane (docs/DESIGN.md §7)
 
@@ -83,11 +95,32 @@ info:
     For all three, a missing/invalid token → `401`; a token without the
     endpoint's scope → `403` (both from the shared resource-server layer).
 
+    **`createTrustDomain`** (`POST /trust-domains`) creates a Trust Domain from a
+    `TrustDomainCreate` body. Three control planes (docs/DESIGN.md §7): the token
+    subject's reserved error suffix → the canonical CAMARA error (an account-level
+    plane, checked first); request validation → `400 INVALID_ARGUMENT`; and the
+    in-memory store — the `trustDomainId` is derived from the `(serviceId, name)`
+    pair, so re-creating the same name for the same service collides → `409`.
+
     ## Documented cuts
 
     - The read-only `getTrustDomainCapabilities`, `getServices` and `getService`
-      legs are implemented so far; the stateful Trust Domain / Trust Domain Device
-      CRUD resources are later slices.
+      legs and the stateful `createTrustDomain` leg are implemented so far; the
+      remaining Trust Domain read/update/delete legs and the Trust Domain Device
+      CRUD resource are later slices.
+    - `createTrustDomain` admits only the access types this provider advertises
+      (Wi-Fi WPA-Personal/Enterprise, Thread STRUCTURED). A canonical but
+      unadvertised `Thread:TLV` access detail → `400 INVALID_ARGUMENT`.
+    - `createTrustDomain` validates the required fields and each access detail's
+      discriminated required keys, but not the nested field *values* (SSID
+      pattern, hex-string lengths, Thread channel range) nor the `policies`
+      object contents (accepted and echoed as-is) — a documented cut.
+    - The write-only WPA `password` is stripped from the `TrustDomain` response.
+    - The `trustDomainId` (and the audit `createdBy`/`modifiedBy`) are
+      deterministic version-5 UUIDs derived from the request, not random —
+      re-creating the same `(serviceId, name)` re-mints the same id (that is how
+      the `409` duplicate is detected). The audit `createdBy`/`modifiedBy`
+      identify the token subject, not a real operator account.
     - `getService` folds a malformed (non-UUID) `serviceId` into the same `404
       NOT_FOUND` as an unknown id (the catalog is regenerated per identity rather
       than stored, so the two are indistinguishable), mirroring the sibling
@@ -214,6 +247,132 @@ paths:
           - input: a token carrying the network-access-domains:trust-domains scope
             result: "200 — the fixed TrustDomainCapabilities document"
           - input: a token without the scope
+            result: "403 PERMISSION_DENIED"
+          - input: no / invalid token
+            result: "401 UNAUTHENTICATED"
+
+  /trust-domains:
+    post:
+      operationId: createTrustDomain
+      summary: Create a Trust Domain
+      description: |
+        Creates a Trust Domain — a group of devices on the subscriber's home
+        network sharing a common access policy — for one of the caller's
+        services. The caller submits a `TrustDomainCreate` (a `serviceId`, a
+        human-readable `name`, an `enabled` flag, and 1–4 `accessDetails`); the
+        simulator mints a server-assigned `trustDomainId`, stores the Trust
+        Domain in memory, and returns the full `TrustDomain` (`201`).
+
+        Three control planes drive the outcome (docs/DESIGN.md §7):
+
+        1. **The token subject** — a reserved error suffix on the authenticated
+           identity selects the canonical CAMARA error (an account-level plane,
+           checked first, mirroring `getServices`/`getService`).
+        2. **Request validation** — a missing/blank/oversized `name`, a missing
+           `enabled`, a missing/malformed `serviceId`, an `accessDetails` that is
+           empty or longer than 4, or an entry whose `accessType` is unknown, is
+           not one this provider advertises (see
+           `GET /trust-domains/capabilities`), or lacks its variant's required
+           keys → `400 INVALID_ARGUMENT`.
+        3. **Store state** — the `trustDomainId` is derived from the
+           `(serviceId, name)` pair, so creating a Trust Domain with the same
+           `name` for the same `serviceId` collides → `409` (duplicate name for
+           service).
+      security:
+        - openId:
+            - network-access-domains:trust-domains
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TrustDomainCreate"
+            examples:
+              wifiPersonal:
+                summary: A Trust Domain with one Wi-Fi WPA-Personal access detail
+                value:
+                  serviceId: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+                  name: "Primary WiFi Network"
+                  description: "Primary home WiFi Network for all devices"
+                  enabled: true
+                  accessDetails:
+                    - accessType: "Wi-Fi:WPA_PERSONAL"
+                      ssid: "my-ssid"
+                      securityMode:
+                        password: "my-password"
+                        securityModeType: "WPA3-Personal"
+      responses:
+        "201":
+          description: The Trust Domain was created.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TrustDomain"
+              examples:
+                created:
+                  summary: The created Trust Domain (write-only password omitted)
+                  value:
+                    id: "b1e0f6a2-9c3d-5e4f-8a1b-2c3d4e5f6a7b"
+                    serviceId: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+                    name: "Primary WiFi Network"
+                    description: "Primary home WiFi Network for all devices"
+                    enabled: true
+                    accessDetails:
+                      - accessType: "Wi-Fi:WPA_PERSONAL"
+                        ssid: "my-ssid"
+                        securityMode:
+                          securityModeType: "WPA3-Personal"
+                    createdAt: "2024-01-01T09:00:00Z"
+                    createdBy: "4a7c9e2d-1b3f-5a6c-9d8e-0f1a2b3c4d5e"
+                    modifiedAt: "2024-01-01T09:00:00Z"
+                    modifiedBy: "4a7c9e2d-1b3f-5a6c-9d8e-0f1a2b3c4d5e"
+        "400":
+          $ref: "../../shared/errors.yaml#/components/responses/InvalidArgument"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "409":
+          $ref: "../../shared/errors.yaml#/components/responses/Conflict"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          createTrustDomain has three control planes (docs/DESIGN.md §7): the
+          token subject's reserved error suffix (checked first), request
+          validation, and the in-memory store (a duplicate name-for-service
+          collides). The trustDomainId is derived from the (serviceId, name)
+          pair, so the same name for the same service re-mints the same id and is
+          rejected as a duplicate.
+        cases:
+          - input: "a valid TrustDomainCreate for a fresh (serviceId, name)"
+            result: "201 — the created TrustDomain (write-only password stripped)"
+          - input: "a second create with the same (serviceId, name)"
+            result: "409 — duplicate name for the service"
+          - input: "a different name for the same serviceId"
+            result: "201 — a distinct Trust Domain"
+          - input: "missing/blank/over-64-char name, missing enabled, or malformed serviceId"
+            result: "400 INVALID_ARGUMENT"
+          - input: "accessDetails empty, longer than 4, or missing a variant's required keys"
+            result: "400 INVALID_ARGUMENT"
+          - input: "an accessType not advertised (e.g. Thread:TLV) or unknown"
+            result: "400 INVALID_ARGUMENT"
+          - input: "the token subject trailing digits are …404"
+            result: "404 NOT_FOUND (reserved error suffix, account-level)"
+          - input: "the token subject trailing digits are …429"
+            result: "429 TOO_MANY_REQUESTS (reserved error suffix, account-level)"
+          - input: a token without the network-access-domains:trust-domains scope
             result: "403 PERMISSION_DENIED"
           - input: no / invalid token
             result: "401 UNAUTHENTICATED"
@@ -742,3 +901,310 @@ components:
           minimum: -180
           maximum: 180
           example: 7.10066
+
+    # --- Trust Domain create (createTrustDomain) --------------------------
+
+    Uuid:
+      type: string
+      format: uuid
+      minLength: 36
+      maxLength: 36
+      pattern: "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+      description: |
+        A UUID (RFC 4122, versions 1-5) using only lowercase hexadecimal
+        characters. CamaraSim mints server-assigned ids (the `trustDomainId`
+        and the audit `createdBy`/`modifiedBy`) as deterministic, name-based
+        version-5 UUIDs.
+      example: "b1e0f6a2-9c3d-5e4f-8a1b-2c3d4e5f6a7b"
+
+    DateTime:
+      type: string
+      format: date-time
+      maxLength: 64
+      description: |
+        An RFC 3339 date-time with a time zone. CamaraSim emits the audit
+        `createdAt`/`modifiedAt` stamps as UTC instants with a `Z` offset.
+      example: "2024-01-01T09:00:00Z"
+
+    Policies:
+      type: object
+      additionalProperties: true
+      description: |
+        Trust Domain policy limits (max devices, per-domain up/downstream
+        bandwidth, egress allow-list) a caller may configure. CamaraSim accepts
+        and echoes the object but does not validate its contents against the
+        advertised capabilities — the full `Policies` shape is a documented cut.
+        See `GET /trust-domains/capabilities` for the supported policy ranges.
+
+    WpaPersonalDetail:
+      type: object
+      additionalProperties: false
+      description: WPA Personal security mode configuration for Wi-Fi networks.
+      required:
+        - password
+      properties:
+        password:
+          type: string
+          writeOnly: true
+          minLength: 8
+          maxLength: 255
+          pattern: "^[\\x20-\\x7E]{8,63}$"
+          description: |
+            The pre-shared key for the WPA Personal Wi-Fi network. Write-only —
+            it is never echoed in a `TrustDomain` response.
+          example: "my-password"
+        securityModeType:
+          type: string
+          enum:
+            - WPA2-Personal
+            - WPA2-WPA3-Personal
+            - WPA3-Personal
+          description: |
+            The security mode type for the WPA Personal Wi-Fi network. Leave
+            blank to auto-select.
+          example: "WPA3-Personal"
+
+    WpaEnterpriseDetail:
+      type: object
+      additionalProperties: false
+      description: WPA Enterprise security mode configuration for Wi-Fi networks.
+      required:
+        - securityModeType
+      properties:
+        authServer:
+          type: string
+          maxLength: 255
+          description: The authentication server for the WPA Enterprise Wi-Fi network.
+          example: "1.2.3.4"
+        securityModeType:
+          type: string
+          enum:
+            - WPA2-Enterprise
+            - WPA3-Enterprise
+          description: The security mode type for the WPA Enterprise Wi-Fi network.
+          example: "WPA3-Enterprise"
+
+    WiFiWpaPersonalAccessDetail:
+      type: object
+      additionalProperties: false
+      description: Access details for Wi-Fi networks using WPA Personal security mode.
+      required:
+        - accessType
+        - securityMode
+      properties:
+        accessType:
+          type: string
+          enum:
+            - "Wi-Fi:WPA_PERSONAL"
+          example: "Wi-Fi:WPA_PERSONAL"
+        ssid:
+          type: string
+          minLength: 2
+          maxLength: 32
+          pattern: "^(?! )[\\x20-\\x7E]{2,32}(?<! )$"
+          description: SSID (2-32 printable ASCII characters, no leading/trailing space).
+          example: "my-ssid"
+        securityMode:
+          $ref: "#/components/schemas/WpaPersonalDetail"
+
+    WiFiWpaEnterpriseAccessDetail:
+      type: object
+      additionalProperties: false
+      description: Access details for Wi-Fi networks using WPA Enterprise security mode.
+      required:
+        - accessType
+        - securityMode
+      properties:
+        accessType:
+          type: string
+          enum:
+            - "Wi-Fi:WPA_ENTERPRISE"
+          example: "Wi-Fi:WPA_ENTERPRISE"
+        ssid:
+          type: string
+          minLength: 2
+          maxLength: 32
+          pattern: "^(?! )[\\x20-\\x7E]{2,32}(?<! )$"
+          description: SSID (2-32 printable ASCII characters, no leading/trailing space).
+          example: "my-ssid"
+        securityMode:
+          $ref: "#/components/schemas/WpaEnterpriseDetail"
+
+    ThreadStructuredAccessDetail:
+      type: object
+      additionalProperties: false
+      description: Access details for Thread networks using the structured format.
+      required:
+        - accessType
+        - channel
+        - extendedPanId
+        - networkKey
+        - networkName
+        - panId
+      properties:
+        accessType:
+          type: string
+          enum:
+            - "Thread:STRUCTURED"
+          example: "Thread:STRUCTURED"
+        channel:
+          type: integer
+          format: int32
+          minimum: 11
+          maximum: 26
+          description: The Thread channel (IEEE 802.15.4 channel number).
+          example: 13
+        extendedPanId:
+          type: string
+          pattern: "^[0-9a-fA-F]{16}$"
+          maxLength: 16
+          description: The Extended PAN ID (16 hex digits).
+          example: "d63e8e3e495ebbc3"
+        networkKey:
+          type: string
+          pattern: "^[0-9a-fA-F]{32}$"
+          maxLength: 32
+          description: The Thread Network Key (32 hex digits).
+          example: "dfd34f0f05cad978ec4e32b0413038ff"
+        networkName:
+          type: string
+          minLength: 1
+          maxLength: 16
+          description: The Thread Network Name (1-16 ASCII characters).
+          example: "Spec-Thread-B3AF"
+        panId:
+          type: string
+          pattern: "^[0-9a-fA-F]{4}$"
+          maxLength: 4
+          description: The PAN ID (4 hex digits).
+          example: "d63e"
+
+    ThreadTlvAccessDetail:
+      type: object
+      additionalProperties: false
+      description: |
+        Access details for Thread networks using the TLV-encoded operational
+        dataset. Present in the canonical schema, but **not advertised** by this
+        provider (see `GET /trust-domains/capabilities`), so `createTrustDomain`
+        rejects a Thread:TLV access detail with `400 INVALID_ARGUMENT`.
+      required:
+        - accessType
+        - operationalDataset
+      properties:
+        accessType:
+          type: string
+          enum:
+            - "Thread:TLV"
+          example: "Thread:TLV"
+        operationalDataset:
+          type: string
+          maxLength: 255
+          description: The Thread operational dataset encoded as a TLV hex string.
+          example: "0e08000000000000010010000102030405060708090a0b0c0d0e0f"
+
+    AccessDetail:
+      oneOf:
+        - $ref: "#/components/schemas/WiFiWpaPersonalAccessDetail"
+        - $ref: "#/components/schemas/WiFiWpaEnterpriseAccessDetail"
+        - $ref: "#/components/schemas/ThreadStructuredAccessDetail"
+        - $ref: "#/components/schemas/ThreadTlvAccessDetail"
+      discriminator:
+        propertyName: accessType
+        mapping:
+          "Wi-Fi:WPA_PERSONAL": "#/components/schemas/WiFiWpaPersonalAccessDetail"
+          "Wi-Fi:WPA_ENTERPRISE": "#/components/schemas/WiFiWpaEnterpriseAccessDetail"
+          "Thread:STRUCTURED": "#/components/schemas/ThreadStructuredAccessDetail"
+          "Thread:TLV": "#/components/schemas/ThreadTlvAccessDetail"
+      required:
+        - accessType
+      description: |
+        Network access details for one access type. `accessType` is the
+        discriminator; the remaining properties belong to the matching variant.
+
+    TrustDomainUpdate:
+      type: object
+      description: The updatable fields of a Trust Domain.
+      properties:
+        name:
+          type: string
+          maxLength: 64
+          description: Human-readable name for the Trust Domain.
+          example: "Primary WiFi Network"
+        description:
+          type: string
+          maxLength: 255
+          description: Detailed description of the Trust Domain.
+          example: "Primary home WiFi Network for all devices"
+        enabled:
+          type: boolean
+          description: Whether the Trust Domain is currently enabled.
+          example: true
+        expiration:
+          allOf:
+            - $ref: "#/components/schemas/DateTime"
+          description: |
+            The expiration date and time of the Trust Domain. If omitted, the
+            Trust Domain does not automatically expire.
+        policies:
+          $ref: "#/components/schemas/Policies"
+        accessDetails:
+          type: array
+          minItems: 1
+          maxItems: 4
+          description: |
+            The access configurations that define how devices may join the Trust
+            Domain (1-4 entries). On creation the full list must be supplied.
+          items:
+            $ref: "#/components/schemas/AccessDetail"
+
+    TrustDomainCreate:
+      allOf:
+        - $ref: "#/components/schemas/TrustDomainUpdate"
+        - type: object
+          properties:
+            serviceId:
+              $ref: "#/components/schemas/ServiceId"
+      required:
+        - name
+        - enabled
+        - accessDetails
+        - serviceId
+      description: The request body used to create a Trust Domain.
+
+    TrustDomain:
+      allOf:
+        - type: object
+          required:
+            - id
+          properties:
+            id:
+              allOf:
+                - $ref: "#/components/schemas/Uuid"
+              readOnly: true
+              description: The server-assigned Trust Domain identifier.
+        - $ref: "#/components/schemas/TrustDomainCreate"
+        - type: object
+          properties:
+            createdAt:
+              allOf:
+                - $ref: "#/components/schemas/DateTime"
+              readOnly: true
+              description: When the Trust Domain was created.
+            createdBy:
+              allOf:
+                - $ref: "#/components/schemas/Uuid"
+              readOnly: true
+              description: The identity that created the Trust Domain.
+            modifiedAt:
+              allOf:
+                - $ref: "#/components/schemas/DateTime"
+              readOnly: true
+              description: When the Trust Domain was last modified.
+            modifiedBy:
+              allOf:
+                - $ref: "#/components/schemas/Uuid"
+              readOnly: true
+              description: The identity that last modified the Trust Domain.
+      description: |
+        A Trust Domain. On the `createTrustDomain` response the write-only WPA
+        `password` inside any `accessDetails` entry is omitted.

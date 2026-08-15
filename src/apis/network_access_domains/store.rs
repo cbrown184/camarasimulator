@@ -1,0 +1,63 @@
+//! In-memory Network Access Domains **Trust Domain store** (docs/DESIGN.md §4,
+//! §5 — "in-memory stores", single node).
+//!
+//! Network Access Domains becomes **stateful** the moment a caller can *create* a
+//! Trust Domain: `POST /trust-domains` (`createTrustDomain`) mints a
+//! `trustDomainId` and remembers the rendered `TrustDomain` so the later read /
+//! update / delete legs can address it. This module is that state. It mirrors
+//! [`crate::apis::edge_application_management::store`]: a process-global
+//! `HashMap` guarded by a `std::sync::Mutex`, the lock held only for the map
+//! read/write and never across an `.await`, so it never blocks the async runtime.
+//!
+//! The stored value is the rendered `TrustDomain` JSON, keyed by its minted
+//! `trustDomainId`. The id is derived deterministically from the Trust Domain's
+//! identity — the `(serviceId, name)` pair
+//! ([`crate::apis::network_access_domains::vwip::trust_domain_id`]) — so
+//! re-creating a Trust Domain with the *same* name for the *same* service hits
+//! the *same* id, which is exactly how [`insert`] detects the duplicate the
+//! CAMARA `409` (duplicate name for service) case reports.
+
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
+
+use serde_json::Value;
+
+/// The process-global Trust Domain store: `trustDomainId` → rendered
+/// `TrustDomain` JSON. In-memory only (single node, per DESIGN §4).
+fn store() -> &'static Mutex<HashMap<String, Value>> {
+    static STORE: OnceLock<Mutex<HashMap<String, Value>>> = OnceLock::new();
+    STORE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Store `trust_domain` under `id`, unless one already exists under that id.
+/// Because `id` is derived from the `(serviceId, name)` pair, an existing id
+/// means a Trust Domain with the *same* name has already been created for the
+/// *same* service.
+///
+/// Returns `true` when the Trust Domain was newly inserted, `false` when one
+/// already existed — `createTrustDomain` maps the latter to the CAMARA `409`
+/// (duplicate name for service). The whole check-and-insert runs under a single
+/// lock hold (never across an `.await`), so two concurrent creates of the same
+/// `(serviceId, name)` can't both win.
+pub fn insert(id: String, trust_domain: Value) -> bool {
+    let mut map = store()
+        .lock()
+        .expect("network-access-domains trust-domain store not poisoned");
+    if map.contains_key(&id) {
+        return false;
+    }
+    map.insert(id, trust_domain);
+    true
+}
+
+/// Fetch the `TrustDomain` stored under `id`, or `None` if no such Trust Domain
+/// exists. Backs the tests that assert a created Trust Domain persists (and the
+/// later `getTrustDomain` read leg).
+#[cfg(test)]
+pub fn get(id: &str) -> Option<Value> {
+    store()
+        .lock()
+        .expect("network-access-domains trust-domain store not poisoned")
+        .get(id)
+        .cloned()
+}

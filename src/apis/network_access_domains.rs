@@ -11,11 +11,15 @@
 //!   yet, so mounted at its canonical `vwip` base path like Network Access Devices
 //!   and the other pre-1.0 wip APIs).
 //!
-//! Implemented so far (all read-only): the provider-level
-//! `GET /trust-domains/capabilities` leg and the `GET /services` catalog
-//! (`getServices`). The single-service `GET /services/{serviceId}` read and the
-//! stateful Trust Domain / device CRUD resources are later slices.
+//! Implemented so far: the read-only provider-level
+//! `GET /trust-domains/capabilities` leg, the `GET /services` catalog
+//! (`getServices`), the single-service `GET /services/{serviceId}` read
+//! (`getService`), and the first **stateful** Trust Domain leg
+//! `POST /trust-domains` (`createTrustDomain`, backed by the in-memory
+//! [`store`]). The remaining Trust Domain read/update/delete legs and the Trust
+//! Domain Device CRUD resource are later slices.
 
+pub mod store;
 pub mod vwip;
 
 use axum::Router;

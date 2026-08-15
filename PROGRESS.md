@@ -3087,8 +3087,27 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
       first); else the `serviceId` vs the catalog — a held id → `200` that
       `Service`, any other id (unknown / another identity's / malformed) → `404
       NOT_FOUND` (malformed folds into 404 — no store to distinguish it). No new
-      dep. The stateful Trust Domain / Trust Domain Device CRUD legs remain later
-      slices.
+      dep.
+    - [x] `POST /trust-domains` (`createTrustDomain`, scope
+      `network-access-domains:trust-domains`) — the first **stateful** Trust
+      Domain leg. Creates a Trust Domain from a `TrustDomainCreate` (`serviceId`,
+      `name`, `enabled`, 1–4 `accessDetails`), mints a server-assigned strict-v5
+      `trustDomainId`, renders the full `TrustDomain` (read-only `id` + audit
+      stamps), persists it in a new in-memory store
+      (`src/apis/network_access_domains/store.rs`; `Mutex<HashMap>`, no new dep,
+      mirroring the edge-app store), `201`. Three control planes (DESIGN §7):
+      token-subject reserved-error suffix → canonical CAMARA error (account-level,
+      checked first, mirroring the reads); request validation → 400
+      INVALID_ARGUMENT (missing/blank/>64 `name`, missing `enabled`,
+      missing/non-UUID `serviceId`, `accessDetails` empty/>4, or an entry whose
+      `accessType` is unknown/unadvertised — e.g. `Thread:TLV` → 400 — or lacks
+      its variant's required keys); store state → `409 CONFLICT` when the same
+      `name` already exists for the same `serviceId` (the `trustDomainId` is
+      derived from that pair, so a duplicate collides). Write-only WPA `password`
+      stripped from the response. Nested access-detail *values* + `policies`
+      contents validated only for presence/shape (documented cut). The remaining
+      Trust Domain read/update/delete legs and the Trust Domain Device CRUD
+      resource remain later slices.
 
 ## Cross-cutting (do alongside the item that needs it)
 - [~] `errors.rs`: base CAMARA error model done (`src/errors.rs`, `specs/shared/errors.yaml`); per-version catalogs still TODO (DESIGN §8)
@@ -4230,6 +4249,30 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-15 — Network Access Domains vwip: added the first **stateful** Trust Domain
+  leg `POST /trust-domains` (`createTrustDomain`, scope
+  `network-access-domains:trust-domains`). Verified the upstream operation + the
+  `TrustDomainCreate`/`TrustDomain`/`AccessDetail` schemas against the canonical
+  `NetworkAccessManagement` repo (`TrustDomains.yaml`, `AccessDetail.yaml`,
+  `NAM_Common.yaml`). New in-memory store (`src/apis/network_access_domains/store.rs`;
+  `Mutex<HashMap>`, lock never across await, no new dep — mirrors the edge-app store);
+  the `trustDomainId` is a strict RFC 4122 v5 UUID derived from the `(serviceId, name)`
+  pair so a duplicate name-for-service collides → `409`. Three control planes (DESIGN §7):
+  token-subject reserved-error suffix (account-level, checked first, mirroring the reads);
+  request validation → 400 (name/enabled/serviceId + accessDetails cardinality & each
+  entry's advertised `accessType` + variant required keys; unadvertised `Thread:TLV` → 400);
+  store state → 409 on duplicate. Write-only WPA `password` stripped from the response;
+  nested access-detail values + `policies` contents a documented presence-only cut. Spec:
+  new `/trust-domains` POST path (op, requestBody, 201 `TrustDomain` example, reserved-error
+  + standard responses, `x-camarasim-scenarios`) + `TrustDomainCreate`/`TrustDomainUpdate`/
+  `TrustDomain`/`AccessDetail` (+ 4 variants) / `WpaPersonalDetail`/`WpaEnterpriseDetail`/
+  `Uuid`/`DateTime`/`Policies` schemas; refreshed header + description + documented cuts.
+  No new dep (reuses sha2). Tests: +15 (6 units: trust_domain_id strict-v5/identity-keyed,
+  is_uuid, validate accept/reject-missing/reject-unadvertised, render strips password+audit;
+  9 router integration: 201 persists via store, duplicate→409, distinct-name→201,
+  reserved-`…404`→404, reserved-`…429`→429, missing-accessDetails→400, Thread:TLV→400,
+  wrong-scope→403, no-token→401, correlator echo). `cargo test` 2451 green (was 2436);
+  `cargo build --release` succeeds. — binary: 4.0M (4164192 B, +31000 B)
 - 2026-08-14 — Network Access Domains vwip: enriched the Services read legs with the
   deterministic **`serviceSite.location.geographicPoint`** (WGS-84 point) — moving it from a
   documented cut to implemented (a small, stateless, non-spatial slice, phase-disciplined; the
