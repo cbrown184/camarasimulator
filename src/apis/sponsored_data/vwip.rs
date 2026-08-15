@@ -1,6 +1,6 @@
 //! Sponsored Data **vwip** (CAMARA Sponsored Data, work-in-progress).
 //!
-//! Five endpoints:
+//! Six endpoints:
 //! - `POST /sponsored-data/vwip/sponsorship` — start a data-sponsorship session
 //!   for a subscriber in a campaign (operationId `startSponsorship`).
 //! - `GET /sponsored-data/vwip/sponsorship/{sponsorId}/{campaignId}/{sessionId}/session-status`
@@ -13,6 +13,9 @@
 //! - `GET /sponsored-data/vwip/campaign/{sponsorId}/{campaignId}/active-sponsorships`
 //!   — list a campaign's currently-active sessions (operationId
 //!   `getActiveSponsorships`).
+//! - `POST /sponsored-data/vwip/campaign/{sponsorId}/{campaignId}/alert-subscription`
+//!   — subscribe a campaign's webhook to alert notifications (operationId
+//!   `configureAlerts`), acknowledged statelessly.
 //!
 //! ## What it does
 //!
@@ -123,8 +126,26 @@
 //! `(sponsorId, campaignId)` and filtered to the [`is_active`] sessions (inside
 //! their window with data remaining — the same condition `getSessionStatus`
 //! reports as `active`). An empty result is `200` with an empty array (a CAMARA
-//! list never `404`s). The remaining campaign operations (`configureAlerts`,
-//! `manageCampaign`) stay deferred to later passes.
+//! list never `404`s).
+//!
+//! ## Configuring campaign alerts (`configureAlerts`)
+//!
+//! `POST …/campaign/{sponsorId}/{campaignId}/alert-subscription` (scope
+//! [`CAMPAIGN_ALERTS_SCOPE`]) subscribes a sponsor's `webhookUrl` to a campaign's
+//! alert notifications — data-volume-threshold, campaign-expiry and
+//! data-exhausted events (each an opt-in boolean flag). There is no campaign store
+//! and no background worker to fire the alerts, so the subscription is **not
+//! persisted**: the operation is a stateless synchronous acknowledgement (like the
+//! In-Home `performDeviceAction` / eSIM `profileOperation` legs) that validates the
+//! request and answers `200` with `{ sponsorId, campaignId, requestResult }`. The
+//! natural-end alert callbacks themselves stay a documented cut, consistent with
+//! the deferred `validity_expired`/`data_exhausted` session webhooks above. Two
+//! control planes (docs/DESIGN.md §7): a reserved trailing-digit suffix on the
+//! campaignId's embedded UUID selects a canonical CAMARA error (as with
+//! `getCampaignStatus`); otherwise the request body is validated (a required,
+//! non-empty `webhookUrl`; an optional non-empty `callbackToken`; optional boolean
+//! alert flags) → `400 INVALID_ARGUMENT` on a malformed request, else `200`. The
+//! remaining campaign operation (`manageCampaign`) stays deferred to a later pass.
 
 use axum::body::Bytes;
 use axum::extract::Path;
@@ -157,6 +178,11 @@ const DELETE_SCOPE: &str = "sponsored-data:sponsorship:delete";
 /// Scope required to read a campaign's status (CamaraSim-assigned; the upstream
 /// `wip` contract declares no `securitySchemes`).
 const CAMPAIGN_READ_SCOPE: &str = "sponsored-data:campaign:read";
+/// Scope required to subscribe a campaign's alert notifications (CamaraSim-assigned;
+/// the upstream `wip` contract declares no `securitySchemes`). A write-shaped
+/// operation, so it carries its own `…:campaign:alerts` scope distinct from the
+/// read scope above.
+const CAMPAIGN_ALERTS_SCOPE: &str = "sponsored-data:campaign:alerts";
 
 /// The sponsored data volume (MB) granted when the request omits `dataVolume` —
 /// the campaign's onboarding default (the spec's `50 MB` example).
@@ -203,6 +229,10 @@ pub fn routes() -> Router {
         .route(
             "/sponsored-data/vwip/campaign/:sponsor_id/:campaign_id/active-sponsorships",
             get(get_active_sponsorships),
+        )
+        .route(
+            "/sponsored-data/vwip/campaign/:sponsor_id/:campaign_id/alert-subscription",
+            post(configure_alerts),
         )
 }
 
@@ -755,6 +785,121 @@ fn active_sponsorships_body(
         "campaignId": campaign_id,
         "activeSponsorships": items,
         "totalCount": total,
+    })
+}
+
+/// The `configureAlerts` request body — a webhook subscription to a campaign's
+/// alert notifications. The upstream `wip` schema marks the request body required
+/// but lists no per-field `required` array; CamaraSim tightens `webhookUrl` to
+/// required (a subscription needs a destination, mirroring `startSponsorship`) and
+/// leaves the rest optional. `callbackToken` authenticates the callbacks (any
+/// non-empty string; looser than `startSponsorship`'s v4-UUID pattern, matching
+/// this operation's looser upstream schema). The three flags are opt-in booleans.
+#[derive(Deserialize)]
+struct ConfigureAlerts {
+    #[serde(rename = "webhookUrl")]
+    webhook_url: Option<String>,
+    #[serde(rename = "callbackToken")]
+    callback_token: Option<String>,
+    #[serde(rename = "alertDataVolumeThresholds")]
+    #[allow(dead_code)] // parsed for validation; not persisted (no alert worker).
+    alert_data_volume_thresholds: Option<bool>,
+    #[serde(rename = "campaignExpiryNotification")]
+    #[allow(dead_code)]
+    campaign_expiry_notification: Option<bool>,
+    #[serde(rename = "dataVolumeExhausted")]
+    #[allow(dead_code)]
+    data_volume_exhausted: Option<bool>,
+}
+
+/// `POST /sponsored-data/vwip/campaign/{sponsorId}/{campaignId}/alert-subscription`
+/// (operationId `configureAlerts`).
+///
+/// Subscribes a campaign's `webhookUrl` to alert notifications. There is no
+/// campaign store and no background worker to fire alerts, so nothing is persisted
+/// — the operation is a **stateless synchronous acknowledgement** (mirroring the
+/// In-Home `performDeviceAction` / eSIM `profileOperation` legs). Requires a token
+/// carrying [`CAMPAIGN_ALERTS_SCOPE`].
+///
+/// Two control planes (docs/DESIGN.md §7):
+/// - **`campaignId` reserved-error suffix.** As with `getCampaignStatus`, a
+///   reserved trailing-digit suffix on the campaignId's embedded UUID selects a
+///   canonical CAMARA error (e.g. `…404` → `404 NOT_FOUND`, campaign not found).
+/// - **Request body.** A required, non-empty `webhookUrl`; an optional, non-empty
+///   `callbackToken`; optional boolean alert flags. A malformed body or field →
+///   `400 INVALID_ARGUMENT`; otherwise `200` with the subscription acknowledgement.
+///
+/// Body validation runs before the reserved-error plane (a malformed request is a
+/// `400` even on a `…404` campaign, mirroring `startSponsorship`). Malformed path
+/// identifiers → `400 INVALID_ARGUMENT`. `x-correlator` is echoed on every
+/// response.
+async fn configure_alerts(
+    claims: Claims,
+    headers: HeaderMap,
+    Path((sponsor_id, campaign_id)): Path<(String, String)>,
+    body: Bytes,
+) -> Response {
+    // Optional correlation header, echoed on every response (CAMARA Commonalities).
+    let correlator = headers.get("x-correlator").cloned();
+
+    // Endpoint authorisation: the token must carry the campaign alerts scope.
+    if let Err(e) = claims.require_scope(CAMPAIGN_ALERTS_SCOPE) {
+        return with_correlator(e.into_response(), &correlator);
+    }
+
+    // The path identifiers must be well-formed (mirrors getCampaignStatus).
+    if !is_sponsor_id(&sponsor_id) {
+        return invalid_argument(
+            "`sponsorId` must be `local@domain.tld` (e.g. acme@sponsor.example.com).",
+            &correlator,
+        );
+    }
+    if !is_campaign_id(&campaign_id) {
+        return invalid_argument("`campaignId` must be `UUID@domain.tld`.", &correlator);
+    }
+
+    // Body is mandatory; parse strictly (a non-boolean flag or bad shape → 400).
+    let req: ConfigureAlerts = match serde_json::from_slice(&body) {
+        Ok(req) => req,
+        Err(_) => {
+            return invalid_argument(
+                "Request body is not a valid alert subscription.",
+                &correlator,
+            )
+        }
+    };
+
+    // `webhookUrl` is required and non-empty (a subscription needs a destination).
+    match req.webhook_url.as_deref() {
+        Some(u) if !u.is_empty() => {}
+        Some(_) => return invalid_argument("`webhookUrl` must not be empty.", &correlator),
+        None => return invalid_argument("`webhookUrl` is required.", &correlator),
+    }
+    // `callbackToken` is optional but, when present, must be non-empty.
+    if matches!(req.callback_token.as_deref(), Some("")) {
+        return invalid_argument("`callbackToken` must not be empty.", &correlator);
+    }
+
+    // Reserved-error plane on the campaignId's embedded UUID (mirrors
+    // getCampaignStatus): the UUID part is used, not the whole string, so a sponsor
+    // domain that happens to carry digits never perturbs the case.
+    let uuid_part = campaign_id.split('@').next().unwrap_or(campaign_id.as_str());
+    if let Some(err) = scenarios::reserved_error(uuid_part) {
+        return with_correlator(err.into_response(), &correlator);
+    }
+
+    let body = configure_alerts_body(&sponsor_id, &campaign_id);
+    with_correlator((StatusCode::OK, Json(body)).into_response(), &correlator)
+}
+
+/// Build the `200` `configureAlerts` acknowledgement. The canonical response
+/// carries only the echoed `sponsorId`/`campaignId` and a fixed `requestResult`
+/// success string; pure over its inputs so the shape is exactly unit-testable.
+fn configure_alerts_body(sponsor_id: &str, campaign_id: &str) -> Value {
+    json!({
+        "sponsorId": sponsor_id,
+        "campaignId": campaign_id,
+        "requestResult": "Campaign notifications subscription - SUCCESS",
     })
 }
 
@@ -2061,6 +2206,213 @@ mod tests {
         assert_eq!(
             headers.get("x-correlator").and_then(|v| v.to_str().ok()),
             Some("corr-active-err")
+        );
+    }
+
+    // --- configureAlerts ---------------------------------------------------
+
+    /// Build the `alert-subscription` URL, percent-encoding the `@` in the
+    /// sponsor/campaign path segments (mirrors `campaign_status_url`).
+    fn alerts_url(sponsor: &str, campaign: &str) -> String {
+        format!(
+            "/sponsored-data/vwip/campaign/{}/{}/alert-subscription",
+            sponsor.replace('@', "%40"),
+            campaign.replace('@', "%40"),
+        )
+    }
+
+    /// POST an arbitrary URL with a JSON body, returning status/headers/JSON (the
+    /// module's `post` helper is pinned to the sponsorship BASE path).
+    async fn post_url(
+        token: Option<&str>,
+        url: &str,
+        body: &str,
+        correlator: Option<&str>,
+    ) -> (StatusCode, HeaderMap, Value) {
+        let mut builder = Request::builder()
+            .method("POST")
+            .uri(url)
+            .header("host", HOST)
+            .header("content-type", "application/json");
+        if let Some(t) = token {
+            builder = builder.header("authorization", format!("Bearer {t}"));
+        }
+        if let Some(c) = correlator {
+            builder = builder.header("x-correlator", c);
+        }
+        let request = builder.body(Body::from(body.to_string())).unwrap();
+        let response = app().oneshot(request).await.unwrap();
+        let status = response.status();
+        let headers = response.headers().clone();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, headers, json)
+    }
+
+    /// The `configureAlerts` acknowledgement echoes the ids and a fixed result — a
+    /// pure unit.
+    #[test]
+    fn configure_alerts_body_echoes_ids_and_result() {
+        let body = configure_alerts_body(SPONSOR, CAMPAIGN);
+        assert_eq!(body["sponsorId"], SPONSOR);
+        assert_eq!(body["campaignId"], CAMPAIGN);
+        assert_eq!(body["requestResult"], "Campaign notifications subscription - SUCCESS");
+    }
+
+    #[tokio::test]
+    async fn configure_alerts_happy_path_is_200() {
+        let token = mint_token(CAMPAIGN_ALERTS_SCOPE).await;
+        let req = json!({ "webhookUrl": WEBHOOK }).to_string();
+        let (status, _, body) = post_url(Some(&token), &alerts_url(SPONSOR, CAMPAIGN), &req, None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["sponsorId"], SPONSOR);
+        assert_eq!(body["campaignId"], CAMPAIGN);
+        assert_eq!(body["requestResult"], "Campaign notifications subscription - SUCCESS");
+    }
+
+    #[tokio::test]
+    async fn configure_alerts_accepts_token_and_optional_flags() {
+        let token = mint_token(CAMPAIGN_ALERTS_SCOPE).await;
+        let req = json!({
+            "webhookUrl": WEBHOOK,
+            "callbackToken": CB_TOKEN,
+            "alertDataVolumeThresholds": true,
+            "campaignExpiryNotification": false,
+            "dataVolumeExhausted": true,
+        })
+        .to_string();
+        let (status, _, _) = post_url(Some(&token), &alerts_url(SPONSOR, CAMPAIGN), &req, None).await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn configure_alerts_reserved_suffix_selects_a_canonical_camara_error() {
+        let token = mint_token(CAMPAIGN_ALERTS_SCOPE).await;
+        let req = json!({ "webhookUrl": WEBHOOK }).to_string();
+        for (tail, code, http) in [
+            ("404", "NOT_FOUND", StatusCode::NOT_FOUND),
+            ("429", "TOO_MANY_REQUESTS", StatusCode::TOO_MANY_REQUESTS),
+        ] {
+            let (status, _, body) =
+                post_url(Some(&token), &alerts_url(SPONSOR, &campaign_tail(tail)), &req, None).await;
+            assert_eq!(status, http, "tail {tail}");
+            assert_eq!(body["code"], code, "tail {tail}");
+        }
+    }
+
+    #[tokio::test]
+    async fn configure_alerts_bad_body_is_400() {
+        let token = mint_token(CAMPAIGN_ALERTS_SCOPE).await;
+        let url = alerts_url(SPONSOR, CAMPAIGN);
+
+        // Missing webhookUrl.
+        let (status, _, body) = post_url(Some(&token), &url, &json!({}).to_string(), None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "INVALID_ARGUMENT");
+
+        // Empty webhookUrl.
+        let (status, _, _) =
+            post_url(Some(&token), &url, &json!({ "webhookUrl": "" }).to_string(), None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        // Empty callbackToken.
+        let (status, _, _) = post_url(
+            Some(&token),
+            &url,
+            &json!({ "webhookUrl": WEBHOOK, "callbackToken": "" }).to_string(),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        // A non-boolean alert flag fails strict parsing.
+        let (status, _, _) = post_url(
+            Some(&token),
+            &url,
+            &json!({ "webhookUrl": WEBHOOK, "dataVolumeExhausted": "yes" }).to_string(),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn configure_alerts_bad_body_beats_reserved_suffix() {
+        // A malformed body on a …404 campaign is a 400, not the reserved 404.
+        let token = mint_token(CAMPAIGN_ALERTS_SCOPE).await;
+        let (status, _, body) = post_url(
+            Some(&token),
+            &alerts_url(SPONSOR, &campaign_tail("404")),
+            &json!({}).to_string(),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "INVALID_ARGUMENT");
+    }
+
+    #[tokio::test]
+    async fn configure_alerts_malformed_ids_are_400() {
+        let token = mint_token(CAMPAIGN_ALERTS_SCOPE).await;
+        let req = json!({ "webhookUrl": WEBHOOK }).to_string();
+        let (status, _, body) =
+            post_url(Some(&token), &alerts_url("not-an-id", CAMPAIGN), &req, None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "INVALID_ARGUMENT");
+        let (status, _, body) = post_url(
+            Some(&token),
+            &alerts_url(SPONSOR, "not-a-uuid@sponsor.example.com"),
+            &req,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "INVALID_ARGUMENT");
+    }
+
+    #[tokio::test]
+    async fn configure_alerts_auth_is_enforced() {
+        let req = json!({ "webhookUrl": WEBHOOK }).to_string();
+        // No token → 401.
+        let (status, _, _) = post_url(None, &alerts_url(SPONSOR, CAMPAIGN), &req, None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        // The campaign *read* scope does not carry the alerts scope → 403.
+        let read = mint_token(CAMPAIGN_READ_SCOPE).await;
+        let (status, _, _) = post_url(Some(&read), &alerts_url(SPONSOR, CAMPAIGN), &req, None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn configure_alerts_echoes_x_correlator() {
+        let token = mint_token(CAMPAIGN_ALERTS_SCOPE).await;
+        let req = json!({ "webhookUrl": WEBHOOK }).to_string();
+        // Success path echoes.
+        let (status, headers, _) = post_url(
+            Some(&token),
+            &alerts_url(SPONSOR, CAMPAIGN),
+            &req,
+            Some("corr-alerts-ok"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-alerts-ok")
+        );
+        // Error (404) path echoes too.
+        let (status, headers, _) = post_url(
+            Some(&token),
+            &alerts_url(SPONSOR, &campaign_tail("404")),
+            &req,
+            Some("corr-alerts-err"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-alerts-err")
         );
     }
 }

@@ -11,16 +11,19 @@
 # (`getSessionStatus`),
 # `DELETE /sponsorship/{sponsorId}/{campaignId}/{sessionId}/revoke`
 # (`revokeSponsorship`),
-# `GET /campaign/{sponsorId}/{campaignId}/campaign-status` (`getCampaignStatus`)
-# and `GET /campaign/{sponsorId}/{campaignId}/active-sponsorships`
-# (`getActiveSponsorships`).
+# `GET /campaign/{sponsorId}/{campaignId}/campaign-status` (`getCampaignStatus`),
+# `GET /campaign/{sponsorId}/{campaignId}/active-sponsorships`
+# (`getActiveSponsorships`) and
+# `POST /campaign/{sponsorId}/{campaignId}/alert-subscription` (`configureAlerts`).
 #
 # Divergences from the upstream CAMARA source (documented cuts):
 #   - The sponsorship **start**, **session-status** read and **revoke**, plus the
-#     campaign **status** (`getCampaignStatus`) and **active-sponsorships** list
-#     (`getActiveSponsorships`), are mounted. The upstream campaign-management
-#     operations (`configureAlerts`, `manageCampaign`) are deferred to later
-#     passes (see PROGRESS.md).
+#     campaign **status** (`getCampaignStatus`), **active-sponsorships** list
+#     (`getActiveSponsorships`) and **alert-subscription** (`configureAlerts`), are
+#     mounted. `configureAlerts` is a stateless acknowledgement — nothing is
+#     persisted (no alert worker), and the natural-end alert callbacks are a cut.
+#     The remaining upstream campaign-management operation (`manageCampaign`) is
+#     deferred to a later pass (see PROGRESS.md).
 #     `startSponsorship` persists the granted session in an in-memory store so
 #     `getSessionStatus` can read it back, `revokeSponsorship` can evict it, and
 #     `getActiveSponsorships` can scan it for a campaign's active sessions.
@@ -41,9 +44,11 @@
 #   - The upstream `wip` contract declares **no** `securitySchemes`; CamaraSim
 #     assigns the canonical `<api>:<resource>:<action>` scopes
 #     `sponsored-data:sponsorship:create` (start),
-#     `sponsored-data:sponsorship:read` (session-status) and
-#     `sponsored-data:sponsorship:delete` (revoke), resolved against the shared
-#     auth spec.
+#     `sponsored-data:sponsorship:read` (session-status),
+#     `sponsored-data:sponsorship:delete` (revoke),
+#     `sponsored-data:campaign:read` (campaign-status / active-sponsorships) and
+#     `sponsored-data:campaign:alerts` (alert-subscription), resolved against the
+#     shared auth spec.
 #   - CamaraSim inlines the request/response schemas and `$ref`s the shared error
 #     model (`../../shared/errors.yaml`) so the served spec resolves without
 #     vendoring the whole Commonalities file.
@@ -664,6 +669,115 @@ paths:
           - input: "no active sessions for the campaign"
             result: "200 with activeSponsorships [] and totalCount 0 (a list never 404s)"
 
+  /campaign/{sponsorId}/{campaignId}/alert-subscription:
+    post:
+      operationId: configureAlerts
+      summary: Subscribe a campaign's webhook to alert notifications
+      description: |
+        Subscribe a sponsor's `webhookUrl` to a campaign's alert notifications:
+        data-volume-threshold alerts (80% of a prepaid campaign's contracted
+        amount), campaign-expiry alerts and data-exhausted alerts — each an opt-in
+        boolean flag. `callbackToken` authenticates the callbacks.
+
+        **CamaraSim behaviour.** There is no campaign store and no background worker
+        to fire the alerts, so the subscription is **not persisted**: the operation
+        is a stateless synchronous acknowledgement (like the In-Home
+        `performDeviceAction` / eSIM `profileOperation` legs) that validates the
+        request and answers `200` with `{ sponsorId, campaignId, requestResult }`.
+        The natural-end alert callbacks themselves are a documented cut, consistent
+        with the deferred `validity_expired`/`data_exhausted` session webhooks.
+
+        Two control planes (docs/DESIGN.md §7): a reserved trailing-digit suffix on
+        the campaignId's embedded UUID selects a canonical CAMARA error (`…404` →
+        404 campaign-not-found, as with `getCampaignStatus`); otherwise the request
+        body is validated (a required, non-empty `webhookUrl`; an optional non-empty
+        `callbackToken`; optional boolean alert flags) → `400 INVALID_ARGUMENT` on a
+        malformed request, else `200`. Body validation runs before the reserved-error
+        plane, so a malformed body is a `400` even on a `…404` campaign. Malformed
+        path identifiers yield `400 INVALID_ARGUMENT`.
+      security:
+        - openId:
+            - sponsored-data:campaign:alerts
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+        - name: sponsorId
+          in: path
+          required: true
+          description: The sponsoring company (`local@domain.tld`).
+          schema:
+            $ref: "#/components/schemas/SponsorId"
+        - name: campaignId
+          in: path
+          required: true
+          description: The campaign (`UUID@domain.tld`); its embedded UUID is the error-plane control.
+          schema:
+            $ref: "#/components/schemas/CampaignId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AlertSubscription"
+            examples:
+              allAlerts:
+                summary: Subscribe to all three alert types
+                value:
+                  webhookUrl: https://sponsor.endpoint.example.com/webhook
+                  callbackToken: 550e8400-e29b-41d4-a716-446655440000
+                  alertDataVolumeThresholds: true
+                  campaignExpiryNotification: true
+                  dataVolumeExhausted: true
+      responses:
+        "200":
+          description: Campaign notifications subscription - SUCCESS.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AlertSubscriptionResult"
+              examples:
+                success:
+                  summary: Alert subscription acknowledged
+                  value:
+                    sponsorId: acme@sponsor.example.com
+                    campaignId: 123e4567-e89b-12d3-a456-426614174000@sponsor.example.com
+                    requestResult: "Campaign notifications subscription - SUCCESS"
+        "400":
+          $ref: "../../shared/errors.yaml#/components/responses/InvalidArgument"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "409":
+          $ref: "../../shared/errors.yaml#/components/responses/Conflict"
+        "422":
+          $ref: "../../shared/errors.yaml#/components/responses/ServiceNotApplicable"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          Result selected from the request body and the campaignId's embedded UUID
+          (docs/DESIGN.md §7). The body is validated first; otherwise a reserved
+          trailing-digit suffix on the UUID selects a canonical CAMARA error, else
+          the subscription is acknowledged. Nothing is persisted (no alert worker).
+        cases:
+          - input: "sponsorId not local@domain, or campaignId not UUID@domain"
+            result: "400 INVALID_ARGUMENT"
+          - input: "malformed body, missing/empty webhookUrl, empty callbackToken, or a non-boolean alert flag"
+            result: "400 INVALID_ARGUMENT (validated before the reserved-error plane)"
+          - input: "campaignId UUID trailing three digits in {400,401,403,404,409,422,429,500,503}"
+            result: "the matching canonical CAMARA error (e.g. …404 -> 404 NOT_FOUND)"
+          - input: "a valid webhookUrl (+ optional callbackToken / boolean alert flags)"
+            result: "200 {sponsorId, campaignId, requestResult} (acknowledged, not persisted)"
+
 components:
   securitySchemes:
     openId:
@@ -1066,6 +1180,61 @@ components:
           minimum: 0
           description: Total number of sponsored subscribers currently active for the campaign.
           example: 2
+
+    AlertSubscription:
+      type: object
+      description: >-
+        A subscription of a campaign's webhook to alert notifications. The upstream
+        `wip` schema marks the request body required but lists no per-field
+        `required` array; CamaraSim tightens `webhookUrl` to required (a subscription
+        needs a destination, mirroring `startSponsorship`) and leaves the rest
+        optional. Nothing is persisted (no alert worker), so the flags drive no
+        stored state — they are validated for type only.
+      required:
+        - webhookUrl
+      properties:
+        webhookUrl:
+          $ref: "#/components/schemas/WebhookUrl"
+        callbackToken:
+          type: string
+          description: >-
+            Security token used to authenticate notifications sent to the webhook.
+            Optional; when present it must be non-empty. Looser than
+            `startSponsorship`'s v4-UUID `callbackToken`, matching this operation's
+            looser upstream schema.
+          example: 550e8400-e29b-41d4-a716-446655440000
+        alertDataVolumeThresholds:
+          type: boolean
+          description: >-
+            Send a notification when data consumption exceeds 80% of the contracted
+            amount (prepaid campaigns).
+          example: true
+        campaignExpiryNotification:
+          type: boolean
+          description: Send a notification when the campaign expires.
+          example: true
+        dataVolumeExhausted:
+          type: boolean
+          description: Send a notification when the campaign data volume is exhausted.
+          example: true
+
+    AlertSubscriptionResult:
+      type: object
+      additionalProperties: false
+      description: The acknowledgement of a campaign alert-notification subscription.
+      required:
+        - sponsorId
+        - campaignId
+        - requestResult
+      properties:
+        sponsorId:
+          $ref: "#/components/schemas/SponsorId"
+        campaignId:
+          $ref: "#/components/schemas/CampaignId"
+        requestResult:
+          type: string
+          description: Human-readable outcome of the subscription request.
+          example: "Campaign notifications subscription - SUCCESS"
 
     SponsoredDataError:
       description: >-

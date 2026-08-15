@@ -2232,7 +2232,20 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
       `getSessionStatus` so the two derivations don't drift). Empty campaign → 200
       empty array, `totalCount:0` (a list never 404s). Malformed path ids → 400
       INVALID_ARGUMENT. `x-correlator` echoed. No new dep.
-    - [ ] `configureAlerts` / `manageCampaign` — deferred.
+    - [x] `POST /campaign/{sponsorId}/{campaignId}/alert-subscription`
+      (`configureAlerts`, scope `sponsored-data:campaign:alerts`) — subscribes a
+      campaign's `webhookUrl` to alert notifications (data-volume-threshold /
+      campaign-expiry / data-exhausted opt-in boolean flags). No campaign store
+      and no alert worker, so nothing is persisted — a **stateless synchronous
+      acknowledgement** (mirroring In-Home `performDeviceAction` / eSIM
+      `profileOperation`): `200 {sponsorId, campaignId, requestResult}`. Two
+      control planes (DESIGN §7): the request body (validated first — required
+      non-empty `webhookUrl`, optional non-empty `callbackToken`, optional boolean
+      flags → 400 INVALID_ARGUMENT, so a body 400 beats a reserved 404) and the
+      campaignId UUID reserved-error suffix → canonical CAMARA error (mirrors
+      `getCampaignStatus`). Natural-end alert callbacks a documented cut.
+      `x-correlator` echoed. No new dep.
+    - [ ] `manageCampaign` — deferred (pause/resume; no campaign store).
 - [x] Click to Dial vwip (`/click-to-dial/vwip`; CAMARA ClickToDial `wip`;
   two-legged, business-facing call origination):
   - [x] `POST /calls` (`createCall`, `click-to-dial:calls:create`) — create a
@@ -4392,6 +4405,33 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-15 — Sponsored Data vwip: added the campaign **alert-subscription** leg
+  `POST /campaign/{sponsorId}/{campaignId}/alert-subscription` (`configureAlerts`,
+  new CamaraSim scope `sponsored-data:campaign:alerts`) — the first of the two
+  deferred campaign-management operations (`manageCampaign` still deferred).
+  Confirmed the canonical shape against the upstream CAMARA SponsoredData `wip`
+  spec (WebFetch): `POST …/alert-subscription`, requestBody with `webhookUrl` /
+  `callbackToken` / three opt-in boolean alert flags (`alertDataVolumeThresholds`
+  / `campaignExpiryNotification` / `dataVolumeExhausted`), success `200` with
+  `{sponsorId, campaignId, requestResult}`; the `wip` contract declares no
+  securityScheme (CamaraSim-assigned scope). Modelled as a **stateless
+  synchronous acknowledgement** (no campaign store, no alert worker — mirroring
+  In-Home `performDeviceAction` / eSIM `profileOperation`): nothing persisted, the
+  natural-end alert callbacks a documented cut. Two control planes (DESIGN §7):
+  request body validated first (required non-empty `webhookUrl`, optional non-empty
+  `callbackToken`, boolean-typed flags via strict serde → 400 INVALID_ARGUMENT, so
+  a body 400 beats a reserved 404), then the campaignId's embedded-UUID
+  reserved-error suffix → canonical CAMARA error (mirrors `getCampaignStatus`).
+  Path ids validated (`is_sponsor_id`/`is_campaign_id`) → 400; `x-correlator`
+  echoed on every response. Spec: `sponsored-data/vwip/openapi.yaml` — added the
+  path (op + requestBody `AlertSubscription` + `AlertSubscriptionResult` + full
+  scenario table), two new schemas, refreshed the header comment / scope-divergence
+  note. Tests: +9 (1 unit — ack body shape; 8 integration — happy 200 / flags+token
+  accepted / reserved 404+429 / bad-body 400 [missing+empty webhook, empty token,
+  non-bool flag] / body-400-beats-reserved-404 / malformed ids 400 / 401+403 /
+  x-correlator on success+error). `cargo test` 2571 green (was 2562); `cargo build
+  --release` succeeds, no warnings. No new dependency. — binary: 5.1M (5,273,776 B;
+  +15,496 B)
 - 2026-08-15 — Network Access Domains vwip: added the Trust Domain **Device**
   update leg `PATCH /trust-domains/{trustDomainId}/devices/{deviceId}`
   (`updateTrustDomainDevice`, scope `network-access-domains:devices`) — the last
