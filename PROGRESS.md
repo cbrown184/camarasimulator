@@ -3227,7 +3227,18 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
         empty result), scoped to the Trust Domain (another domain's device never
         leaks in). The opaque minted `trustDomainId` has no reserved-suffix plane
         and the token subject is not consulted. `x-correlator` echoed. No new dep.
-        The device update/delete legs remain a later slice.
+      - [x] `DELETE /trust-domains/{trustDomainId}/devices/{deviceId}`
+        (`deleteTrustDomainDevice`, scope `network-access-domains:devices`) —
+        deregisters a device by its opaque, server-minted `deviceId` inside its
+        owning `trustDomainId`. Store-only, mirroring `deleteTrustDomain` /
+        `getTrustDomainDevice` (DESIGN §7): the device store is keyed by the full
+        `(trustDomainId, deviceId)` pair, so a stored pair is evicted → `204 No
+        Content` (single-use — new `store::remove_device`); any other pair (unknown
+        parent, unknown/other-domain device, malformed id) folds into `404
+        NOT_FOUND`. The opaque `deviceId` has no reserved-suffix plane and the token
+        subject is not consulted. `x-correlator` echoed on the `204`. No new dep.
+        The device update leg (`updateTrustDomainDevice`, PATCH) remains a later
+        slice.
 
 ## Cross-cutting (do alongside the item that needs it)
 - [~] `errors.rs`: base CAMARA error model done (`src/errors.rs`, `specs/shared/errors.yaml`); per-version catalogs still TODO (DESIGN §8)
@@ -4367,6 +4378,29 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-15 — Network Access Domains vwip: added the Trust Domain **Device**
+  delete leg `DELETE /trust-domains/{trustDomainId}/devices/{deviceId}`
+  (`deleteTrustDomainDevice`, scope `network-access-domains:devices`) — the
+  delete leg the create/read/list passes flagged as a later slice. Confirmed the
+  canonical shape against the upstream CAMARA NetworkAccessManagement spec:
+  operationId `deleteTrustDomainDevice`, no request body, `204` success, `404`
+  declared (a PATCH `updateTrustDomainDevice` is the only remaining device leg —
+  no PUT). Store-only, mirroring `deleteTrustDomain` + `getTrustDomainDevice`: a
+  new `store::remove_device` evicts the `(trustDomainId, deviceId)` pair — a hit
+  → `204 No Content` (single-use), a miss (unknown parent / unknown device /
+  another Trust Domain's device / malformed id, all folded) → `404 NOT_FOUND`.
+  The opaque minted `deviceId` has no reserved-suffix plane and the token subject
+  is not a control plane (store-only delete). Route: added
+  `.delete(delete_trust_domain_device)` to the existing `.../devices/:device_id`
+  param path (alongside `get`). Spec: `network-access-domains/vwip/openapi.yaml`
+  — added the DELETE op with `x-camarasim-scenarios`, a `deleteTrustDomainDevice`
+  prose paragraph, and refreshed the header comment + info.description
+  documented-cuts (create+read+list+delete done, update remains). Tests: +10
+  (evict+read-404 / single-use / unknown-id 404 / unknown-parent 404 /
+  other-domain 404 [+ real device survives] / malformed 404 / subject-reserved
+  suffix ignored 204 / 403 [device survives] / 401 / x-correlator on the 204).
+  `cargo test` 2546 green (was 2536); `cargo build --release` succeeds, no
+  warnings. No new dependency. — binary: 5.1M (5,244,656 B; +11,144 B)
 - 2026-08-15 — Network Access Domains vwip: added the Trust Domain **Device**
   list leg `GET /trust-domains/{trustDomainId}/devices` (`getTrustDomainDevices`,
   scope `network-access-domains:devices`) — the list leg the read-leg pass flagged

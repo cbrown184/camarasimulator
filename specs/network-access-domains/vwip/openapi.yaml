@@ -30,9 +30,11 @@
 # (createTrustDomainDevice), its list leg
 # `GET /trust-domains/{trustDomainId}/devices` (getTrustDomainDevices), and its
 # read leg `GET /trust-domains/{trustDomainId}/devices/{deviceId}`
-# (getTrustDomainDevice), backed by an in-memory device store keyed by
-# (trustDomainId, deviceId); the device update/delete legs remain to be added in
-# later slices.
+# (getTrustDomainDevice), and its delete leg
+# `DELETE /trust-domains/{trustDomainId}/devices/{deviceId}`
+# (deleteTrustDomainDevice), backed by an in-memory device store keyed by
+# (trustDomainId, deviceId); the device update leg (updateTrustDomainDevice)
+# remains to be added in a later slice.
 openapi: 3.0.3
 info:
   title: Network Access Domains
@@ -174,14 +176,25 @@ info:
     Domain never appears). The token subject is not a control plane. Same
     `network-access-domains:devices` scope as the other device legs.
 
+    **`deleteTrustDomainDevice`**
+    (`DELETE /trust-domains/{trustDomainId}/devices/{deviceId}`) deregisters a
+    device. Store-only like the read leg (mirroring `deleteTrustDomain`): the
+    device store is keyed by the full `(trustDomainId, deviceId)` pair and the
+    `deviceId` is an opaque server-minted UUID, so the token subject is not a
+    control plane — a stored pair is evicted → `204 No Content` (single-use), any
+    other pair (unknown parent, unknown device, another Trust Domain's device, or
+    a malformed id) → `404 NOT_FOUND` (folded, one store operation). Same
+    `network-access-domains:devices` scope as the other device legs.
+
     ## Documented cuts
 
     - The read-only `getTrustDomainCapabilities`, `getServices` and `getService`
       legs and the stateful `createTrustDomain` / `getTrustDomain` /
       `updateTrustDomain` / `deleteTrustDomain` legs are implemented, plus the
-      Trust Domain Device create + read + list legs `createTrustDomainDevice` /
-      `getTrustDomainDevice` / `getTrustDomainDevices`; the device update/delete
-      legs are a later slice.
+      Trust Domain Device create + read + list + delete legs
+      `createTrustDomainDevice` / `getTrustDomainDevice` / `getTrustDomainDevices`
+      / `deleteTrustDomainDevice`; the device update leg (`updateTrustDomainDevice`)
+      is a later slice.
     - `createTrustDomainDevice` validates the required `deviceName`/`enabled`, the
       optional scalar fields, and the `hardwareAddress` (EUI-48 type + MAC
       pattern), but accepts and echoes the nested `bootstrappingInfo` as-is and
@@ -1110,6 +1123,94 @@ paths:
             result: "404 NOT_FOUND (folded, no store entry to distinguish it)"
           - input: "the token subject trailing digits are …429 but the device exists"
             result: "200 — the read is store-only, the subject is not a plane"
+          - input: a token without the network-access-domains:devices scope
+            result: "403 PERMISSION_DENIED"
+          - input: no / invalid token
+            result: "401 UNAUTHENTICATED"
+    delete:
+      operationId: deleteTrustDomainDevice
+      summary: Deregister a device from a Trust Domain by id
+      description: |
+        Deregisters and removes a single `TrustDomainDevice` by the
+        server-assigned `deviceId` that `createTrustDomainDevice` returned, inside
+        its owning `trustDomainId`.
+
+        There is no request body: the operation is keyed only to the in-memory
+        device store (docs/DESIGN.md §7). Like `getTrustDomainDevice`, the
+        `deviceId` is an opaque, server-minted UUID over the
+        `(trustDomainId, deviceName)` pair that the caller cannot construct, so it
+        is not itself a scenario plane and the token subject is not consulted (the
+        delete is store-only, mirroring `deleteTrustDomain`). A stored
+        `(trustDomainId, deviceId)` pair is evicted → `204 No Content`
+        (single-use: a second delete of the same pair finds nothing); any other
+        pair → `404 NOT_FOUND`. Because the store is keyed by the full pair, an
+        unknown parent Trust Domain, an unknown device, a device that belongs to a
+        *different* Trust Domain, and a malformed id all fold into the same `404`
+        (one store operation). Deletion is synchronous.
+      security:
+        - openId:
+            - network-access-domains:devices
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+        - name: trustDomainId
+          in: path
+          required: true
+          description: The server-assigned id of the Trust Domain the device belongs to.
+          schema:
+            type: string
+            format: uuid
+        - name: deviceId
+          in: path
+          required: true
+          description: The server-assigned id of the device to deregister.
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "204":
+          description: The device was deregistered successfully. No content.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+        "400":
+          $ref: "../../shared/errors.yaml#/components/responses/InvalidArgument"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          deleteTrustDomainDevice is keyed only to the in-memory device store
+          (docs/DESIGN.md §7). The store is keyed by the full (trustDomainId,
+          deviceId) pair and the deviceId is an opaque server-minted UUID, so —
+          like getTrustDomainDevice — the token subject is not a control plane and
+          store state is the only plane: a stored pair is evicted (204,
+          single-use), any other pair (unknown parent, unknown device, another
+          Trust Domain's device, or a malformed id) is a 404 (folded, one store
+          operation).
+        cases:
+          - input: "a (trustDomainId, deviceId) pair returned by a prior createTrustDomainDevice"
+            result: "204 No Content — the device is deregistered"
+          - input: "the same pair a second time (already deleted)"
+            result: "404 NOT_FOUND (single-use)"
+          - input: "a well-formed deviceId that was never created in the Trust Domain"
+            result: "404 NOT_FOUND"
+          - input: "a deviceId that exists in a different Trust Domain"
+            result: "404 NOT_FOUND (the key mismatch folds into the same 404; the real device survives)"
+          - input: "a valid deviceId under a well-formed but never-created trustDomainId"
+            result: "404 NOT_FOUND"
+          - input: "a malformed (non-UUID) deviceId"
+            result: "404 NOT_FOUND (folded, no store entry to distinguish it)"
+          - input: "the token subject trailing digits are …429 but the device exists"
+            result: "204 — the delete is store-only, the subject is not a plane"
           - input: a token without the network-access-domains:devices scope
             result: "403 PERMISSION_DENIED"
           - input: no / invalid token

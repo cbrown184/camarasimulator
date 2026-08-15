@@ -151,7 +151,7 @@ pub fn routes() -> Router {
         )
         .route(
             "/network-access-domains/vwip/trust-domains/:trust_domain_id/devices/:device_id",
-            get(get_trust_domain_device),
+            get(get_trust_domain_device).delete(delete_trust_domain_device),
         )
         .route(
             "/network-access-domains/vwip/services",
@@ -479,6 +479,54 @@ async fn get_trust_domain_device(
                 .into_response(),
             &correlator,
         ),
+    }
+}
+
+/// `DELETE /network-access-domains/vwip/trust-domains/{trustDomainId}/devices/{deviceId}`
+/// (`deleteTrustDomainDevice`).
+///
+/// Deregisters a device from its owning Trust Domain by the opaque, server-minted
+/// `deviceId`. Like `getTrustDomainDevice`/`deleteTrustDomain`, the `deviceId` is
+/// not derivable by the caller (a deterministic version-5 UUID over the
+/// `(trustDomainId, deviceName)` pair, see [`trust_domain_device_id`]), so the
+/// **in-memory device store is the only control plane** (docs/DESIGN.md §7): a
+/// stored `(trustDomainId, deviceId)` pair is evicted → `204 No Content`
+/// (single-use — a second delete of the same pair finds nothing); any other pair →
+/// `404 NOT_FOUND`. Because the store is keyed by the full pair, an unknown parent
+/// Trust Domain, an unknown device, a device that belongs to a *different* Trust
+/// Domain, and a malformed id all fold into the same `404` (one store operation,
+/// mirroring `getTrustDomainDevice`). Deletion is synchronous with no
+/// `subscription-ended`-style CloudEvent (the API has no `sink` on devices).
+///
+/// Requires a token carrying the `network-access-domains:devices` scope (the same
+/// scope guards `createTrustDomainDevice`/`getTrustDomainDevice`). Like the read
+/// leg, the token subject is **not** a control plane (a reserved suffix on the
+/// subject does not shape a store-only delete). `x-correlator` is echoed on every
+/// response, including the `204`.
+async fn delete_trust_domain_device(
+    claims: Claims,
+    headers: HeaderMap,
+    Path((trust_domain_id, device_id)): Path<(String, String)>,
+) -> Response {
+    // Optional correlation header, echoed on every response (CAMARA Commonalities).
+    let correlator = headers.get("x-correlator").cloned();
+
+    // Endpoint authorisation: the token must carry the device scope.
+    if let Err(e) = claims.require_scope(DEVICES_SCOPE) {
+        return with_correlator(e.into_response(), &correlator);
+    }
+
+    // Store state is the only control plane — the opaque minted device id has no
+    // reserved-suffix plane. A present pair is evicted (204); a miss (unknown
+    // parent Trust Domain, unknown/other-domain device, or malformed id) is a 404.
+    if store::remove_device(&trust_domain_id, &device_id) {
+        with_correlator(StatusCode::NO_CONTENT.into_response(), &correlator)
+    } else {
+        with_correlator(
+            CamaraError::not_found("No device found for the provided id in the Trust Domain.")
+                .into_response(),
+            &correlator,
+        )
     }
 }
 
@@ -2695,6 +2743,233 @@ mod tests {
         assert_eq!(
             headers.get("x-correlator").and_then(|v| v.to_str().ok()),
             Some("corr-tdd-read-1")
+        );
+    }
+
+    // === deleteTrustDomainDevice (DELETE /trust-domains/{id}/devices/{deviceId}) ===
+
+    /// DELETE `/trust-domains/{td}/devices/{deviceId}` with an optional Bearer token
+    /// and optional `x-correlator`. Returns (status, headers, json-or-null — the
+    /// `204` body is empty, so the value is `Null`).
+    async fn delete_device_req(
+        token: Option<&str>,
+        trust_domain_id: &str,
+        device_id: &str,
+        correlator: Option<&str>,
+    ) -> (StatusCode, HeaderMap, Value) {
+        let mut builder = Request::builder()
+            .method("DELETE")
+            .uri(format!(
+                "/network-access-domains/vwip/trust-domains/{trust_domain_id}/devices/{device_id}"
+            ))
+            .header("host", HOST);
+        if let Some(t) = token {
+            builder = builder.header("authorization", format!("Bearer {t}"));
+        }
+        if let Some(c) = correlator {
+            builder = builder.header("x-correlator", c);
+        }
+        let response = app().oneshot(builder.body(Body::empty()).unwrap()).await.unwrap();
+        let status = response.status();
+        let headers = response.headers().clone();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, headers, json)
+    }
+
+    #[tokio::test]
+    async fn delete_device_evicts_the_created_device() {
+        // Create a device, delete it, then confirm a subsequent read is a 404.
+        let (td_id, dev_id) = make_device(
+            "nad-005",
+            "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+            "TDD delete ok",
+            "Delete Laptop",
+        )
+        .await;
+        let token = mint_token_as("nad-005", DEVICES_SCOPE).await;
+
+        let (status, _, _) = delete_device_req(Some(&token), &td_id, &dev_id, None).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert!(
+            store::get_device(&td_id, &dev_id).is_none(),
+            "the device store entry is gone"
+        );
+
+        // A read after delete is a 404.
+        let (read, _, err) = get_device_req(Some(&token), &td_id, &dev_id, None).await;
+        assert_eq!(read, StatusCode::NOT_FOUND);
+        assert_eq!(err["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn delete_device_is_single_use() {
+        let (td_id, dev_id) = make_device(
+            "nad-005",
+            "16fd2706-8baf-433b-82eb-8c7fada847da",
+            "TDD delete twice",
+            "Twice Device",
+        )
+        .await;
+        let token = mint_token_as("nad-005", DEVICES_SCOPE).await;
+
+        // First delete evicts (204); the second finds nothing → 404.
+        let (first, _, _) = delete_device_req(Some(&token), &td_id, &dev_id, None).await;
+        assert_eq!(first, StatusCode::NO_CONTENT);
+        let (second, _, err) = delete_device_req(Some(&token), &td_id, &dev_id, None).await;
+        assert_eq!(second, StatusCode::NOT_FOUND);
+        assert_eq!(err["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn delete_device_unknown_id_is_not_found() {
+        // A well-formed but never-minted device id in an existing Trust Domain → 404.
+        let (td_id, _) = make_device(
+            "nad-005",
+            "123e4567-e89b-12d3-a456-426614174000",
+            "TDD delete unknown",
+            "Present",
+        )
+        .await;
+        let token = mint_token_as("nad-005", DEVICES_SCOPE).await;
+        let (status, _, err) = delete_device_req(
+            Some(&token),
+            &td_id,
+            "00000000-0000-4000-8000-000000000000",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(err["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn delete_device_in_unknown_trust_domain_is_not_found() {
+        // The device store is keyed by the full (trustDomainId, deviceId) pair, so a
+        // valid-shaped but unknown parent id finds nothing → 404.
+        let token = mint_token_as("nad-005", DEVICES_SCOPE).await;
+        let (status, _, err) = delete_device_req(
+            Some(&token),
+            "11111111-1111-4111-8111-111111111111",
+            "22222222-2222-4222-8222-222222222222",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(err["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn delete_device_of_another_trust_domain_is_not_found() {
+        // A device that exists in Trust Domain A cannot be deleted under Trust Domain
+        // B (the key mismatch folds into the same 404), and A's device survives.
+        let (td_a, dev_id) = make_device(
+            "nad-005",
+            "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+            "TDD delete owner A",
+            "Owned",
+        )
+        .await;
+        let td_b = make_trust_domain(
+            "nad-005",
+            "9d5e6f70-1a2b-4c3d-8e4f-5a6b7c8d9e0f",
+            "TDD delete owner B",
+        )
+        .await;
+        let token = mint_token_as("nad-005", DEVICES_SCOPE).await;
+        let (status, _, err) = delete_device_req(Some(&token), &td_b, &dev_id, None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(err["code"], "NOT_FOUND");
+        // The real device under Trust Domain A is untouched.
+        assert!(
+            store::get_device(&td_a, &dev_id).is_some(),
+            "another domain's delete must not evict the device"
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_device_malformed_id_is_not_found() {
+        let (td_id, _) = make_device(
+            "nad-005",
+            "123e4567-e89b-12d3-a456-426614174000",
+            "TDD delete malformed",
+            "Present2",
+        )
+        .await;
+        let token = mint_token_as("nad-005", DEVICES_SCOPE).await;
+        // A malformed device id has no store entry to distinguish it → 404 (folded).
+        let (status, _, err) = delete_device_req(Some(&token), &td_id, "not-a-uuid", None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(err["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn delete_device_ignores_the_subject_reserved_suffix_plane() {
+        // Like the read leg, delete is store-only: a reserved-suffix subject that
+        // would 429 on create still evicts an existing device as 204.
+        let (td_id, dev_id) = make_device(
+            "nad-005",
+            "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+            "TDD delete no-subject-plane",
+            "Shared",
+        )
+        .await;
+        let token = mint_token_as("nad-429", DEVICES_SCOPE).await;
+        let (status, _, _) = delete_device_req(Some(&token), &td_id, &dev_id, None).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn delete_device_token_without_the_scope_is_forbidden() {
+        let (td_id, dev_id) = make_device(
+            "nad-005",
+            "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+            "TDD delete forbidden",
+            "Guarded",
+        )
+        .await;
+        let token = mint_token_as("nad-005", "some:other-scope").await;
+        let (status, _, err) = delete_device_req(Some(&token), &td_id, &dev_id, None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(err["code"], "PERMISSION_DENIED");
+        // Rejected before touching the store — the device is still present.
+        assert!(
+            store::get_device(&td_id, &dev_id).is_some(),
+            "a forbidden delete must not evict the device"
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_device_missing_token_is_unauthenticated() {
+        let (status, _, err) = delete_device_req(
+            None,
+            "11111111-1111-4111-8111-111111111111",
+            "22222222-2222-4222-8222-222222222222",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(err["code"], "UNAUTHENTICATED");
+    }
+
+    #[tokio::test]
+    async fn delete_device_x_correlator_is_echoed_on_the_204() {
+        let (td_id, dev_id) = make_device(
+            "nad-005",
+            "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+            "TDD delete corr",
+            "Corr Device",
+        )
+        .await;
+        let token = mint_token_as("nad-005", DEVICES_SCOPE).await;
+        let (status, headers, _) =
+            delete_device_req(Some(&token), &td_id, &dev_id, Some("corr-tdd-delete-1")).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-tdd-delete-1")
         );
     }
 

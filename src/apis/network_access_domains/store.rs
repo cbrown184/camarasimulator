@@ -181,3 +181,23 @@ pub fn list_devices(trust_domain_id: &str) -> Vec<Value> {
     });
     devices
 }
+
+/// Evict the `TrustDomainDevice` stored under `(trust_domain_id, device_id)`,
+/// reporting whether one existed. Backs the `deleteTrustDomainDevice` leg
+/// (`DELETE /trust-domains/{trustDomainId}/devices/{deviceId}`): a present pair is
+/// removed and the leg answers `204 No Content` (single-use — a second delete of
+/// the same pair finds nothing), a missing pair yields the CAMARA `404`. Because
+/// the key is the full `(trustDomainId, deviceId)` pair, an unknown parent Trust
+/// Domain, an unknown device, a device that belongs to a *different* Trust Domain,
+/// and a malformed id all fold into the same "not present" outcome (mirroring
+/// [`get_device`]). The whole check-and-remove runs under a single lock hold
+/// (never across an `.await`), so two concurrent deletes of the same pair can't
+/// both report success.
+pub fn remove_device(trust_domain_id: &str, device_id: &str) -> bool {
+    let key = (trust_domain_id.to_owned(), device_id.to_owned());
+    device_store()
+        .lock()
+        .expect("network-access-domains trust-domain-device store not poisoned")
+        .remove(&key)
+        .is_some()
+}
