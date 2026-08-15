@@ -182,6 +182,34 @@ pub fn list_devices(trust_domain_id: &str) -> Vec<Value> {
     devices
 }
 
+/// Atomically update the `TrustDomainDevice` stored under
+/// `(trust_domain_id, device_id)` by applying `apply` to a mutable reference to
+/// it, returning the updated device (a clone taken after the mutation) or `None`
+/// if no device exists under that pair. Backs the `updateTrustDomainDevice` leg
+/// (`PATCH /trust-domains/{trustDomainId}/devices/{deviceId}`): a hit renders
+/// `200` with the patched device, a miss the CAMARA `404`. The whole
+/// get-modify-write runs under a single lock hold (never across an `.await`), so
+/// a concurrent update / delete of the same pair can't observe a torn state.
+/// Because the key is the full pair, an unknown parent Trust Domain, an unknown
+/// device, and a device that belongs to a *different* Trust Domain all fold into
+/// the same `None` (mirroring [`get_device`] / [`remove_device`]).
+pub fn update_device<F>(trust_domain_id: &str, device_id: &str, apply: F) -> Option<Value>
+where
+    F: FnOnce(&mut Value),
+{
+    let key = (trust_domain_id.to_owned(), device_id.to_owned());
+    let mut map = device_store()
+        .lock()
+        .expect("network-access-domains trust-domain-device store not poisoned");
+    match map.get_mut(&key) {
+        Some(device) => {
+            apply(device);
+            Some(device.clone())
+        }
+        None => None,
+    }
+}
+
 /// Evict the `TrustDomainDevice` stored under `(trust_domain_id, device_id)`,
 /// reporting whether one existed. Backs the `deleteTrustDomainDevice` leg
 /// (`DELETE /trust-domains/{trustDomainId}/devices/{deviceId}`): a present pair is

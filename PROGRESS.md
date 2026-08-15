@@ -3181,9 +3181,9 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
       `409` (fixed id, a rename can't collide — canonical response set 200/400/404).
       New atomic `store::update` (get-modify-write under one lock hold). Shares the
       `/trust-domains/:id` param route via `.patch(…)`. No new dep.
-    - [~] the stateful Trust Domain **Device** sub-resource
+    - [x] the stateful Trust Domain **Device** sub-resource
       (`/trust-domains/{trustDomainId}/devices`; scope
-      `network-access-domains:devices`):
+      `network-access-domains:devices`) — **CRUD complete**:
       - [x] `POST /trust-domains/{trustDomainId}/devices`
         (`createTrustDomainDevice`) — registers a device inside an existing Trust
         Domain, minting a `deviceId` and persisting the rendered
@@ -3237,8 +3237,22 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
         parent, unknown/other-domain device, malformed id) folds into `404
         NOT_FOUND`. The opaque `deviceId` has no reserved-suffix plane and the token
         subject is not consulted. `x-correlator` echoed on the `204`. No new dep.
-        The device update leg (`updateTrustDomainDevice`, PATCH) remains a later
-        slice.
+      - [x] `PATCH /trust-domains/{trustDomainId}/devices/{deviceId}`
+        (`updateTrustDomainDevice`, scope `network-access-domains:devices`) —
+        in-place update from a `TrustDomainDeviceUpdate` (all fields optional:
+        `deviceName`/`deviceType`/`enabled`/`blocked`/`hardwareAddress`/
+        `bootstrappingInfo`/`deviceCredential`). Two control planes (DESIGN §7),
+        mirroring `updateTrustDomain`: request body validated first (a body 400
+        beats the 404), then store state via a new atomic `store::update_device`
+        (get-modify-write under one lock hold) — a stored `(trustDomainId,
+        deviceId)` pair → `200` the updated device; any other pair (unknown parent,
+        unknown/other-domain device, malformed id, all folded) → `404 NOT_FOUND`.
+        Store-only, so the opaque `deviceId` has no reserved-suffix plane and the
+        token subject is not consulted. The create-only `externalId` + read-only
+        identity/lifecycle/audit fields are immutable (ignored if sent); the
+        write-only `deviceCredential` is accepted-not-echoed; `modifiedAt`/`By`
+        re-stamped. No `409` (fixed id, never re-derived — canonical set
+        200/400/404). No new dep. **Completes the Trust Domain Device CRUD.**
 
 ## Cross-cutting (do alongside the item that needs it)
 - [~] `errors.rs`: base CAMARA error model done (`src/errors.rs`, `specs/shared/errors.yaml`); per-version catalogs still TODO (DESIGN §8)
@@ -4379,7 +4393,39 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 ## Scan journal
 
 - 2026-08-15 — Network Access Domains vwip: added the Trust Domain **Device**
-  delete leg `DELETE /trust-domains/{trustDomainId}/devices/{deviceId}`
+  update leg `PATCH /trust-domains/{trustDomainId}/devices/{deviceId}`
+  (`updateTrustDomainDevice`, scope `network-access-domains:devices`) — the last
+  remaining device leg (create/read/list/delete already done), **completing the
+  Trust Domain Device sub-resource CRUD**. Confirmed the canonical shape against
+  the upstream CAMARA NetworkAccessManagement spec (WebFetch): `PATCH`,
+  operationId `updateTrustDomainDevice`, request body `TrustDomainDeviceUpdate`,
+  success `200` with the updated device body, declared set `200/400/401/403/404/
+  500/503` — **no 409, no PUT**. Modelled on the sibling `updateTrustDomain`:
+  new atomic `store::update_device` (get-modify-write under one lock hold, keyed
+  by the full `(trustDomainId, deviceId)` pair), a new
+  `validate_trust_domain_device_update` (every field optional, same per-field
+  rules as create — non-blank ≤255 `deviceName`, boolean `enabled`/`blocked`,
+  `DEVICE_TYPES` enum, EUI-48 `hardwareAddress`, object-shape
+  `bootstrappingInfo`/`deviceCredential`; a present null fails its type check),
+  and `apply_trust_domain_device_update` (sets present mutable fields, re-stamps
+  `modifiedAt`/`By`; the write-only `deviceCredential` accepted-not-echoed; the
+  create-only `externalId` + read-only id/lifecycle/audit fields immutable).
+  Two control planes (DESIGN §7): request body (validated first → a body 400
+  beats the 404), then store state (store-only — the opaque minted `deviceId`
+  has no reserved-suffix plane, token subject not consulted); unknown parent /
+  unknown / other-domain / malformed id all fold to 404. Route: added
+  `.patch(update_trust_domain_device)` to the existing `.../devices/:device_id`
+  path. Spec: `network-access-domains/vwip/openapi.yaml` — added the PATCH op
+  (`TrustDomainDeviceUpdate` requestBody, 200 example, full scenario table),
+  refreshed the header comment + info.description documented-cuts (device CRUD
+  now complete). Tests: +16 (3 units — validate accept/reject, apply
+  sets+restamps+strips-credential; 13 integration — patch persists /
+  empty-noop / credential stripped / unknown-id 404 / unknown-parent 404 /
+  other-domain 404 [+ real device survives] / malformed 404 / bad-body 400 /
+  body-400-beats-404 / subject-reserved-suffix ignored 200 / 403 / 401 /
+  x-correlator). `cargo test` 2562 green (was 2546); `cargo build --release`
+  succeeds, no warnings. No new dependency. — binary: 5.1M (5,258,280 B;
+  +13,624 B)
   (`deleteTrustDomainDevice`, scope `network-access-domains:devices`) — the
   delete leg the create/read/list passes flagged as a later slice. Confirmed the
   canonical shape against the upstream CAMARA NetworkAccessManagement spec:

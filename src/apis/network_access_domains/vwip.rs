@@ -151,7 +151,9 @@ pub fn routes() -> Router {
         )
         .route(
             "/network-access-domains/vwip/trust-domains/:trust_domain_id/devices/:device_id",
-            get(get_trust_domain_device).delete(delete_trust_domain_device),
+            get(get_trust_domain_device)
+                .patch(update_trust_domain_device)
+                .delete(delete_trust_domain_device),
         )
         .route(
             "/network-access-domains/vwip/services",
@@ -527,6 +529,94 @@ async fn delete_trust_domain_device(
                 .into_response(),
             &correlator,
         )
+    }
+}
+
+/// `PATCH /network-access-domains/vwip/trust-domains/{trustDomainId}/devices/{deviceId}`
+/// (`updateTrustDomainDevice`).
+///
+/// Updates a registered device in place by the server-assigned `deviceId`, inside
+/// its owning `trustDomainId`. The caller sends a `TrustDomainDeviceUpdate` — the
+/// mutable subset of a device (`deviceName`/`deviceType`/`enabled`/`blocked`/
+/// `hardwareAddress`/`bootstrappingInfo`/`deviceCredential`), **every field
+/// optional** — and only the fields present are changed. The create-only
+/// `externalId` and the read-only identity/lifecycle/audit fields (`id`,
+/// `connected`, `associated`, `createdAt`, `createdBy`, any assigned
+/// `ipv4Address`/`ipv6Address`) are immutable — a body that carries them has them
+/// ignored — and every successful update refreshes `modifiedAt`/`modifiedBy`.
+///
+/// Two control planes (docs/DESIGN.md §7), mirroring the sibling PATCH legs
+/// (`updateTrustDomain`, `updateAppDeployment`):
+///
+/// 1. **Request body** — validated first, so a body `400` wins over a `404`. A
+///    malformed body or a present-but-ill-typed field (blank/oversized
+///    `deviceName`, non-boolean `enabled`/`blocked`, unknown `deviceType`, a
+///    `hardwareAddress` that is not an EUI-48 object, or a non-object
+///    `bootstrappingInfo`/`deviceCredential`) → `400 INVALID_ARGUMENT`.
+/// 2. **Store state** — the opaque, server-minted `deviceId` has no
+///    reserved-suffix plane (mirroring `getTrustDomainDevice`/
+///    `deleteTrustDomainDevice`), so the token subject is **not** a control plane:
+///    a stored `(trustDomainId, deviceId)` pair is patched and the updated
+///    `TrustDomainDevice` returned (`200`); any other pair (unknown parent,
+///    unknown/other-domain device, or a malformed id) → `404 NOT_FOUND` (folded).
+///
+/// Unlike `createTrustDomainDevice` there is **no `409`**: the operation addresses
+/// an existing device by its fixed id and never re-derives it, so a rename can't
+/// collide (the canonical `updateTrustDomainDevice` response set is
+/// `200`/`400`/`404`). The write-only `deviceCredential` is accepted (validated
+/// for object shape) but never applied to or echoed in the stored device — no
+/// live onboarding, a documented cut mirroring `createTrustDomainDevice`. Requires
+/// the `network-access-domains:devices` scope. `x-correlator` is echoed on every
+/// response.
+async fn update_trust_domain_device(
+    claims: Claims,
+    headers: HeaderMap,
+    Path((trust_domain_id, device_id)): Path<(String, String)>,
+    body: Bytes,
+) -> Response {
+    let correlator = headers.get("x-correlator").cloned();
+
+    // Endpoint authorisation: the token must carry the device scope.
+    if let Err(e) = claims.require_scope(DEVICES_SCOPE) {
+        return with_correlator(e.into_response(), &correlator);
+    }
+
+    // Parse the TrustDomainDeviceUpdate body (malformed JSON / non-object → 400).
+    let req: Value = match serde_json::from_slice::<Value>(&body) {
+        Ok(v) if v.is_object() => v,
+        _ => {
+            return invalid_argument(
+                "the request body is not a valid TrustDomainDeviceUpdate JSON object",
+                &correlator,
+            )
+        }
+    };
+
+    // Control plane 1 — request-body validation (checked before the store lookup,
+    // so a body 400 wins over a 404).
+    if let Err(message) = validate_trust_domain_device_update(&req) {
+        return invalid_argument(&message, &correlator);
+    }
+
+    // Control plane 2 — store state. The whole get-modify-write runs under one lock
+    // hold (see `store::update_device`): a hit applies the patch, refreshes the
+    // audit stamps, and returns the updated device; a miss (unknown parent,
+    // unknown/other-domain device, or malformed id — all folded) is a 404. The
+    // opaque minted deviceId has no reserved-suffix plane, so the token subject is
+    // not consulted (store-only, mirroring the read/delete device legs).
+    let now = rfc3339_utc(now_unix_secs());
+    let actor = deterministic_uuid_v5("nad-td-actor", claims.subject().unwrap_or(""));
+    match store::update_device(&trust_domain_id, &device_id, |dev| {
+        apply_trust_domain_device_update(dev, &req, &now, &actor)
+    }) {
+        Some(updated) => {
+            with_correlator((StatusCode::OK, Json(updated)).into_response(), &correlator)
+        }
+        None => with_correlator(
+            CamaraError::not_found("No device found for the provided id in the Trust Domain.")
+                .into_response(),
+            &correlator,
+        ),
     }
 }
 
@@ -1382,6 +1472,118 @@ fn render_trust_domain_device(id: &str, req: &Value, now: &str, actor: &str) -> 
     d.insert("modifiedAt".into(), json!(now));
     d.insert("modifiedBy".into(), json!(actor));
     Value::Object(d)
+}
+
+/// Validate a `TrustDomainDeviceUpdate` body. Every field is **optional** — the
+/// patch changes only the fields present — so each is checked only when present,
+/// using the same per-field rules as `createTrustDomainDevice`. Returns
+/// `Err(message)` on the first violation (mapped by the caller to
+/// `400 INVALID_ARGUMENT`). No field is nullable (the CAMARA `TrustDomainDeviceUpdate`
+/// schema declares none), so a present `null` fails its type check. The create-only
+/// `externalId` and any read-only field the body may carry are neither validated nor
+/// applied (a documented cut, mirroring `updateTrustDomain`'s immutable identity
+/// fields). The nested `bootstrappingInfo`/`deviceCredential` objects are validated
+/// only for object shape (their internals are a documented cut, as at create).
+fn validate_trust_domain_device_update(req: &Value) -> Result<(), String> {
+    // deviceName — if present, a non-blank string ≤ 255 characters.
+    if let Some(v) = req.get("deviceName") {
+        match v.as_str() {
+            None => return Err("`deviceName` must be a string".into()),
+            Some(n) if n.trim().is_empty() => return Err("`deviceName` must not be blank".into()),
+            Some(n) if n.chars().count() > 255 => {
+                return Err("`deviceName` must be at most 255 characters".into())
+            }
+            Some(_) => {}
+        }
+    }
+
+    // enabled — if present, a boolean.
+    if let Some(v) = req.get("enabled") {
+        if !v.is_boolean() {
+            return Err("`enabled` must be a boolean".into());
+        }
+    }
+
+    // blocked — if present, a boolean.
+    if let Some(v) = req.get("blocked") {
+        if !v.is_boolean() {
+            return Err("`blocked` must be a boolean".into());
+        }
+    }
+
+    // deviceType — if present, one of the advertised device types.
+    if let Some(v) = req.get("deviceType") {
+        match v.as_str() {
+            Some(s) if DEVICE_TYPES.contains(&s) => {}
+            _ => return Err("`deviceType` must be one of the supported device types".into()),
+        }
+    }
+
+    // hardwareAddress — if present, an object with an EUI-48 type + a valid MAC.
+    if let Some(v) = req.get("hardwareAddress") {
+        let obj = match v.as_object() {
+            Some(o) => o,
+            None => return Err("`hardwareAddress` must be an object".into()),
+        };
+        match obj.get("hardwareAddressType").and_then(Value::as_str) {
+            Some("EUI-48") => {}
+            _ => return Err("`hardwareAddress.hardwareAddressType` must be \"EUI-48\"".into()),
+        }
+        match obj.get("value").and_then(Value::as_str) {
+            Some(mac) if is_eui48(mac) => {}
+            _ => return Err("`hardwareAddress.value` must be an EUI-48 MAC address".into()),
+        }
+    }
+
+    // bootstrappingInfo / deviceCredential — if present, objects (contents cut).
+    for key in ["bootstrappingInfo", "deviceCredential"] {
+        if let Some(v) = req.get(key) {
+            if !v.is_object() {
+                return Err(format!("`{key}` must be an object"));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Apply a validated `TrustDomainDeviceUpdate` `req` to the stored
+/// `TrustDomainDevice` `dev` in place (called under the store lock by
+/// [`store::update_device`]). Only the mutable fields present in the body change:
+/// `deviceName`/`deviceType`/`enabled`/`blocked`/`hardwareAddress`/
+/// `bootstrappingInfo` are set from the present value. The write-only
+/// `deviceCredential` is accepted but neither applied nor echoed (no live
+/// onboarding — a documented cut, mirroring `render_trust_domain_device`). Every
+/// call refreshes the audit stamps (`modifiedAt` = `now`, `modifiedBy` = `actor`),
+/// so an empty `{}` body is an accepted no-op that only re-stamps `modified*`. The
+/// create-only `externalId` and the read-only identity/lifecycle fields
+/// (`id`/`connected`/`associated`/`createdAt`/`createdBy`/address) are left
+/// untouched even if the body carries them.
+fn apply_trust_domain_device_update(dev: &mut Value, req: &Value, now: &str, actor: &str) {
+    let obj = match dev.as_object_mut() {
+        Some(o) => o,
+        None => return,
+    };
+
+    // Mutable fields: set when present (validation already rejected an ill-typed
+    // value). deviceCredential is write-only — accepted at validation but never
+    // applied to or echoed in the stored device.
+    for key in [
+        "deviceName",
+        "deviceType",
+        "enabled",
+        "blocked",
+        "hardwareAddress",
+        "bootstrappingInfo",
+    ] {
+        if let Some(v) = req.get(key) {
+            obj.insert(key.into(), v.clone());
+        }
+    }
+
+    // Refresh the audit stamps on every successful update.
+    obj.insert("modifiedAt".into(), json!(now));
+    obj.insert("modifiedBy".into(), json!(actor));
 }
 
 /// A stable, strict RFC 4122 (version 5, name-based) UUID from a domain-tagged
@@ -3158,6 +3360,432 @@ mod tests {
         assert_eq!(
             headers.get("x-correlator").and_then(|v| v.to_str().ok()),
             Some("corr-tdd-list-1")
+        );
+    }
+
+    // === updateTrustDomainDevice (PATCH /trust-domains/{id}/devices/{deviceId}) ==
+
+    #[test]
+    fn validate_device_update_accepts_optional_and_empty() {
+        // Every field is optional — an empty body is valid (a no-op re-stamp).
+        assert!(validate_trust_domain_device_update(&json!({})).is_ok());
+        // A partial patch of any single mutable field is valid.
+        assert!(validate_trust_domain_device_update(&json!({ "enabled": false })).is_ok());
+        assert!(validate_trust_domain_device_update(&json!({ "deviceName": "Renamed" })).is_ok());
+        assert!(validate_trust_domain_device_update(&json!({ "blocked": true })).is_ok());
+        assert!(validate_trust_domain_device_update(&json!({
+            "deviceType": "SMARTPHONE",
+            "hardwareAddress": { "hardwareAddressType": "EUI-48", "value": "aa-bb-cc-dd-ee-ff" },
+            "deviceCredential": { "credentialAction": "GENERATE" }
+        }))
+        .is_ok());
+    }
+
+    #[test]
+    fn validate_device_update_rejects_malformed_present_fields() {
+        // deviceName present-but-blank / too long / wrong type.
+        assert!(validate_trust_domain_device_update(&json!({ "deviceName": "  " })).is_err());
+        assert!(
+            validate_trust_domain_device_update(&json!({ "deviceName": "x".repeat(256) })).is_err()
+        );
+        assert!(validate_trust_domain_device_update(&json!({ "deviceName": 7 })).is_err());
+        // enabled / blocked present-but-not-boolean (a present null fails the type check).
+        assert!(validate_trust_domain_device_update(&json!({ "enabled": "yes" })).is_err());
+        assert!(validate_trust_domain_device_update(&json!({ "enabled": Value::Null })).is_err());
+        assert!(validate_trust_domain_device_update(&json!({ "blocked": 1 })).is_err());
+        // deviceType unknown enum.
+        assert!(validate_trust_domain_device_update(&json!({ "deviceType": "SERVER" })).is_err());
+        // hardwareAddress bad type / bad MAC.
+        assert!(validate_trust_domain_device_update(&json!({
+            "hardwareAddress": { "hardwareAddressType": "EUI-64", "value": "00:11:22:33:44:55" }
+        }))
+        .is_err());
+        assert!(validate_trust_domain_device_update(&json!({
+            "hardwareAddress": { "hardwareAddressType": "EUI-48", "value": "not-a-mac" }
+        }))
+        .is_err());
+    }
+
+    #[test]
+    fn apply_device_update_sets_present_and_restamps() {
+        let mut dev = json!({
+            "id": "b1e0f6a2-9c3d-5e4f-8a1b-2c3d4e5f6a7b",
+            "deviceName": "Old", "enabled": true, "deviceType": "LAPTOP",
+            "externalId": "asset-42", "connected": false, "associated": false,
+            "createdAt": "2024-01-01T00:00:00Z", "createdBy": "creator-uuid",
+            "modifiedAt": "2024-01-01T00:00:00Z", "modifiedBy": "creator-uuid"
+        });
+        let req = json!({
+            "deviceName": "New", "enabled": false, "blocked": true,
+            // read-only / create-only fields in the body are ignored:
+            "id": "ffffffff-ffff-4fff-8fff-ffffffffffff",
+            "externalId": "asset-99", "connected": true,
+            // write-only credential must not land in the echo:
+            "deviceCredential": { "credentialAction": "GENERATE" }
+        });
+        apply_trust_domain_device_update(&mut dev, &req, "2024-06-01T12:00:00Z", "editor-uuid");
+
+        assert_eq!(dev["deviceName"], json!("New"));
+        assert_eq!(dev["enabled"], json!(false));
+        assert_eq!(dev["blocked"], json!(true));
+        // Immutable fields untouched.
+        assert_eq!(dev["id"], json!("b1e0f6a2-9c3d-5e4f-8a1b-2c3d4e5f6a7b"));
+        assert_eq!(dev["externalId"], json!("asset-42"));
+        assert_eq!(dev["connected"], json!(false));
+        assert_eq!(dev["createdAt"], json!("2024-01-01T00:00:00Z"));
+        assert_eq!(dev["createdBy"], json!("creator-uuid"));
+        // Audit stamps refreshed; credential never echoed.
+        assert_eq!(dev["modifiedAt"], json!("2024-06-01T12:00:00Z"));
+        assert_eq!(dev["modifiedBy"], json!("editor-uuid"));
+        assert!(dev.get("deviceCredential").is_none(), "credential must not be echoed");
+    }
+
+    // --- Integration through the real router -------------------------------
+
+    /// PATCH `/trust-domains/{id}/devices/{deviceId}` with an optional Bearer token,
+    /// optional JSON body, and optional `x-correlator`. Returns (status, headers, json).
+    async fn patch_device_req(
+        token: Option<&str>,
+        trust_domain_id: &str,
+        device_id: &str,
+        body: Option<&Value>,
+        correlator: Option<&str>,
+    ) -> (StatusCode, HeaderMap, Value) {
+        let mut builder = Request::builder()
+            .method("PATCH")
+            .uri(format!(
+                "/network-access-domains/vwip/trust-domains/{trust_domain_id}/devices/{device_id}"
+            ))
+            .header("host", HOST);
+        if let Some(t) = token {
+            builder = builder.header("authorization", format!("Bearer {t}"));
+        }
+        if let Some(c) = correlator {
+            builder = builder.header("x-correlator", c);
+        }
+        let req_body = match body {
+            Some(v) => {
+                builder = builder.header("content-type", "application/json");
+                Body::from(serde_json::to_vec(v).unwrap())
+            }
+            None => Body::empty(),
+        };
+        let response = app().oneshot(builder.body(req_body).unwrap()).await.unwrap();
+        let status = response.status();
+        let headers = response.headers().clone();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, headers, json)
+    }
+
+    #[tokio::test]
+    async fn update_device_patches_fields_and_persists() {
+        let (td_id, dev_id) = make_device(
+            "nad-005",
+            "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+            "TDD update ok",
+            "Before",
+        )
+        .await;
+        let token = mint_token_as("nad-005", DEVICES_SCOPE).await;
+
+        let (status, _, updated) = patch_device_req(
+            Some(&token),
+            &td_id,
+            &dev_id,
+            Some(&json!({ "deviceName": "After", "enabled": false, "blocked": true })),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(updated["id"], json!(dev_id));
+        assert_eq!(updated["deviceName"], json!("After"));
+        assert_eq!(updated["enabled"], json!(false));
+        assert_eq!(updated["blocked"], json!(true));
+        // Read-only lifecycle preserved; audit re-stamped.
+        assert_eq!(updated["connected"], json!(false));
+        assert!(updated["modifiedAt"].as_str().unwrap().ends_with('Z'));
+        assert!(updated["modifiedBy"].is_string());
+
+        // The change persists — a later read sees it.
+        let stored = store::get_device(&td_id, &dev_id).expect("device still stored");
+        assert_eq!(stored["deviceName"], json!("After"));
+        assert_eq!(stored["enabled"], json!(false));
+    }
+
+    #[tokio::test]
+    async fn update_device_empty_body_is_a_no_op_ok() {
+        let (td_id, dev_id) = make_device(
+            "nad-005",
+            "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+            "TDD update empty",
+            "Steady",
+        )
+        .await;
+        let token = mint_token_as("nad-005", DEVICES_SCOPE).await;
+
+        let (status, _, updated) =
+            patch_device_req(Some(&token), &td_id, &dev_id, Some(&json!({})), None).await;
+        assert_eq!(status, StatusCode::OK);
+        // Original mutable fields unchanged; only the audit stamps re-stamped.
+        assert_eq!(updated["deviceName"], json!("Steady"));
+        assert_eq!(updated["enabled"], json!(true));
+        assert!(updated["modifiedAt"].as_str().unwrap().ends_with('Z'));
+    }
+
+    #[tokio::test]
+    async fn update_device_strips_credential_from_the_echo() {
+        let (td_id, dev_id) = make_device(
+            "nad-005",
+            "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+            "TDD update cred",
+            "Creddy",
+        )
+        .await;
+        let token = mint_token_as("nad-005", DEVICES_SCOPE).await;
+
+        let (status, _, updated) = patch_device_req(
+            Some(&token),
+            &td_id,
+            &dev_id,
+            Some(&json!({ "deviceCredential": { "credentialAction": "GENERATE" } })),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            updated.get("deviceCredential").is_none(),
+            "write-only credential must not be echoed"
+        );
+        let stored = store::get_device(&td_id, &dev_id).expect("device still stored");
+        assert!(stored.get("deviceCredential").is_none());
+    }
+
+    #[tokio::test]
+    async fn update_device_unknown_id_is_not_found() {
+        let (td_id, _) = make_device(
+            "nad-005",
+            "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+            "TDD update unknown",
+            "Present",
+        )
+        .await;
+        let token = mint_token_as("nad-005", DEVICES_SCOPE).await;
+        let (status, _, err) = patch_device_req(
+            Some(&token),
+            &td_id,
+            "00000000-0000-4000-8000-000000000000",
+            Some(&json!({ "enabled": false })),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(err["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn update_device_in_unknown_trust_domain_is_not_found() {
+        let (_td_id, dev_id) = make_device(
+            "nad-005",
+            "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+            "TDD update unknown parent",
+            "Orphan",
+        )
+        .await;
+        let token = mint_token_as("nad-005", DEVICES_SCOPE).await;
+        // A real device id, but under a never-created parent → 404 (key mismatch).
+        let (status, _, err) = patch_device_req(
+            Some(&token),
+            "00000000-0000-4000-8000-000000000000",
+            &dev_id,
+            Some(&json!({ "enabled": false })),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(err["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn update_device_of_another_trust_domain_is_not_found() {
+        // A device that exists in Trust Domain A is not addressable under Trust
+        // Domain B (the key mismatch folds into the same 404).
+        let (_td_a, dev_id) = make_device(
+            "nad-005",
+            "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+            "TDD update owner A",
+            "OwnedU",
+        )
+        .await;
+        let td_b = make_trust_domain(
+            "nad-005",
+            "9d5e6f70-1a2b-4c3d-8e4f-5a6b7c8d9e0f",
+            "TDD update owner B",
+        )
+        .await;
+        let token = mint_token_as("nad-005", DEVICES_SCOPE).await;
+        let (status, _, err) = patch_device_req(
+            Some(&token),
+            &td_b,
+            &dev_id,
+            Some(&json!({ "enabled": false })),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(err["code"], "NOT_FOUND");
+        // The real device is untouched by the mis-scoped patch.
+        let stored = store::get_device(&_td_a, &dev_id).expect("device survives");
+        assert_eq!(stored["enabled"], json!(true));
+    }
+
+    #[tokio::test]
+    async fn update_device_malformed_id_is_not_found() {
+        let (td_id, _) = make_device(
+            "nad-005",
+            "123e4567-e89b-12d3-a456-426614174000",
+            "TDD update malformed",
+            "Present3",
+        )
+        .await;
+        let token = mint_token_as("nad-005", DEVICES_SCOPE).await;
+        let (status, _, err) = patch_device_req(
+            Some(&token),
+            &td_id,
+            "not-a-uuid",
+            Some(&json!({ "enabled": false })),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(err["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn update_device_invalid_body_is_bad_request() {
+        let (td_id, dev_id) = make_device(
+            "nad-005",
+            "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+            "TDD update bad body",
+            "BadBody",
+        )
+        .await;
+        let token = mint_token_as("nad-005", DEVICES_SCOPE).await;
+        let (status, _, err) = patch_device_req(
+            Some(&token),
+            &td_id,
+            &dev_id,
+            Some(&json!({ "enabled": "yes" })),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(err["code"], "INVALID_ARGUMENT");
+    }
+
+    #[tokio::test]
+    async fn update_device_body_400_beats_unknown_id_404() {
+        // An invalid body is reported before the store lookup, so a 400 wins over a 404.
+        let token = mint_token_as("nad-005", DEVICES_SCOPE).await;
+        let (status, _, err) = patch_device_req(
+            Some(&token),
+            "00000000-0000-4000-8000-000000000000",
+            "00000000-0000-4000-8000-000000000001",
+            Some(&json!({ "deviceType": "SERVER" })),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(err["code"], "INVALID_ARGUMENT");
+    }
+
+    #[tokio::test]
+    async fn update_device_ignores_the_subject_reserved_suffix_plane() {
+        // Like read/delete, the update leg is store-only: the token subject is not a
+        // control plane, so a reserved-suffix subject that would 429 on create still
+        // patches an existing device as 200.
+        let (td_id, dev_id) = make_device(
+            "nad-005",
+            "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+            "TDD update no-subject-plane",
+            "SharedU",
+        )
+        .await;
+        let token = mint_token_as("nad-429", DEVICES_SCOPE).await;
+        let (status, _, updated) = patch_device_req(
+            Some(&token),
+            &td_id,
+            &dev_id,
+            Some(&json!({ "enabled": false })),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(updated["id"], json!(dev_id));
+        assert_eq!(updated["enabled"], json!(false));
+    }
+
+    #[tokio::test]
+    async fn update_device_token_without_the_scope_is_forbidden() {
+        let (td_id, dev_id) = make_device(
+            "nad-005",
+            "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+            "TDD update forbidden",
+            "Forbid",
+        )
+        .await;
+        let token = mint_token_as("nad-005", "some:other-scope").await;
+        let (status, _, err) = patch_device_req(
+            Some(&token),
+            &td_id,
+            &dev_id,
+            Some(&json!({ "enabled": false })),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(err["code"], "PERMISSION_DENIED");
+    }
+
+    #[tokio::test]
+    async fn update_device_missing_token_is_unauthenticated() {
+        let (td_id, dev_id) = make_device(
+            "nad-005",
+            "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+            "TDD update noauth",
+            "NoAuthU",
+        )
+        .await;
+        let (status, _, err) =
+            patch_device_req(None, &td_id, &dev_id, Some(&json!({ "enabled": false })), None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(err["code"], "UNAUTHENTICATED");
+    }
+
+    #[tokio::test]
+    async fn update_device_x_correlator_is_echoed() {
+        let (td_id, dev_id) = make_device(
+            "nad-005",
+            "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+            "TDD update corr",
+            "CorrU",
+        )
+        .await;
+        let token = mint_token_as("nad-005", DEVICES_SCOPE).await;
+        let (status, headers, _) = patch_device_req(
+            Some(&token),
+            &td_id,
+            &dev_id,
+            Some(&json!({ "enabled": false })),
+            Some("corr-tdd-update-1"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-tdd-update-1")
         );
     }
 
