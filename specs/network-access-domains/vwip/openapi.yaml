@@ -21,10 +21,12 @@
 #     returned ServiceList deterministically.
 # It also serves the single-service `GET /services/{serviceId}` read
 # (getService), the stateful Trust Domain create leg
-# `POST /trust-domains` (createTrustDomain), and its read-back
-# `GET /trust-domains/{trustDomainId}` (getTrustDomain), backed by the in-memory
-# trust-domain store. The remaining Trust Domain update/delete legs and the
-# Trust Domain Device CRUD resource remain to be added in later slices.
+# `POST /trust-domains` (createTrustDomain), its read-back
+# `GET /trust-domains/{trustDomainId}` (getTrustDomain), and its delete leg
+# `DELETE /trust-domains/{trustDomainId}` (deleteTrustDomain), backed by the
+# in-memory trust-domain store. The remaining Trust Domain update leg
+# (updateTrustDomain) and the Trust Domain Device CRUD resource remain to be
+# added in later slices.
 openapi: 3.0.3
 info:
   title: Network Access Domains
@@ -118,12 +120,19 @@ info:
     `TrustDomain`, any other id (never created or malformed) → `404 NOT_FOUND`
     (a malformed id folds into the same `404`, no store entry to tell them apart).
 
+    **`deleteTrustDomain`** (`DELETE /trust-domains/{trustDomainId}`) evicts a
+    created Trust Domain. Keyed only to the store, mirroring `getTrustDomain`: a
+    stored id is removed → `204 No Content` (single-use — a second delete of the
+    same id finds nothing), any other id (never created, already deleted, or
+    malformed) → `404 NOT_FOUND`. Deletion is synchronous with no CloudEvent.
+
     ## Documented cuts
 
     - The read-only `getTrustDomainCapabilities`, `getServices` and `getService`
-      legs and the stateful `createTrustDomain` / `getTrustDomain` legs are
-      implemented so far; the remaining Trust Domain update/delete legs and the
-      Trust Domain Device CRUD resource are later slices.
+      legs and the stateful `createTrustDomain` / `getTrustDomain` /
+      `deleteTrustDomain` legs are implemented so far; the remaining Trust Domain
+      update leg (`updateTrustDomain`) and the Trust Domain Device CRUD resource
+      are later slices.
     - `createTrustDomain` admits only the access types this provider advertises
       (Wi-Fi WPA-Personal/Enterprise, Thread STRUCTURED). A canonical but
       unadvertised `Thread:TLV` access detail → `400 INVALID_ARGUMENT`.
@@ -473,6 +482,74 @@ paths:
         cases:
           - input: "a trustDomainId returned by a prior createTrustDomain"
             result: "200 — the persisted TrustDomain (write-only password omitted)"
+          - input: "a well-formed trustDomainId that was never created"
+            result: "404 NOT_FOUND"
+          - input: "a malformed (non-UUID) trustDomainId"
+            result: "404 NOT_FOUND (folded, no store to distinguish it)"
+          - input: a token without the network-access-domains:trust-domains scope
+            result: "403 PERMISSION_DENIED"
+          - input: no / invalid token
+            result: "401 UNAUTHENTICATED"
+    delete:
+      operationId: deleteTrustDomain
+      summary: Delete a Trust Domain by id
+      description: |
+        Deletes a single `TrustDomain` by the server-assigned `trustDomainId`
+        that `createTrustDomain` returned, and (conceptually) removes its
+        configuration from every network access device where it is applied.
+
+        There is no request body and no device identifier: the operation is keyed
+        only to the in-memory store (docs/DESIGN.md §7). The `trustDomainId` is an
+        opaque, SHA-256-derived UUID the caller cannot construct, so it is not
+        itself a scenario plane — a stored id is evicted → `204 No Content`
+        (single-use: a second delete of the same id finds nothing), any other id
+        (never created, already deleted, or malformed) → `404 NOT_FOUND`. A
+        malformed id folds into the same `404` (there is no store entry to
+        distinguish it from an unknown one). Deletion is synchronous.
+      security:
+        - openId:
+            - network-access-domains:trust-domains
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+        - name: trustDomainId
+          in: path
+          required: true
+          description: The server-assigned id of the Trust Domain to delete.
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "204":
+          description: The Trust Domain was deleted successfully. No content.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+        "400":
+          $ref: "../../shared/errors.yaml#/components/responses/InvalidArgument"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          deleteTrustDomain is keyed only to the in-memory store (docs/DESIGN.md
+          §7). The trustDomainId is an opaque server-minted UUID, so store state
+          is the only control plane: a stored id is evicted (204, single-use), any
+          other id — unknown, already-deleted, or malformed — is a 404 (folded, no
+          store entry to tell them apart).
+        cases:
+          - input: "a trustDomainId returned by a prior createTrustDomain"
+            result: "204 No Content — the Trust Domain is evicted"
+          - input: "the same trustDomainId a second time (already deleted)"
+            result: "404 NOT_FOUND (single-use)"
           - input: "a well-formed trustDomainId that was never created"
             result: "404 NOT_FOUND"
           - input: "a malformed (non-UUID) trustDomainId"

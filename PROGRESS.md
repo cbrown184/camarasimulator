@@ -3114,9 +3114,18 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
       `TrustDomain` verbatim (write-only WPA password already stripped at create);
       any other id (never created or malformed) → `404 NOT_FOUND` (folded). Route
       is a param sibling of the static `/trust-domains/capabilities` (static wins,
-      guarded by a test). `x-correlator` echoed. No new dep. The remaining Trust
-      Domain update/delete legs and the Trust Domain Device CRUD resource remain
-      later slices.
+      guarded by a test). `x-correlator` echoed. No new dep.
+    - [x] `DELETE /trust-domains/{trustDomainId}` (`deleteTrustDomain`, scope
+      `network-access-domains:trust-domains`) — evicts a created Trust Domain by
+      its opaque, server-minted `trustDomainId`. Store state is the only control
+      plane (the id is SHA-256-derived, no reserved-suffix plane, mirroring
+      `getTrustDomain`): a stored id → `204 No Content` (single-use, new
+      `store::remove`); any other id (never created, already deleted, or malformed)
+      → `404 NOT_FOUND` (folded). Synchronous, no CloudEvent. Shares the
+      `/trust-domains/:id` param route with `getTrustDomain` via `.delete(…)`.
+      `x-correlator` echoed on the `204`. No new dep. The remaining Trust Domain
+      update leg (`updateTrustDomain`) and the Trust Domain Device CRUD resource
+      remain later slices.
 
 ## Cross-cutting (do alongside the item that needs it)
 - [~] `errors.rs`: base CAMARA error model done (`src/errors.rs`, `specs/shared/errors.yaml`); per-version catalogs still TODO (DESIGN §8)
@@ -4258,6 +4267,23 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-15 — Network Access Domains vwip: added the Trust Domain delete leg
+  `DELETE /trust-domains/{trustDomainId}` (`deleteTrustDomain`, scope
+  `network-access-domains:trust-domains`), the natural next slice after
+  `getTrustDomain`. New `store::remove` (single lock hold, never across await,
+  returns whether the id existed) and a `delete_trust_domain` handler sharing the
+  existing `/trust-domains/:id` param route via `.delete(…)` alongside
+  `get_trust_domain`. Store state is the only control plane (opaque SHA-256-derived
+  id, no reserved-suffix plane, mirroring `getTrustDomain`): a stored id evicted →
+  `204 No Content` (single-use — a second delete finds nothing); any other id
+  (never created / already deleted / malformed) → `404 NOT_FOUND` (folded).
+  Synchronous, no CloudEvent (Trust Domains carry no sink). Spec: added the
+  `delete:` op on the `/trust-domains/{trustDomainId}` path (204 + standard error
+  set + `x-camarasim-scenarios`), refreshed the header notes / functional-cases
+  prose / documented cuts. 7 new tests (evict+read-back-404, single-use,
+  unknown-id 404, malformed 404, wrong-scope 403, no-token 401, correlator echo on
+  204). `cargo test` 2465 green (was 2458); `cargo build --release` succeeds. No
+  new dep. — binary: 4.0M (4179392 B, +6824 B)
 - 2026-08-15 — Network Access Domains vwip: added the Trust Domain read-back leg
   `GET /trust-domains/{trustDomainId}` (`getTrustDomain`, scope
   `network-access-domains:trust-domains`), the natural next slice after

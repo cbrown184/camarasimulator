@@ -61,3 +61,17 @@ pub fn get(id: &str) -> Option<Value> {
         .get(id)
         .cloned()
 }
+
+/// Evict the `TrustDomain` stored under `id`, reporting whether one existed.
+/// Backs the `deleteTrustDomain` leg (`DELETE /trust-domains/{id}`): a present
+/// id is removed and the leg answers `204 No Content` (single-use — a second
+/// delete of the same id finds nothing), a missing id yields the CAMARA `404`.
+/// The whole check-and-remove runs under a single lock hold (never across an
+/// `.await`), so two concurrent deletes of the same id can't both report success.
+pub fn remove(id: &str) -> bool {
+    store()
+        .lock()
+        .expect("network-access-domains trust-domain store not poisoned")
+        .remove(id)
+        .is_some()
+}

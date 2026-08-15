@@ -121,7 +121,7 @@ pub fn routes() -> Router {
         )
         .route(
             "/network-access-domains/vwip/trust-domains/:trust_domain_id",
-            get(get_trust_domain),
+            get(get_trust_domain).delete(delete_trust_domain),
         )
         .route(
             "/network-access-domains/vwip/services",
@@ -277,6 +277,50 @@ async fn get_trust_domain(
             CamaraError::not_found("No Trust Domain found for the provided id.").into_response(),
             &correlator,
         ),
+    }
+}
+
+/// `DELETE /network-access-domains/vwip/trust-domains/{trustDomainId}`
+/// (`deleteTrustDomain`).
+///
+/// Deletes a Trust Domain by the opaque, server-minted `trustDomainId` that
+/// `createTrustDomain` returned. Like `getTrustDomain`, the id is not derivable
+/// by the caller (a SHA-256-derived UUID over the `(serviceId, name)` pair), so
+/// the **in-memory store is the only control plane** (docs/DESIGN.md §7): a
+/// stored id is evicted → `204 No Content` (single-use — a second delete of the
+/// same id finds nothing); any other id (never created, already deleted, or
+/// malformed) → `404 NOT_FOUND`. There is no store entry to distinguish a
+/// malformed id from an unknown one, so both fold into the same `404` (mirroring
+/// `getTrustDomain`). Deletion is synchronous with no `subscription-ended`-style
+/// CloudEvent (the API has no `sink` on Trust Domains).
+///
+/// Requires a token carrying the `network-access-domains:trust-domains` scope
+/// (the same scope guards `createTrustDomain` / `getTrustDomain` / the
+/// capabilities document). `x-correlator` is echoed on every response, including
+/// the `204`.
+async fn delete_trust_domain(
+    claims: Claims,
+    headers: HeaderMap,
+    Path(trust_domain_id): Path<String>,
+) -> Response {
+    // Optional correlation header, echoed on every response (CAMARA Commonalities).
+    let correlator = headers.get("x-correlator").cloned();
+
+    // Endpoint authorisation: the token must carry this API's Trust Domain scope.
+    if let Err(e) = claims.require_scope(TRUST_DOMAINS_SCOPE) {
+        return with_correlator(e.into_response(), &correlator);
+    }
+
+    // Store state is the only control plane — the opaque minted id has no
+    // reserved-suffix plane. A present id is evicted (204); a miss (unknown,
+    // already-deleted, or malformed id) is a 404.
+    if store::remove(&trust_domain_id) {
+        with_correlator(StatusCode::NO_CONTENT.into_response(), &correlator)
+    } else {
+        with_correlator(
+            CamaraError::not_found("No Trust Domain found for the provided id.").into_response(),
+            &correlator,
+        )
     }
 }
 
@@ -1675,6 +1719,124 @@ mod tests {
         assert_eq!(
             headers.get("x-correlator").and_then(|v| v.to_str().ok()),
             Some("corr-td-read")
+        );
+    }
+
+    // === deleteTrustDomain (DELETE /trust-domains/{trustDomainId}) =========
+
+    /// DELETE `/trust-domains/{id}` with an optional Bearer token and optional
+    /// `x-correlator`. Returns (status, headers, json-or-null — the `204` body is
+    /// empty, so the value is `Null`).
+    async fn delete_trust_domain_req(
+        token: Option<&str>,
+        id: &str,
+        correlator: Option<&str>,
+    ) -> (StatusCode, HeaderMap, Value) {
+        let mut builder = Request::builder()
+            .method("DELETE")
+            .uri(format!("/network-access-domains/vwip/trust-domains/{id}"))
+            .header("host", HOST);
+        if let Some(t) = token {
+            builder = builder.header("authorization", format!("Bearer {t}"));
+        }
+        if let Some(c) = correlator {
+            builder = builder.header("x-correlator", c);
+        }
+        let response = app().oneshot(builder.body(Body::empty()).unwrap()).await.unwrap();
+        let status = response.status();
+        let headers = response.headers().clone();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, headers, json)
+    }
+
+    #[tokio::test]
+    async fn delete_evicts_the_created_trust_domain() {
+        let token = mint_token_as("nad-005", TRUST_DOMAINS_SCOPE).await;
+        // Create one, delete it, then confirm a subsequent read is a 404.
+        let body = td_body("7c9e6679-7425-40de-944b-e07fc1f90ae7", "TD delete ok");
+        let (created, _, td) = post_trust_domain(Some(&token), Some(&body), None).await;
+        assert_eq!(created, StatusCode::CREATED);
+        let id = td["id"].as_str().unwrap().to_string();
+
+        let (status, _, _) = delete_trust_domain_req(Some(&token), &id, None).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert!(store::get(&id).is_none(), "the store entry is gone");
+
+        // A read after delete is a 404.
+        let (read, _, err) = get_trust_domain_req(Some(&token), &id, None).await;
+        assert_eq!(read, StatusCode::NOT_FOUND);
+        assert_eq!(err["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn delete_is_single_use() {
+        let token = mint_token_as("nad-005", TRUST_DOMAINS_SCOPE).await;
+        let body = td_body("16fd2706-8baf-433b-82eb-8c7fada847da", "TD delete twice");
+        let (_, _, td) = post_trust_domain(Some(&token), Some(&body), None).await;
+        let id = td["id"].as_str().unwrap().to_string();
+
+        // First delete evicts (204); the second finds nothing → 404.
+        let (first, _, _) = delete_trust_domain_req(Some(&token), &id, None).await;
+        assert_eq!(first, StatusCode::NO_CONTENT);
+        let (second, _, err) = delete_trust_domain_req(Some(&token), &id, None).await;
+        assert_eq!(second, StatusCode::NOT_FOUND);
+        assert_eq!(err["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn delete_unknown_id_is_not_found() {
+        let token = mint_token_as("nad-005", TRUST_DOMAINS_SCOPE).await;
+        // A well-formed but never-created id → 404 NOT_FOUND (store is the only plane).
+        let (status, _, err) =
+            delete_trust_domain_req(Some(&token), "00000000-0000-0000-0000-000000000000", None)
+                .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(err["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn delete_malformed_id_is_not_found() {
+        let token = mint_token_as("nad-005", TRUST_DOMAINS_SCOPE).await;
+        // A non-UUID id folds into the same 404 (mirroring getTrustDomain).
+        let (status, _, err) = delete_trust_domain_req(Some(&token), "not-a-uuid", None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(err["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn delete_token_without_the_scope_is_forbidden() {
+        let token = mint_token_as("nad-005", "some:other-scope").await;
+        let (status, _, err) =
+            delete_trust_domain_req(Some(&token), "00000000-0000-0000-0000-000000000000", None)
+                .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(err["code"], "PERMISSION_DENIED");
+    }
+
+    #[tokio::test]
+    async fn delete_missing_token_is_unauthenticated() {
+        let (status, _, err) =
+            delete_trust_domain_req(None, "00000000-0000-0000-0000-000000000000", None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(err["code"], "UNAUTHENTICATED");
+    }
+
+    #[tokio::test]
+    async fn delete_x_correlator_is_echoed_on_the_204() {
+        let token = mint_token_as("nad-005", TRUST_DOMAINS_SCOPE).await;
+        let body = td_body("6ba7b810-9dad-11d1-80b4-00c04fd430c8", "TD delete corr");
+        let (_, _, td) = post_trust_domain(Some(&token), Some(&body), None).await;
+        let id = td["id"].as_str().unwrap().to_string();
+
+        let (status, headers, _) =
+            delete_trust_domain_req(Some(&token), &id, Some("corr-td-delete")).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-td-delete")
         );
     }
 }
