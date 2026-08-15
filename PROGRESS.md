@@ -4495,6 +4495,34 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-15 — Contract-test harness: added an **example-within-numeric-bounds**
+  spec-structural contract test (`src/registry.rs`
+  `every_example_is_within_its_numeric_bounds`) — where a Schema Object declares a
+  numeric `example` beside a `minimum` and/or `maximum`, the example must lie within
+  those bounds, else the schema advertises a sample its own validator rejects (a
+  Redoc/Swagger "try it" prefill / codegen sample below the floor or above the
+  ceiling). The `example` analogue of `every_default_is_within_its_numeric_bounds`,
+  completing the default↔example pair set for numeric bounds (enum-membership and
+  schema-type analogues already paired). Invisible to its example siblings:
+  `every_example_is_a_member_of_its_enum` checks an example vs a sibling *enum*,
+  `every_example_matches_its_schema_type` checks an example's *type* not its
+  magnitude, and `every_numeric_bound_is_ordered_low_to_high` compares the two bounds
+  to each other but never against an example. New pure
+  `examples_outside_their_numeric_bounds` extractor mirrors
+  `defaults_outside_their_numeric_bounds` exactly (only the pivot key differs —
+  `example:` for `default:`): unquoted-numeric-only inline value, same-indent
+  dedent-bounded sibling `minimum`/`maximum` scan (down then up), inclusive
+  comparison (exclusive-bound edges never false-positive), and skips for
+  quoted/non-numeric examples, block-opening `example:` (object/array example or a
+  property named `example`), an example with no bound sibling, and an inner
+  `example:` nested in an outer `example:`/`examples:` payload. Surveyed the corpus
+  first (230 example+bound pairs across all specs, 0 out of range) → no drift to fix.
+  Tests: +2 (the contract test + `example_numeric_bound_extraction_rules`:
+  within/below/above in document order, inclusive-equal, down-scan bound, quoted +
+  non-numeric skip, no-bound skip, nested-example skip, cross-property non-pairing,
+  block-example skip, ≥3 example+bound sibling non-vacuous floor). `cargo test` 2605
+  green (was 2603); `cargo build --release` succeeds, no warnings. No new dependency;
+  test-only change. — binary: 5.1M (5,314,968 B; unchanged)
 - 2026-08-15 — Contract-test harness: added an **example-in-enum** spec-structural
   contract test (`src/registry.rs` `every_example_is_a_member_of_its_enum`) — where
   a Schema Object declares BOTH an `example` and an `enum`, the example must be one

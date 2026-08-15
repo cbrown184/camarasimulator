@@ -13760,6 +13760,336 @@ components:
         );
     }
 
+    /// The 1-based line numbers, in document order, of every `example:` keyword whose
+    /// inline numeric value falls outside a sibling numeric bound — `minimum` or
+    /// `maximum` — declared in the same Schema Object, without a YAML dep. The
+    /// `example` analogue of `defaults_outside_their_numeric_bounds` (only the pivot
+    /// key differs — `example:` for `default:`).
+    ///
+    /// In OpenAPI 3.0.x (JSON Schema) an `example` is a sample *instance* of the
+    /// schema, so it MUST satisfy the schema's own constraints. Where the object bounds
+    /// a numeric value with `minimum`/`maximum`, a numeric `example` below the `minimum`
+    /// or above the `maximum` is a self-contradictory schema: the schema advertises a
+    /// sample its own validator rejects, so a Redoc/Swagger "try it" prefill and a
+    /// codegen client's generated sample carry a value the bound can never legally hold.
+    ///
+    /// Only an `example` carrying an inline *unquoted numeric* scalar and at least one
+    /// same-object numeric bound sibling is inspected; each bound is scanned at the
+    /// example's own indent, down through the object's block then up, dedent-bounded
+    /// exactly like `defaults_outside_their_numeric_bounds`, so a nested or following
+    /// sibling object's bound never pairs. Skipped: an `example:` that opens a block (an
+    /// object/array example, or a property literally named `example`); a quoted or
+    /// non-numeric example (a numeric bound constrains only numbers — a mistyped example
+    /// is `examples_inconsistent_with_type`'s concern); an example with no numeric bound
+    /// sibling; and an `example:` nested inside an outer `example:`/`examples:` payload
+    /// (example data whose inner `example` key is not a schema keyword). The comparison
+    /// is inclusive — only a value strictly below `minimum` or strictly above `maximum`
+    /// is flagged — so an exclusive-bound equality edge is never a false positive.
+    fn examples_outside_their_numeric_bounds(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        // The inline scalar of a `name:` key (inline comment stripped; surrounding
+        // quotes preserved so a quoted token stays distinguishable from a bare number);
+        // `None` when the line is a different key or opens a block (no inline value).
+        let raw_inline = |l: &str, name: &str| -> Option<String> {
+            let (k, v) = l.trim_start().split_once(':')?;
+            if k.trim() != name {
+                return None;
+            }
+            let v = v.split('#').next().unwrap_or(v).trim();
+            if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            }
+        };
+        // A same-indent numeric bound sibling `key` in the same object as line `i`
+        // (indent `c`): scan down through the object's block then up, dedent-bounded so
+        // a nested or following object's bound never pairs. Returns the parsed number
+        // only for an unquoted numeric scalar (a quoted or non-numeric bound has no
+        // magnitude to compare against and is treated as absent here).
+        let sibling_num = |i: usize, c: usize, key: &str| -> Option<f64> {
+            let parse_num = |l: &str| -> Option<f64> {
+                let raw = raw_inline(l, key)?;
+                if raw.starts_with('"') || raw.starts_with('\'') {
+                    return None; // quoted → not a number
+                }
+                raw.parse::<f64>().ok()
+            };
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c {
+                    if let Some(n) = parse_num(l) {
+                        return Some(n);
+                    }
+                }
+                j += 1;
+            }
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c {
+                    if let Some(n) = parse_num(l) {
+                        return Some(n);
+                    }
+                }
+            }
+            None
+        };
+        // True when line `i` (indent `c`) sits inside an outer `example:`/`examples:`
+        // payload — some enclosing container key up the indent ladder is
+        // `example`/`examples` (mirroring `defaults_outside_their_numeric_bounds`), so
+        // an inner `example` key there is sample data, not a schema keyword.
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some(raw) = raw_inline(line, "example") else {
+                continue;
+            };
+            // Only an unquoted numeric example can violate a numeric bound; a quoted or
+            // non-numeric example is `examples_inconsistent_with_type`'s concern.
+            if raw.starts_with('"') || raw.starts_with('\'') {
+                continue;
+            }
+            let Ok(val) = raw.parse::<f64>() else {
+                continue;
+            };
+            let c = indent(line);
+            if inside_example(i, c) {
+                continue;
+            }
+            let min = sibling_num(i, c, "minimum");
+            let max = sibling_num(i, c, "maximum");
+            if min.is_none() && max.is_none() {
+                continue;
+            }
+            let below = min.is_some_and(|m| val < m);
+            let above = max.is_some_and(|m| val > m);
+            if below || above {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_example_is_within_its_numeric_bounds() {
+        // Contract-harness invariant (OpenAPI 3.0.x / JSON-Schema structural rule):
+        // where a Schema Object declares a numeric `example` beside a `minimum` and/or
+        // `maximum`, the example MUST lie within those bounds. An `example` is a sample
+        // *instance* of the schema, so a value below the `minimum` or above the
+        // `maximum` — an `example: 0` under `minimum: 1`, an `example: 300` under
+        // `maximum: 240` — is a self-contradictory schema: the schema advertises a
+        // sample its own validator rejects, so a Redoc/Swagger "try it" form pre-fills a
+        // control with an out-of-range value and a codegen client's generated sample
+        // fails the bound's own check.
+        //
+        // The `example` analogue of `every_default_is_within_its_numeric_bounds` — the
+        // same routine hazard in these scenario-table-heavy specs, where a bounded
+        // numeric param carries a hand-tuned example (a `maxAge` 1..2400 example 240, a
+        // `radius`/`duration` sample) that a later bound-narrowing or a paste from a
+        // sibling with a different range leaves out of range. It is invisible to its
+        // example siblings: `every_example_is_a_member_of_its_enum` checks an example
+        // against a sibling *enum*, `every_example_matches_its_schema_type` checks an
+        // example's *type* never its magnitude, and the numeric-bound test
+        // (`every_numeric_bound_is_ordered_low_to_high`) compares the two bounds to each
+        // other but never against an example. No existing test compares an `example`'s
+        // value against its own bounds. Verified true across all mounted specs before
+        // asserting.
+        for api in APIS {
+            let offenders = examples_outside_their_numeric_bounds(api.body);
+            assert!(
+                offenders.is_empty(),
+                "{} spec declares a numeric `example` outside its sibling `minimum`/\
+                 `maximum` bound (a value the bound's own validator would reject) at \
+                 `example:` line(s): {:?}",
+                api.name,
+                offenders
+            );
+        }
+    }
+
+    #[test]
+    fn example_numeric_bound_extraction_rules() {
+        // Unit-cover `examples_outside_their_numeric_bounds` so the contract test above
+        // can't pass vacuously and its detection is pinned: an example within its bounds
+        // passes; an example below a `minimum` (declared above it) and one above a
+        // `maximum` (declared above it) are flagged in document order; an example equal
+        // to a bound passes (inclusive); a `minimum` declared *below* the example is
+        // still paired (down-scan); a quoted or non-numeric example is skipped (nothing
+        // numeric to compare); an example with no bound sibling is skipped; an `example:`
+        // nested inside an outer `example:` payload is skipped; an example in one
+        // property never pairs with a following property's bound across the dedent; and
+        // an `example:` opening a block (a property literally named `example`) is skipped.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    GoodRange:
+      type: integer
+      minimum: 1
+      maximum: 10
+      example: 5
+    BadBelow:
+      type: integer
+      minimum: 100
+      example: 1
+    BadAbove:
+      type: integer
+      maximum: 10
+      example: 99
+    MinOnlyGood:
+      type: integer
+      example: 7
+      minimum: 1
+    Equal:
+      type: integer
+      minimum: 5
+      maximum: 5
+      example: 5
+    Quoted:
+      type: string
+      minimum: 1
+      example: '0'
+    NonNumeric:
+      type: string
+      minimum: 1
+      example: hello
+    NoBound:
+      type: integer
+      example: 42
+    NestedExample:
+      type: object
+      example:
+        minimum: 100
+        example: 1
+    Split:
+      type: object
+      properties:
+        a:
+          example: 0
+        b:
+          type: integer
+          minimum: 100
+    NamedExample:
+      type: object
+      properties:
+        example:
+          type: integer
+          minimum: 100
+";
+        // Flagged, in document order: line 22 (`BadBelow.example: 1` < its
+        // `minimum: 100` sibling above) and line 26 (`BadAbove.example: 99` > its
+        // `maximum: 10` sibling above). Not flagged: `GoodRange` (5 in [1,10]);
+        // `MinOnlyGood` (7 >= a `minimum: 1` declared *below* it — down-scan);
+        // `Equal` (5 == both bounds, inclusive); `Quoted` (`'0'` is a quoted string,
+        // not a number, though 0 < 1); `NonNumeric` (`hello` isn't numeric);
+        // `NoBound` (no bound sibling); `NestedExample` (its inner `example: 1` sits
+        // inside the outer `example:` payload); `Split.a.example: 0`, whose only
+        // candidate `minimum: 100` sits in the following property `Split.b` past a
+        // dedent, so the two never pair; and `NamedExample` (an `example:` opening a
+        // block has no inline scalar).
+        assert_eq!(examples_outside_their_numeric_bounds(body), vec![22, 26]);
+
+        // Non-vacuous floor: across every registered spec every numeric example with a
+        // sibling bound lies within it (the invariant the contract test asserts), and
+        // the corpus actually declares many bounded examples (bounded `radius`,
+        // `maxAge`, `duration`, page-size samples) — so the magnitude-comparison path
+        // runs on real data and a broken (always-empty) extractor can't hide behind a
+        // corpus that never pairs an example with a bound. Count pairs with a window
+        // detector independent of the extractor's magnitude comparison.
+        let mut bounded_examples = 0usize;
+        for api in APIS {
+            assert!(
+                examples_outside_their_numeric_bounds(api.body).is_empty(),
+                "{}: every numeric example must lie within its sibling min/max bound",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            let is_num_key = |l: &str, name: &str| {
+                l.trim_start().split_once(':').is_some_and(|(k, v)| {
+                    k.trim() == name
+                        && v.split('#')
+                            .next()
+                            .unwrap_or(v)
+                            .trim()
+                            .parse::<f64>()
+                            .is_ok()
+                })
+            };
+            for (i, l) in lines.iter().enumerate() {
+                if !is_num_key(l, "example") {
+                    continue;
+                }
+                let c = indent(l);
+                let lo = i.saturating_sub(8);
+                let hi = (i + 8).min(lines.len());
+                let has_bound = (lo..hi).any(|j| {
+                    j != i
+                        && indent(lines[j]) == c
+                        && (is_num_key(lines[j], "minimum") || is_num_key(lines[j], "maximum"))
+                });
+                if has_bound {
+                    bounded_examples += 1;
+                }
+            }
+        }
+        assert!(
+            bounded_examples >= 3,
+            "expected several numeric example+bound sibling pairs across specs, got {bounded_examples}"
+        );
+    }
+
     /// The 1-based line numbers, in document order, of every `properties:` mapping
     /// opener whose sibling `type:` scalar names a JSON type other than `object` —
     /// without a YAML dep.
