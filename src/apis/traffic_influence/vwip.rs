@@ -74,7 +74,7 @@
 //! response.
 
 use axum::body::Bytes;
-use axum::extract::Path;
+use axum::extract::{Path, RawQuery};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -130,7 +130,10 @@ const MAX_PORT: i64 = 65535;
 /// Routes for Traffic Influence vwip, mounted at their canonical URLs.
 pub fn routes() -> Router {
     Router::new()
-        .route(COLLECTION, post(post_traffic_influence))
+        .route(
+            COLLECTION,
+            post(post_traffic_influence).get(get_all_traffic_influences),
+        )
         .route(DEVICE_COLLECTION, post(post_traffic_influence_device))
         .route(
             ITEM,
@@ -636,6 +639,76 @@ fn finalize(input: ValidInput, correlator: &Option<HeaderValue>) -> Response {
             .insert(HeaderName::from_static("location"), value);
     }
     with_correlator(response, correlator)
+}
+
+/// `GET /traffic-influence/vwip/traffic-influences`.
+///
+/// Lists all Traffic Influence resources created by [`post_traffic_influence`] /
+/// [`post_traffic_influence_device`], as a bare JSON array of `TrafficInfluence`
+/// (the upstream contract has no page wrapper). A list never `404`s: with no
+/// resources it returns `200 []` (docs/DESIGN.md §7). The resources are the
+/// snapshot of the shared in-memory [`super::store`], returned verbatim and
+/// sorted by `trafficInfluenceID` for a stable order.
+///
+/// One control plane: the optional `appId` query parameter (upstream `AppId`, a
+/// UUID) narrows the list to resources whose `appId` equals it. A present but
+/// non-UUID `appId` → `400 INVALID_ARGUMENT`; an unknown-but-well-formed `appId`
+/// → `200 []` (a filter that matches nothing is not a `404`). The opaque,
+/// operator-minted `trafficInfluenceID`s carry no reserved-identifier plane, so
+/// the store is the only state consulted. Mirrors Dedicated Network's
+/// `listNetworks` and Dedicated Network Accesses' `listAccesses`.
+async fn get_all_traffic_influences(
+    claims: Claims,
+    headers: HeaderMap,
+    RawQuery(query): RawQuery,
+) -> Response {
+    // Optional correlation header, echoed on every response (CAMARA Commonalities).
+    let correlator = headers.get("x-correlator").cloned();
+
+    // Endpoint authorisation: the token must carry the read scope.
+    if let Err(e) = claims.require_scope(READ_SCOPE) {
+        return with_correlator(e.into_response(), &correlator);
+    }
+
+    // Optional `appId` filter (a UUID). A present-but-malformed value → 400.
+    let app_id_filter = match parse_app_id_filter(query.as_deref()) {
+        Ok(f) => f,
+        Err(msg) => return invalid_argument(&msg, &correlator),
+    };
+
+    let mut resources = super::store::all();
+    if let Some(app_id) = &app_id_filter {
+        resources.retain(|r| r.get("appId").and_then(Value::as_str) == Some(app_id.as_str()));
+    }
+    // Stable order so the response is deterministic (the store is unordered).
+    resources.sort_by(|a, b| {
+        let ka = a.get("trafficInfluenceID").and_then(Value::as_str).unwrap_or("");
+        let kb = b.get("trafficInfluenceID").and_then(Value::as_str).unwrap_or("");
+        ka.cmp(kb)
+    });
+
+    with_correlator(
+        (StatusCode::OK, Json(Value::Array(resources))).into_response(),
+        &correlator,
+    )
+}
+
+/// Extract and validate the optional `appId` query parameter for
+/// [`get_all_traffic_influences`]. `Ok(Some(id))` for a well-formed UUID,
+/// `Ok(None)` when absent, and `Err(message)` when `appId` is present but not a
+/// UUID (including empty). Pure over its input, so it is unit-tested directly.
+fn parse_app_id_filter(query: Option<&str>) -> Result<Option<String>, String> {
+    let raw = query.unwrap_or("");
+    let pairs: Vec<(String, String)> = serde_urlencoded::from_str(raw).unwrap_or_default();
+    for (key, value) in pairs {
+        if key == "appId" {
+            if !is_uuid_any(&value) {
+                return Err("`appId` must be a valid UUID.".to_string());
+            }
+            return Ok(Some(value));
+        }
+    }
+    Ok(None)
 }
 
 /// `GET /traffic-influence/vwip/traffic-influences/{trafficInfluenceID}`.
@@ -1150,6 +1223,27 @@ mod tests {
     }
 
     #[test]
+    fn app_id_filter_parsing() {
+        // Absent → no filter.
+        assert_eq!(parse_app_id_filter(None), Ok(None));
+        assert_eq!(parse_app_id_filter(Some("")), Ok(None));
+        // Unrelated keys are ignored (only `appId` is a filter).
+        assert_eq!(parse_app_id_filter(Some("foo=bar")), Ok(None));
+        // A well-formed UUID is accepted (and URL-decoding is applied).
+        assert_eq!(
+            parse_app_id_filter(Some(&format!("appId={APP_ACTIVE}"))),
+            Ok(Some(APP_ACTIVE.to_string()))
+        );
+        assert_eq!(
+            parse_app_id_filter(Some(&format!("other=x&appId={ZONE}&z=1"))),
+            Ok(Some(ZONE.to_string()))
+        );
+        // Present but not a UUID (including empty) → error.
+        assert!(parse_app_id_filter(Some("appId=nope")).is_err());
+        assert!(parse_app_id_filter(Some("appId=")).is_err());
+    }
+
+    #[test]
     fn state_is_selected_from_the_app_id_tail() {
         assert_eq!(derive_state(APP_ORDERED), "ordered"); // 000 → 0 % 3
         assert_eq!(derive_state(APP_CREATED), "created"); // 001 → 1 % 3
@@ -1530,6 +1624,171 @@ mod tests {
         assert_eq!(
             headers.get("x-correlator").and_then(|v| v.to_str().ok()),
             Some("corr-get-2")
+        );
+    }
+
+    // --- getAllTrafficInfluences (list) ------------------------------------
+
+    /// A unique-per-test `appId` UUID whose trailing three digits are a
+    /// non-reserved, non-`000`/`001`/`002` tail, so the created resources isolate
+    /// this test from the process-global store yet dodge the reserved-error and
+    /// state control planes. `tail` picks the trailing three digits (`>= 100` to
+    /// keep the 3-digit shape) and `n` varies an interior hex nibble.
+    fn unique_app_id(n: u8, tail: u16) -> String {
+        // Last UUID group is 12 chars: eight `0`s + one hex nibble (`n`) + the
+        // three decimal `tail` digits (which drive `trailing_three_digits`).
+        format!("abcdef01-0000-4000-8000-00000000{n:01x}{tail:03}")
+    }
+
+    async fn list_req(
+        token: Option<&str>,
+        query: Option<&str>,
+        correlator: Option<&str>,
+    ) -> (StatusCode, HeaderMap, Value) {
+        let uri = match query {
+            Some(q) => format!("{COLLECTION}?{q}"),
+            None => COLLECTION.to_string(),
+        };
+        let mut builder = Request::builder().method("GET").uri(uri).header("host", HOST);
+        if let Some(t) = token {
+            builder = builder.header("authorization", format!("Bearer {t}"));
+        }
+        if let Some(c) = correlator {
+            builder = builder.header("x-correlator", c);
+        }
+        let request = builder.body(Body::empty()).unwrap();
+        let response = app().oneshot(request).await.unwrap();
+        let status = response.status();
+        let headers = response.headers().clone();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, headers, value)
+    }
+
+    #[tokio::test]
+    async fn list_filtered_by_app_id_returns_exactly_the_matching_resources() {
+        let write = token().await;
+        let app_id = unique_app_id(1, 700); // tail 700 → non-reserved, state `created`
+        let other = unique_app_id(2, 701);
+
+        // Two resources under `app_id`, one under a different `appId`.
+        let (s1, _, r1) = post(Some(&write), None, create_body(&app_id)).await;
+        let (s2, _, r2) = post(Some(&write), None, create_body(&app_id)).await;
+        let (s3, _, r3) = post(Some(&write), None, create_body(&other)).await;
+        assert_eq!((s1, s2, s3), (StatusCode::CREATED, StatusCode::CREATED, StatusCode::CREATED));
+        let id1 = r1["trafficInfluenceID"].as_str().unwrap().to_string();
+        let id2 = r2["trafficInfluenceID"].as_str().unwrap().to_string();
+        let id3 = r3["trafficInfluenceID"].as_str().unwrap().to_string();
+
+        let read = mint_token(READ_SCOPE).await;
+        let (status, _, body) = list_req(Some(&read), Some(&format!("appId={app_id}")), None).await;
+        assert_eq!(status, StatusCode::OK);
+        let arr = body.as_array().expect("list is a JSON array");
+        // The filter isolates this test from every other resource in the store:
+        // exactly the two matching ids, every element carrying `app_id`.
+        let ids: Vec<&str> = arr
+            .iter()
+            .map(|r| r["trafficInfluenceID"].as_str().unwrap())
+            .collect();
+        assert_eq!(arr.len(), 2, "exactly the two matching resources");
+        assert!(ids.contains(&id1.as_str()) && ids.contains(&id2.as_str()));
+        assert!(!ids.contains(&id3.as_str()), "the other-appId resource is excluded");
+        assert!(arr.iter().all(|r| r["appId"] == json!(app_id)));
+        // Stable order: sorted by trafficInfluenceID.
+        let sorted = { let mut c = ids.clone(); c.sort_unstable(); c };
+        assert_eq!(ids, sorted, "resources are returned in trafficInfluenceID order");
+    }
+
+    #[tokio::test]
+    async fn unfiltered_list_contains_a_created_resource() {
+        let write = token().await;
+        let app_id = unique_app_id(3, 702);
+        let (status, _, created) = post(Some(&write), None, create_body(&app_id)).await;
+        assert_eq!(status, StatusCode::CREATED);
+        let id = created["trafficInfluenceID"].as_str().unwrap().to_string();
+
+        let read = mint_token(READ_SCOPE).await;
+        let (status, _, body) = list_req(Some(&read), None, None).await;
+        assert_eq!(status, StatusCode::OK);
+        let arr = body.as_array().expect("list is a JSON array");
+        // Containment (the process-global store also holds other tests' resources).
+        assert!(
+            arr.iter().any(|r| r["trafficInfluenceID"] == json!(id)),
+            "the unfiltered list includes a freshly created resource"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_filter_matching_nothing_is_empty_array_not_404() {
+        // A well-formed UUID that was never created → 200 [] (a list never 404s).
+        let read = mint_token(READ_SCOPE).await;
+        let never = "0fffffff-ffff-4fff-8fff-ffffffffff99";
+        let (status, _, body) = list_req(Some(&read), Some(&format!("appId={never}")), None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, json!([]));
+    }
+
+    #[tokio::test]
+    async fn list_reflects_a_delete() {
+        let write = token().await;
+        let app_id = unique_app_id(4, 703);
+        let (_, _, created) = post(Some(&write), None, create_body(&app_id)).await;
+        let id = created["trafficInfluenceID"].as_str().unwrap().to_string();
+
+        let read = mint_token(READ_SCOPE).await;
+        let (_, _, before) = list_req(Some(&read), Some(&format!("appId={app_id}")), None).await;
+        assert_eq!(before.as_array().unwrap().len(), 1);
+
+        let del = mint_token(DELETE_SCOPE).await;
+        let (status, _, _) = delete_req(Some(&del), &id, None).await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+
+        let (status, _, after) = list_req(Some(&read), Some(&format!("appId={app_id}")), None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(after, json!([]), "the deleted resource no longer appears");
+    }
+
+    #[tokio::test]
+    async fn list_malformed_app_id_is_invalid_argument() {
+        let read = mint_token(READ_SCOPE).await;
+        let (status, _, body) = list_req(Some(&read), Some("appId=not-a-uuid"), None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "INVALID_ARGUMENT");
+    }
+
+    #[tokio::test]
+    async fn list_missing_token_is_unauthenticated() {
+        let (status, _, _) = list_req(None, None, None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn list_wrong_scope_is_permission_denied() {
+        // The write scope does not grant read.
+        let wrong = mint_token(WRITE_SCOPE).await;
+        let (status, _, _) = list_req(Some(&wrong), None, None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn list_echoes_x_correlator() {
+        let read = mint_token(READ_SCOPE).await;
+        // Success path.
+        let (status, headers, _) = list_req(Some(&read), None, Some("corr-list-1")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-list-1")
+        );
+        // Error path (malformed appId).
+        let (status, headers, _) =
+            list_req(Some(&read), Some("appId=bad"), Some("corr-list-2")).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-list-2")
         );
     }
 

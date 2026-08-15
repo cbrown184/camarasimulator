@@ -244,6 +244,99 @@ paths:
             result: "201 with no delivered event (initial event only)"
           - input: "subscriptionRequest missing sink/protocol/types/config or config.subscriptionDetail, protocol not HTTP, or types not the single change event"
             result: "400 INVALID_ARGUMENT"
+    get:
+      operationId: getAllTrafficInfluences
+      summary: List all Traffic Influence resources
+      description: |
+        Retrieve all `TrafficInfluence` resources created through this API, as a
+        bare JSON array (there is no page wrapper). A list never `404`s: with no
+        resources — or with a filter that matches none — the response is `200`
+        with an empty array `[]`.
+
+        The optional `appId` query parameter narrows the result to resources whose
+        `appId` equals it. The `trafficInfluenceID`s are opaque and operator-minted,
+        so they carry no control-plane behaviour; the stored resources are the only
+        state consulted, returned verbatim and ordered by `trafficInfluenceID`.
+      security:
+        - openId:
+            - traffic-influence:traffic-influences:read
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+        - name: appId
+          in: query
+          required: false
+          description: Filter the result to resources bound to this application id.
+          schema:
+            type: string
+            format: uuid
+          example: 123e4567-e89b-12d3-a456-426614174002
+      responses:
+        "200":
+          description: The (possibly filtered) list of Traffic Influence resources.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/TrafficInfluence"
+              examples:
+                two:
+                  summary: Two resources for the same appId
+                  value:
+                    - trafficInfluenceID: 8f14e45f-ceea-4e0a-9d1f-2e3c4b5a6d70
+                      apiConsumerId: consumer-42
+                      appId: 123e4567-e89b-12d3-a456-426614174002
+                      state: active
+                    - trafficInfluenceID: 9a27c11d-1b3e-4f0a-8c2d-7e6f5a4b3c21
+                      apiConsumerId: consumer-42
+                      appId: 123e4567-e89b-12d3-a456-426614174002
+                      state: created
+                empty:
+                  summary: No resources (or no match) — never a 404
+                  value: []
+        "400":
+          description: |
+            400 — invalid request. CamaraSim returns `INVALID_ARGUMENT` when the
+            `appId` query parameter is present but not a UUID.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TrafficInfluenceError"
+              examples:
+                invalidArgument:
+                  summary: Malformed appId filter
+                  value:
+                    status: 400
+                    code: INVALID_ARGUMENT
+                    message: "`appId` must be a valid UUID."
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          The optional `appId` query parameter is the only control plane
+          (docs/DESIGN.md §7); the opaque trafficInfluenceIDs carry none.
+        cases:
+          - input: "no appId query parameter"
+            result: "200 with every stored TrafficInfluence resource (array, ordered by trafficInfluenceID)"
+          - input: "appId query parameter = a UUID that some resources carry"
+            result: "200 with exactly those resources"
+          - input: "appId query parameter = a well-formed UUID no resource carries"
+            result: "200 []"
+          - input: "no resources stored"
+            result: "200 []"
+          - input: "appId query parameter present but not a UUID"
+            result: "400 INVALID_ARGUMENT"
 
   /traffic-influence-devices:
     post:

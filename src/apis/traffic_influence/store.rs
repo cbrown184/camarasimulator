@@ -46,6 +46,19 @@ pub fn get(id: &str) -> Option<Value> {
         .cloned()
 }
 
+/// Snapshot every stored resource as a `Vec<Value>` (each cloned), in arbitrary
+/// map order — `getAllTrafficInfluences` sorts them for a stable response and
+/// applies the optional `appId` filter. Empty when no resources exist (a list
+/// never 404s). Mirrors [`crate::apis::dedicated_network::store::all`].
+pub fn all() -> Vec<Value> {
+    store()
+        .lock()
+        .expect("traffic-influence store not poisoned")
+        .values()
+        .cloned()
+        .collect()
+}
+
 /// Apply `f` to the resource stored under `id` in place, returning the updated
 /// resource (cloned) if one was present, or `None` if there was no such resource.
 /// The get-modify-write happens under a single lock hold — never across an
@@ -110,6 +123,26 @@ mod tests {
         assert!(remove(&id), "first remove evicts → true");
         assert!(get(&id).is_none(), "gone after remove");
         assert!(!remove(&id), "second remove → false (single-use)");
+    }
+
+    #[test]
+    fn all_contains_inserted_resources() {
+        // Uniquely-keyed so the containment assertions hold against the
+        // process-global store shared with every other test in the binary.
+        let id = "ti-store-unit-all-0001".to_string();
+        insert(
+            id.clone(),
+            json!({ "trafficInfluenceID": id, "appId": "ti-store-unit-all-app" }),
+        );
+        let snapshot = all();
+        assert!(
+            snapshot
+                .iter()
+                .any(|r| r["trafficInfluenceID"] == json!(id.clone())),
+            "all() must include a freshly inserted resource"
+        );
+        // The snapshot is a clone — mutating it never touches the store.
+        assert!(get(&id).is_some());
     }
 
     #[test]

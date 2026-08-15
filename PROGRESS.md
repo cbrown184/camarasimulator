@@ -2407,6 +2407,17 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     (missing/malformed `apiConsumerId`/`appId`/`appInstanceId`/`edgeCloudRegion`/
     `edgeCloudZoneId`, or non-JSON body) / OUT_OF_RANGE (a `sourcePort`/
     `destinationPort` outside `0..=65535`). `x-correlator` echoed.
+  - [x] `GET /traffic-influences` (`getAllTrafficInfluences`,
+    `traffic-influence:traffic-influences:read`) — the collection **list** leg.
+    Store-only (mirroring `listNetworks`/`listAccesses`): `store::all()` scans the
+    in-memory store and returns every created `TrafficInfluence` as a bare JSON
+    array (no page wrapper — the canonical shape), sorted by `trafficInfluenceID`;
+    no resources → `200 []` (a list never 404s). One control plane (DESIGN §7):
+    the optional `appId` query filter (a UUID) narrows to resources whose `appId`
+    equals it — an unknown-but-valid `appId` → `200 []`, a present-but-non-UUID
+    `appId` → 400 INVALID_ARGUMENT. The opaque operator-minted `trafficInfluenceID`
+    has no reserved-suffix plane. `x-correlator` echoed. No new dep (`RawQuery` +
+    the existing `serde_urlencoded`).
   - [x] `GET /traffic-influences/{trafficInfluenceID}` (`getTrafficInfluence`,
     `traffic-influence:traffic-influences:read`) — reads a created resource back
     from the shared in-memory store (`store::get`), returned verbatim (`200`) or
@@ -4426,6 +4437,33 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-15 — Traffic Influence vwip: added the collection **list** leg
+  `GET /traffic-influences` (`getAllTrafficInfluences`, scope
+  `traffic-influence:traffic-influences:read`) — the one missing resource leg
+  (the collection route carried only `POST`; create/read/patch/delete + the
+  per-device create were already done). Verified against the upstream CAMARA
+  TrafficInfluence `wip` spec (WebFetch): operationId `getAllTrafficInfluences`,
+  optional `appId` (UUID) query filter, `200` = a **bare array** of
+  `TrafficInfluence` (no page wrapper), declared error set `400/401/403/429`.
+  Store-only, mirroring the sibling list legs (`listNetworks`/`listAccesses`):
+  new `store::all()` snapshots the in-memory store; the handler applies the
+  optional `appId` filter and sorts by `trafficInfluenceID` for a stable
+  response — no resources / no match → `200 []` (a list never 404s); the opaque
+  operator-minted `trafficInfluenceID`s carry no reserved-suffix plane, so the
+  `appId` query param is the sole control plane (DESIGN §7). A present-but-non-UUID
+  `appId` → 400 INVALID_ARGUMENT (parsed with `RawQuery` + the existing
+  `serde_urlencoded`, no new dep). Route: added `.get(get_all_traffic_influences)`
+  to the existing `/traffic-influences` collection path (alongside `post`). Spec:
+  `traffic-influence/vwip/openapi.yaml` — added the GET op (params, 200 two+empty
+  examples, 400, `x-camarasim-scenarios`), refreshed the module doc-comment op
+  list. Tests: +10 (2 units — `parse_app_id_filter` accept/reject, `store::all`
+  containment; 8 integration — filtered-returns-exactly-matching+sorted /
+  unfiltered-contains-created / empty-filter-200-[] / reflects-a-delete /
+  malformed-appId-400 / 401 / 403 / x-correlator on success+error; list
+  assertions filter by a unique per-test `appId` to isolate from the
+  process-global store). `cargo test` 2595 green (was 2585); `cargo build
+  --release` succeeds, no warnings. No new dependency. — binary: 5.1M
+  (5,311,960 B; +13,224 B)
 - 2026-08-15 — Sponsored Data vwip: added the campaign **management** leg
   `POST /campaign/management` (`manageCampaign`, new CamaraSim scope
   `sponsored-data:campaign:manage`) — the second (and last) deferred

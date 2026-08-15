@@ -5,8 +5,8 @@
 //! the nearest **edge cloud** instance of that application — steering flows to a
 //! chosen `edgeCloudZoneId`/`edgeCloudRegion`, optionally narrowed to specific
 //! source/destination traffic filters. The upstream CAMARA API exposes a
-//! `TrafficInfluence` **resource** lifecycle (`POST /traffic-influences`, then
-//! `GET`/`PATCH`/`DELETE /traffic-influences/{trafficInfluenceID}`), a
+//! `TrafficInfluence` **resource** lifecycle (`GET`/`POST /traffic-influences`,
+//! then `GET`/`PATCH`/`DELETE /traffic-influences/{trafficInfluenceID}`), a
 //! per-device create (`POST /traffic-influence-devices`), and CloudEvents
 //! change notifications.
 //!
@@ -14,7 +14,8 @@
 //! - [`vwip`] — mounted at `/traffic-influence/vwip` (CAMARA `wip` — no released
 //!   version yet, so mounted at its canonical `vwip` base path, like the other
 //!   pre-1.0 wip APIs). Serves `POST /traffic-influences` (`postTrafficInfluence`),
-//!   `POST /traffic-influence-devices` (`postTrafficInfluenceDevice`),
+//!   `GET /traffic-influences` (`getAllTrafficInfluences`, optional `appId`
+//!   filter), `POST /traffic-influence-devices` (`postTrafficInfluenceDevice`),
 //!   `GET`/`PATCH`/`DELETE /traffic-influences/{trafficInfluenceID}`.
 //!
 //! Creating a resource that can later be read back makes Traffic Influence
