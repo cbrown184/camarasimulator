@@ -1262,7 +1262,7 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
       `deliver_tls` mirror QoD. Closes geofencing's `http://`-only cut.
 
 ### Phase 5 — Remaining
-- [~] Carrier Billing v0.5 (`/carrier-billing/v0.5`; CAMARA 0.5.0, release r3.2):
+- [x] Carrier Billing v0.5 (`/carrier-billing/v0.5`; CAMARA 0.5.0, release r3.2):
   - [x] `POST /payments` (`carrier-billing:payments:create`, `createPayment`) —
     one-step charge; identifier + amount control planes (DESIGN §7). Now
     persists the charged payment (see `retrievePayment` below).
@@ -1319,7 +1319,7 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
       other non-`reserved` (`pending_validation`/`denied`) → 409 `CONFLICT`;
       unknown → 404. New `store::cancel`; optional `phoneNumber` body
       accepted-not-applied. **Completes the two-step flow.**
-  - [~] charging notifications on `sink`:
+  - [x] charging notifications on `sink`:
     - [x] `createPayment` → `payment-completed` CloudEvent on a successful
       one-step charge (http sink, fire-and-forget over raw TCP, no HTTP-client
       dep; ACCESSTOKEN `sinkCredential` bearer + PLAIN Basic applied; REFRESHTOKEN cut).
@@ -1355,6 +1355,13 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
       to also `PLAIN` → `Authorization: Basic base64(identifier:secret)`), so the
       credential recorded at create/prepare authenticates all one-step and terminal
       events; REFRESHTOKEN still cut (needs a token-exchange round trip).
+    - [x] TLS (`https://` sink) delivery — reuses the QoD / Traffic Influence /
+      Session Insights rustls (ring) + bundled Mozilla roots (`webpki-roots`)
+      stack; `parse_sink` + `deliver_tls` + generic `write_request<W: AsyncWrite>`
+      mirror the siblings; server cert verified. Closes carrier-billing's
+      `http://`-only cut — every charging callback (payment-completed / -reserved /
+      -pending-validation / -cancelled / -denied) now delivers over http+https.
+      **Completes Carrier Billing v0.5 charging notifications and the API.** No new dep.
 - [x] Call Forwarding Signal v0.4 (`/call-forwarding-signal/v0.4`; CAMARA 0.4.0,
   release r3.3; stateless, non-spatial, phone-number-keyed):
   - [x] `POST /unconditional-call-forwardings`
@@ -4437,6 +4444,36 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-15 — Carrier Billing v0.5: added **TLS (`https://`) sink delivery** to
+  the charging notifications (`src/apis/carrier_billing/notifications.rs`) — the
+  **last** CamaraSim notification module still `http://`-only (every other —
+  QoD / Geofencing / QoS Provisioning / QoS Booking / Session Insights / Traffic
+  Influence / Click to Dial — already delivered over TLS). Mirrored the sibling
+  pattern exactly (mirror-don't-share): replaced the http-only `parse_http_sink`
+  (returning `(host,port,path)`) with `parse_sink` → a `SinkTarget{tls,host,port,
+  path}` (default port 80/443, `host_header()` helper), branched `deliver` on
+  `target.tls`, and added `deliver_tls` (rustls session, server cert verified,
+  clean `close_notify` shutdown) + `tls_connector`/`webpki_root_store`/
+  `build_client_config` (ring provider, bundled Mozilla roots, cached in a
+  `OnceLock`). The HTTP writer was factored to a generic `write_request<W:
+  AsyncWrite>` shared by the TCP and TLS paths. `spawn_delivery`/`deliver`
+  signatures unchanged, so all five callers (payment-completed / -reserved /
+  -pending-validation / -cancelled / -denied) deliver over http+https with no
+  call-site change; `sinkCredential` (ACCESSTOKEN Bearer / PLAIN Basic) applied on
+  both transports. No new dependency (`tokio-rustls` ring + `webpki-roots` already
+  linked by the sibling APIs; `rcgen` dev-only for the test cert). Spec:
+  `carrier-billing/v0.5/openapi.yaml` — updated all nine `http://`-only /
+  "no TLS client" mentions (top description, the five callback descriptions, the
+  `sink` property docs) to document http+https delivery, and added an `https://`
+  createPayment charging scenario; the stale "documented cut" tail on the `sink`
+  property now reads as the http:// convenience (loopback receivers). Tests: +4 net
+  (`parse_sink` http + https/host_header + reject-unsupported replacing the single
+  old `parse_http_sink` test; `write_request` buffer format with/without auth; and
+  an end-to-end `deliver_tls` over a throwaway self-signed cert with real cert
+  verification — mirrors Traffic Influence), and the non-http noop test switched
+  from `https://` (now delivered) to `ftp://`. `cargo test` 2599 green (was 2595);
+  `cargo build --release` succeeds, no warnings. — binary: 5.1M (5,314,968 B;
+  +3,008 B)
 - 2026-08-15 — Traffic Influence vwip: added the collection **list** leg
   `GET /traffic-influences` (`getAllTrafficInfluences`, scope
   `traffic-influence:traffic-influences:read`) — the one missing resource leg

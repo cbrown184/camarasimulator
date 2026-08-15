@@ -174,7 +174,8 @@ info:
     - **Charging notifications.** A successful one-step `createPayment` charge
       now delivers a `payment-completed` CloudEvent to the request's `sink` (see
       the operation's `callbacks`), fire-and-forget over raw TCP to an `http://`
-      sink only (no TLS client), with a `sinkCredential` applied as an
+      sink or over a `rustls` TLS session to an `https://` sink (server cert
+      verified against the bundled Mozilla roots), with a `sinkCredential` applied as an
       `Authorization` header: `ACCESSTOKEN` → `Bearer <accessToken>` (RFC 6750),
       `PLAIN` → `Basic <base64(identifier:secret)>` (RFC 7617); `REFRESHTOKEN`
       accepted but not applied. The `sink` is used only to notify — it is never persisted
@@ -341,6 +342,8 @@ paths:
             result: "422 MISSING_IDENTIFIER"
           - input: successful charge with an `http://` `sink`
             result: "201; a payment-completed CloudEvent POSTed to the sink"
+          - input: successful charge with an `https://` `sink`
+            result: "201; the payment-completed CloudEvent POSTed over TLS (server cert verified)"
           - input: successful charge with a `sink` + ACCESSTOKEN `sinkCredential`
             result: "the callback carries Authorization: Bearer <accessToken>"
           - input: successful charge with a `sink` + PLAIN `sinkCredential`
@@ -357,8 +360,9 @@ paths:
 
                 CamaraSim delivers the `payment-completed` event
                 (`data.status: succeeded`) on a successful one-step charge.
-                Delivery is best-effort, fire-and-forget, and only to an
-                `http://` sink (no TLS client). When the payment was created with
+                Delivery is best-effort, fire-and-forget, to an `http://` sink
+                (raw TCP) or an `https://` sink (`rustls` TLS, server cert
+                verified against the bundled Mozilla roots). When the payment was created with
                 an `ACCESSTOKEN` `sinkCredential`, the request carries an
                 `Authorization: Bearer <accessToken>` header (RFC 6750), and with a
                 `PLAIN` `sinkCredential` an `Authorization: Basic
@@ -640,8 +644,7 @@ paths:
                 `payment-reserved`; it delivers the separate
                 `payment-pending-validation` event instead (`data.status:
                 succeeded`, no `paymentDate` and no `validationInfo`).
-                Delivery is best-effort, fire-and-forget, and only to an
-                `http://` sink (no TLS client). When the payment was created with
+                Delivery is best-effort, fire-and-forget, to an `http://` sink (raw TCP) or an `https://` sink (rustls TLS, server cert verified). When the payment was created with
                 an `ACCESSTOKEN` `sinkCredential`, the request carries an
                 `Authorization: Bearer <accessToken>` header (RFC 6750), and with a
                 `PLAIN` `sinkCredential` an `Authorization: Basic
@@ -685,7 +688,7 @@ paths:
         in-memory side-store keyed by `paymentId` and taken single-use when the
         reservation is denied (so a `…888` reservation still fires exactly one
         terminal event — confirm, cancel, *or* deny). Delivery is best-effort,
-        fire-and-forget, over raw TCP to an `http://` sink only (no TLS client),
+        fire-and-forget, over raw TCP to an `http://` sink or over `rustls` TLS to an `https://` sink (server cert verified),
         off the request path; a `PLAIN` `sinkCredential` is applied as HTTP Basic
         (RFC 7617), `REFRESHTOKEN` accepted but not applied.
       security:
@@ -806,7 +809,7 @@ paths:
                 CamaraSim delivers the `payment-denied` event
                 (`data.status: failed`, no `paymentDate` — nothing is charged) on
                 a `VALIDATION_FAILED` outcome. Delivery is best-effort,
-                fire-and-forget, and only to an `http://` sink (no TLS client).
+                fire-and-forget, to an `http://` sink (raw TCP) or an `https://` sink (rustls TLS, server cert verified).
                 When the reservation was prepared with an `ACCESSTOKEN`
                 `sinkCredential`, the request carries an
                 `Authorization: Bearer <accessToken>` header (RFC 6750), and with a
@@ -846,7 +849,7 @@ paths:
         `ACCESSTOKEN` `sinkCredential` bearer) recorded at `preparePayment`, held
         in an in-memory side-store keyed by `paymentId` and taken single-use when
         the charge goes through. Delivery is best-effort, fire-and-forget, over raw
-        TCP to an `http://` sink only (no TLS client), off the request path; a
+        TCP to an `http://` sink, or over `rustls` TLS to an `https://` sink (server cert verified), off the request path; a
         `PLAIN` `sinkCredential` is applied as HTTP Basic (RFC 7617), `REFRESHTOKEN`
         accepted but not applied.
       security:
@@ -948,8 +951,7 @@ paths:
 
                 CamaraSim delivers the `payment-completed` event
                 (`data.status: succeeded`, with a `paymentDate`) on a successful
-                confirm. Delivery is best-effort, fire-and-forget, and only to an
-                `http://` sink (no TLS client). When the reservation was prepared
+                confirm. Delivery is best-effort, fire-and-forget, to an `http://` sink (raw TCP) or an `https://` sink (rustls TLS, server cert verified). When the reservation was prepared
                 with an `ACCESSTOKEN` `sinkCredential`, the request carries an
                 `Authorization: Bearer <accessToken>` header (RFC 6750), and with a
                 `PLAIN` `sinkCredential` an `Authorization: Basic
@@ -988,8 +990,7 @@ paths:
         any `ACCESSTOKEN` `sinkCredential` bearer) recorded at `preparePayment`,
         held in an in-memory side-store keyed by `paymentId` and taken single-use
         (so a reservation fires exactly one terminal event — confirm *or* cancel).
-        Delivery is best-effort, fire-and-forget, over raw TCP to an `http://`
-        sink only (no TLS client), off the request path; a `PLAIN` `sinkCredential`
+        Delivery is best-effort, fire-and-forget, over raw TCP to an `http://` sink, or over `rustls` TLS to an `https://` sink (server cert verified), off the request path; a `PLAIN` `sinkCredential`
         is applied as HTTP Basic (RFC 7617), `REFRESHTOKEN` accepted but not applied.
       security:
         - openId:
@@ -1090,8 +1091,7 @@ paths:
 
                 CamaraSim delivers the `payment-cancelled` event
                 (`data.status: failed`, no `paymentDate`) on a successful cancel.
-                Delivery is best-effort, fire-and-forget, and only to an `http://`
-                sink (no TLS client). When the reservation was prepared with an
+                Delivery is best-effort, fire-and-forget, to an `http://` sink (raw TCP) or an `https://` sink (rustls TLS, server cert verified). When the reservation was prepared with an
                 `ACCESSTOKEN` `sinkCredential`, the request carries an
                 `Authorization: Bearer <accessToken>` header (RFC 6750), and with a
                 `PLAIN` `sinkCredential` an `Authorization: Basic
@@ -1220,8 +1220,9 @@ components:
             Optional callback URL for charging notifications. On a successful
             one-step charge CamaraSim delivers a `payment-completed` CloudEvent
             here (see the operation's `callbacks`). CAMARA specifies `https://`;
-            CamaraSim only delivers to an `http://` sink (no TLS client — a
-            documented cut).
+            CamaraSim delivers over `rustls` TLS to an `https://` sink (server cert
+            verified) and also accepts an `http://` sink over raw TCP (a
+            simulator convenience for loopback test receivers).
         sinkCredential:
           $ref: "#/components/schemas/SinkCredential"
 
@@ -1727,8 +1728,9 @@ components:
             tail, `payment-pending-validation`) CloudEvent here, and later the
             terminal `payment-completed` / `payment-cancelled` / `payment-denied`
             event (see the operation's `callbacks`). CAMARA specifies `https://`;
-            CamaraSim only delivers to an `http://` sink (no TLS client — a
-            documented cut).
+            CamaraSim delivers over `rustls` TLS to an `https://` sink (server cert
+            verified) and also accepts an `http://` sink over raw TCP (a
+            simulator convenience for loopback test receivers).
         sinkCredential:
           $ref: "#/components/schemas/SinkCredential"
 
