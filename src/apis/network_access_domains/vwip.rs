@@ -147,7 +147,7 @@ pub fn routes() -> Router {
         )
         .route(
             "/network-access-domains/vwip/trust-domains/:trust_domain_id/devices",
-            post(create_trust_domain_device),
+            get(get_trust_domain_devices).post(create_trust_domain_device),
         )
         .route(
             "/network-access-domains/vwip/trust-domains/:trust_domain_id/devices/:device_id",
@@ -371,6 +371,64 @@ async fn create_trust_domain_device(
 
     with_correlator(
         (StatusCode::CREATED, Json(device)).into_response(),
+        &correlator,
+    )
+}
+
+/// `GET /network-access-domains/vwip/trust-domains/{trustDomainId}/devices`
+/// (`getTrustDomainDevices`).
+///
+/// Lists every device registered in the Trust Domain named by `{trustDomainId}`
+/// as a plain JSON array (the CAMARA `TrustDomainDeviceList`, an array of
+/// `TrustDomainDevice`; there is no page wrapper). There is no request body and
+/// no query parameter, so the outcome keys only on state (docs/DESIGN.md §7):
+///
+/// 1. **Parent Trust Domain existence** — the collection lives *under* a Trust
+///    Domain, so an unknown/never-created (or malformed) `{trustDomainId}` →
+///    `404 NOT_FOUND` (the parent path segment must resolve; the upstream spec
+///    declares the `404`). The `trustDomainId` is an opaque, server-minted UUID,
+///    so it has no reserved-suffix plane — the store is the only judge, mirroring
+///    `getTrustDomain`.
+/// 2. **The device store** — the Trust Domain's own device roster
+///    ([`store::list_devices`]), rendered verbatim (each device's write-only
+///    `deviceCredential` was already stripped at create). A Trust Domain with no
+///    devices yet → `200 []` (a list never `404`s on an empty *result*; the
+///    parent still had to exist to reach here). The list is scoped to this Trust
+///    Domain: a device created in a different Trust Domain never appears.
+///
+/// Like the device read leg, the token subject is **not** a control plane (a
+/// reserved suffix on the subject does not shape a store-only read); the leg is
+/// store-only. Requires a token carrying the `network-access-domains:devices`
+/// scope (the same scope guards `createTrustDomainDevice`/`getTrustDomainDevice`).
+/// `x-correlator` is echoed on every response.
+async fn get_trust_domain_devices(
+    claims: Claims,
+    headers: HeaderMap,
+    Path(trust_domain_id): Path<String>,
+) -> Response {
+    // Optional correlation header, echoed on every response (CAMARA Commonalities).
+    let correlator = headers.get("x-correlator").cloned();
+
+    // Endpoint authorisation: the token must carry the device scope.
+    if let Err(e) = claims.require_scope(DEVICES_SCOPE) {
+        return with_correlator(e.into_response(), &correlator);
+    }
+
+    // Control plane 1 — the parent Trust Domain must exist (the collection is
+    // scoped under it). An unknown/malformed id has no store entry → 404,
+    // mirroring `getTrustDomain`.
+    if store::get(&trust_domain_id).is_none() {
+        return with_correlator(
+            CamaraError::not_found("No Trust Domain found for the provided id.").into_response(),
+            &correlator,
+        );
+    }
+
+    // Control plane 2 — the device store. An existing Trust Domain with no
+    // devices yields `200 []` (a list never 404s on an empty result).
+    let devices = store::list_devices(&trust_domain_id);
+    with_correlator(
+        (StatusCode::OK, Json(Value::Array(devices))).into_response(),
         &correlator,
     )
 }
@@ -2637,6 +2695,194 @@ mod tests {
         assert_eq!(
             headers.get("x-correlator").and_then(|v| v.to_str().ok()),
             Some("corr-tdd-read-1")
+        );
+    }
+
+    // === getTrustDomainDevices (GET /trust-domains/{id}/devices) ===========
+
+    /// GET `/trust-domains/{td}/devices` (the device list leg) with an optional
+    /// Bearer token and optional `x-correlator`. Returns (status, headers,
+    /// json-or-null).
+    async fn list_devices_req(
+        token: Option<&str>,
+        trust_domain_id: &str,
+        correlator: Option<&str>,
+    ) -> (StatusCode, HeaderMap, Value) {
+        let mut builder = Request::builder()
+            .method("GET")
+            .uri(format!(
+                "/network-access-domains/vwip/trust-domains/{trust_domain_id}/devices"
+            ))
+            .header("host", HOST);
+        if let Some(t) = token {
+            builder = builder.header("authorization", format!("Bearer {t}"));
+        }
+        if let Some(c) = correlator {
+            builder = builder.header("x-correlator", c);
+        }
+        let response = app().oneshot(builder.body(Body::empty()).unwrap()).await.unwrap();
+        let status = response.status();
+        let headers = response.headers().clone();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, headers, json)
+    }
+
+    #[tokio::test]
+    async fn list_devices_returns_the_created_devices() {
+        // A Trust Domain with two devices lists both, as a plain array of the
+        // persisted TrustDomainDevice objects (no page wrapper, credential stripped).
+        let td_id = make_trust_domain(
+            "nad-005",
+            "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+            "TDD list two",
+        )
+        .await;
+        let dev_token = mint_token_as("nad-005", DEVICES_SCOPE).await;
+        let (s1, _, d1) =
+            post_device(Some(&dev_token), &td_id, Some(&device_body("List One")), None).await;
+        let (s2, _, d2) =
+            post_device(Some(&dev_token), &td_id, Some(&device_body("List Two")), None).await;
+        assert_eq!(s1, StatusCode::CREATED);
+        assert_eq!(s2, StatusCode::CREATED);
+
+        let (status, _, list) = list_devices_req(Some(&dev_token), &td_id, None).await;
+        assert_eq!(status, StatusCode::OK);
+        let items = list.as_array().expect("TrustDomainDeviceList is a JSON array");
+        assert_eq!(items.len(), 2);
+        let ids: Vec<&str> = items.iter().map(|d| d["id"].as_str().unwrap()).collect();
+        assert!(ids.contains(&d1["id"].as_str().unwrap()));
+        assert!(ids.contains(&d2["id"].as_str().unwrap()));
+        // Each entry is a full TrustDomainDevice with the write-only credential stripped.
+        for d in items {
+            assert!(d["deviceName"].is_string());
+            assert_eq!(d["connected"], json!(false));
+            assert!(d.get("deviceCredential").is_none(), "credential must not be echoed");
+        }
+    }
+
+    #[tokio::test]
+    async fn list_devices_empty_trust_domain_is_ok_empty_array() {
+        // An existing Trust Domain with no devices yet → 200 with an empty array
+        // (a list never 404s on an empty result once the parent resolves).
+        let td_id = make_trust_domain(
+            "nad-005",
+            "123e4567-e89b-12d3-a456-426614174000",
+            "TDD list empty",
+        )
+        .await;
+        let token = mint_token_as("nad-005", DEVICES_SCOPE).await;
+        let (status, _, list) = list_devices_req(Some(&token), &td_id, None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(list, json!([]));
+    }
+
+    #[tokio::test]
+    async fn list_devices_unknown_trust_domain_is_not_found() {
+        // A well-formed but never-created parent id → 404 (the collection is
+        // scoped under a Trust Domain that must exist).
+        let token = mint_token_as("nad-005", DEVICES_SCOPE).await;
+        let (status, _, err) = list_devices_req(
+            Some(&token),
+            "11111111-1111-4111-8111-111111111111",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(err["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn list_devices_is_scoped_to_the_trust_domain() {
+        // A device created in Trust Domain A does not appear in Trust Domain B's list.
+        let (_td_a, dev_id) = make_device(
+            "nad-005",
+            "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+            "TDD list scope A",
+            "Owned By A",
+        )
+        .await;
+        let td_b = make_trust_domain(
+            "nad-005",
+            "9d5e6f70-1a2b-4c3d-8e4f-5a6b7c8d9e0f",
+            "TDD list scope B",
+        )
+        .await;
+        let token = mint_token_as("nad-005", DEVICES_SCOPE).await;
+        let (status, _, list) = list_devices_req(Some(&token), &td_b, None).await;
+        assert_eq!(status, StatusCode::OK);
+        // Trust Domain B has no devices of its own; A's device must not leak in.
+        assert_eq!(list, json!([]));
+        let ids: Vec<&str> = list
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|d| d["id"].as_str().unwrap())
+            .collect();
+        assert!(!ids.contains(&dev_id.as_str()));
+    }
+
+    #[tokio::test]
+    async fn list_devices_ignores_the_subject_reserved_suffix_plane() {
+        // The list is store-only, so a reserved-error suffix on the token subject
+        // (…429) does not shape it. Create the Trust Domain + device with a normal
+        // subject, then list with a …429 token — the device still lists (200).
+        let (td_id, dev_id) = make_device(
+            "nad-005",
+            "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+            "TDD list subj",
+            "Subject Insensitive",
+        )
+        .await;
+        let token = mint_token_as("nad-429", DEVICES_SCOPE).await;
+        let (status, _, list) = list_devices_req(Some(&token), &td_id, None).await;
+        assert_eq!(status, StatusCode::OK);
+        let ids: Vec<&str> = list
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|d| d["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, vec![dev_id.as_str()]);
+    }
+
+    #[tokio::test]
+    async fn list_devices_token_without_the_scope_is_forbidden() {
+        let td_id = make_trust_domain(
+            "nad-005",
+            "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+            "TDD list forbidden",
+        )
+        .await;
+        let token = mint_token_as("nad-005", "some:other:scope").await;
+        let (status, _, _) = list_devices_req(Some(&token), &td_id, None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn list_devices_missing_token_is_unauthenticated() {
+        let (status, _, _) =
+            list_devices_req(None, "11111111-1111-4111-8111-111111111111", None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn list_devices_x_correlator_is_echoed() {
+        let td_id = make_trust_domain(
+            "nad-005",
+            "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+            "TDD list corr",
+        )
+        .await;
+        let token = mint_token_as("nad-005", DEVICES_SCOPE).await;
+        let (status, headers, _) =
+            list_devices_req(Some(&token), &td_id, Some("corr-tdd-list-1")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-tdd-list-1")
         );
     }
 

@@ -150,3 +150,34 @@ pub fn get_device(trust_domain_id: &str, device_id: &str) -> Option<Value> {
         .get(&key)
         .cloned()
 }
+
+/// List every `TrustDomainDevice` registered in the Trust Domain named by
+/// `trust_domain_id`, as a `Vec` of the rendered device JSON. Backs the
+/// `getTrustDomainDevices` list leg
+/// (`GET /trust-domains/{trustDomainId}/devices`): the caller has already
+/// confirmed the parent Trust Domain exists, so an empty `Vec` here means the
+/// Trust Domain simply has no devices yet (the leg renders `200 []` — a list
+/// never `404`s on an empty result). The device store is keyed by the full
+/// `(trustDomainId, deviceId)` pair, so scanning for a matching first element
+/// yields exactly this Trust Domain's devices and never another's.
+///
+/// The result is sorted by each device's minted `id` so the list is stable
+/// across calls (the underlying `HashMap` has no inherent order); CAMARA
+/// declares no ordering for `TrustDomainDeviceList`, so any deterministic order
+/// is canonical. The lock is held only for the scan (never across an `.await`).
+pub fn list_devices(trust_domain_id: &str) -> Vec<Value> {
+    let mut devices: Vec<Value> = device_store()
+        .lock()
+        .expect("network-access-domains trust-domain-device store not poisoned")
+        .iter()
+        .filter(|((td, _), _)| td == trust_domain_id)
+        .map(|(_, device)| device.clone())
+        .collect();
+    devices.sort_by(|a, b| {
+        a["id"]
+            .as_str()
+            .unwrap_or_default()
+            .cmp(b["id"].as_str().unwrap_or_default())
+    });
+    devices
+}

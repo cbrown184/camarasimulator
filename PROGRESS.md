@@ -3214,7 +3214,20 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
         at create); any other pair (unknown parent, unknown device, another Trust
         Domain's device, or a malformed id) → `404 NOT_FOUND` (folded, one store
         lookup via the now-ungated `store::get_device`). `x-correlator` echoed. No
-        new dep. The device list/update/delete legs remain a later slice.
+        new dep.
+      - [x] `GET /trust-domains/{trustDomainId}/devices` (`getTrustDomainDevices`,
+        scope `network-access-domains:devices`) — lists a Trust Domain's registered
+        devices as a `TrustDomainDeviceList` (a plain array of `TrustDomainDevice`,
+        no page wrapper, no query params — the canonical shape). Store-only, like
+        `getTrustDomainDevice` (DESIGN §7): the parent Trust Domain must exist
+        (unknown/malformed `trustDomainId` → 404, mirroring `getTrustDomain`), then
+        the device store supplies the roster (new `store::list_devices`, scans the
+        `(trustDomainId, _)` keys, sorted by device `id` for a stable order) — an
+        existing Trust Domain with no devices → `200 []` (a list never 404s on an
+        empty result), scoped to the Trust Domain (another domain's device never
+        leaks in). The opaque minted `trustDomainId` has no reserved-suffix plane
+        and the token subject is not consulted. `x-correlator` echoed. No new dep.
+        The device update/delete legs remain a later slice.
 
 ## Cross-cutting (do alongside the item that needs it)
 - [~] `errors.rs`: base CAMARA error model done (`src/errors.rs`, `specs/shared/errors.yaml`); per-version catalogs still TODO (DESIGN §8)
@@ -4354,6 +4367,28 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-15 — Network Access Domains vwip: added the Trust Domain **Device**
+  list leg `GET /trust-domains/{trustDomainId}/devices` (`getTrustDomainDevices`,
+  scope `network-access-domains:devices`) — the list leg the read-leg pass flagged
+  as a later slice. Confirmed the canonical shape against the upstream CAMARA
+  NetworkAccessManagement spec: operationId `getTrustDomainDevices`, no query
+  params, `200` = `TrustDomainDeviceList` (a plain array of `TrustDomainDevice`,
+  maxItems 1024, no page wrapper), `404` declared. Store-only, mirroring
+  `getTrustDomainDevice`: the parent Trust Domain must exist (unknown/malformed
+  `trustDomainId` → 404, checked via `store::get`), then a new
+  `store::list_devices` scans the device store's `(trustDomainId, _)` keys and
+  returns the roster sorted by device `id` — an existing Trust Domain with no
+  devices → `200 []`, scoped to the Trust Domain (another domain's device never
+  leaks). Opaque minted `trustDomainId` has no reserved-suffix plane; token
+  subject not consulted. Route: added `get(get_trust_domain_devices)` to the
+  existing `.../devices` collection path (alongside `post`). Spec:
+  `network-access-domains/vwip/openapi.yaml` — added the GET op with
+  `x-camarasim-scenarios` + the `TrustDomainDeviceList` schema, and refreshed the
+  header/info.description + documented-cuts (create+read+list done, update/delete
+  remain). Tests: +7 (two devices listed / empty-domain 200 [] / unknown-parent
+  404 / scoped-to-domain / subject-reserved-suffix ignored / 403 / 401 +
+  x-correlator). `cargo test` 2536 green (was 2529); `cargo build --release`
+  succeeds. No new dependency. — binary: 5.0M (5,233,512 B)
 - 2026-08-15 — Network Access Domains vwip: added the Trust Domain **Device**
   read leg `GET /trust-domains/{trustDomainId}/devices/{deviceId}`
   (`getTrustDomainDevice`, scope `network-access-domains:devices`) — the read leg

@@ -27,11 +27,12 @@
 # `DELETE /trust-domains/{trustDomainId}` (deleteTrustDomain), backed by the
 # in-memory trust-domain store. The Trust Domain Device sub-resource has its
 # create leg `POST /trust-domains/{trustDomainId}/devices`
-# (createTrustDomainDevice) and its read leg
-# `GET /trust-domains/{trustDomainId}/devices/{deviceId}`
+# (createTrustDomainDevice), its list leg
+# `GET /trust-domains/{trustDomainId}/devices` (getTrustDomainDevices), and its
+# read leg `GET /trust-domains/{trustDomainId}/devices/{deviceId}`
 # (getTrustDomainDevice), backed by an in-memory device store keyed by
-# (trustDomainId, deviceId); the device list/update/delete legs remain to be
-# added in later slices.
+# (trustDomainId, deviceId); the device update/delete legs remain to be added in
+# later slices.
 openapi: 3.0.3
 info:
   title: Network Access Domains
@@ -163,13 +164,24 @@ info:
     `404 NOT_FOUND` (folded, one store lookup). Same `network-access-domains:devices`
     scope as the create leg.
 
+    **`getTrustDomainDevices`** (`GET /trust-domains/{trustDomainId}/devices`)
+    lists the devices registered in a Trust Domain as a `TrustDomainDeviceList`
+    (a plain array of `TrustDomainDevice`, no page wrapper, no query parameter).
+    Store-only, like the read leg: the parent Trust Domain must exist
+    (unknown/malformed id → `404`, mirroring `getTrustDomain`), and the device
+    store supplies the roster — an existing Trust Domain with no devices → `200
+    []`, and the list is scoped to the Trust Domain (a device in another Trust
+    Domain never appears). The token subject is not a control plane. Same
+    `network-access-domains:devices` scope as the other device legs.
+
     ## Documented cuts
 
     - The read-only `getTrustDomainCapabilities`, `getServices` and `getService`
       legs and the stateful `createTrustDomain` / `getTrustDomain` /
       `updateTrustDomain` / `deleteTrustDomain` legs are implemented, plus the
-      Trust Domain Device create + read legs `createTrustDomainDevice` /
-      `getTrustDomainDevice`; the device list/update/delete legs are a later slice.
+      Trust Domain Device create + read + list legs `createTrustDomainDevice` /
+      `getTrustDomainDevice` / `getTrustDomainDevices`; the device update/delete
+      legs are a later slice.
     - `createTrustDomainDevice` validates the required `deviceName`/`enabled`, the
       optional scalar fields, and the `hardwareAddress` (EUI-48 type + MAC
       pattern), but accepts and echoes the nested `bootstrappingInfo` as-is and
@@ -737,6 +749,120 @@ paths:
             result: "401 UNAUTHENTICATED"
 
   /trust-domains/{trustDomainId}/devices:
+    get:
+      operationId: getTrustDomainDevices
+      summary: List the devices registered in a Trust Domain
+      description: |
+        Lists every device registered in the Trust Domain named by
+        `{trustDomainId}` as a `TrustDomainDeviceList` — a plain array of
+        `TrustDomainDevice` (there is no page wrapper and no query parameter).
+
+        There is no request body, so the outcome keys only on state
+        (docs/DESIGN.md §7):
+
+        1. **Parent Trust Domain existence** — the collection lives *under* a
+           Trust Domain, so an unknown/never-created (or malformed)
+           `{trustDomainId}` → `404 NOT_FOUND` (the parent path segment must
+           resolve). The `trustDomainId` is an opaque, server-minted UUID, so it
+           has no reserved-suffix plane — the in-memory store is the only judge,
+           mirroring `getTrustDomain`.
+        2. **The device store** — the Trust Domain's device roster, each device
+           rendered verbatim (the write-only `deviceCredential` was already
+           stripped at create). A Trust Domain with no devices yet → `200 []` (a
+           list never `404`s on an empty *result* once the parent resolves). The
+           list is scoped to this Trust Domain: a device created in a different
+           Trust Domain never appears.
+
+        Like the device read leg, the token subject is **not** a control plane
+        (the read is store-only). The list is returned sorted by device `id` for
+        a stable order (CAMARA declares no ordering for `TrustDomainDeviceList`).
+      security:
+        - openId:
+            - network-access-domains:devices
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+        - name: trustDomainId
+          in: path
+          required: true
+          description: The server-assigned id of the Trust Domain to list devices for.
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: The devices registered in the Trust Domain (possibly empty).
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TrustDomainDeviceList"
+              examples:
+                two:
+                  summary: A Trust Domain with two registered devices
+                  value:
+                    - id: "c2f1a7b3-8d4e-5f6a-9b0c-1d2e3f4a5b6c"
+                      deviceName: "Alice's Laptop"
+                      deviceType: "LAPTOP"
+                      enabled: true
+                      connected: false
+                      associated: false
+                      createdAt: "2024-01-01T09:00:00Z"
+                      createdBy: "4a7c9e2d-1b3f-5a6c-9d8e-0f1a2b3c4d5e"
+                      modifiedAt: "2024-01-01T09:00:00Z"
+                      modifiedBy: "4a7c9e2d-1b3f-5a6c-9d8e-0f1a2b3c4d5e"
+                    - id: "d3a2b8c4-9e5f-6a7b-0c1d-2e3f4a5b6c7d"
+                      deviceName: "Alice's Phone"
+                      deviceType: "SMARTPHONE"
+                      enabled: true
+                      connected: false
+                      associated: false
+                      createdAt: "2024-01-01T09:05:00Z"
+                      createdBy: "4a7c9e2d-1b3f-5a6c-9d8e-0f1a2b3c4d5e"
+                      modifiedAt: "2024-01-01T09:05:00Z"
+                      modifiedBy: "4a7c9e2d-1b3f-5a6c-9d8e-0f1a2b3c4d5e"
+                empty:
+                  summary: An existing Trust Domain with no devices yet
+                  value: []
+        "400":
+          $ref: "../../shared/errors.yaml#/components/responses/InvalidArgument"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          getTrustDomainDevices is keyed only to state (docs/DESIGN.md §7): the
+          parent Trust Domain must exist (unknown/malformed id → 404, mirroring
+          getTrustDomain), and the in-memory device store supplies the roster.
+          The opaque server-minted trustDomainId has no reserved-suffix plane and
+          the token subject is not consulted (the read is store-only). An existing
+          Trust Domain with no devices lists 200 []; the list is scoped to the
+          Trust Domain and never leaks another's devices.
+        cases:
+          - input: "an existing Trust Domain with two devices"
+            result: "200 — a TrustDomainDeviceList array of both devices (deviceCredential stripped)"
+          - input: "an existing Trust Domain with no devices yet"
+            result: "200 — an empty array (a list never 404s on an empty result)"
+          - input: "a well-formed but never-created trustDomainId"
+            result: "404 NOT_FOUND (the parent Trust Domain does not exist)"
+          - input: "a Trust Domain B, when a device exists only in Trust Domain A"
+            result: "200 — an empty array (the list is scoped to the Trust Domain)"
+          - input: "the token subject trailing digits are …429 but the Trust Domain exists"
+            result: "200 — the list is store-only, the subject is not a plane"
+          - input: a token without the network-access-domains:devices scope
+            result: "403 PERMISSION_DENIED"
+          - input: no / invalid token
+            result: "401 UNAUTHENTICATED"
     post:
       operationId: createTrustDomainDevice
       summary: Register a device in a Trust Domain
@@ -1989,3 +2115,15 @@ components:
         response the write-only `deviceCredential` is omitted, and
         `connected`/`associated` are `false` with no assigned `ipv4Address`/
         `ipv6Address` until the device associates.
+
+    TrustDomainDeviceList:
+      type: array
+      description: |
+        A list of the devices registered in a Trust Domain — the `200` body of
+        `getTrustDomainDevices` (`GET /trust-domains/{trustDomainId}/devices`).
+        A plain array of `TrustDomainDevice` (no page wrapper); empty when the
+        Trust Domain has no devices yet. CamaraSim returns the array sorted by
+        each device's `id` for a stable order.
+      items:
+        $ref: "#/components/schemas/TrustDomainDevice"
+      maxItems: 1024
