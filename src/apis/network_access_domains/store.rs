@@ -98,3 +98,53 @@ pub fn remove(id: &str) -> bool {
         .remove(id)
         .is_some()
 }
+
+/// The process-global **Trust Domain Device** store: the composite
+/// `(trustDomainId, deviceId)` → rendered `TrustDomainDevice` JSON. A device
+/// lives inside a Trust Domain, so it is keyed by the pair — the later read /
+/// update / delete legs will address a device by its owning Trust Domain and its
+/// own id, and two Trust Domains may hold devices with the same minted id shape
+/// without colliding. In-memory only (single node, per DESIGN §4).
+fn device_store() -> &'static Mutex<HashMap<(String, String), Value>> {
+    static STORE: OnceLock<Mutex<HashMap<(String, String), Value>>> = OnceLock::new();
+    STORE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Store `device` under `(trust_domain_id, device_id)`, unless one already exists
+/// under that key. Because `device_id` is derived from the
+/// `(trustDomainId, deviceName)` pair
+/// ([`crate::apis::network_access_domains::vwip::trust_domain_device_id`]), an
+/// existing key means a device with the *same* `deviceName` has already been
+/// created in the *same* Trust Domain.
+///
+/// Returns `true` when the device was newly inserted, `false` when one already
+/// existed — `createTrustDomainDevice` maps the latter to the CAMARA `409`
+/// (duplicate device name in the Trust Domain). The whole check-and-insert runs
+/// under a single lock hold (never across an `.await`), so two concurrent creates
+/// of the same `(trustDomainId, deviceName)` can't both win.
+pub fn insert_device(trust_domain_id: &str, device_id: &str, device: Value) -> bool {
+    let key = (trust_domain_id.to_owned(), device_id.to_owned());
+    let mut map = device_store()
+        .lock()
+        .expect("network-access-domains trust-domain-device store not poisoned");
+    if map.contains_key(&key) {
+        return false;
+    }
+    map.insert(key, device);
+    true
+}
+
+/// Fetch the `TrustDomainDevice` stored under `(trust_domain_id, device_id)`, or
+/// `None` if no such device exists. Currently only the tests that assert a created
+/// device persists use this; the later `getTrustDomainDevice` read leg will
+/// un-gate it (so it is `#[cfg(test)]` for now to keep the release build
+/// warning-free).
+#[cfg(test)]
+pub fn get_device(trust_domain_id: &str, device_id: &str) -> Option<Value> {
+    let key = (trust_domain_id.to_owned(), device_id.to_owned());
+    device_store()
+        .lock()
+        .expect("network-access-domains trust-domain-device store not poisoned")
+        .get(&key)
+        .cloned()
+}

@@ -3180,8 +3180,29 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
       `createdAt`/`createdBy`) immutable, `modifiedAt`/`modifiedBy` re-stamped. No
       `409` (fixed id, a rename can't collide — canonical response set 200/400/404).
       New atomic `store::update` (get-modify-write under one lock hold). Shares the
-      `/trust-domains/:id` param route via `.patch(…)`. No new dep. The remaining
-      Trust Domain Device CRUD resource is a later slice.
+      `/trust-domains/:id` param route via `.patch(…)`. No new dep.
+    - [~] the stateful Trust Domain **Device** sub-resource
+      (`/trust-domains/{trustDomainId}/devices`; scope
+      `network-access-domains:devices`):
+      - [x] `POST /trust-domains/{trustDomainId}/devices`
+        (`createTrustDomainDevice`) — registers a device inside an existing Trust
+        Domain, minting a `deviceId` and persisting the rendered
+        `TrustDomainDevice` in a new in-memory device store (`store::insert_device`;
+        `Mutex<HashMap<(trustDomainId, deviceId), Value>>`, no new dep), `201`. Four
+        control planes (DESIGN §7): token-subject reserved-error suffix → canonical
+        CAMARA error (account-level, checked first); request validation → 400
+        INVALID_ARGUMENT (missing/blank/>255 `deviceName`, missing/ill-typed
+        `enabled`, out-of-range `externalId`, non-boolean `blocked`, unknown
+        `deviceType` enum, or a `hardwareAddress` whose `hardwareAddressType` ≠
+        `EUI-48` / `value` ≠ EUI-48 MAC — hand-rolled MAC check, no regex dep);
+        parent cross-reference (unknown `trustDomainId` → 404 NOT_FOUND, checked
+        after validation so a body 400 wins); and store state (same
+        `(trustDomainId, deviceName)` → 409 CONFLICT). A freshly created device is
+        `connected`/`associated` `false` with no assigned `ipv4Address`/`ipv6Address`
+        (no live onboarding — documented cut); the write-only `deviceCredential` is
+        stripped from the echo, and `bootstrappingInfo`/`deviceCredential` contents
+        are validated only for object shape. `x-correlator` echoed. The device
+        read/list/update/delete legs remain a later slice.
 
 ## Cross-cutting (do alongside the item that needs it)
 - [~] `errors.rs`: base CAMARA error model done (`src/errors.rs`, `specs/shared/errors.yaml`); per-version catalogs still TODO (DESIGN §8)
@@ -4321,6 +4342,31 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-15 — Network Access Domains vwip: began the Trust Domain **Device**
+  sub-resource (the "later slice" the trust-domain CRUD passes flagged) with its
+  create leg `POST /trust-domains/{trustDomainId}/devices`
+  (`createTrustDomainDevice`, scope `network-access-domains:devices`). Fetched the
+  canonical CAMARA NetworkAccessManagement `TrustDomainDeviceCreate`/`TrustDomainDevice`
+  schemas upstream (device sub-resource paths + `TrustDomainDevices` module). New
+  in-memory device store keyed by `(trustDomainId, deviceId)`
+  (`store::insert_device`, + test-only `get_device` gated `#[cfg(test)]`), mirroring
+  the trust-domain store. Handler mirrors `createTrustDomain`: four control planes —
+  subject reserved-error suffix (first) → validation 400 → parent-exists 404 (after
+  validation, so a body 400 wins) → store-state 409 (duplicate `(trustDomainId,
+  deviceName)`). `deviceId` = deterministic v5 UUID over the pair (reuses
+  `deterministic_uuid_v5`); EUI-48 MAC validated by a hand-rolled `is_eui48` (no
+  regex dep); `deviceType` enum; freshly created device `connected`/`associated`
+  false with no address (no live onboarding — cut); write-only `deviceCredential`
+  stripped from the echo; `bootstrappingInfo`/`deviceCredential` shape-only (cuts).
+  Spec: `network-access-domains/vwip/openapi.yaml` — added the devices path + POST
+  op with `x-camarasim-scenarios`, and the `TrustDomainDevice`/`TrustDomainDeviceCreate`/
+  `TrustDomainDeviceUpdate`/`HardwareAddress`/`DeviceType`/`BootstrappingInfo`/
+  `DeviceCredential` schemas; header + info.description + documented-cuts updated.
+  Tests: +11 (id derivation, `is_eui48`, validate accept/reject, render strips
+  credential + sets lifecycle flags, and the router 201/409/404/400-beats-404/
+  reserved-429/403/401/x-correlator cases). `cargo test` 2519 green (was 2508);
+  `cargo build --release` succeeds, no warnings. No new dependency. —
+  binary: 5.0M (5,210,072 B)
 - 2026-08-15 — Traffic Influence vwip: extended CloudEvents sink delivery to
   `https://` (TLS) sinks — the last sink API on the `http://`-only cut (the prior
   Click to Dial pass flagged it). Applied the exact rustls (ring) + bundled Mozilla

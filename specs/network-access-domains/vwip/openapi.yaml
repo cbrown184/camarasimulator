@@ -25,8 +25,11 @@
 # `GET /trust-domains/{trustDomainId}` (getTrustDomain), its in-place update leg
 # `PATCH /trust-domains/{trustDomainId}` (updateTrustDomain), and its delete leg
 # `DELETE /trust-domains/{trustDomainId}` (deleteTrustDomain), backed by the
-# in-memory trust-domain store. The Trust Domain Device CRUD resource remains to
-# be added in later slices.
+# in-memory trust-domain store. The Trust Domain Device sub-resource has begun
+# with its create leg `POST /trust-domains/{trustDomainId}/devices`
+# (createTrustDomainDevice), backed by an in-memory device store keyed by
+# (trustDomainId, deviceId); the device read/list/update/delete legs remain to be
+# added in later slices.
 openapi: 3.0.3
 info:
   title: Network Access Domains
@@ -136,12 +139,33 @@ info:
     same id finds nothing), any other id (never created, already deleted, or
     malformed) → `404 NOT_FOUND`. Deletion is synchronous with no CloudEvent.
 
+    **`createTrustDomainDevice`** (`POST /trust-domains/{trustDomainId}/devices`)
+    registers a device inside an existing Trust Domain. Four control planes: the
+    token subject's reserved error suffix (checked first); request validation
+    (`400`); the parent Trust Domain's existence in the store (`404`, checked
+    after validation so a body `400` wins); and the in-memory device store — the
+    `deviceId` is derived from the `(trustDomainId, deviceName)` pair, so the same
+    `deviceName` in the same Trust Domain collides → `409`. A just-created device
+    is `connected: false` / `associated: false` with no assigned address, the
+    write-only `deviceCredential` is stripped, and it requires the
+    `network-access-domains:devices` scope.
+
     ## Documented cuts
 
     - The read-only `getTrustDomainCapabilities`, `getServices` and `getService`
       legs and the stateful `createTrustDomain` / `getTrustDomain` /
-      `updateTrustDomain` / `deleteTrustDomain` legs are implemented so far; the
-      remaining Trust Domain Device CRUD resource is a later slice.
+      `updateTrustDomain` / `deleteTrustDomain` legs are implemented, plus the
+      Trust Domain Device create leg `createTrustDomainDevice`; the device
+      read/list/update/delete legs are a later slice.
+    - `createTrustDomainDevice` validates the required `deviceName`/`enabled`, the
+      optional scalar fields, and the `hardwareAddress` (EUI-48 type + MAC
+      pattern), but accepts and echoes the nested `bootstrappingInfo` as-is and
+      never echoes the write-only `deviceCredential` (contents not validated); a
+      freshly created device has no assigned `ipv4Address`/`ipv6Address` and is
+      `connected`/`associated` `false` until association (no live onboarding). The
+      `deviceId` is a deterministic version-5 UUID over `(trustDomainId,
+      deviceName)`, so re-creating the same name in the same Trust Domain re-mints
+      the same id (that is how the `409` duplicate is detected).
     - `createTrustDomain` admits only the access types this provider advertises
       (Wi-Fi WPA-Personal/Enterprise, Thread STRUCTURED). A canonical but
       unadvertised `Thread:TLV` access detail → `400 INVALID_ARGUMENT`.
@@ -695,6 +719,149 @@ paths:
           - input: "a malformed (non-UUID) trustDomainId"
             result: "404 NOT_FOUND (folded, no store to distinguish it)"
           - input: a token without the network-access-domains:trust-domains scope
+            result: "403 PERMISSION_DENIED"
+          - input: no / invalid token
+            result: "401 UNAUTHENTICATED"
+
+  /trust-domains/{trustDomainId}/devices:
+    post:
+      operationId: createTrustDomainDevice
+      summary: Register a device in a Trust Domain
+      description: |
+        Registers a device inside an existing Trust Domain. The caller submits a
+        `TrustDomainDeviceCreate` (a required `deviceName` + `enabled`, plus the
+        optional `externalId`/`deviceType`/`blocked`/`hardwareAddress`/
+        `bootstrappingInfo`/`deviceCredential`); the simulator mints a
+        server-assigned `deviceId`, stores the device in memory under its owning
+        Trust Domain, and returns the full `TrustDomainDevice` (`201`).
+
+        Four control planes drive the outcome (docs/DESIGN.md §7):
+
+        1. **The token subject** — a reserved error suffix on the authenticated
+           identity selects the canonical CAMARA error (an account-level plane,
+           checked first, mirroring `createTrustDomain`).
+        2. **Request validation** — a missing/blank/oversized `deviceName`, a
+           missing or non-boolean `enabled`, an out-of-range `externalId`, a
+           non-boolean `blocked`, an unknown `deviceType`, or a malformed
+           `hardwareAddress` (`hardwareAddressType` other than `EUI-48`, or a
+           `value` that is not an EUI-48 MAC) → `400 INVALID_ARGUMENT`.
+        3. **Parent cross-reference** — the `{trustDomainId}` path must name a
+           Trust Domain already created (in the in-memory store), else
+           `404 NOT_FOUND`. Validation is checked before this, so a body `400`
+           wins over the parent `404`.
+        4. **Store state** — the `deviceId` is derived from the
+           `(trustDomainId, deviceName)` pair, so creating a device with the same
+           `deviceName` in the same Trust Domain collides → `409` (duplicate
+           device name in the Trust Domain).
+
+        A freshly created device is not yet `associated`/`connected` and holds no
+        assigned network address, so `connected`/`associated` are rendered
+        `false` and `ipv4Address`/`ipv6Address` are omitted until association (a
+        documented cut — the simulator has no live onboarding). The write-only
+        `deviceCredential` is stripped from the echoed `TrustDomainDevice`, and
+        the nested `bootstrappingInfo`/`deviceCredential` contents are validated
+        only for object shape (documented cuts, mirroring the Trust Domain
+        `policies`).
+      security:
+        - openId:
+            - network-access-domains:devices
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+        - name: trustDomainId
+          in: path
+          required: true
+          description: The server-assigned id of the Trust Domain to add the device to.
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TrustDomainDeviceCreate"
+            examples:
+              laptop:
+                summary: A laptop identified by its EUI-48 hardware address
+                value:
+                  deviceName: "Alice's Laptop"
+                  deviceType: "LAPTOP"
+                  enabled: true
+                  hardwareAddress:
+                    hardwareAddressType: "EUI-48"
+                    value: "00:11:22:33:44:55"
+      responses:
+        "201":
+          description: The device was registered in the Trust Domain.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TrustDomainDevice"
+              examples:
+                created:
+                  summary: The created device (write-only deviceCredential omitted)
+                  value:
+                    id: "c2f1a7b3-8d4e-5f6a-9b0c-1d2e3f4a5b6c"
+                    deviceName: "Alice's Laptop"
+                    deviceType: "LAPTOP"
+                    enabled: true
+                    hardwareAddress:
+                      hardwareAddressType: "EUI-48"
+                      value: "00:11:22:33:44:55"
+                    connected: false
+                    associated: false
+                    createdAt: "2024-01-01T09:00:00Z"
+                    createdBy: "4a7c9e2d-1b3f-5a6c-9d8e-0f1a2b3c4d5e"
+                    modifiedAt: "2024-01-01T09:00:00Z"
+                    modifiedBy: "4a7c9e2d-1b3f-5a6c-9d8e-0f1a2b3c4d5e"
+        "400":
+          $ref: "../../shared/errors.yaml#/components/responses/InvalidArgument"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "409":
+          $ref: "../../shared/errors.yaml#/components/responses/Conflict"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          createTrustDomainDevice has four control planes (docs/DESIGN.md §7): the
+          token subject's reserved error suffix (checked first), request
+          validation, the parent Trust Domain's existence, and the in-memory
+          device store (a duplicate deviceName in the Trust Domain collides). The
+          deviceId is derived from the (trustDomainId, deviceName) pair, so the
+          same name in the same Trust Domain re-mints the same id and is rejected
+          as a duplicate.
+        cases:
+          - input: "a valid TrustDomainDeviceCreate for an existing Trust Domain"
+            result: "201 — the created TrustDomainDevice (deviceCredential stripped, connected/associated false)"
+          - input: "a second create with the same deviceName in the same Trust Domain"
+            result: "409 — duplicate device name in the Trust Domain"
+          - input: "a different deviceName in the same Trust Domain"
+            result: "201 — a distinct device"
+          - input: "missing/blank/over-255-char deviceName, missing/ill-typed enabled, or out-of-range externalId"
+            result: "400 INVALID_ARGUMENT"
+          - input: "an unknown deviceType, or a hardwareAddress with a non-EUI-48 type or a value that is not an EUI-48 MAC"
+            result: "400 INVALID_ARGUMENT"
+          - input: "an invalid body against an unknown trustDomainId"
+            result: "400 INVALID_ARGUMENT (validation precedes the parent lookup)"
+          - input: "a valid body against a well-formed but never-created trustDomainId"
+            result: "404 NOT_FOUND (parent Trust Domain does not exist)"
+          - input: "the token subject trailing digits are …404"
+            result: "404 NOT_FOUND (reserved error suffix, account-level, before the parent lookup)"
+          - input: "the token subject trailing digits are …429"
+            result: "429 TOO_MANY_REQUESTS (reserved error suffix, account-level)"
+          - input: a token without the network-access-domains:devices scope
             result: "403 PERMISSION_DENIED"
           - input: no / invalid token
             result: "401 UNAUTHENTICATED"
@@ -1530,3 +1697,172 @@ components:
       description: |
         A Trust Domain. On the `createTrustDomain` response the write-only WPA
         `password` inside any `accessDetails` entry is omitted.
+
+    DeviceType:
+      type: string
+      enum:
+        - AUTOMOTIVE
+        - DESKTOP
+        - IOT
+        - LAPTOP
+        - MEDICAL
+        - OTHER
+        - SMARTPHONE
+        - TABLET
+        - TV
+        - WEARABLE
+      description: The category of device being registered in the Trust Domain.
+      example: "LAPTOP"
+
+    HardwareAddress:
+      type: object
+      additionalProperties: false
+      required:
+        - hardwareAddressType
+        - value
+      properties:
+        hardwareAddressType:
+          type: string
+          enum:
+            - "EUI-48"
+          description: The hardware address type. Only EUI-48 (MAC-48) is supported.
+          example: "EUI-48"
+        value:
+          type: string
+          pattern: "^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$"
+          description: |
+            The device's EUI-48 hardware (MAC) address — six 2-hex-digit groups
+            separated by `:` or `-`.
+          example: "00:11:22:33:44:55"
+      description: A device hardware (MAC) address.
+
+    BootstrappingInfo:
+      type: object
+      additionalProperties: true
+      description: |
+        Provisioning/bootstrapping details for onboarding the device (e.g. a DPP,
+        Matter, or WKSO protocol configuration with a `protocolPreference`
+        ordering). CamaraSim accepts and echoes the object but does not validate
+        its protocol internals — the full `BootstrappingInfo` shape is a
+        documented cut.
+
+    DeviceCredential:
+      type: object
+      additionalProperties: true
+      writeOnly: true
+      description: |
+        Per-device or shared credential material for the device (e.g. a
+        `credentialAction` of `GENERATE` or `ASSIGN`). Write-only — CamaraSim
+        accepts it on create but never echoes it in a `TrustDomainDevice`
+        response, and does not validate its internals (a documented cut).
+
+    TrustDomainDeviceUpdate:
+      type: object
+      description: The updatable fields of a Trust Domain Device.
+      properties:
+        deviceName:
+          type: string
+          minLength: 1
+          maxLength: 255
+          description: Human-readable name for the device.
+          example: "Alice's Laptop"
+        deviceType:
+          $ref: "#/components/schemas/DeviceType"
+        enabled:
+          type: boolean
+          description: Whether the device is permitted to authenticate to the Trust Domain.
+          example: true
+        blocked:
+          type: boolean
+          description: Whether the device is currently blocked from forwarding data.
+          example: false
+        hardwareAddress:
+          $ref: "#/components/schemas/HardwareAddress"
+        bootstrappingInfo:
+          $ref: "#/components/schemas/BootstrappingInfo"
+        deviceCredential:
+          $ref: "#/components/schemas/DeviceCredential"
+
+    TrustDomainDeviceCreate:
+      allOf:
+        - $ref: "#/components/schemas/TrustDomainDeviceUpdate"
+        - type: object
+          properties:
+            externalId:
+              type: string
+              minLength: 1
+              maxLength: 255
+              description: A caller-supplied external identifier for the device.
+              example: "asset-42"
+      required:
+        - deviceName
+        - enabled
+      description: The request body used to register a device in a Trust Domain.
+
+    TrustDomainDevice:
+      allOf:
+        - type: object
+          required:
+            - id
+          properties:
+            id:
+              allOf:
+                - $ref: "#/components/schemas/Uuid"
+              readOnly: true
+              description: The server-assigned device identifier.
+        - $ref: "#/components/schemas/TrustDomainDeviceCreate"
+        - type: object
+          properties:
+            ipv4Address:
+              type: object
+              additionalProperties: true
+              readOnly: true
+              description: |
+                The device's assigned IPv4 address, once associated. CamaraSim
+                omits it until the device is associated (a documented cut — no
+                live onboarding).
+            ipv6Address:
+              type: string
+              readOnly: true
+              description: |
+                The device's assigned IPv6 address, once associated. Omitted by
+                CamaraSim until association (a documented cut).
+            connected:
+              type: boolean
+              readOnly: true
+              description: |
+                Whether the device is currently present on the network. A
+                freshly created device is `false`.
+              example: false
+            associated:
+              type: boolean
+              readOnly: true
+              description: |
+                Whether the device has completed onboarding/association. A
+                freshly created device is `false`.
+              example: false
+            createdAt:
+              allOf:
+                - $ref: "#/components/schemas/DateTime"
+              readOnly: true
+              description: When the device was created.
+            createdBy:
+              allOf:
+                - $ref: "#/components/schemas/Uuid"
+              readOnly: true
+              description: The identity that created the device.
+            modifiedAt:
+              allOf:
+                - $ref: "#/components/schemas/DateTime"
+              readOnly: true
+              description: When the device was last modified.
+            modifiedBy:
+              allOf:
+                - $ref: "#/components/schemas/Uuid"
+              readOnly: true
+              description: The identity that last modified the device.
+      description: |
+        A device registered in a Trust Domain. On the `createTrustDomainDevice`
+        response the write-only `deviceCredential` is omitted, and
+        `connected`/`associated` are `false` with no assigned `ipv4Address`/
+        `ipv6Address` until the device associates.

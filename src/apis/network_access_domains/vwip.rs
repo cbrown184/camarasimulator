@@ -98,6 +98,26 @@ const TRUST_DOMAINS_SCOPE: &str = "network-access-domains:trust-domains";
 /// The OAuth2 scope the `GET /services` endpoint requires.
 const SERVICES_SCOPE: &str = "network-access-domains:services:read";
 
+/// The OAuth2 scope the Trust Domain Device legs require (CAMARA
+/// NetworkAccessManagement / Network Access Domains — the whole device sub-resource
+/// carries the single `network-access-domains:devices` scope).
+const DEVICES_SCOPE: &str = "network-access-domains:devices";
+
+/// The device types a `TrustDomainDeviceCreate` may declare (the CAMARA
+/// `deviceType` enum). A present `deviceType` outside this set → `400`.
+const DEVICE_TYPES: [&str; 10] = [
+    "AUTOMOTIVE",
+    "DESKTOP",
+    "IOT",
+    "LAPTOP",
+    "MEDICAL",
+    "OTHER",
+    "SMARTPHONE",
+    "TABLET",
+    "TV",
+    "WEARABLE",
+];
+
 /// The advertised Trust Domain access types (the discriminator values this
 /// provider supports, from [`trust_domain_capabilities`]). `createTrustDomain`
 /// admits only these — a well-formed `accessType` outside this set (e.g. the
@@ -124,6 +144,10 @@ pub fn routes() -> Router {
             get(get_trust_domain)
                 .patch(update_trust_domain)
                 .delete(delete_trust_domain),
+        )
+        .route(
+            "/network-access-domains/vwip/trust-domains/:trust_domain_id/devices",
+            post(create_trust_domain_device),
         )
         .route(
             "/network-access-domains/vwip/services",
@@ -235,6 +259,114 @@ async fn create_trust_domain(claims: Claims, headers: HeaderMap, body: Bytes) ->
 
     with_correlator(
         (StatusCode::CREATED, Json(trust_domain)).into_response(),
+        &correlator,
+    )
+}
+
+/// `POST /network-access-domains/vwip/trust-domains/{trustDomainId}/devices`
+/// (`createTrustDomainDevice`).
+///
+/// Registers a device inside an existing Trust Domain. The caller sends a
+/// `TrustDomainDeviceCreate` (a required `deviceName` + `enabled`, plus the
+/// optional `externalId`/`deviceType`/`blocked`/`hardwareAddress`/
+/// `bootstrappingInfo`/`deviceCredential`), the simulator validates it, mints a
+/// server-assigned `deviceId`, renders the full `TrustDomainDevice` (adding the
+/// read-only `id`, the `connected`/`associated` lifecycle flags, and the audit
+/// stamps), persists it in the in-memory device [`store`], and returns `201`.
+///
+/// Four control planes (docs/DESIGN.md §7):
+///
+/// 1. **Reserved error suffix (token subject)** — an account-level plane checked
+///    first, mirroring `createTrustDomain`: the subject's trailing three digits
+///    naming a reserved CAMARA status answer that canonical error regardless of
+///    the path or body.
+/// 2. **Request validation** — a missing/blank/oversized `deviceName`, a missing
+///    or non-boolean `enabled`, an out-of-range `externalId`, a non-boolean
+///    `blocked`, an unknown `deviceType`, or a malformed `hardwareAddress`
+///    (`hardwareAddressType` other than `EUI-48`, or a `value` that is not an
+///    EUI-48 MAC) → `400 INVALID_ARGUMENT`.
+/// 3. **Parent cross-reference** — the `{trustDomainId}` path must name a Trust
+///    Domain already in the store, else → `404 NOT_FOUND` (a device cannot be
+///    created in a Trust Domain that does not exist).
+/// 4. **Store state** — the `deviceId` is derived deterministically from the
+///    `(trustDomainId, deviceName)` identity ([`trust_domain_device_id`]), so
+///    creating a device with the *same* `deviceName` in the *same* Trust Domain
+///    collides → `409` (duplicate device name in the Trust Domain).
+///
+/// A freshly created device is not yet `associated`/`connected` and holds no
+/// assigned network address, so `connected`/`associated` are rendered `false`
+/// and `ipv4Address`/`ipv6Address` are omitted until association (a documented
+/// cut — the simulator has no live onboarding). The write-only `deviceCredential`
+/// (it may carry a shared/assigned secret) is stripped from the echoed
+/// `TrustDomainDevice`, and the nested `bootstrappingInfo`/`deviceCredential`
+/// contents are validated only for object shape (documented cuts, mirroring
+/// `createTrustDomain`'s `policies`). `x-correlator` is echoed on every response.
+async fn create_trust_domain_device(
+    claims: Claims,
+    headers: HeaderMap,
+    Path(trust_domain_id): Path<String>,
+    body: Bytes,
+) -> Response {
+    let correlator = headers.get("x-correlator").cloned();
+
+    // Endpoint authorisation: the token must carry the device scope.
+    if let Err(e) = claims.require_scope(DEVICES_SCOPE) {
+        return with_correlator(e.into_response(), &correlator);
+    }
+
+    // Control plane 1 — account-level reserved-error suffix on the token subject
+    // (checked first, mirroring `createTrustDomain`).
+    let identity = claims.subject().unwrap_or("");
+    if let Some(err) = scenarios::reserved_error(identity) {
+        return with_correlator(err.into_response(), &correlator);
+    }
+
+    // Parse the TrustDomainDeviceCreate body (malformed JSON / non-object → 400).
+    let req: Value = match serde_json::from_slice::<Value>(&body) {
+        Ok(v) if v.is_object() => v,
+        _ => {
+            return invalid_argument(
+                "the request body is not a valid TrustDomainDeviceCreate JSON object",
+                &correlator,
+            )
+        }
+    };
+
+    // Control plane 2 — required-field / shape validation (a body 400 is reported
+    // before the parent 404, mirroring `createAppInstance`).
+    if let Err(message) = validate_trust_domain_device_create(&req) {
+        return invalid_argument(&message, &correlator);
+    }
+
+    // Control plane 3 — the parent Trust Domain must exist.
+    if store::get(&trust_domain_id).is_none() {
+        return with_correlator(
+            CamaraError::not_found("No Trust Domain found for the provided id.").into_response(),
+            &correlator,
+        );
+    }
+
+    // `deviceName` is guaranteed present + well-typed by `validate` above.
+    let device_name = req["deviceName"].as_str().unwrap_or_default();
+    let id = trust_domain_device_id(&trust_domain_id, device_name);
+
+    // Render the full TrustDomainDevice (adds the read-only id, lifecycle flags,
+    // and audit stamps; strips the write-only deviceCredential from the echo).
+    let now = rfc3339_utc(now_unix_secs());
+    let actor = deterministic_uuid_v5("nad-td-actor", identity);
+    let device = render_trust_domain_device(&id, &req, &now, &actor);
+
+    // Control plane 4 — store state (same (trustDomainId, deviceName) → 409).
+    if !store::insert_device(&trust_domain_id, &id, device.clone()) {
+        return with_correlator(
+            CamaraError::conflict("A device with this name already exists in the Trust Domain.")
+                .into_response(),
+            &correlator,
+        );
+    }
+
+    with_correlator(
+        (StatusCode::CREATED, Json(device)).into_response(),
         &correlator,
     )
 }
@@ -951,6 +1083,146 @@ fn sanitised_access_details(details: &Value) -> Value {
 /// `TrustDomain.id` `Uuid` pattern the CAMARA schema requires.
 pub fn trust_domain_id(service_id: &str, name: &str) -> String {
     deterministic_uuid_v5("nad-trust-domain", &format!("{service_id}\u{1f}{name}"))
+}
+
+/// A deterministic, server-assigned `deviceId` for a Trust Domain Device, derived
+/// from its `(trustDomainId, deviceName)` identity. Deriving it from the identity
+/// is what makes a duplicate (same `deviceName` in the same Trust Domain) collide
+/// → the CAMARA `409`. It is a strict RFC 4122 (version 5, name-based) UUID so it
+/// satisfies the `TrustDomainDevice.id` `Uuid` pattern the CAMARA schema requires.
+pub fn trust_domain_device_id(trust_domain_id: &str, device_name: &str) -> String {
+    deterministic_uuid_v5(
+        "nad-td-device",
+        &format!("{trust_domain_id}\u{1f}{device_name}"),
+    )
+}
+
+/// Validate a `TrustDomainDeviceCreate` body. `deviceName` and `enabled` are
+/// required; the remaining fields are optional and checked only when present.
+/// Returns `Err(message)` on the first violation (mapped by the caller to
+/// `400 INVALID_ARGUMENT`). The nested `bootstrappingInfo`/`deviceCredential`
+/// objects are validated only for object shape (their protocol/credential
+/// internals are a documented cut, mirroring the Trust Domain `policies`).
+fn validate_trust_domain_device_create(req: &Value) -> Result<(), String> {
+    // deviceName — required, non-blank string ≤ 255 characters.
+    match req.get("deviceName").map(Value::as_str) {
+        None => return Err("`deviceName` is required".into()),
+        Some(None) => return Err("`deviceName` must be a string".into()),
+        Some(Some(n)) if n.trim().is_empty() => return Err("`deviceName` must not be blank".into()),
+        Some(Some(n)) if n.chars().count() > 255 => {
+            return Err("`deviceName` must be at most 255 characters".into())
+        }
+        Some(Some(_)) => {}
+    }
+
+    // enabled — required boolean.
+    match req.get("enabled") {
+        None => return Err("`enabled` is required".into()),
+        Some(v) if !v.is_boolean() => return Err("`enabled` must be a boolean".into()),
+        Some(_) => {}
+    }
+
+    // externalId — if present, a string of 1..=255 characters.
+    if let Some(v) = req.get("externalId") {
+        match v.as_str() {
+            Some(s) if (1..=255).contains(&s.chars().count()) => {}
+            _ => return Err("`externalId` must be a string of 1 to 255 characters".into()),
+        }
+    }
+
+    // blocked — if present, a boolean.
+    if let Some(v) = req.get("blocked") {
+        if !v.is_boolean() {
+            return Err("`blocked` must be a boolean".into());
+        }
+    }
+
+    // deviceType — if present, one of the advertised device types.
+    if let Some(v) = req.get("deviceType") {
+        match v.as_str() {
+            Some(s) if DEVICE_TYPES.contains(&s) => {}
+            _ => return Err("`deviceType` must be one of the supported device types".into()),
+        }
+    }
+
+    // hardwareAddress — if present, an object with an EUI-48 type + a valid MAC.
+    if let Some(v) = req.get("hardwareAddress") {
+        let obj = match v.as_object() {
+            Some(o) => o,
+            None => return Err("`hardwareAddress` must be an object".into()),
+        };
+        match obj.get("hardwareAddressType").and_then(Value::as_str) {
+            Some("EUI-48") => {}
+            _ => return Err("`hardwareAddress.hardwareAddressType` must be \"EUI-48\"".into()),
+        }
+        match obj.get("value").and_then(Value::as_str) {
+            Some(mac) if is_eui48(mac) => {}
+            _ => return Err("`hardwareAddress.value` must be an EUI-48 MAC address".into()),
+        }
+    }
+
+    // bootstrappingInfo / deviceCredential — if present, objects (contents cut).
+    for key in ["bootstrappingInfo", "deviceCredential"] {
+        if let Some(v) = req.get(key) {
+            if !v.is_object() {
+                return Err(format!("`{key}` must be an object"));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Whether `s` is an EUI-48 MAC address — six 2-hex-digit groups separated by a
+/// `:` or `-` (each separator independently either), matching the CAMARA
+/// `^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$` pattern. No regex dependency.
+fn is_eui48(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    if bytes.len() != 17 {
+        return false;
+    }
+    bytes.iter().enumerate().all(|(i, &c)| {
+        if i % 3 == 2 {
+            c == b':' || c == b'-'
+        } else {
+            c.is_ascii_hexdigit()
+        }
+    })
+}
+
+/// Render the full `TrustDomainDevice` response from a validated
+/// `TrustDomainDeviceCreate` `req`: the minted read-only `id`, the echoed create
+/// fields, the read-only lifecycle flags, and the audit stamps
+/// (`createdAt`/`modifiedAt` = `now`, `createdBy`/`modifiedBy` = `actor`). The
+/// write-only `deviceCredential` is stripped (it never appears in a response); a
+/// freshly created device is `connected: false` / `associated: false` and holds
+/// no assigned `ipv4Address`/`ipv6Address` (omitted until association).
+fn render_trust_domain_device(id: &str, req: &Value, now: &str, actor: &str) -> Value {
+    let mut d = serde_json::Map::new();
+    d.insert("id".into(), json!(id));
+    d.insert("deviceName".into(), req["deviceName"].clone());
+    // Echoed optional create fields (present, non-null); deviceCredential is
+    // write-only and deliberately excluded.
+    for key in [
+        "externalId",
+        "deviceType",
+        "blocked",
+        "hardwareAddress",
+        "bootstrappingInfo",
+    ] {
+        if let Some(v) = req.get(key).filter(|v| !v.is_null()) {
+            d.insert(key.into(), v.clone());
+        }
+    }
+    d.insert("enabled".into(), req["enabled"].clone());
+    // Read-only lifecycle: a just-created device is not yet associated/connected.
+    d.insert("connected".into(), json!(false));
+    d.insert("associated".into(), json!(false));
+    d.insert("createdAt".into(), json!(now));
+    d.insert("createdBy".into(), json!(actor));
+    d.insert("modifiedAt".into(), json!(now));
+    d.insert("modifiedBy".into(), json!(actor));
+    Value::Object(d)
 }
 
 /// A stable, strict RFC 4122 (version 5, name-based) UUID from a domain-tagged
@@ -1811,6 +2083,299 @@ mod tests {
         assert_eq!(
             headers.get("x-correlator").and_then(|v| v.to_str().ok()),
             Some("corr-td-1")
+        );
+    }
+
+    // === createTrustDomainDevice (POST /trust-domains/{id}/devices) =======
+
+    /// A representative, valid `TrustDomainDeviceCreate` body.
+    fn device_body(device_name: &str) -> Value {
+        json!({
+            "deviceName": device_name,
+            "enabled": true,
+            "deviceType": "LAPTOP",
+            "hardwareAddress": { "hardwareAddressType": "EUI-48", "value": "00:11:22:33:44:55" }
+        })
+    }
+
+    // --- Pure units --------------------------------------------------------
+
+    #[test]
+    fn device_id_is_strict_uuid_and_identity_keyed() {
+        let td = "b1e0f6a2-9c3d-5e4f-8a1b-2c3d4e5f6a7b";
+        let id = trust_domain_device_id(td, "Laptop");
+        assert!(is_uuid_shaped(&id), "id {id}");
+        // Deterministic per (trustDomainId, deviceName); differs when either changes.
+        assert_eq!(id, trust_domain_device_id(td, "Laptop"));
+        assert_ne!(id, trust_domain_device_id(td, "Phone"));
+        assert_ne!(id, trust_domain_device_id("123e4567-e89b-12d3-a456-426614174000", "Laptop"));
+    }
+
+    #[test]
+    fn is_eui48_accepts_colons_and_hyphens_only() {
+        assert!(is_eui48("00:11:22:33:44:55"));
+        assert!(is_eui48("aA-bB-cC-dD-eE-fF")); // mixed case, hyphen separators
+        assert!(is_eui48("00-11:22-33:44-55")); // each separator independent
+        assert!(!is_eui48("0011.2233.4455")); // dotted form not accepted
+        assert!(!is_eui48("00:11:22:33:44")); // too few groups
+        assert!(!is_eui48("00:11:22:33:44:5")); // short final group
+        assert!(!is_eui48("0g:11:22:33:44:55")); // non-hex digit
+    }
+
+    #[test]
+    fn validate_device_accepts_a_minimal_and_a_full_body() {
+        assert!(validate_trust_domain_device_create(&json!({
+            "deviceName": "Minimal", "enabled": false
+        }))
+        .is_ok());
+        assert!(validate_trust_domain_device_create(&device_body("Full")).is_ok());
+    }
+
+    #[test]
+    fn validate_device_rejects_missing_and_malformed_fields() {
+        // deviceName missing / blank / too long.
+        assert!(validate_trust_domain_device_create(&json!({ "enabled": true })).is_err());
+        assert!(validate_trust_domain_device_create(&json!({ "deviceName": "  ", "enabled": true })).is_err());
+        assert!(validate_trust_domain_device_create(
+            &json!({ "deviceName": "x".repeat(256), "enabled": true })
+        )
+        .is_err());
+
+        // enabled missing / wrong type.
+        assert!(validate_trust_domain_device_create(&json!({ "deviceName": "D" })).is_err());
+        assert!(validate_trust_domain_device_create(
+            &json!({ "deviceName": "D", "enabled": "yes" })
+        )
+        .is_err());
+
+        // deviceType unknown.
+        assert!(validate_trust_domain_device_create(
+            &json!({ "deviceName": "D", "enabled": true, "deviceType": "SERVER" })
+        )
+        .is_err());
+
+        // externalId out of range / wrong type.
+        assert!(validate_trust_domain_device_create(
+            &json!({ "deviceName": "D", "enabled": true, "externalId": "" })
+        )
+        .is_err());
+
+        // hardwareAddress malformed type / bad MAC.
+        assert!(validate_trust_domain_device_create(&json!({
+            "deviceName": "D", "enabled": true,
+            "hardwareAddress": { "hardwareAddressType": "EUI-64", "value": "00:11:22:33:44:55" }
+        }))
+        .is_err());
+        assert!(validate_trust_domain_device_create(&json!({
+            "deviceName": "D", "enabled": true,
+            "hardwareAddress": { "hardwareAddressType": "EUI-48", "value": "not-a-mac" }
+        }))
+        .is_err());
+    }
+
+    #[test]
+    fn render_device_strips_credential_and_sets_lifecycle_flags() {
+        let req = json!({
+            "deviceName": "Laptop", "enabled": true, "deviceType": "LAPTOP", "blocked": false,
+            "deviceCredential": { "credentialAction": "GENERATE" }
+        });
+        let id = trust_domain_device_id("td-id", "Laptop");
+        let dev = render_trust_domain_device(&id, &req, "2024-01-01T00:00:00Z", "actor-uuid");
+
+        assert_eq!(dev["id"], json!(id));
+        assert_eq!(dev["deviceName"], json!("Laptop"));
+        assert_eq!(dev["enabled"], json!(true));
+        assert_eq!(dev["deviceType"], json!("LAPTOP"));
+        assert_eq!(dev["connected"], json!(false));
+        assert_eq!(dev["associated"], json!(false));
+        assert_eq!(dev["createdAt"], json!("2024-01-01T00:00:00Z"));
+        assert_eq!(dev["createdBy"], json!("actor-uuid"));
+        // The write-only deviceCredential is never echoed; no address until associated.
+        assert!(dev.get("deviceCredential").is_none(), "credential must not be echoed");
+        assert!(dev.get("ipv4Address").is_none());
+    }
+
+    // --- Integration through the real router -------------------------------
+
+    /// POST `/trust-domains/{id}/devices` with an optional Bearer token, optional
+    /// JSON body, and optional `x-correlator`. Returns (status, headers, json).
+    async fn post_device(
+        token: Option<&str>,
+        trust_domain_id: &str,
+        body: Option<&Value>,
+        correlator: Option<&str>,
+    ) -> (StatusCode, HeaderMap, Value) {
+        let mut builder = Request::builder()
+            .method("POST")
+            .uri(format!(
+                "/network-access-domains/vwip/trust-domains/{trust_domain_id}/devices"
+            ))
+            .header("host", HOST);
+        if let Some(t) = token {
+            builder = builder.header("authorization", format!("Bearer {t}"));
+        }
+        if let Some(c) = correlator {
+            builder = builder.header("x-correlator", c);
+        }
+        let req_body = match body {
+            Some(v) => {
+                builder = builder.header("content-type", "application/json");
+                Body::from(serde_json::to_vec(v).unwrap())
+            }
+            None => Body::empty(),
+        };
+        let response = app().oneshot(builder.body(req_body).unwrap()).await.unwrap();
+        let status = response.status();
+        let headers = response.headers().clone();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, headers, json)
+    }
+
+    /// Create a Trust Domain via the real router and return its minted id.
+    async fn make_trust_domain(subject: &str, service_id: &str, name: &str) -> String {
+        let token = mint_token_as(subject, TRUST_DOMAINS_SCOPE).await;
+        let (status, _, td) =
+            post_trust_domain(Some(&token), Some(&td_body(service_id, name)), None).await;
+        assert_eq!(status, StatusCode::CREATED);
+        td["id"].as_str().unwrap().to_string()
+    }
+
+    #[tokio::test]
+    async fn create_device_persists_and_returns_the_resource() {
+        let td_id =
+            make_trust_domain("nad-005", "3fa85f64-5717-4562-b3fc-2c963f66afa6", "TDD ok").await;
+        let token = mint_token_as("nad-005", DEVICES_SCOPE).await;
+        let (status, _, dev) =
+            post_device(Some(&token), &td_id, Some(&device_body("Laptop")), None).await;
+        assert_eq!(status, StatusCode::CREATED);
+
+        let id = dev["id"].as_str().unwrap();
+        assert!(is_uuid_shaped(id), "id {id}");
+        assert_eq!(dev["deviceName"], json!("Laptop"));
+        assert_eq!(dev["enabled"], json!(true));
+        assert_eq!(dev["connected"], json!(false));
+        assert_eq!(dev["associated"], json!(false));
+        assert!(dev["createdAt"].as_str().unwrap().ends_with('Z'));
+        assert!(dev["createdBy"].is_string());
+
+        // It is persisted under (trustDomainId, deviceId) — backs later read legs.
+        let stored = store::get_device(&td_id, id).expect("the created device is stored");
+        assert_eq!(stored["deviceName"], json!("Laptop"));
+    }
+
+    #[tokio::test]
+    async fn create_device_duplicate_name_conflicts() {
+        let td_id =
+            make_trust_domain("nad-005", "123e4567-e89b-12d3-a456-426614174000", "TDD dup").await;
+        let token = mint_token_as("nad-005", DEVICES_SCOPE).await;
+
+        let (first, _, _) =
+            post_device(Some(&token), &td_id, Some(&device_body("Dup Laptop")), None).await;
+        assert_eq!(first, StatusCode::CREATED);
+        // Same (trustDomainId, deviceName) → same minted id → duplicate → 409.
+        let (second, _, err) =
+            post_device(Some(&token), &td_id, Some(&device_body("Dup Laptop")), None).await;
+        assert_eq!(second, StatusCode::CONFLICT);
+        assert_eq!(err["code"], "CONFLICT");
+        // A different name in the same Trust Domain is a distinct device → 201.
+        let (third, _, _) =
+            post_device(Some(&token), &td_id, Some(&device_body("Dup Laptop 2")), None).await;
+        assert_eq!(third, StatusCode::CREATED);
+    }
+
+    #[tokio::test]
+    async fn create_device_in_unknown_trust_domain_is_not_found() {
+        // A valid body + a well-formed but never-created trustDomainId → 404.
+        let token = mint_token_as("nad-005", DEVICES_SCOPE).await;
+        let (status, _, err) = post_device(
+            Some(&token),
+            "00000000-0000-4000-8000-000000000000",
+            Some(&device_body("Orphan")),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(err["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn create_device_invalid_body_beats_the_parent_404() {
+        // An invalid body against an unknown Trust Domain still reports the body 400
+        // (validation is checked before the parent cross-reference).
+        let token = mint_token_as("nad-005", DEVICES_SCOPE).await;
+        let bad = json!({ "enabled": true }); // deviceName missing
+        let (status, _, err) = post_device(
+            Some(&token),
+            "00000000-0000-4000-8000-000000000000",
+            Some(&bad),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(err["code"], "INVALID_ARGUMENT");
+    }
+
+    #[tokio::test]
+    async fn create_device_reserved_suffix_on_subject_beats_a_valid_body() {
+        // sub = "nad-429" → reserved suffix → 429, even before the parent lookup.
+        let token = mint_token_as("nad-429", DEVICES_SCOPE).await;
+        let (status, _, err) = post_device(
+            Some(&token),
+            "00000000-0000-4000-8000-000000000000",
+            Some(&device_body("Reserved")),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(err["code"], "TOO_MANY_REQUESTS");
+    }
+
+    #[tokio::test]
+    async fn create_device_token_without_the_scope_is_forbidden() {
+        let token = mint_token_as("nad-005", "some:other-scope").await;
+        let (status, _, err) = post_device(
+            Some(&token),
+            "00000000-0000-4000-8000-000000000000",
+            Some(&device_body("Forbidden")),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(err["code"], "PERMISSION_DENIED");
+    }
+
+    #[tokio::test]
+    async fn create_device_missing_token_is_unauthenticated() {
+        let (status, _, err) = post_device(
+            None,
+            "00000000-0000-4000-8000-000000000000",
+            Some(&device_body("NoAuth")),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(err["code"], "UNAUTHENTICATED");
+    }
+
+    #[tokio::test]
+    async fn create_device_x_correlator_is_echoed() {
+        let td_id =
+            make_trust_domain("nad-005", "3fa85f64-5717-4562-b3fc-2c963f66afa6", "TDD corr").await;
+        let token = mint_token_as("nad-005", DEVICES_SCOPE).await;
+        let (status, headers, _) = post_device(
+            Some(&token),
+            &td_id,
+            Some(&device_body("Corr Laptop")),
+            Some("corr-tdd-1"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-tdd-1")
         );
     }
 
