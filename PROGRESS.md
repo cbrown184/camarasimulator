@@ -3105,9 +3105,18 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
       `name` already exists for the same `serviceId` (the `trustDomainId` is
       derived from that pair, so a duplicate collides). Write-only WPA `password`
       stripped from the response. Nested access-detail *values* + `policies`
-      contents validated only for presence/shape (documented cut). The remaining
-      Trust Domain read/update/delete legs and the Trust Domain Device CRUD
-      resource remain later slices.
+      contents validated only for presence/shape (documented cut).
+    - [x] `GET /trust-domains/{trustDomainId}` (`getTrustDomain`, scope
+      `network-access-domains:trust-domains`) — reads a created Trust Domain back
+      by its opaque, server-minted `trustDomainId`. Store state is the only
+      control plane (the id is SHA-256-derived, so no reserved-suffix plane,
+      mirroring `readNetwork`/`getApp`): a stored id → `200` the persisted
+      `TrustDomain` verbatim (write-only WPA password already stripped at create);
+      any other id (never created or malformed) → `404 NOT_FOUND` (folded). Route
+      is a param sibling of the static `/trust-domains/capabilities` (static wins,
+      guarded by a test). `x-correlator` echoed. No new dep. The remaining Trust
+      Domain update/delete legs and the Trust Domain Device CRUD resource remain
+      later slices.
 
 ## Cross-cutting (do alongside the item that needs it)
 - [~] `errors.rs`: base CAMARA error model done (`src/errors.rs`, `specs/shared/errors.yaml`); per-version catalogs still TODO (DESIGN §8)
@@ -4249,6 +4258,20 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-15 — Network Access Domains vwip: added the Trust Domain read-back leg
+  `GET /trust-domains/{trustDomainId}` (`getTrustDomain`, scope
+  `network-access-domains:trust-domains`), the natural next slice after
+  `createTrustDomain`. Un-gated `store::get` (was `#[cfg(test)]`) and added the
+  handler + a param route sibling of the static `/trust-domains/capabilities`
+  (static wins in axum's router — guarded by a `read_does_not_shadow_the_capabilities_path`
+  test). Store state is the only control plane (opaque SHA-256-derived id, no
+  reserved-suffix plane, mirroring `readNetwork`/`getApp`): stored id → `200` the
+  persisted `TrustDomain` verbatim (WPA password already stripped at create); any
+  other id (never created / malformed) → `404 NOT_FOUND` (folded). Spec: added the
+  `/trust-domains/{trustDomainId}` path + `getTrustDomain` op + x-camarasim-scenarios,
+  and updated the header notes. 7 new tests (read-back, unknown 404, malformed 404,
+  no-shadow, 403, 401, x-correlator). `cargo test` 2458 green (was 2451);
+  `cargo build --release` succeeds. No new dep. — binary: 4.0M (4172568 B, +8376 B)
 - 2026-08-15 — Network Access Domains vwip: added the first **stateful** Trust Domain
   leg `POST /trust-domains` (`createTrustDomain`, scope
   `network-access-domains:trust-domains`). Verified the upstream operation + the

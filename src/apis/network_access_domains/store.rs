@@ -51,9 +51,9 @@ pub fn insert(id: String, trust_domain: Value) -> bool {
 }
 
 /// Fetch the `TrustDomain` stored under `id`, or `None` if no such Trust Domain
-/// exists. Backs the tests that assert a created Trust Domain persists (and the
-/// later `getTrustDomain` read leg).
-#[cfg(test)]
+/// exists. Backs the `getTrustDomain` read leg (`GET /trust-domains/{id}`) — a
+/// hit renders `200`, a miss the CAMARA `404` — and the tests that assert a
+/// created Trust Domain persists.
 pub fn get(id: &str) -> Option<Value> {
     store()
         .lock()

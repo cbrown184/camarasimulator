@@ -120,6 +120,10 @@ pub fn routes() -> Router {
             post(create_trust_domain),
         )
         .route(
+            "/network-access-domains/vwip/trust-domains/:trust_domain_id",
+            get(get_trust_domain),
+        )
+        .route(
             "/network-access-domains/vwip/services",
             get(get_services),
         )
@@ -231,6 +235,49 @@ async fn create_trust_domain(claims: Claims, headers: HeaderMap, body: Bytes) ->
         (StatusCode::CREATED, Json(trust_domain)).into_response(),
         &correlator,
     )
+}
+
+/// `GET /network-access-domains/vwip/trust-domains/{trustDomainId}`
+/// (`getTrustDomain`).
+///
+/// Reads a Trust Domain back by the opaque, server-minted `trustDomainId` that
+/// `createTrustDomain` returned. The id is not derivable by the caller (it is a
+/// SHA-256-derived UUID over the `(serviceId, name)` pair), so — mirroring the
+/// sibling `readNetwork` / `getApp` read legs — the **in-memory store is the only
+/// control plane** (docs/DESIGN.md §7): a stored id → `200` with the persisted
+/// `TrustDomain` verbatim (write-only WPA password already stripped at create);
+/// any other id (never created, already deleted in a later slice, or malformed) →
+/// `404 NOT_FOUND`. There is no store entry to distinguish a malformed id from an
+/// unknown one, so both fold into the same `404` (mirroring `getService`).
+///
+/// Requires a token carrying the `network-access-domains:trust-domains` scope
+/// (the same scope guards `createTrustDomain` and the capabilities document).
+/// `x-correlator` is echoed on every response.
+async fn get_trust_domain(
+    claims: Claims,
+    headers: HeaderMap,
+    Path(trust_domain_id): Path<String>,
+) -> Response {
+    // Optional correlation header, echoed on every response (CAMARA Commonalities).
+    let correlator = headers.get("x-correlator").cloned();
+
+    // Endpoint authorisation: the token must carry this API's Trust Domain scope.
+    if let Err(e) = claims.require_scope(TRUST_DOMAINS_SCOPE) {
+        return with_correlator(e.into_response(), &correlator);
+    }
+
+    // Store state is the only control plane — the opaque minted id has no
+    // reserved-suffix plane. A hit renders the stored TrustDomain; a miss (unknown
+    // or malformed id) is a 404.
+    match store::get(&trust_domain_id) {
+        Some(trust_domain) => {
+            with_correlator((StatusCode::OK, Json(trust_domain)).into_response(), &correlator)
+        }
+        None => with_correlator(
+            CamaraError::not_found("No Trust Domain found for the provided id.").into_response(),
+            &correlator,
+        ),
+    }
 }
 
 /// `GET /network-access-domains/vwip/services`.
@@ -1516,6 +1563,118 @@ mod tests {
         assert_eq!(
             headers.get("x-correlator").and_then(|v| v.to_str().ok()),
             Some("corr-td-1")
+        );
+    }
+
+    // === getTrustDomain (GET /trust-domains/{trustDomainId}) ==============
+
+    /// GET `/trust-domains/{id}` with an optional Bearer token and optional
+    /// `x-correlator`. Returns (status, headers, json-or-null).
+    async fn get_trust_domain_req(
+        token: Option<&str>,
+        id: &str,
+        correlator: Option<&str>,
+    ) -> (StatusCode, HeaderMap, Value) {
+        let mut builder = Request::builder()
+            .method("GET")
+            .uri(format!("/network-access-domains/vwip/trust-domains/{id}"))
+            .header("host", HOST);
+        if let Some(t) = token {
+            builder = builder.header("authorization", format!("Bearer {t}"));
+        }
+        if let Some(c) = correlator {
+            builder = builder.header("x-correlator", c);
+        }
+        let response = app().oneshot(builder.body(Body::empty()).unwrap()).await.unwrap();
+        let status = response.status();
+        let headers = response.headers().clone();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, headers, json)
+    }
+
+    #[tokio::test]
+    async fn read_returns_the_created_trust_domain() {
+        let token = mint_token_as("nad-005", TRUST_DOMAINS_SCOPE).await;
+        // Create one, then read it back by its minted id.
+        let body = td_body("3fa85f64-5717-4562-b3fc-2c963f66afa6", "TD read ok");
+        let (created, _, td) = post_trust_domain(Some(&token), Some(&body), None).await;
+        assert_eq!(created, StatusCode::CREATED);
+        let id = td["id"].as_str().unwrap().to_string();
+
+        let (status, _, got) = get_trust_domain_req(Some(&token), &id, None).await;
+        assert_eq!(status, StatusCode::OK);
+        // The stored resource is returned verbatim (same id/name/serviceId; the
+        // write-only WPA password is still absent).
+        assert_eq!(got["id"], json!(id));
+        assert_eq!(got["name"], json!("TD read ok"));
+        assert_eq!(got["serviceId"], body["serviceId"]);
+        assert!(got["accessDetails"][0]["securityMode"].get("password").is_none());
+    }
+
+    #[tokio::test]
+    async fn read_unknown_id_is_not_found() {
+        let token = mint_token_as("nad-005", TRUST_DOMAINS_SCOPE).await;
+        // A well-formed but never-created id → 404 NOT_FOUND.
+        let (status, _, err) =
+            get_trust_domain_req(Some(&token), "00000000-0000-0000-0000-000000000000", None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(err["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn read_malformed_id_is_not_found() {
+        let token = mint_token_as("nad-005", TRUST_DOMAINS_SCOPE).await;
+        // A non-UUID id folds into the same 404 (the opaque id is not a store key,
+        // so unknown and malformed are indistinguishable), mirroring getService.
+        let (status, _, err) = get_trust_domain_req(Some(&token), "not-a-uuid", None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(err["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn read_does_not_shadow_the_capabilities_path() {
+        // `/trust-domains/capabilities` must still reach getTrustDomainCapabilities,
+        // not the {trustDomainId} param route (static segments win in the router).
+        let token = mint_token(TRUST_DOMAINS_SCOPE).await;
+        let (status, _, doc) =
+            get_trust_domain_req(Some(&token), "capabilities", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(doc["supportedAccessTypes"].is_array(), "got the capabilities doc");
+    }
+
+    #[tokio::test]
+    async fn read_token_without_the_scope_is_forbidden() {
+        let token = mint_token_as("nad-005", "some:other-scope").await;
+        let (status, _, err) =
+            get_trust_domain_req(Some(&token), "00000000-0000-0000-0000-000000000000", None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(err["code"], "PERMISSION_DENIED");
+    }
+
+    #[tokio::test]
+    async fn read_missing_token_is_unauthenticated() {
+        let (status, _, err) =
+            get_trust_domain_req(None, "00000000-0000-0000-0000-000000000000", None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(err["code"], "UNAUTHENTICATED");
+    }
+
+    #[tokio::test]
+    async fn read_x_correlator_is_echoed() {
+        let token = mint_token_as("nad-005", TRUST_DOMAINS_SCOPE).await;
+        let body = td_body("123e4567-e89b-12d3-a456-426614174000", "TD read corr");
+        let (_, _, td) = post_trust_domain(Some(&token), Some(&body), None).await;
+        let id = td["id"].as_str().unwrap().to_string();
+
+        let (status, headers, _) =
+            get_trust_domain_req(Some(&token), &id, Some("corr-td-read")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-td-read")
         );
     }
 }

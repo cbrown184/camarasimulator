@@ -20,9 +20,10 @@
 #     the canonical CAMARA error; else the subject's trailing three digits fix the
 #     returned ServiceList deterministically.
 # It also serves the single-service `GET /services/{serviceId}` read
-# (getService) and the first stateful Trust Domain leg
-# `POST /trust-domains` (createTrustDomain), backed by the in-memory
-# trust-domain store. The remaining Trust Domain read/update/delete legs and the
+# (getService), the stateful Trust Domain create leg
+# `POST /trust-domains` (createTrustDomain), and its read-back
+# `GET /trust-domains/{trustDomainId}` (getTrustDomain), backed by the in-memory
+# trust-domain store. The remaining Trust Domain update/delete legs and the
 # Trust Domain Device CRUD resource remain to be added in later slices.
 openapi: 3.0.3
 info:
@@ -64,6 +65,14 @@ info:
     stateful Trust Domain leg — the created Trust Domain is held in an in-memory
     store so later read/update/delete legs can address it.
 
+    ## `GET /trust-domains/{trustDomainId}`
+
+    Reads a **Trust Domain** back by the server-assigned `trustDomainId` that
+    `createTrustDomain` returned. It requires the same
+    `network-access-domains:trust-domains` scope. The id is opaque
+    (SHA-256-derived), so the in-memory store is the only control plane: a stored
+    id → `200` with the persisted `TrustDomain`, any other id → `404 NOT_FOUND`.
+
     ## Functional cases — the input is the control plane (docs/DESIGN.md §7)
 
     **`getTrustDomainCapabilities`** — provider capabilities are fixed operator
@@ -102,12 +111,19 @@ info:
     in-memory store — the `trustDomainId` is derived from the `(serviceId, name)`
     pair, so re-creating the same name for the same service collides → `409`.
 
+    **`getTrustDomain`** (`GET /trust-domains/{trustDomainId}`) reads a created
+    Trust Domain back. The `trustDomainId` is an opaque, server-minted UUID, so —
+    mirroring the sibling `readNetwork` / `getApp` read legs — the in-memory store
+    is the only control plane: a stored id → `200` with the persisted
+    `TrustDomain`, any other id (never created or malformed) → `404 NOT_FOUND`
+    (a malformed id folds into the same `404`, no store entry to tell them apart).
+
     ## Documented cuts
 
     - The read-only `getTrustDomainCapabilities`, `getServices` and `getService`
-      legs and the stateful `createTrustDomain` leg are implemented so far; the
-      remaining Trust Domain read/update/delete legs and the Trust Domain Device
-      CRUD resource are later slices.
+      legs and the stateful `createTrustDomain` / `getTrustDomain` legs are
+      implemented so far; the remaining Trust Domain update/delete legs and the
+      Trust Domain Device CRUD resource are later slices.
     - `createTrustDomain` admits only the access types this provider advertises
       (Wi-Fi WPA-Personal/Enterprise, Thread STRUCTURED). A canonical but
       unadvertised `Thread:TLV` access detail → `400 INVALID_ARGUMENT`.
@@ -372,6 +388,95 @@ paths:
             result: "404 NOT_FOUND (reserved error suffix, account-level)"
           - input: "the token subject trailing digits are …429"
             result: "429 TOO_MANY_REQUESTS (reserved error suffix, account-level)"
+          - input: a token without the network-access-domains:trust-domains scope
+            result: "403 PERMISSION_DENIED"
+          - input: no / invalid token
+            result: "401 UNAUTHENTICATED"
+
+  /trust-domains/{trustDomainId}:
+    get:
+      operationId: getTrustDomain
+      summary: Retrieve a Trust Domain by id
+      description: |
+        Retrieves a single `TrustDomain` by the server-assigned `trustDomainId`
+        that `createTrustDomain` returned.
+
+        There is no request body and no device identifier: the operation is keyed
+        only to the in-memory store (docs/DESIGN.md §7). The `trustDomainId` is an
+        opaque, SHA-256-derived UUID the caller cannot construct, so it is not
+        itself a scenario plane — a stored id → `200` with the persisted
+        `TrustDomain` (the write-only WPA password was already stripped at
+        create), any other id (never created or malformed) → `404 NOT_FOUND`. A
+        malformed id folds into the same `404` (there is no store entry to
+        distinguish it from an unknown one).
+      security:
+        - openId:
+            - network-access-domains:trust-domains
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+        - name: trustDomainId
+          in: path
+          required: true
+          description: The server-assigned id of the Trust Domain to retrieve.
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: The requested Trust Domain.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TrustDomain"
+              examples:
+                trustDomain:
+                  summary: A stored Trust Domain (write-only password omitted)
+                  value:
+                    id: "b1e0f6a2-9c3d-5e4f-8a1b-2c3d4e5f6a7b"
+                    serviceId: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+                    name: "Primary WiFi Network"
+                    description: "Primary home WiFi Network for all devices"
+                    enabled: true
+                    accessDetails:
+                      - accessType: "Wi-Fi:WPA_PERSONAL"
+                        ssid: "my-ssid"
+                        securityMode:
+                          securityModeType: "WPA3-Personal"
+                    createdAt: "2024-01-01T09:00:00Z"
+                    createdBy: "4a7c9e2d-1b3f-5a6c-9d8e-0f1a2b3c4d5e"
+                    modifiedAt: "2024-01-01T09:00:00Z"
+                    modifiedBy: "4a7c9e2d-1b3f-5a6c-9d8e-0f1a2b3c4d5e"
+        "400":
+          $ref: "../../shared/errors.yaml#/components/responses/InvalidArgument"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          getTrustDomain is keyed only to the in-memory store (docs/DESIGN.md §7).
+          The trustDomainId is an opaque server-minted UUID, so store state is the
+          only control plane: a stored id returns the persisted TrustDomain, any
+          other id — unknown or malformed — is a 404 (folded, no store entry to
+          tell them apart).
+        cases:
+          - input: "a trustDomainId returned by a prior createTrustDomain"
+            result: "200 — the persisted TrustDomain (write-only password omitted)"
+          - input: "a well-formed trustDomainId that was never created"
+            result: "404 NOT_FOUND"
+          - input: "a malformed (non-UUID) trustDomainId"
+            result: "404 NOT_FOUND (folded, no store to distinguish it)"
           - input: a token without the network-access-domains:trust-domains scope
             result: "403 PERMISSION_DENIED"
           - input: no / invalid token
