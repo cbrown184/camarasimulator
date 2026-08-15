@@ -1705,7 +1705,7 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
       HTTP writer was factored to a generic `write_request<W: AsyncWrite>` shared by
       the TCP and TLS paths (mirror-don't-share; own cached connector). No new dep.
       **Completes QoS Provisioning v0.3.**
-- [~] QoS Booking vwip (`/qos-booking/vwip`; CAMARA qos-booking, wip — part of the
+- [x] QoS Booking vwip (`/qos-booking/vwip`; CAMARA qos-booking, wip — part of the
   ConnectivityQualityManagement subproject; the *time-boxed booking* sibling of
   Quality on Demand (immediate sessions) and QoS Provisioning (open-ended); stateful,
   resource-oriented, in-memory booking store):
@@ -1755,7 +1755,7 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     scanned by each booking's echoed `device` (new `store::find_by_device`,
     mirroring QoD's `retrieveSessionsByDevice`). Not scoped per client
     (documented cut). `x-correlator` echoed. No new dep.
-  - [~] CloudEvents notifications on `sink` (status transitions)
+  - [x] CloudEvents notifications on `sink` (status transitions)
     (`src/apis/qos_booking/notifications.rs`; event type
     `org.camaraproject.qos-booking.v0.status-changed`, mirroring QoS Provisioning):
     - [x] `DELETE_REQUESTED` `status-changed` on `deleteBooking` — a deleted
@@ -1792,7 +1792,11 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
       initial status, this transition keys off `startTime` (self-contained RFC 3339
       parser `unix_secs_from_rfc3339` + `days_from_civil`, no new dep). A no-`sink`
       SCHEDULED booking stays SCHEDULED (nothing to notify).
-    - [ ] TLS (`https://` sink) delivery (needs a rustls TLS client)
+    - [x] TLS (`https://` sink) delivery — reuses the rustls (ring) + bundled
+      Mozilla roots (`webpki-roots`) stack QoD/Geofencing/QoS Provisioning link;
+      `parse_sink` + `deliver_tls` + generic `write_request<W: AsyncWrite>` mirror
+      QoS Provisioning. Closes qos-booking's `http://`-only cut — all four
+      status-changed callbacks now deliver over http+https. **Completes QoS Booking vwip.**
 - [x] Device Data Volume vwip (`/device-data-volume/vwip`; CAMARA
   device-data-volume, wip — no released version yet, mounted at its canonical
   `vwip` base path; stateless, non-spatial, device-keyed data-usage query):
@@ -4300,6 +4304,31 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 ---
 
 ## Scan journal
+
+- 2026-08-15 — QoS Booking vwip: extended CloudEvents sink delivery to `https://`
+  (TLS) sinks, adopting the rustls TLS client QoD/Geofencing/QoS Provisioning
+  introduced (the follow-up the QoS Provisioning pass flagged for the remaining
+  Phase-5 sink APIs). `notifications.rs` now parses the sink scheme (`parse_sink` →
+  `SinkTarget{tls,host,port,path}`, default port 80/443, replacing the http-only
+  `parse_http_sink`) and, for an `https://` sink, POSTs the CloudEvent over a rustls
+  TLS session (`deliver_tls`/`tls_connector`; server cert verified against the
+  bundled Mozilla roots, `webpki-roots`) instead of raw TCP; the HTTP writer was
+  factored to a generic `write_request<W: AsyncWrite>` shared by the TCP and TLS
+  paths (mirror-don't-share; qos_booking keeps its own cached connector so the APIs
+  stay decoupled). No new dependency (`tokio-rustls`/`webpki-roots` already linked;
+  dev-only `rcgen` for the test cert). Closes the `http://`-only cut on QoS Booking —
+  the DELETE_REQUESTED/NETWORK_TERMINATED/DURATION_EXPIRED/SCHEDULED→ACTIVATED
+  callbacks all now deliver over http+https. Spec: qos-booking `openapi.yaml` —
+  header comment, `createBooking`/`deleteBooking` prose + `x-camarasim-scenarios`,
+  and the `sink` schema note now describe http+https delivery (removed the "no TLS
+  client" cuts); added an https-sink functional case. Tests: real TLS round-trip
+  (rustls server with an rcgen self-signed 127.0.0.1 cert, client trusting only it),
+  `write_request` byte-format, `parse_sink` http/https/port-443/reject cases
+  (replacing the old `parse_http_sink` test); the non-http no-op test now uses
+  `ftp://` since `https://` is delivered. Completes QoS Booking vwip. `cargo test`
+  2494 green (was 2490); `cargo build --release` succeeds. Session Insights /
+  Click to Dial / Traffic Influence sink APIs can adopt TLS next. — binary: 5.0M
+  (5171704 B, +7104 B — TLS stack already linked)
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 

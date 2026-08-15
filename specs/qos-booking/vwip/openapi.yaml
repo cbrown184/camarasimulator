@@ -20,9 +20,10 @@
 #
 # CloudEvents notifications on `sink`: deleting a booking that recorded a `sink`
 # delivers a `status-changed` CloudEvent (`bookingStatus: TERMINATED`, `statusInfo:
-# DELETE_REQUESTED`) to it, fire-and-forget over a raw TCP `http://` POST (no
-# HTTP-client dependency), with the `sinkCredential` (ACCESSTOKEN → Bearer, PLAIN →
-# Basic) applied. An `ACTIVATED`, sink-bearing booking whose identifier tail is
+# DELETE_REQUESTED`) to it, fire-and-forget (no HTTP-client dependency — an `http://`
+# sink over a raw TCP POST, an `https://` sink over a `rustls` TLS session with the
+# server cert verified against the bundled Mozilla roots), with the `sinkCredential`
+# (ACCESSTOKEN → Bearer, PLAIN → Basic) applied. An `ACTIVATED`, sink-bearing booking whose identifier tail is
 # `…002` is dropped early by the simulated network: a short-grace async timer evicts
 # it and delivers a `status-changed` CloudEvent (`bookingStatus: TERMINATED`,
 # `statusInfo: NETWORK_TERMINATED`), likewise fire-and-forget with the
@@ -34,9 +35,9 @@
 # `ACTIVATED` at its window start (`startTime`): an async timer flips it to
 # `ACTIVATED` and delivers a non-terminal `status-changed` CloudEvent
 # (`bookingStatus: ACTIVATED`, no `statusInfo`), then the now-active booking runs its
-# window to `DURATION_EXPIRED` as above. TLS (`https://` sink) delivery is the only
-# remaining later pass — a supplied `https://` `sink`/`sinkCredential` is otherwise
-# validated and echoed only (a documented cut). See the `QosBookingEvent` schema for
+# window to `DURATION_EXPIRED` as above. Both `http://` and `https://` sinks are
+# delivered to (the latter over `rustls` TLS); any other scheme is validated/echoed
+# but not delivered to (a documented cut). See the `QosBookingEvent` schema for
 # the CloudEvent shape.
 openapi: 3.0.3
 info:
@@ -125,13 +126,14 @@ info:
     - **`qosProfile`** — a profile whose name contains `unavailable` →
       `422 QOS_BOOKING.QOS_PROFILE_NOT_APPLICABLE`; otherwise it is applied.
     - **`sink`** — optional; when present it must be a well-formed `http://` or
-      `https://` callback URL → else `400 INVALID_SINK`. A recorded `http://` sink
-      receives the `status-changed` CloudEvents above (`DELETE_REQUESTED` on delete;
+      `https://` callback URL → else `400 INVALID_SINK`. A recorded sink receives the
+      `status-changed` CloudEvents above (`DELETE_REQUESTED` on delete;
       `NETWORK_TERMINATED` for a `…002` ACTIVATED booking; `DURATION_EXPIRED` when an
       ACTIVATED booking's window lapses; and the non-terminal `ACTIVATED` event when a
-      `SCHEDULED` booking reaches its window start); an `https://` sink is validated
-      and echoed but not delivered to (no TLS client — a documented cut).
-      `sinkCredential` (a secret) authenticates the callbacks but is never echoed.
+      `SCHEDULED` booking reaches its window start), delivered over raw TCP for an
+      `http://` sink and over a `rustls` TLS session (server cert verified) for an
+      `https://` sink. `sinkCredential` (a secret) authenticates the callbacks but is
+      never echoed.
 
     The response echoes the device back in a single-property `DeviceResponse`
     (the identifier used), and echoes the submitted `serviceArea`, `startTime`,
@@ -363,12 +365,13 @@ paths:
           `qosProfile` add further planes. CamaraSim manages CIRCLE and AREANAME
           service areas (POLYGON → NOT_MANAGED_AREA_TYPE). `startTime` is validated
           for shape and does not drive the *initial* status (a documented cut), but it
-          times the `SCHEDULED`→`ACTIVATED` transition. A recorded `http://` `sink`
-          receives the `status-changed` CloudEvents (`DELETE_REQUESTED` on delete;
+          times the `SCHEDULED`→`ACTIVATED` transition. A recorded `sink` receives
+          the `status-changed` CloudEvents (`DELETE_REQUESTED` on delete;
           `NETWORK_TERMINATED` for a `…002` ACTIVATED booking; `DURATION_EXPIRED` when
           any other ACTIVATED booking's window lapses; and the non-terminal
-          `ACTIVATED` event when a `SCHEDULED` booking reaches its window start); an
-          `https://` sink is validated/echoed but not delivered to.
+          `ACTIVATED` event when a `SCHEDULED` booking reaches its window start),
+          delivered over raw TCP for an `http://` sink and over `rustls` TLS (server
+          cert verified) for an `https://` sink.
         cases:
           - input: identifier ending in a reserved error suffix (e.g. …404)
             result: the canonical CAMARA error for that status
@@ -399,6 +402,12 @@ paths:
               fire-and-forget status-changed CloudEvent (bookingStatus TERMINATED,
               statusInfo DURATION_EXPIRED) is POSTed to the sink and the booking is
               evicted (a later GET is 404)
+          - input: "a recorded https:// sink"
+            result: >-
+              the same status-changed CloudEvents are delivered, POSTed over a rustls
+              TLS session (server certificate verified against the bundled Mozilla
+              roots) instead of raw TCP; a non-http(s) sink is validated/echoed but
+              not delivered to (a documented cut)
           - input: phoneNumber-keyed request
             result: "201 with the device echoed (`device.phoneNumber`)"
           - input: "`duration` < 1"
@@ -520,11 +529,12 @@ paths:
         **Notification.** When the deleted booking recorded a `sink`, a
         `status-changed` CloudEvent (`bookingStatus: TERMINATED`, `statusInfo:
         DELETE_REQUESTED`; see the `QosBookingEvent` schema) is delivered to it
-        fire-and-forget over a raw TCP `http://` POST, off the request path, so a slow
-        or unreachable sink never delays the `204`. The booking's `sinkCredential`
-        (ACCESSTOKEN → `Authorization: Bearer`, PLAIN → `Authorization: Basic`) is
-        applied and consumed single-use. An `https://` sink is not delivered to (no
-        TLS client — a documented cut).
+        fire-and-forget, off the request path, so a slow or unreachable sink never
+        delays the `204`: an `http://` sink over a raw TCP POST, an `https://` sink
+        over a `rustls` TLS session (server cert verified against the bundled Mozilla
+        roots). The booking's `sinkCredential` (ACCESSTOKEN → `Authorization: Bearer`,
+        PLAIN → `Authorization: Basic`) is applied and consumed single-use. A
+        non-http(s) sink is not delivered to (a documented cut).
       security:
         - openId:
             - qos-booking:device-qos-bookings:delete
@@ -570,10 +580,12 @@ paths:
             result: >-
               204 — plus a fire-and-forget status-changed CloudEvent
               (bookingStatus TERMINATED, statusInfo DELETE_REQUESTED) POSTed to the
-              sink, with the sinkCredential applied (ACCESSTOKEN → Bearer, PLAIN →
-              Basic)
+              sink over raw TCP, with the sinkCredential applied (ACCESSTOKEN →
+              Bearer, PLAIN → Basic)
           - input: a stored booking whose sink is `https://…`
-            result: "204 — event not delivered (no TLS client, a documented cut)"
+            result: >-
+              204 — the same CloudEvent is POSTed over a rustls TLS session (server
+              cert verified against the bundled Mozilla roots)
           - input: an unknown / never-created / already-deleted bookingId
             result: "404 NOT_FOUND"
 
@@ -765,15 +777,16 @@ components:
           description: >-
             A callback URL for asynchronous CloudEvents notifications. CAMARA's
             schema requires `https://`; CamaraSim also accepts `http://` so a
-            loopback receiver can observe callbacks. A recorded `http://` sink
-            receives a `status-changed` CloudEvent (`TERMINATED`) on `deleteBooking`
+            loopback receiver can observe callbacks. A recorded sink receives a
+            `status-changed` CloudEvent (`TERMINATED`) on `deleteBooking`
             (`DELETE_REQUESTED`), for a `…002` `ACTIVATED` booking when the simulated
             network drops it early (`NETWORK_TERMINATED`), and for any other
             `ACTIVATED` booking when its `duration` lapses (`DURATION_EXPIRED`); a
             `SCHEDULED` booking also receives a non-terminal `ACTIVATED` event when it
-            reaches its window start (`startTime`). See `QosBookingEvent`. An
-            `https://` sink is echoed but not delivered to (no TLS client — a
-            documented cut).
+            reaches its window start (`startTime`). See `QosBookingEvent`. Delivery is
+            over raw TCP for an `http://` sink and over a `rustls` TLS session (server
+            cert verified against the bundled Mozilla roots) for an `https://` sink; a
+            non-http(s) sink is echoed but not delivered to (a documented cut).
           pattern: '^https?:\/\/.+$'
           example: "https://application-server.example.com/notifications"
         sinkCredential:
