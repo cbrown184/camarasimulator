@@ -11,8 +11,9 @@
 # list-by-device (`POST /retrieve-sessions`, `retrieveSessionsByDevice`) and
 # application-observed metrics submission (`POST /sessions/{sessionId}/metrics`,
 # `sendSessionMetrics`). `sendSessionMetrics` now also delivers the resulting
-# `network-quality-score` CloudEvent to the session's `sink` (fire-and-forget over
-# raw TCP, `http://` sinks only — no TLS client). `deleteSession` now delivers the
+# `network-quality-score` CloudEvent to the session's `sink` (fire-and-forget;
+# `http://` sinks over raw TCP, `https://` sinks over a rustls TLS session).
+# `deleteSession` now delivers the
 # terminal `session-ended` CloudEvent (`terminationReason: SESSION_DELETED`) to the
 # session's `sink` too, and `createSession` schedules the network-initiated
 # `session-ended` leg (`terminationReason: NETWORK_TERMINATED`) for a `…001`
@@ -22,8 +23,7 @@
 # (`createSession` schedules the expiry timer). A session's `sinkCredential`
 # authenticates every callback — an ACCESSTOKEN credential as `Authorization: Bearer`
 # (RFC 6750) and a PLAIN credential as `Authorization: Basic base64(identifier:secret)`
-# (RFC 7617); only `https://` (TLS) sink delivery and REFRESHTOKEN remain deferred to
-# a later pass.
+# (RFC 7617); only REFRESHTOKEN remains a documented cut.
 openapi: 3.0.3
 info:
   title: Session Insights
@@ -97,8 +97,8 @@ paths:
         **terminal** `session-ended` CloudEvent (type
         `org.camaraproject.session-insights.v0.session-ended`,
         `data.terminationReason: NETWORK_TERMINATED`) is delivered to its `sink` —
-        fire-and-forget over raw TCP, `http://` sinks only (an `https://` sink is a
-        documented no-op cut — no TLS client), so nothing delays the `201`. The
+        fire-and-forget (`http://` sinks over raw TCP, `https://` sinks over a rustls
+        TLS session), so nothing delays the `201`. The
         session's `sinkCredential` (stashed here — ACCESSTOKEN as `Bearer`, PLAIN as
         `Basic`) authenticates the callback and is taken single-use (the event is
         terminal). A concurrent
@@ -307,9 +307,9 @@ paths:
         recorded a `sink`, CamaraSim delivers the **terminal** `session-ended`
         CloudEvent (type
         `org.camaraproject.session-insights.v0.session-ended`, `data.terminationReason:
-        SESSION_DELETED`) to that `sink` — fire-and-forget over raw TCP, `http://`
-        sinks only (an `https://` sink is a documented no-op cut — no TLS client), so
-        a slow or unreachable sink never delays the `204`. The session's
+        SESSION_DELETED`) to that `sink` — fire-and-forget (`http://` sinks over raw
+        TCP, `https://` sinks over a rustls TLS session), so a slow or unreachable
+        sink never delays the `204`. The session's
         `sinkCredential` (stashed at `createSession`) is applied to the callback's
         `Authorization` header — ACCESSTOKEN as `Bearer <token>` (RFC 6750), PLAIN as
         `Basic base64(identifier:secret)` (RFC 7617) — and taken single-use (the event
@@ -353,7 +353,7 @@ paths:
             result: >-
               204 No Content; the session is evicted (single-use) and a terminal
               session-ended CloudEvent (terminationReason SESSION_DELETED) is fired
-              to its sink (http:// only)
+              to its sink (http:// over raw TCP or https:// over TLS)
           - input: >-
               a deleted session whose sink recorded an ACCESSTOKEN sinkCredential
             result: >-
@@ -509,10 +509,10 @@ paths:
         it); because metrics may be submitted repeatedly, the credential is read
         non-destructively on each delivery and dropped when the session is deleted.
 
-        **Documented cuts.** Delivery is to `http://` sinks only — CamaraSim adds no
-        TLS client, so an `https://` sink is accepted at `createSession` but its
-        callback is a silent no-op (matches QoD / QoS Provisioning). A
-        `REFRESHTOKEN` `sinkCredential` (or none) sends the callback
+        **Documented cuts.** Delivery reaches both `http://` sinks (raw TCP) and
+        `https://` sinks (rustls TLS session, server cert verified against the
+        bundled Mozilla roots), matching QoS Booking / QoS Provisioning / QoD /
+        Geofencing. A `REFRESHTOKEN` `sinkCredential` (or none) sends the callback
         unauthenticated. The `session-ended` CloudEvent legs (delete /
         network-termination / expiry) are delivered on their own transitions, not
         here. The spec's `410 Gone` (metrics for an expired session) is a cut: no
@@ -589,7 +589,10 @@ paths:
               session's http:// sink (qualityScore deterministic from the metrics —
               e.g. packetLossErrorRate 3 → 44)
           - input: a valid MetricsPayload on a session whose sink is https://
-            result: "204 No Content; the notification callback is a no-op (no TLS client, documented cut)"
+            result: >-
+              204 No Content; the network-quality-score callback is POSTed over a
+              rustls TLS session (server cert verified against the bundled Mozilla
+              roots)
           - input: an unknown or already-deleted sessionId
             result: "404 NOT_FOUND (no notification)"
           - input: a missing required figure, malformed body, or invalid unit
@@ -900,7 +903,8 @@ components:
       type: object
       description: >-
         The CloudEvents 1.0 envelope CamaraSim delivers to a session's `sink`
-        after `sendSessionMetrics` (fire-and-forget, `http://` sinks only). `data`
+        after `sendSessionMetrics` (fire-and-forget, `http://` and `https://` sinks).
+        `data`
         carries the `sessionId` and a synthetic `qualityScore` (0–100) derived
         deterministically from the submitted metrics (docs/DESIGN.md §7): score =
         clamp(100 − (10 − packetLossErrorRate)·8 − packetDelay.value/20 −
@@ -960,7 +964,7 @@ components:
         further events are delivered. CamaraSim emits it from `deleteSession`
         (`SESSION_DELETED`), from the `…001` network-termination timer
         (`NETWORK_TERMINATED`), and from the expiry timer of a time-bounded session
-        (`SESSION_EXPIRED`) — fire-and-forget, `http://` sinks only. `data` (CAMARA
+        (`SESSION_EXPIRED`) — fire-and-forget, `http://` and `https://` sinks. `data` (CAMARA
         `SessionEndedData`) carries the `sessionId` and the `terminationReason`.
       required:
         - id

@@ -1958,7 +1958,7 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     carries a deterministic `reportedDate` of `now − d hours`. `lastChecked` = now
     (self-contained RFC 3339 formatter, no new dep). `x-correlator` echoed.
     **Completes Device Authenticity vwip.**
-- [~] Session Insights vwip (`/session-insights/vwip`; CAMARA SessionInsights,
+- [x] Session Insights vwip (`/session-insights/vwip`; CAMARA SessionInsights,
   wip — no released version yet, mounted at its canonical `vwip` base path;
   **stateful, resource-oriented**, non-spatial application-session resource):
   - [x] `POST /sessions` (`session-insights:sessions:create`, `createSession`)
@@ -1996,7 +1996,7 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     OUT_OF_RANGE`. Spec's `410 Gone` (expired session) a documented cut (no
     retained expired state — a deleted session evicts → 404; expiry arrives with
     the deferred notifications). No new dep.
-  - [~] CloudEvents notifications on `sink`
+  - [x] CloudEvents notifications on `sink`
     (`src/apis/session_insights/notifications.rs`; event type
     `org.camaraproject.session-insights.v0.network-quality-score`, mirroring QoD /
     QoS Provisioning):
@@ -2017,7 +2017,7 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
       `sendSessionMetrics` delivery (metrics may repeat), and taken single-use on the
       terminal legs. `REFRESHTOKEN` a documented cut. No new dep (mirrors QoS
       Provisioning / Carrier Billing).
-    - [~] `session-ended` CloudEvent:
+    - [x] `session-ended` CloudEvent:
       - [x] `SESSION_DELETED` on `deleteSession` — a deleted session that recorded a
         `sink` receives the terminal
         `org.camaraproject.session-insights.v0.session-ended` CloudEvent
@@ -2042,7 +2042,12 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
         in a test — the timer is exercised end-to-end by driving it with an
         already-past `expiresAt` (fires immediately), the same code path a live
         session takes at expiry. No new dep.
-    - [ ] TLS (`https://` sink) delivery (needs a rustls TLS client)
+    - [x] TLS (`https://` sink) delivery — `notifications.rs` adopts QoD's rustls
+      TLS client (`parse_sink`/`deliver_tls`/`write_request`/`tls_connector`, server
+      cert verified against the bundled Mozilla roots); every session-insights
+      callback (network-quality-score, session-ended delete/network-termination/
+      expiry legs) now POSTs over `http://` (raw TCP) or `https://` (TLS). No new
+      dep. **Completes Session Insights vwip notifications.**
 - [x] Network Health Assessment vwip (`/network-health-assessment/vwip`; CAMARA
   NetworkInsights, wip — no released version yet, mounted at its canonical `vwip`
   base path; stateless, non-spatial, **network-keyed** aggregate health score —
@@ -4304,6 +4309,31 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 ---
 
 ## Scan journal
+
+- 2026-08-15 — Session Insights vwip: extended CloudEvents sink delivery to `https://`
+  (TLS) sinks, adopting the rustls TLS client QoD/Geofencing/QoS Provisioning/QoS
+  Booking introduced (the follow-up those passes flagged for the remaining sink APIs),
+  **completing Session Insights vwip**. `notifications.rs` now parses the sink scheme
+  (`parse_sink` → `SinkTarget{tls,host,port,path}`, default port 80/443, replacing the
+  http-only `parse_http_sink`) and, for an `https://` sink, POSTs the CloudEvent over a
+  rustls TLS session (`deliver_tls`/`tls_connector`; server cert verified against the
+  bundled Mozilla roots, `webpki-roots`) instead of raw TCP; the HTTP writer was
+  factored to a generic `write_request<W: AsyncWrite>` shared by the TCP and TLS paths
+  (mirror-don't-share; session_insights keeps its own cached connector so the APIs stay
+  decoupled). No new dependency (`tokio-rustls`/`webpki-roots` already linked; dev-only
+  `rcgen` for the test cert). Closes the `http://`-only cut on Session Insights — the
+  network-quality-score and every session-ended leg (SESSION_DELETED / NETWORK_TERMINATED
+  / SESSION_EXPIRED) now deliver over http+https. Spec: session-insights `openapi.yaml` —
+  header comment, createSession/deleteSession/sendSessionMetrics prose, the
+  NetworkQualityScore/SessionEnded event schema notes, and the documented-cuts block now
+  describe http+https delivery (removed the "no TLS client" cuts); updated the https-sink
+  functional case from no-op to a TLS delivery. Tests: real TLS round-trip (rustls server
+  with an rcgen self-signed 127.0.0.1 cert, client trusting only it), `write_request`
+  byte-format, `parse_sink` http/https/port-443/reject cases (replacing the old
+  `parse_http_sink` test); the unsupported-scheme no-op test now uses `ftp://` since
+  `https://` is delivered. `cargo test` 2498 green (was 2494); `cargo build --release`
+  succeeds. Click to Dial / Traffic Influence sink APIs can adopt TLS next. — binary: 5.0M
+  (5174712 B, +3008 B — TLS stack already linked)
 
 - 2026-08-15 — QoS Booking vwip: extended CloudEvents sink delivery to `https://`
   (TLS) sinks, adopting the rustls TLS client QoD/Geofencing/QoS Provisioning
