@@ -121,7 +121,9 @@ pub fn routes() -> Router {
         )
         .route(
             "/network-access-domains/vwip/trust-domains/:trust_domain_id",
-            get(get_trust_domain).delete(delete_trust_domain),
+            get(get_trust_domain)
+                .patch(update_trust_domain)
+                .delete(delete_trust_domain),
         )
         .route(
             "/network-access-domains/vwip/services",
@@ -321,6 +323,87 @@ async fn delete_trust_domain(
             CamaraError::not_found("No Trust Domain found for the provided id.").into_response(),
             &correlator,
         )
+    }
+}
+
+/// `PATCH /network-access-domains/vwip/trust-domains/{trustDomainId}`
+/// (`updateTrustDomain`).
+///
+/// Updates a created Trust Domain in place. The caller sends a `TrustDomainUpdate`
+/// — the mutable subset of a Trust Domain, every field **optional**
+/// (`name`/`description`/`enabled`/`expiration`/`policies`/`accessDetails`) — and
+/// only the fields present are changed. Per the CAMARA schema `accessDetails` is a
+/// **full replacement** (a supplied array replaces the stored one wholesale), and
+/// the read-only identity/audit fields (`id`, `serviceId`, `createdAt`/`createdBy`)
+/// are immutable — a caller that includes them in the body has them ignored. Every
+/// successful update refreshes the `modifiedAt`/`modifiedBy` audit stamps.
+///
+/// Two control planes (docs/DESIGN.md §7), mirroring the repo's other PATCH legs
+/// (`updateAppDeployment`, `patchTrafficInfluence`):
+///
+/// 1. **Request body** — validated first, so a body `400` wins over a `404`. A
+///    malformed body, a present-but-ill-typed field (blank/oversized `name`,
+///    non-boolean `enabled`, over-long `description`, non-string `expiration`,
+///    non-object `policies`, an `accessDetails` that is not a 1–4 array or whose
+///    entries fail the same access-detail validation as `createTrustDomain`) →
+///    `400 INVALID_ARGUMENT`.
+/// 2. **Store state** — the opaque, server-minted `trustDomainId` has no
+///    reserved-suffix plane (mirroring `getTrustDomain`/`deleteTrustDomain`): a
+///    stored id is patched and the updated `TrustDomain` returned (`200`); any
+///    other id (never created, already deleted, or malformed) → `404 NOT_FOUND`.
+///
+/// Unlike `createTrustDomain` there is **no `409`**: `updateTrustDomain` addresses
+/// an existing resource by its fixed id and never re-derives it, so a rename can't
+/// collide (the CAMARA `updateTrustDomain` response set is `200`/`400`/`404`).
+/// The write-only WPA `password` is stripped from any replacement `accessDetails`
+/// so it never appears in the echoed `TrustDomain`. Requires the
+/// `network-access-domains:trust-domains` scope. `x-correlator` is echoed on every
+/// response.
+async fn update_trust_domain(
+    claims: Claims,
+    headers: HeaderMap,
+    Path(trust_domain_id): Path<String>,
+    body: Bytes,
+) -> Response {
+    let correlator = headers.get("x-correlator").cloned();
+
+    // Endpoint authorisation: the token must carry this API's Trust Domain scope.
+    if let Err(e) = claims.require_scope(TRUST_DOMAINS_SCOPE) {
+        return with_correlator(e.into_response(), &correlator);
+    }
+
+    // Parse the TrustDomainUpdate body (malformed JSON / non-object → 400).
+    let req: Value = match serde_json::from_slice::<Value>(&body) {
+        Ok(v) if v.is_object() => v,
+        _ => {
+            return invalid_argument(
+                "the request body is not a valid TrustDomainUpdate JSON object",
+                &correlator,
+            )
+        }
+    };
+
+    // Control plane 1 — request-body validation (checked before the store lookup,
+    // so a body 400 wins over a 404).
+    if let Err(message) = validate_trust_domain_update(&req) {
+        return invalid_argument(&message, &correlator);
+    }
+
+    // Control plane 2 — store state. The whole get-modify-write runs under one lock
+    // hold (see `store::update`): a hit applies the patch, refreshes the audit
+    // stamps, and returns the updated resource; a miss is a 404.
+    let now = rfc3339_utc(now_unix_secs());
+    let actor = deterministic_uuid_v5("nad-td-actor", claims.subject().unwrap_or(""));
+    match store::update(&trust_domain_id, |td| {
+        apply_trust_domain_update(td, &req, &now, &actor)
+    }) {
+        Some(updated) => {
+            with_correlator((StatusCode::OK, Json(updated)).into_response(), &correlator)
+        }
+        None => with_correlator(
+            CamaraError::not_found("No Trust Domain found for the provided id.").into_response(),
+            &correlator,
+        ),
     }
 }
 
@@ -695,6 +778,127 @@ fn validate_access_detail(detail: &Value) -> Result<(), String> {
         _ => unreachable!("accessType already checked against the advertised set"),
     }
     Ok(())
+}
+
+/// Validate a `TrustDomainUpdate` (PATCH) body. Every field is **optional**, so
+/// this only checks the ones that are present; an absent field is left unchanged
+/// by [`apply_trust_domain_update`]. Returns `Err(message)` on the first violation
+/// (mapped by the caller to `400 INVALID_ARGUMENT`).
+///
+/// The clearable optional fields (`description`/`expiration`/`policies`) accept an
+/// explicit JSON `null` (which [`apply_trust_domain_update`] removes); the required
+/// resource fields (`name`/`enabled`) and the full-replacement `accessDetails`
+/// array do **not** — a present `null` for those is a `400`. Read-only fields the
+/// body may carry (`id`/`serviceId`/audit stamps) are neither validated nor applied
+/// (a documented cut, mirroring `updateAppDeployment`'s immutable `appId`).
+fn validate_trust_domain_update(req: &Value) -> Result<(), String> {
+    // name — if present, a non-blank string ≤ 64 characters (not clearable).
+    if let Some(name) = req.get("name") {
+        match name.as_str() {
+            None => return Err("`name` must be a string".into()),
+            Some(n) if n.trim().is_empty() => return Err("`name` must not be blank".into()),
+            Some(n) if n.chars().count() > 64 => {
+                return Err("`name` must be at most 64 characters".into())
+            }
+            Some(_) => {}
+        }
+    }
+
+    // enabled — if present, a boolean (not clearable).
+    if let Some(enabled) = req.get("enabled") {
+        if !enabled.is_boolean() {
+            return Err("`enabled` must be a boolean".into());
+        }
+    }
+
+    // description — if present, either null (clear) or a string ≤ 255 characters.
+    if let Some(desc) = req.get("description").filter(|v| !v.is_null()) {
+        match desc.as_str() {
+            Some(s) if s.chars().count() <= 255 => {}
+            Some(_) => return Err("`description` must be at most 255 characters".into()),
+            None => return Err("`description` must be a string".into()),
+        }
+    }
+
+    // expiration — if present, either null (clear) or an RFC 3339 date-time string.
+    if let Some(exp) = req.get("expiration").filter(|v| !v.is_null()) {
+        if !exp.is_string() {
+            return Err("`expiration` must be an RFC 3339 date-time string".into());
+        }
+    }
+
+    // policies — if present, either null (clear) or an object (contents not validated).
+    if let Some(pol) = req.get("policies").filter(|v| !v.is_null()) {
+        if !pol.is_object() {
+            return Err("`policies` must be an object".into());
+        }
+    }
+
+    // accessDetails — if present, a full-replacement array of 1..=4 valid entries
+    // (same per-entry validation as `createTrustDomain`; not clearable).
+    if let Some(access) = req.get("accessDetails") {
+        let details = match access.as_array() {
+            None => return Err("`accessDetails` must be an array".into()),
+            Some(d) => d,
+        };
+        if details.is_empty() {
+            return Err("`accessDetails` must contain at least one entry".into());
+        }
+        if details.len() > 4 {
+            return Err("`accessDetails` must contain at most 4 entries".into());
+        }
+        for detail in details {
+            validate_access_detail(detail)?;
+        }
+    }
+
+    Ok(())
+}
+
+/// Apply a validated `TrustDomainUpdate` `req` to the stored `TrustDomain` `td`
+/// in place (called under the store lock by [`store::update`]). Only the mutable
+/// fields present in the body change: `name`/`enabled`/`accessDetails` are set from
+/// a present (non-null) value; the clearable `description`/`expiration`/`policies`
+/// are set from a present non-null value and **removed** on an explicit `null`;
+/// `accessDetails` replaces wholesale (write-only WPA `password` stripped). Every
+/// call refreshes the audit stamps (`modifiedAt` = `now`, `modifiedBy` = `actor`),
+/// so an empty `{}` body is an accepted no-op that only re-stamps `modified*`. The
+/// read-only identity fields (`id`/`serviceId`/`createdAt`/`createdBy`) are left
+/// untouched even if the body carries them.
+fn apply_trust_domain_update(td: &mut Value, req: &Value, now: &str, actor: &str) {
+    let obj = match td.as_object_mut() {
+        Some(o) => o,
+        None => return,
+    };
+
+    // Non-clearable scalar fields: set when present (validation already rejected a
+    // present-but-null name/enabled).
+    for key in ["name", "enabled"] {
+        if let Some(v) = req.get(key) {
+            obj.insert(key.into(), v.clone());
+        }
+    }
+
+    // Clearable optional fields: a present non-null value sets, an explicit null
+    // removes the field.
+    for key in ["description", "expiration", "policies"] {
+        if let Some(v) = req.get(key) {
+            if v.is_null() {
+                obj.remove(key);
+            } else {
+                obj.insert(key.into(), v.clone());
+            }
+        }
+    }
+
+    // accessDetails: full replacement, write-only password stripped from the echo.
+    if let Some(access) = req.get("accessDetails") {
+        obj.insert("accessDetails".into(), sanitised_access_details(access));
+    }
+
+    // Refresh the audit stamps on every successful update.
+    obj.insert("modifiedAt".into(), json!(now));
+    obj.insert("modifiedBy".into(), json!(actor));
 }
 
 /// Render the full `TrustDomain` response from a validated `TrustDomainCreate`
@@ -1837,6 +2041,311 @@ mod tests {
         assert_eq!(
             headers.get("x-correlator").and_then(|v| v.to_str().ok()),
             Some("corr-td-delete")
+        );
+    }
+
+    // === updateTrustDomain (PATCH /trust-domains/{trustDomainId}) ==========
+
+    // --- Pure units --------------------------------------------------------
+
+    #[test]
+    fn validate_update_allows_empty_and_partial_bodies() {
+        // Every field is optional — an empty body and any single-field body validate.
+        assert!(validate_trust_domain_update(&json!({})).is_ok());
+        assert!(validate_trust_domain_update(&json!({ "name": "Renamed" })).is_ok());
+        assert!(validate_trust_domain_update(&json!({ "enabled": false })).is_ok());
+        // The clearable optional fields accept an explicit null.
+        assert!(validate_trust_domain_update(&json!({ "description": null })).is_ok());
+        assert!(validate_trust_domain_update(&json!({ "expiration": null })).is_ok());
+        assert!(validate_trust_domain_update(&json!({ "policies": null })).is_ok());
+    }
+
+    #[test]
+    fn validate_update_rejects_ill_typed_present_fields() {
+        // name present but blank / over-long / not a string / null → error.
+        assert!(validate_trust_domain_update(&json!({ "name": "   " })).is_err());
+        assert!(validate_trust_domain_update(&json!({ "name": "x".repeat(65) })).is_err());
+        assert!(validate_trust_domain_update(&json!({ "name": 7 })).is_err());
+        assert!(validate_trust_domain_update(&json!({ "name": null })).is_err());
+        // enabled present but not a boolean / null → error (not clearable).
+        assert!(validate_trust_domain_update(&json!({ "enabled": "yes" })).is_err());
+        assert!(validate_trust_domain_update(&json!({ "enabled": null })).is_err());
+        // description over-long; policies not an object.
+        assert!(validate_trust_domain_update(&json!({ "description": "d".repeat(256) })).is_err());
+        assert!(validate_trust_domain_update(&json!({ "policies": "nope" })).is_err());
+        // accessDetails empty / too many / invalid entry / null → error.
+        assert!(validate_trust_domain_update(&json!({ "accessDetails": [] })).is_err());
+        assert!(validate_trust_domain_update(&json!({ "accessDetails": null })).is_err());
+        let one = td_body("3fa85f64-5717-4562-b3fc-2c963f66afa6", "x")["accessDetails"][0].clone();
+        assert!(validate_trust_domain_update(
+            &json!({ "accessDetails": [one, one.clone(), one.clone(), one.clone(), one.clone()] })
+        )
+        .is_err());
+        assert!(validate_trust_domain_update(
+            &json!({ "accessDetails": [{ "accessType": "Thread:TLV" }] })
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn apply_update_sets_clears_replaces_and_restamps() {
+        // Start from a rendered TrustDomain (as the store holds it).
+        let body = td_body("3fa85f64-5717-4562-b3fc-2c963f66afa6", "Home");
+        let id = trust_domain_id("3fa85f64-5717-4562-b3fc-2c963f66afa6", "Home");
+        let mut td = render_trust_domain(&id, &body, "2024-01-01T00:00:00Z", "creator-uuid");
+
+        let patch = json!({
+            "name": "Home Renamed",
+            "enabled": false,
+            "description": null,
+            "accessDetails": [
+                {
+                    "accessType": "Wi-Fi:WPA_PERSONAL",
+                    "ssid": "new-ssid",
+                    "securityMode": { "password": "hidden", "securityModeType": "WPA2-Personal" }
+                }
+            ]
+        });
+        apply_trust_domain_update(&mut td, &patch, "2024-06-01T12:00:00Z", "editor-uuid");
+
+        // Present scalars set; a null clears the optional field.
+        assert_eq!(td["name"], json!("Home Renamed"));
+        assert_eq!(td["enabled"], json!(false));
+        assert!(td.get("description").is_none(), "null cleared description");
+        // accessDetails replaced wholesale, write-only password stripped.
+        assert_eq!(td["accessDetails"][0]["ssid"], json!("new-ssid"));
+        assert!(td["accessDetails"][0]["securityMode"].get("password").is_none());
+        // Immutable identity + creation audit untouched; modified* re-stamped.
+        assert_eq!(td["id"], json!(id));
+        assert_eq!(td["serviceId"], body["serviceId"]);
+        assert_eq!(td["createdAt"], json!("2024-01-01T00:00:00Z"));
+        assert_eq!(td["createdBy"], json!("creator-uuid"));
+        assert_eq!(td["modifiedAt"], json!("2024-06-01T12:00:00Z"));
+        assert_eq!(td["modifiedBy"], json!("editor-uuid"));
+    }
+
+    // --- Integration through the real router -------------------------------
+
+    /// PATCH `/trust-domains/{id}` with an optional Bearer token, optional JSON
+    /// body, and optional `x-correlator`. Returns (status, headers, json-or-null).
+    async fn patch_trust_domain_req(
+        token: Option<&str>,
+        id: &str,
+        body: Option<&Value>,
+        correlator: Option<&str>,
+    ) -> (StatusCode, HeaderMap, Value) {
+        let mut builder = Request::builder()
+            .method("PATCH")
+            .uri(format!("/network-access-domains/vwip/trust-domains/{id}"))
+            .header("host", HOST);
+        if let Some(t) = token {
+            builder = builder.header("authorization", format!("Bearer {t}"));
+        }
+        if let Some(c) = correlator {
+            builder = builder.header("x-correlator", c);
+        }
+        let req_body = match body {
+            Some(v) => {
+                builder = builder.header("content-type", "application/json");
+                Body::from(serde_json::to_vec(v).unwrap())
+            }
+            None => Body::empty(),
+        };
+        let response = app().oneshot(builder.body(req_body).unwrap()).await.unwrap();
+        let status = response.status();
+        let headers = response.headers().clone();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, headers, json)
+    }
+
+    #[tokio::test]
+    async fn update_patches_fields_and_persists() {
+        let token = mint_token_as("nad-005", TRUST_DOMAINS_SCOPE).await;
+        let body = td_body("3fa85f64-5717-4562-b3fc-2c963f66afa6", "TD patch ok");
+        let (created, _, td) = post_trust_domain(Some(&token), Some(&body), None).await;
+        assert_eq!(created, StatusCode::CREATED);
+        let id = td["id"].as_str().unwrap().to_string();
+        let created_at = td["createdAt"].as_str().unwrap().to_string();
+
+        // Patch name + enabled; a serviceId in the body is ignored (immutable).
+        let patch = json!({
+            "name": "TD patched",
+            "enabled": false,
+            "serviceId": "00000000-0000-0000-0000-000000000000"
+        });
+        let (status, _, updated) = patch_trust_domain_req(Some(&token), &id, Some(&patch), None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(updated["name"], json!("TD patched"));
+        assert_eq!(updated["enabled"], json!(false));
+        // Immutable fields survive: id + serviceId unchanged, createdAt preserved.
+        assert_eq!(updated["id"], json!(id));
+        assert_eq!(updated["serviceId"], body["serviceId"]);
+        assert_eq!(updated["createdAt"], json!(created_at));
+        assert!(updated["modifiedBy"].is_string());
+
+        // The change is persisted — a fresh read reflects it.
+        let (read, _, got) = get_trust_domain_req(Some(&token), &id, None).await;
+        assert_eq!(read, StatusCode::OK);
+        assert_eq!(got["name"], json!("TD patched"));
+        assert_eq!(got["enabled"], json!(false));
+        assert_eq!(got["serviceId"], body["serviceId"]);
+    }
+
+    #[tokio::test]
+    async fn update_replaces_access_details_and_strips_password() {
+        let token = mint_token_as("nad-005", TRUST_DOMAINS_SCOPE).await;
+        let body = td_body("123e4567-e89b-12d3-a456-426614174000", "TD patch access");
+        let (_, _, td) = post_trust_domain(Some(&token), Some(&body), None).await;
+        let id = td["id"].as_str().unwrap().to_string();
+
+        // Full-replacement accessDetails with a Thread entry; password never echoed.
+        let patch = json!({
+            "accessDetails": [
+                {
+                    "accessType": "Thread:STRUCTURED",
+                    "channel": 15,
+                    "extendedPanId": "d63e8e3e495ebbc3",
+                    "networkKey": "dfd34f0f05cad978ec4e32b0413038ff",
+                    "networkName": "Patched-Thread",
+                    "panId": "0x1234"
+                }
+            ]
+        });
+        let (status, _, updated) = patch_trust_domain_req(Some(&token), &id, Some(&patch), None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(updated["accessDetails"].as_array().unwrap().len(), 1);
+        assert_eq!(updated["accessDetails"][0]["accessType"], json!("Thread:STRUCTURED"));
+        assert_eq!(updated["accessDetails"][0]["networkName"], json!("Patched-Thread"));
+    }
+
+    #[tokio::test]
+    async fn update_clears_optional_field_with_null() {
+        let token = mint_token_as("nad-005", TRUST_DOMAINS_SCOPE).await;
+        // td_body carries a description; a null in the patch removes it.
+        let body = td_body("7c9e6679-7425-40de-944b-e07fc1f90ae7", "TD patch clear");
+        let (_, _, td) = post_trust_domain(Some(&token), Some(&body), None).await;
+        let id = td["id"].as_str().unwrap().to_string();
+        assert_eq!(td["description"], json!("Primary home Wi-Fi"));
+
+        let (status, _, updated) =
+            patch_trust_domain_req(Some(&token), &id, Some(&json!({ "description": null })), None)
+                .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(updated.get("description").is_none(), "description cleared");
+    }
+
+    #[tokio::test]
+    async fn update_empty_body_is_a_no_op_ok() {
+        let token = mint_token_as("nad-005", TRUST_DOMAINS_SCOPE).await;
+        let body = td_body("16fd2706-8baf-433b-82eb-8c7fada847da", "TD patch empty");
+        let (_, _, td) = post_trust_domain(Some(&token), Some(&body), None).await;
+        let id = td["id"].as_str().unwrap().to_string();
+
+        let (status, _, updated) =
+            patch_trust_domain_req(Some(&token), &id, Some(&json!({})), None).await;
+        assert_eq!(status, StatusCode::OK);
+        // Nothing changed except the (re-stamped) modified audit fields.
+        assert_eq!(updated["name"], json!("TD patch empty"));
+        assert_eq!(updated["enabled"], json!(true));
+    }
+
+    #[tokio::test]
+    async fn update_unknown_id_is_not_found() {
+        let token = mint_token_as("nad-005", TRUST_DOMAINS_SCOPE).await;
+        let (status, _, err) = patch_trust_domain_req(
+            Some(&token),
+            "00000000-0000-0000-0000-000000000000",
+            Some(&json!({ "enabled": false })),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(err["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn update_malformed_id_is_not_found() {
+        let token = mint_token_as("nad-005", TRUST_DOMAINS_SCOPE).await;
+        // A non-UUID id folds into the same 404 (mirroring getTrustDomain).
+        let (status, _, err) =
+            patch_trust_domain_req(Some(&token), "not-a-uuid", Some(&json!({})), None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(err["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn update_invalid_body_is_bad_request() {
+        let token = mint_token_as("nad-005", TRUST_DOMAINS_SCOPE).await;
+        let body = td_body("6ba7b810-9dad-11d1-80b4-00c04fd430c8", "TD patch bad body");
+        let (_, _, td) = post_trust_domain(Some(&token), Some(&body), None).await;
+        let id = td["id"].as_str().unwrap().to_string();
+
+        // A present-but-blank name → 400 INVALID_ARGUMENT.
+        let (status, _, err) =
+            patch_trust_domain_req(Some(&token), &id, Some(&json!({ "name": "  " })), None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(err["code"], "INVALID_ARGUMENT");
+    }
+
+    #[tokio::test]
+    async fn update_body_400_beats_unknown_id_404() {
+        let token = mint_token_as("nad-005", TRUST_DOMAINS_SCOPE).await;
+        // Body is validated before the store lookup, so a bad body on an
+        // never-created id is a 400, not a 404.
+        let (status, _, err) = patch_trust_domain_req(
+            Some(&token),
+            "00000000-0000-0000-0000-000000000000",
+            Some(&json!({ "enabled": "not-a-bool" })),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(err["code"], "INVALID_ARGUMENT");
+    }
+
+    #[tokio::test]
+    async fn update_token_without_the_scope_is_forbidden() {
+        let token = mint_token_as("nad-005", "some:other-scope").await;
+        let (status, _, err) = patch_trust_domain_req(
+            Some(&token),
+            "00000000-0000-0000-0000-000000000000",
+            Some(&json!({})),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(err["code"], "PERMISSION_DENIED");
+    }
+
+    #[tokio::test]
+    async fn update_missing_token_is_unauthenticated() {
+        let (status, _, err) = patch_trust_domain_req(
+            None,
+            "00000000-0000-0000-0000-000000000000",
+            Some(&json!({})),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(err["code"], "UNAUTHENTICATED");
+    }
+
+    #[tokio::test]
+    async fn update_x_correlator_is_echoed() {
+        let token = mint_token_as("nad-005", TRUST_DOMAINS_SCOPE).await;
+        let body = td_body("a1b2c3d4-0000-4000-8000-000000000000", "TD patch corr");
+        let (_, _, td) = post_trust_domain(Some(&token), Some(&body), None).await;
+        let id = td["id"].as_str().unwrap().to_string();
+
+        let (status, headers, _) =
+            patch_trust_domain_req(Some(&token), &id, Some(&json!({})), Some("corr-td-patch")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            headers.get("x-correlator").and_then(|v| v.to_str().ok()),
+            Some("corr-td-patch")
         );
     }
 }

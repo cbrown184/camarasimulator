@@ -62,6 +62,29 @@ pub fn get(id: &str) -> Option<Value> {
         .cloned()
 }
 
+/// Atomically update the `TrustDomain` stored under `id` by applying `apply` to a
+/// mutable reference to it, returning the updated `TrustDomain` (a clone taken
+/// after the mutation) or `None` if no Trust Domain exists under `id`. Backs the
+/// `updateTrustDomain` leg (`PATCH /trust-domains/{id}`): a hit renders `200` with
+/// the patched resource, a miss the CAMARA `404`. The whole get-modify-write runs
+/// under a single lock hold (never across an `.await`), so a concurrent update /
+/// delete of the same id can't observe a torn state.
+pub fn update<F>(id: &str, apply: F) -> Option<Value>
+where
+    F: FnOnce(&mut Value),
+{
+    let mut map = store()
+        .lock()
+        .expect("network-access-domains trust-domain store not poisoned");
+    match map.get_mut(id) {
+        Some(td) => {
+            apply(td);
+            Some(td.clone())
+        }
+        None => None,
+    }
+}
+
 /// Evict the `TrustDomain` stored under `id`, reporting whether one existed.
 /// Backs the `deleteTrustDomain` leg (`DELETE /trust-domains/{id}`): a present
 /// id is removed and the leg answers `204 No Content` (single-use — a second

@@ -3123,9 +3123,23 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
       `store::remove`); any other id (never created, already deleted, or malformed)
       → `404 NOT_FOUND` (folded). Synchronous, no CloudEvent. Shares the
       `/trust-domains/:id` param route with `getTrustDomain` via `.delete(…)`.
-      `x-correlator` echoed on the `204`. No new dep. The remaining Trust Domain
-      update leg (`updateTrustDomain`) and the Trust Domain Device CRUD resource
-      remain later slices.
+      `x-correlator` echoed on the `204`. No new dep.
+    - [x] `PATCH /trust-domains/{trustDomainId}` (`updateTrustDomain`, scope
+      `network-access-domains:trust-domains`) — in-place update from a
+      `TrustDomainUpdate` (every field optional: `name`/`description`/`enabled`/
+      `expiration`/`policies`/`accessDetails`). Two control planes (DESIGN §7),
+      mirroring `updateAppDeployment`/`patchTrafficInfluence`: the request body
+      (validated first → 400 INVALID_ARGUMENT, so a body 400 wins over a 404) and
+      store state (opaque server-minted id, no reserved-suffix plane — stored id →
+      `200` updated `TrustDomain`, else `404 NOT_FOUND`). A present field replaces,
+      an explicit `null` on a clearable optional (`description`/`expiration`/
+      `policies`) removes it, `accessDetails` replaces wholesale (write-only WPA
+      `password` stripped); read-only identity/audit fields (`id`/`serviceId`/
+      `createdAt`/`createdBy`) immutable, `modifiedAt`/`modifiedBy` re-stamped. No
+      `409` (fixed id, a rename can't collide — canonical response set 200/400/404).
+      New atomic `store::update` (get-modify-write under one lock hold). Shares the
+      `/trust-domains/:id` param route via `.patch(…)`. No new dep. The remaining
+      Trust Domain Device CRUD resource is a later slice.
 
 ## Cross-cutting (do alongside the item that needs it)
 - [~] `errors.rs`: base CAMARA error model done (`src/errors.rs`, `specs/shared/errors.yaml`); per-version catalogs still TODO (DESIGN §8)
@@ -4267,6 +4281,29 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 Newest first. One line per pass: `YYYY-MM-DD HH:MMZ — <what happened> — binary: <size>`
 
+- 2026-08-15 — Network Access Domains vwip: added the Trust Domain update leg
+  `PATCH /trust-domains/{trustDomainId}` (`updateTrustDomain`, scope
+  `network-access-domains:trust-domains`), the natural next slice after
+  `deleteTrustDomain`. Confirmed the canonical CAMARA shape against the upstream
+  spec: PATCH, body `TrustDomainUpdate` (every field optional — the schema already
+  existed as `TrustDomainCreate`'s allOf base), full-replacement `accessDetails`,
+  responses 200/400/404 (no 409). New atomic `store::update` (get-modify-write
+  under one lock hold, never across await) + a `update_trust_domain` handler
+  sharing the `/trust-domains/:id` param route via `.patch(…)`. Two control planes
+  (DESIGN §7, mirroring `updateAppDeployment`/`patchTrafficInfluence`): body
+  validated first → 400 (so a body 400 beats a 404), then store state → 200 updated
+  `TrustDomain` / 404. Present field replaces; explicit `null` clears a clearable
+  optional (`description`/`expiration`/`policies`); `accessDetails` replaces
+  wholesale (write-only WPA `password` stripped); read-only `id`/`serviceId`/
+  `createdAt`/`createdBy` immutable, `modifiedAt`/`modifiedBy` re-stamped; empty
+  `{}` a no-op 200. Spec: added the `patch:` op on `/trust-domains/{trustDomainId}`
+  (request body + 200 + standard error set + `x-camarasim-scenarios`), refreshed
+  the header notes / functional-cases prose / documented cuts. 15 new tests (2 unit:
+  validate + apply; 13 integration: patch+persist, immutable serviceId, accessDetails
+  replace+strip, null-clear, empty no-op, unknown-404, malformed-404, bad-body-400,
+  400-beats-404, wrong-scope 403, no-token 401, correlator echo). `cargo test` 2479
+  green (was 2465); `cargo build --release` succeeds. No new dep. — binary: 4.0M
+  (4192392 B, +13000 B)
 - 2026-08-15 — Network Access Domains vwip: added the Trust Domain delete leg
   `DELETE /trust-domains/{trustDomainId}` (`deleteTrustDomain`, scope
   `network-access-domains:trust-domains`), the natural next slice after

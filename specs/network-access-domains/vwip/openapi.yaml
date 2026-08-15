@@ -22,11 +22,11 @@
 # It also serves the single-service `GET /services/{serviceId}` read
 # (getService), the stateful Trust Domain create leg
 # `POST /trust-domains` (createTrustDomain), its read-back
-# `GET /trust-domains/{trustDomainId}` (getTrustDomain), and its delete leg
+# `GET /trust-domains/{trustDomainId}` (getTrustDomain), its in-place update leg
+# `PATCH /trust-domains/{trustDomainId}` (updateTrustDomain), and its delete leg
 # `DELETE /trust-domains/{trustDomainId}` (deleteTrustDomain), backed by the
-# in-memory trust-domain store. The remaining Trust Domain update leg
-# (updateTrustDomain) and the Trust Domain Device CRUD resource remain to be
-# added in later slices.
+# in-memory trust-domain store. The Trust Domain Device CRUD resource remains to
+# be added in later slices.
 openapi: 3.0.3
 info:
   title: Network Access Domains
@@ -120,6 +120,16 @@ info:
     `TrustDomain`, any other id (never created or malformed) → `404 NOT_FOUND`
     (a malformed id folds into the same `404`, no store entry to tell them apart).
 
+    **`updateTrustDomain`** (`PATCH /trust-domains/{trustDomainId}`) updates a
+    created Trust Domain in place from a `TrustDomainUpdate` (every field optional).
+    Two control planes: the request body (validated first, so a body `400` wins over
+    a `404`) and store state (a stored id → `200` with the updated `TrustDomain`,
+    any other id → `404`). A present field replaces, an explicit `null` on a
+    clearable optional (`description`/`expiration`/`policies`) removes it, and
+    `accessDetails` replaces wholesale; the read-only identity/audit fields are
+    immutable and `modifiedAt`/`modifiedBy` are re-stamped. There is no `409` — the
+    resource is addressed by its fixed id, so a rename can't collide.
+
     **`deleteTrustDomain`** (`DELETE /trust-domains/{trustDomainId}`) evicts a
     created Trust Domain. Keyed only to the store, mirroring `getTrustDomain`: a
     stored id is removed → `204 No Content` (single-use — a second delete of the
@@ -130,9 +140,8 @@ info:
 
     - The read-only `getTrustDomainCapabilities`, `getServices` and `getService`
       legs and the stateful `createTrustDomain` / `getTrustDomain` /
-      `deleteTrustDomain` legs are implemented so far; the remaining Trust Domain
-      update leg (`updateTrustDomain`) and the Trust Domain Device CRUD resource
-      are later slices.
+      `updateTrustDomain` / `deleteTrustDomain` legs are implemented so far; the
+      remaining Trust Domain Device CRUD resource is a later slice.
     - `createTrustDomain` admits only the access types this provider advertises
       (Wi-Fi WPA-Personal/Enterprise, Thread STRUCTURED). A canonical but
       unadvertised `Thread:TLV` access detail → `400 INVALID_ARGUMENT`.
@@ -482,6 +491,137 @@ paths:
         cases:
           - input: "a trustDomainId returned by a prior createTrustDomain"
             result: "200 — the persisted TrustDomain (write-only password omitted)"
+          - input: "a well-formed trustDomainId that was never created"
+            result: "404 NOT_FOUND"
+          - input: "a malformed (non-UUID) trustDomainId"
+            result: "404 NOT_FOUND (folded, no store to distinguish it)"
+          - input: a token without the network-access-domains:trust-domains scope
+            result: "403 PERMISSION_DENIED"
+          - input: no / invalid token
+            result: "401 UNAUTHENTICATED"
+    patch:
+      operationId: updateTrustDomain
+      summary: Update a Trust Domain by id
+      description: |
+        Updates a single `TrustDomain` in place by the server-assigned
+        `trustDomainId` that `createTrustDomain` returned. The caller sends a
+        `TrustDomainUpdate` — the mutable subset of a Trust Domain, **every field
+        optional** — and only the fields present in the body are changed; an absent
+        field is left unchanged. Per the CAMARA schema `accessDetails` is a **full
+        replacement** (a supplied array replaces the stored one wholesale, it is not
+        merged). The read-only identity/audit fields (`id`, `serviceId`,
+        `createdAt`, `createdBy`) are immutable — a body that carries them has them
+        ignored — and every successful update refreshes `modifiedAt`/`modifiedBy`.
+
+        Two control planes (docs/DESIGN.md §7), mirroring the repo's other PATCH
+        legs: the **request body** is validated first (so a body `400` wins over a
+        `404`), then **store state** — the opaque server-minted `trustDomainId` is
+        not itself a scenario plane, so a stored id → `200` with the updated
+        `TrustDomain`, any other id (never created, already deleted, or malformed) →
+        `404 NOT_FOUND` (folded). Unlike `createTrustDomain` there is **no `409`**:
+        the operation addresses an existing resource by its fixed id and never
+        re-derives it. The write-only WPA `password` is stripped from any
+        replacement `accessDetails` so it never appears in the echoed `TrustDomain`.
+      security:
+        - openId:
+            - network-access-domains:trust-domains
+      parameters:
+        - $ref: "#/components/parameters/XCorrelator"
+        - name: trustDomainId
+          in: path
+          required: true
+          description: The server-assigned id of the Trust Domain to update.
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TrustDomainUpdate"
+            examples:
+              renameAndDisable:
+                summary: Rename and disable a Trust Domain
+                value:
+                  name: "Guest WiFi Network"
+                  enabled: false
+              clearDescription:
+                summary: Clear the optional description (explicit null)
+                value:
+                  description: null
+              replaceAccessDetails:
+                summary: Replace the access details wholesale
+                value:
+                  accessDetails:
+                    - accessType: "Wi-Fi:WPA_PERSONAL"
+                      ssid: "new-ssid"
+                      securityMode:
+                        password: "new-s3cr3t"
+                        securityModeType: "WPA3-Personal"
+      responses:
+        "200":
+          description: The updated Trust Domain.
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TrustDomain"
+              examples:
+                trustDomain:
+                  summary: The updated Trust Domain (write-only password omitted)
+                  value:
+                    id: "b1e0f6a2-9c3d-5e4f-8a1b-2c3d4e5f6a7b"
+                    serviceId: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+                    name: "Guest WiFi Network"
+                    enabled: false
+                    accessDetails:
+                      - accessType: "Wi-Fi:WPA_PERSONAL"
+                        ssid: "my-ssid"
+                        securityMode:
+                          securityModeType: "WPA3-Personal"
+                    createdAt: "2024-01-01T09:00:00Z"
+                    createdBy: "4a7c9e2d-1b3f-5a6c-9d8e-0f1a2b3c4d5e"
+                    modifiedAt: "2024-06-01T12:00:00Z"
+                    modifiedBy: "4a7c9e2d-1b3f-5a6c-9d8e-0f1a2b3c4d5e"
+        "400":
+          $ref: "../../shared/errors.yaml#/components/responses/InvalidArgument"
+        "401":
+          $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
+        "404":
+          $ref: "../../shared/errors.yaml#/components/responses/NotFound"
+        "429":
+          $ref: "../../shared/errors.yaml#/components/responses/TooManyRequests"
+        "500":
+          $ref: "../../shared/errors.yaml#/components/responses/Internal"
+        "503":
+          $ref: "../../shared/errors.yaml#/components/responses/Unavailable"
+      x-camarasim-scenarios:
+        description: >-
+          updateTrustDomain has two control planes (docs/DESIGN.md §7): the request
+          body (validated first, so a body 400 wins over a 404) and store state (the
+          opaque server-minted trustDomainId is not a scenario plane). Every field
+          in TrustDomainUpdate is optional; a present field replaces, an explicit
+          null on a clearable optional field (description/expiration/policies)
+          removes it, and accessDetails replaces wholesale. There is no 409 — an
+          existing resource is addressed by its fixed id, so a rename cannot collide.
+        cases:
+          - input: "a stored trustDomainId + { name, enabled } to change"
+            result: "200 — the updated TrustDomain (modifiedAt/By re-stamped)"
+          - input: "a stored trustDomainId + { description: null }"
+            result: "200 — the optional description is cleared"
+          - input: "a stored trustDomainId + { accessDetails: [...] }"
+            result: "200 — accessDetails replaced wholesale (password stripped)"
+          - input: "a stored trustDomainId + an empty {} body"
+            result: "200 — a no-op that only re-stamps modifiedAt/modifiedBy"
+          - input: "a stored trustDomainId + a body with a serviceId/id field"
+            result: "200 — read-only identity fields ignored (immutable)"
+          - input: "any id + an ill-typed field (e.g. enabled: \"yes\")"
+            result: "400 INVALID_ARGUMENT (body validated before the store lookup)"
           - input: "a well-formed trustDomainId that was never created"
             result: "404 NOT_FOUND"
           - input: "a malformed (non-UUID) trustDomainId"
