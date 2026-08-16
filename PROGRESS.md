@@ -3385,6 +3385,26 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     schema-`example` cases skipped; plus a ≥100 example+numeric-key pair floor via an
     independent up-walk). Verified true across all mounted specs (237 numeric-status
     response-example pairs, 0 mismatched) before asserting.
+  - an operation-`description` non-empty contract test (`src/registry.rs`
+    `every_operation_description_is_non_empty`) asserts that where a path-item operation
+    declares a `description`, that description carries text. An operation's
+    `description` is the CommonMark prose Redoc/Swagger renders as its long-form
+    explanation on the served `/docs` page (where each spec spells out the endpoint's
+    auth model + functional cases), so a present-but-empty value (`description: ""`/`''`,
+    a bare `description:` null, or an empty block scalar) renders a described-yet-blank
+    operation. The value-side guard for an OPTIONAL field with no presence-test sibling
+    (unlike `summary`): nothing else inspects a present operation `description`'s value —
+    `every_operation_summary_is_non_empty` judges the sibling `summary`, and
+    `every_response_description_is_non_empty` judges a Response Object's description,
+    never an operation's. Pure `operations_with_empty_description` extractor (no YAML dep)
+    reuses `operations_without_summary`'s path-item/method scoping and judges the
+    operation's own indent-6 `description:` value empty via the same `value_is_empty`
+    logic (bare/null, exactly-empty quoted `""`/`''`, empty `|`/`>` block scalar); a Path
+    Item Object's 4-space `description`, a Response Object's 10-space `description`, a
+    `description` schema property, and a *missing* description are never flagged.
+    Unit-covered (`operation_description_non_empty_extraction_rules`, incl. a ≥100
+    indent-6 operation-description floor). Verified true across all mounted specs (all 173
+    operation descriptions non-empty) before asserting.
   - an operation-`summary` non-empty contract test (`src/registry.rs`
     `every_operation_summary_is_non_empty`) asserts that where an operation declares a
     `summary`, that summary carries text. `summary` is the short label Redoc/Swagger
@@ -4839,6 +4859,35 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-16 — Contract-test harness: added an **operation-`description`-non-empty**
+  contract test (`src/registry.rs` `every_operation_description_is_non_empty`) — where a
+  path-item operation declares a `description`, that description must carry text. An
+  operation's `description` is the CommonMark prose Redoc/Swagger renders as its
+  long-form explanation on the served `/docs` page (where each spec spells out the
+  endpoint's auth model + parameter-driven functional cases), so a present-but-empty
+  value (`description: ""`/`''`, a bare `description:` YAML null, or an empty `|`/`>`
+  block scalar) renders a described-yet-blank operation. Unlike `summary`, operation
+  `description` is OPTIONAL with **no** presence-test sibling, so nothing else inspected a
+  present description's value: `every_operation_summary_is_non_empty` judges the sibling
+  `summary`, and `every_response_description_is_non_empty` judges a Response Object's
+  description, never an operation's. New pure `operations_with_empty_description`
+  extractor (no YAML dep) reuses `operations_without_summary`'s path-item/method scoping
+  (a 4-space HTTP-verb key under a 2-space `/…` path item under `paths:`) and judges the
+  operation's own indent-6 `description:` value empty via the same `value_is_empty` logic
+  as the summary slice; a Path Item Object's 4-space `description`, a Response Object's
+  10-space `description`, a `description` schema property (e.g. the 14 `description`
+  properties surveyed across the corpus, all indent-12 inside schemas), and a *missing*
+  description are never flagged. Surveyed the corpus first (173 operation-level
+  descriptions, 0 empty) → no drift to fix. Unit-covered
+  (`operation_description_non_empty_extraction_rules`: an inline description and a block
+  scalar with content pass; an empty `''`, a bare null, an empty `""`, and an empty block
+  scalar flagged in document order `[POST /a, GET /b, POST /b, GET /c]`; a Path Item
+  Object's own 4-space description, a Response Object's 10-space description, a missing
+  description, and a `components` `description` schema property never flagged; plus a ≥100
+  indent-6 operation-description floor via an independent counter). `cargo test` 2647
+  green (was 2645; +2); `cargo build --release` succeeds, no warnings. No new dependency;
+  test-only change (the extractor and both tests live in the `#[cfg(test)]` module). —
+  binary (release): 5.1M (5,314,968 B; unchanged)
 - 2026-08-16 — Contract-test harness: added a **path-key-no-trailing-slash** contract
   test (`src/registry.rs` `every_path_item_key_has_no_trailing_slash`) — no `paths:` key
   a mounted spec declares, other than the bare root `/`, may end with a trailing slash
