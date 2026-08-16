@@ -3322,6 +3322,25 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - an `additionalProperties` boolean-scalar contract test (`src/registry.rs`
+    `every_additional_properties_scalar_is_a_boolean`) asserts every
+    `additionalProperties` with an inline **scalar** value is the JSON boolean
+    `true`/`false`. `additionalProperties` is polymorphic — a boolean (are members
+    beyond `properties` allowed?) or a Schema Object — so an inline scalar that is
+    neither a boolean nor a flow-mapping schema (`{ … }`) — a quoted `"false"`, a
+    number, a YAML-truthy `no`/`yes` — is an invalid document a validator/codegen
+    client can't read, silently breaking the deny-unknown-fields contract these specs
+    lean on (`additionalProperties: false` on every request/response body). The
+    value-side complement of `every_boolean_schema_keyword_carries_a_boolean`, which
+    deliberately EXCLUDES `additionalProperties` (its value isn't always a boolean); no
+    other test inspects its value. Pure `additional_properties_non_boolean_scalars`
+    extractor (no YAML dep) skips a block-opening Schema Object (empty inline), an
+    inline flow-mapping `{ … }`, and an `additionalProperties:` inside an `example:`
+    payload (ancestor walk, mirroring `boolean_keyword_non_boolean_values`); quotes
+    preserved so a quoted `"true"` is flagged, not coerced. Unit-covered
+    (`additional_properties_scalar_extraction_rules`, incl. a ≥30 bare-boolean
+    non-vacuous floor). Verified true (70 inline `additionalProperties: false`/`true`
+    across all mounted specs, all bare booleans — no drift to fix) before asserting.
   - a `required`-array object-type contract test (`src/registry.rs`
     `every_required_array_sits_on_an_object_type`) asserts every **array-form**
     `required:` a mounted spec declares beside a scalar `type:` sits on `type: object`
@@ -4567,6 +4586,38 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-16 — Contract-test harness: added an **`additionalProperties` boolean-scalar**
+  spec-structural contract test (`src/registry.rs`
+  `every_additional_properties_scalar_is_a_boolean`) — every `additionalProperties` with
+  an inline **scalar** value must be the JSON boolean `true`/`false`.
+  `additionalProperties` is polymorphic in OpenAPI 3.0.x: a boolean (does the object
+  permit members beyond `properties`?) OR a Schema Object constraining those extra
+  members — so an inline scalar that is neither a boolean nor a flow-mapping schema
+  (`{ … }`) — a quoted `"false"` (a string), a number, a YAML-truthy `no`/`yes`, a bare
+  word — is an invalid document a Redoc/Swagger/codegen client can't read: it can no
+  longer tell whether the object is open or closed, silently breaking the
+  deny-unknown-fields contract these specs lean on (`additionalProperties: false` on
+  every request/response body). The value-side complement of
+  `every_boolean_schema_keyword_carries_a_boolean`, which deliberately EXCLUDES
+  `additionalProperties` because — unlike nullable/readOnly/deprecated/… — its value is
+  not always a boolean; no other test inspects its value at all (the `type:`/`format:`
+  vocabulary tests and the numeric/size-bound tests never look at it). New pure
+  `additional_properties_non_boolean_scalars` extractor (no YAML dep): the `:` must
+  immediately follow the keyword (a longer `additionalPropertiesFoo:` never matches),
+  skips a block-opening Schema Object (empty inline value — also a property literally
+  *named* `additionalProperties`), an inline flow-mapping `{ … }` Schema Object, and an
+  `additionalProperties:` inside an `example:`/`examples:` payload (ancestor-chain walk,
+  mirroring `boolean_keyword_non_boolean_values`); quotes are preserved before the
+  boolean compare so a quoted `"true"`/`"false"` is flagged, not coerced. Surveyed the
+  corpus first (70 inline `additionalProperties`: 63 `false` + 7 `true`, all bare
+  booleans; 1 block-opening Schema Object — 0 drift) → no fix needed. Unit-covered
+  (`additional_properties_scalar_extraction_rules`: bare `false`/`true`, an inline
+  `{ type: string }`, and a block-opening schema all pass; a quoted `"false"`, a number
+  `0`, and a bare `no` flagged in document order `[29, 32, 35]`; an `example:`-payload
+  occurrence skipped; plus a ≥30 bare-boolean non-vacuous floor via an independent
+  counter). `cargo test` 2615 green (was 2613; +2); `cargo build --release` succeeds, no
+  warnings. No new dependency; test-only change. — binary (release): 5.1M (5,314,968 B;
+  unchanged)
 - 2026-08-16 — Contract-test harness: added a **`required`-array object-type**
   spec-structural contract test (`src/registry.rs`
   `every_required_array_sits_on_an_object_type`) — every **array-form** `required:` a

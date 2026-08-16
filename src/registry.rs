@@ -16353,4 +16353,214 @@ components:
             "expected many numeric-facet+type pairs that agree across specs, got {agree}"
         );
     }
+
+    /// Line numbers (1-based), in document order, of every `additionalProperties:`
+    /// keyword whose inline *scalar* value is neither the JSON boolean `true`/`false`
+    /// nor an inline flow-mapping schema (`{ … }`) — a value OpenAPI 3.0.x forbids.
+    ///
+    /// In OpenAPI 3.0.x `additionalProperties` is polymorphic: it is EITHER a JSON
+    /// boolean (does the object permit members beyond those in `properties`?) OR a
+    /// Schema Object constraining those extra members. So an *inline* value that is
+    /// neither — a stringified `"false"`, a number, a YAML-truthy typo (`no`/`yes`),
+    /// a bare word — is an invalid document: a Redoc/Swagger/codegen client can no
+    /// longer tell whether extra members are allowed (or under what schema), so the
+    /// open/closed contract silently breaks where a caller reads or builds the
+    /// payload. This is exactly why `every_boolean_schema_keyword_carries_a_boolean`
+    /// deliberately EXCLUDES `additionalProperties` (its value is not always a
+    /// boolean); no other test inspects its value at all.
+    ///
+    /// Only an `additionalProperties` carrying an inline scalar is judged. Skipped:
+    /// an `additionalProperties:` opening a block (an empty inline value — the
+    /// Schema-Object form, or a property literally *named* `additionalProperties`);
+    /// an inline flow-mapping value (`{ … }` — an inline Schema Object, valid); and
+    /// an `additionalProperties:` appearing as data inside an `example:`/`examples:`
+    /// payload (walked up the ancestor chain, mirroring
+    /// `boolean_keyword_non_boolean_values`). The `:` must immediately follow the
+    /// keyword, so a longer key sharing the prefix (`additionalPropertiesFoo:`) does
+    /// not match. Quotes are PRESERVED before the boolean comparison, so a quoted
+    /// `"true"`/`"false"` (a string, not a boolean, and not a Schema Object) is
+    /// flagged rather than coerced.
+    fn additional_properties_non_boolean_scalars(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        // The inline value of an `additionalProperties:` line (inline comment
+        // stripped, surrounding whitespace trimmed; quotes PRESERVED so a quoted
+        // string stays distinguishable from a bare boolean). `None` when the line is
+        // a different key. An empty string marks a block opener (no inline value).
+        let inline = |l: &str| -> Option<String> {
+            let rest = l.trim_start().strip_prefix("additionalProperties")?;
+            let v = rest.strip_prefix(':')?;
+            Some(v.split('#').next().unwrap_or(v).trim().to_string())
+        };
+        // True when line `i` (indent `c`) sits inside an `example:`/`examples:`
+        // payload — some enclosing container key up the indent ladder is
+        // `example`/`examples`.
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some(v) = inline(line) else { continue };
+            if v.is_empty() {
+                continue; // block opener: the Schema-Object form / a named property
+            }
+            if v.starts_with('{') {
+                continue; // an inline flow-mapping Schema Object (valid)
+            }
+            if v == "true" || v == "false" {
+                continue; // the JSON boolean form (valid)
+            }
+            if inside_example(i, indent(line)) {
+                continue; // example data, not a schema keyword
+            }
+            out.push(i + 1);
+        }
+        out
+    }
+
+    #[test]
+    fn every_additional_properties_scalar_is_a_boolean() {
+        // Contract-harness invariant (OpenAPI 3.0.x structural rule): every
+        // `additionalProperties` a mounted spec declares with an inline *scalar*
+        // value MUST be the JSON boolean `true` or `false`. `additionalProperties`
+        // is polymorphic — a boolean (are members beyond `properties` allowed?) or a
+        // Schema Object (the schema those extra members must satisfy) — so an inline
+        // scalar that is neither a boolean nor a flow-mapping schema (`{ … }`) — a
+        // quoted `"false"`, a number, a YAML-truthy `no`/`yes`, a bare word — is an
+        // invalid document a Redoc/Swagger/codegen client can't read: it can no
+        // longer tell whether the object is open or closed, so the deny-unknown-
+        // fields contract these specs lean on (`additionalProperties: false` on
+        // every request/response body) silently breaks.
+        //
+        // The value-side complement of `every_boolean_schema_keyword_carries_a_boolean`,
+        // which deliberately EXCLUDES `additionalProperties` because — unlike
+        // nullable/readOnly/deprecated/… — its value is not always a boolean; no
+        // other test inspects its value at all (the `type:`/`format:` vocabulary
+        // tests and the numeric/size-bound tests never look at it). Verified true
+        // across all mounted specs before asserting.
+        for api in APIS {
+            let bad = additional_properties_non_boolean_scalars(api.body);
+            assert!(
+                bad.is_empty(),
+                "{} spec declares an `additionalProperties` with an inline scalar that \
+                 is neither a boolean nor a flow-mapping schema (an open/closed \
+                 contract a validator can't read) at line(s): {:?}",
+                api.name,
+                bad
+            );
+        }
+    }
+
+    #[test]
+    fn additional_properties_scalar_extraction_rules() {
+        // Unit-cover `additional_properties_non_boolean_scalars` so the contract test
+        // above can't pass vacuously and its detection is pinned: the two boolean
+        // forms (`additionalProperties: false`/`true`), an inline flow-mapping schema
+        // (`{ type: string }`), and a block-opening Schema Object (empty inline
+        // value) all pass; a quoted `"false"` (a string, not a boolean), a number
+        // (`0`), and a YAML-truthy word (`no`) are flagged in document order; and an
+        // `additionalProperties:` sitting inside an `example:` payload is skipped.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    GoodFalse:
+      type: object
+      additionalProperties: false
+    GoodTrue:
+      type: object
+      additionalProperties: true
+    GoodInlineSchema:
+      type: object
+      additionalProperties: { type: string }
+    GoodBlockSchema:
+      type: object
+      additionalProperties:
+        type: string
+    BadQuoted:
+      type: object
+      additionalProperties: \"false\"
+    BadNumber:
+      type: object
+      additionalProperties: 0
+    BadWord:
+      type: object
+      additionalProperties: no
+    InExample:
+      type: object
+      example:
+        additionalProperties: 0
+";
+        // Flagged, in document order: line 29 (`BadQuoted` — a quoted `\"false\"` is a
+        // string, neither a boolean nor a Schema Object), line 32 (`BadNumber` — a
+        // number), and line 35 (`BadWord` — a YAML-truthy bare word). Not flagged:
+        // `GoodFalse`/`GoodTrue` (bare booleans), `GoodInlineSchema` (a flow-mapping
+        // Schema Object, `{ … }`), `GoodBlockSchema` (a block-opening Schema Object,
+        // empty inline value), and the `InExample` occurrence (its
+        // `additionalProperties: 0` sits inside the `example:` payload).
+        assert_eq!(
+            additional_properties_non_boolean_scalars(body),
+            vec![29, 32, 35]
+        );
+
+        // Non-vacuous floor: across every registered spec every `additionalProperties`
+        // scalar is a boolean (the invariant the contract test asserts), and the
+        // corpus actually declares many `additionalProperties: false`/`true` (the
+        // deny-unknown-fields flag on request/response bodies) — so the
+        // boolean-comparison path runs on real data and a broken (always-empty)
+        // extractor can't hide behind a corpus that never declares one. Count the
+        // bare-boolean occurrences with a detector independent of the extractor.
+        let mut boolean_ap = 0usize;
+        for api in APIS {
+            assert!(
+                additional_properties_non_boolean_scalars(api.body).is_empty(),
+                "{}: every `additionalProperties` scalar must be a boolean",
+                api.name
+            );
+            for l in api.body.lines() {
+                if let Some(rest) = l.trim_start().strip_prefix("additionalProperties:") {
+                    let v = rest.split('#').next().unwrap_or(rest).trim();
+                    if v == "true" || v == "false" {
+                        boolean_ap += 1;
+                    }
+                }
+            }
+        }
+        assert!(
+            boolean_ap >= 30,
+            "expected many boolean `additionalProperties` across specs, got {boolean_ap}"
+        );
+    }
 }
