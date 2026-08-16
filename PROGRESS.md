@@ -3322,6 +3322,24 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - a no-body-status-has-no-content contract test (`src/registry.rs`
+    `no_bodyless_status_response_declares_content`) asserts no `204`/`304` Response
+    Object declares `content`. HTTP `204 No Content` / `304 Not Modified` forbid a
+    message body (RFC 9110), so a `content` block on one advertises a payload that
+    can never be sent — a Redoc/Swagger "try it" panel / codegen client is handed a
+    response model no response will fill. The response-side complement of the
+    body-bearing tests (`request_bodies_missing_content`/`media_types_missing_schema`,
+    which assert a body-bearing object *has* content/schema); invisible to them and
+    to `responses_missing_description` (checks a response *has* a description) /
+    `operations_without_success_response` (checks a `2xx` *exists*) — none asserts a
+    status *forbids* content. A `204`/`304` given as a `$ref` Reference Object is
+    exempt (body-ness lives in the referenced component); a `"204"` inside an
+    `example:` payload is skipped via the ancestor walk. Pure
+    `bodyless_responses_declaring_content` extractor (no YAML dep) matches the status
+    key quoted-or-bare as a block opener, credits `content:` only at the response's
+    own child indent (a deeper `content` under a header schema never counts), and is
+    unit-covered so the contract can't pass vacuously. Verified true across all
+    mounted specs (34 no-body responses, 0 with content).
   - a readOnly↔writeOnly mutual-exclusion contract test (`src/registry.rs`
     `no_property_declares_both_read_only_and_write_only`) asserts no Schema Object
     declares BOTH `readOnly: true` and `writeOnly: true` — `readOnly` bars the field
@@ -4509,6 +4527,31 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-16 — Contract-test harness: added a **no-body-status-has-no-content**
+  spec-structural contract test (`src/registry.rs`
+  `no_bodyless_status_response_declares_content`) — no `204 No Content` / `304 Not
+  Modified` Response Object may declare `content`. Both statuses forbid a message body
+  (RFC 9110 §15.3.5/§15.4.5; CAMARA design guidelines), so a `content` block on one
+  advertises a payload that can never be sent — a Redoc/Swagger "try it" panel /
+  codegen client is handed a response model no response will fill. The response-side
+  complement of the body-bearing tests (`request_bodies_missing_content` /
+  `media_types_missing_schema`, which assert a body-bearing object *has*
+  content/schema); invisible to them and to `responses_missing_description` (a response
+  *has* a description) / `operations_without_success_response` (a `2xx` *exists*) — none
+  asserts a status *forbids* content. New pure `bodyless_responses_declaring_content`
+  extractor (no YAML dep): matches the `204`/`304` status key quoted-or-bare only as a
+  block opener (empty inline value), exempts a `$ref` Reference-Object response
+  (body-ness lives in the referenced component), skips a `"204"` inside an
+  `example:`/`examples:` payload via the ancestor walk, and credits `content:` only at
+  the response object's own child indent (a deeper `content` under a header's schema
+  never counts). Surveyed the corpus first (34 no-body responses across 19 specs, 0
+  declaring content) → no drift to fix. Tests: +2 (the contract test +
+  `bodyless_response_content_extraction_rules`: POST-response 204 & 304 content flagged
+  in document order; description/headers-only 204, a body-bearing 200, a non-no-body
+  205, a `$ref` 204, and an `example:`-payload 204 all correctly skipped; ≥20 no-body
+  responses non-vacuous floor via an independent counter). `cargo test` 2609 green (was
+  2607); `cargo build --release` succeeds, no warnings. No new dependency; test-only
+  change. — binary: 5.1M (5,314,968 B; unchanged)
 - 2026-08-16 — Contract-test harness: added a **readOnly↔writeOnly mutual-exclusion**
   spec-structural contract test (`src/registry.rs`
   `no_property_declares_both_read_only_and_write_only`) — no Schema Object may declare

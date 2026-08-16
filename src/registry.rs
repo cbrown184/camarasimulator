@@ -11632,6 +11632,265 @@ components:
         );
     }
 
+    /// Line numbers (1-based) where a `204`/`304` response object declares a
+    /// `content:` field — a message body on a status whose HTTP semantics forbid
+    /// one.
+    ///
+    /// HTTP `204 No Content` and `304 Not Modified` MUST NOT carry a message body
+    /// (RFC 9110 §15.3.5 / §15.4.5, and the CAMARA API design guidelines), so an
+    /// OpenAPI Response Object for either status must not define `content`: the
+    /// payload it advertises can never be sent, and a Redoc/Swagger "try it" panel
+    /// or codegen client is handed a response model no response will ever fill. It
+    /// is the response-side complement of the body-bearing structural tests
+    /// (`request_bodies_missing_content` / `media_types_missing_schema`), which
+    /// assert a body-bearing object *has* content/schema; this asserts a no-body
+    /// response *lacks* one.
+    ///
+    /// A live copy-paste hazard: a `204` block pasted from a body-bearing sibling
+    /// (a `200`/`201`) that kept its `content:` when the status was changed.
+    /// Invisible to every existing test — `responses_missing_description` checks a
+    /// response *has* a description, `operations_without_success_response` checks a
+    /// `2xx` *exists*, and `media_types_missing_schema` inspects a media type's
+    /// *schema*; none ever asserts a status forbids content.
+    ///
+    /// A `204`/`304` supplied as a Reference Object (its first child is `$ref`) is
+    /// exempt — its body-ness is defined by the referenced component, not here. A
+    /// `"204"` appearing as data inside an `example:`/`examples:` payload (a
+    /// response map shown as a sample) is excluded via the ancestor walk. The
+    /// status key is matched quoted or bare (`"204":`/`204:`) and only as a block
+    /// opener (empty inline value); `content:` is credited only at the response
+    /// object's own child indent, so a `content` nested deeper (under a header's
+    /// schema, say) never counts. The offending `content:` line is reported.
+    fn bodyless_responses_declaring_content(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        // `Some("204"|"304")` when a line opens a no-body response block: a `204`/
+        // `304` key (quoted or bare) with an empty inline value (a block opener, not
+        // a scalar). `None` for any other key, an inline value, or a non-matching
+        // status.
+        let no_body_opener = |l: &str| -> Option<&'static str> {
+            let (k, v) = l.trim_start().split_once(':')?;
+            if !v.split('#').next().unwrap_or(v).trim().is_empty() {
+                return None; // inline value → not a block opener
+            }
+            match k.trim().trim_matches('"').trim_matches('\'') {
+                "204" => Some("204"),
+                "304" => Some("304"),
+                _ => None,
+            }
+        };
+        // True when line `i` (indent `c`) sits inside an `example:`/`examples:`
+        // payload — some enclosing container key up the indent ladder is
+        // `example`/`examples`.
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        fn field_key(l: &str) -> Option<&str> {
+            l.trim_start().split_once(':').map(|(k, _)| k.trim())
+        }
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            if no_body_opener(line).is_none() {
+                continue;
+            }
+            let c = indent(line);
+            if inside_example(i, c) {
+                continue; // a response map shown as example data, not a real response
+            }
+            // The response object's own child indent = the indent of its first
+            // non-empty child. If that first child is `$ref`, the response is a
+            // Reference Object — its content is defined elsewhere, so exempt.
+            let mut child_indent = None;
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) <= c {
+                    break; // empty block / next sibling — no children to inspect
+                }
+                if field_key(l) != Some("$ref") {
+                    child_indent = Some(indent(l));
+                }
+                break;
+            }
+            let Some(ci) = child_indent else { continue };
+            // Scan the response object's block for a `content:` field at its own
+            // child indent; a `content` nested deeper is not the response's own.
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) <= c {
+                    break; // dedented out of this response object
+                }
+                if indent(l) == ci && field_key(l) == Some("content") {
+                    out.push(j + 1);
+                    break;
+                }
+                j += 1;
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn no_bodyless_status_response_declares_content() {
+        // Contract-harness invariant (HTTP / OpenAPI structural rule): a `204 No
+        // Content` or `304 Not Modified` Response Object MUST NOT declare `content`.
+        // Both statuses forbid a message body (RFC 9110), so a `content` block on
+        // one advertises a payload that can never be sent — a Redoc/Swagger "try it"
+        // panel / codegen client is handed a response model no response will fill.
+        //
+        // A live copy-paste hazard: a `204` pasted from a body-bearing `200`/`201`
+        // sibling that kept its `content:` after the status changed. Invisible to
+        // every existing test — `responses_missing_description` checks a response
+        // *has* a description, `operations_without_success_response` checks a `2xx`
+        // *exists*, `media_types_missing_schema` inspects a media type's *schema*;
+        // none asserts a status forbids content. A `204`/`304` given as a `$ref`
+        // Reference Object is exempt (its body-ness lives in the referenced
+        // component). Verified true across all mounted specs before asserting.
+        for api in APIS {
+            let bad = bodyless_responses_declaring_content(api.body);
+            assert!(
+                bad.is_empty(),
+                "{} spec declares `content` on a 204/304 response (a no-body HTTP \
+                 status must not carry a message body) at line(s): {:?}",
+                api.name,
+                bad
+            );
+        }
+    }
+
+    #[test]
+    fn bodyless_response_content_extraction_rules() {
+        // Unit-cover the `bodyless_responses_declaring_content` extractor so the
+        // contract test above can't pass vacuously and its detection is pinned: a
+        // `204`/`304` response whose own object declares `content` is flagged (at the
+        // `content:` line); a `204` carrying only `description`/`headers` is not; a
+        // `200` with `content` is not (only no-body statuses are inspected); a `204`
+        // given as a `$ref` Reference Object is not; and a `"204"` inside an
+        // `example:` payload is example data, not a response, so it is skipped.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    delete:
+      operationId: delA
+      responses:
+        \"204\":
+          description: deleted
+          headers:
+            x-correlator:
+              $ref: \"#/components/headers/XCorrelator\"
+        \"200\":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+    post:
+      operationId: postA
+      responses:
+        \"204\":
+          description: bad no-body with a body
+          content:
+            application/json:
+              schema:
+                type: object
+        \"304\":
+          description: also bad
+          content:
+            application/json:
+              schema:
+                type: string
+        \"205\":
+          $ref: \"#/components/responses/Reset\"
+  /b:
+    get:
+      operationId: getB
+      responses:
+        \"204\":
+          $ref: \"#/components/responses/NoBody\"
+components:
+  schemas:
+    Sample:
+      type: object
+      example:
+        responses:
+          \"204\":
+            content:
+              application/json: {}
+";
+        // Flagged, in document order: the `content:` of the POST /a `204` (line 26)
+        // and of its `304` (line 32). Not flagged: the DELETE /a `204` (only
+        // description + headers, no content); the `200` (a body-bearing status —
+        // never inspected); the `205` (not a no-body status); the GET /b `204` (a
+        // `$ref` Reference Object — exempt); and the `Sample.example` `204` (a
+        // response map inside an `example:` payload — literal data, not a response).
+        assert_eq!(bodyless_responses_declaring_content(body), vec![26, 32]);
+
+        // Non-vacuous floor: across every registered spec no 204/304 response
+        // declares content (the contract), and the corpus actually declares many
+        // no-body responses — so the scan runs on real data and a broken
+        // (always-empty) extractor can't hide behind a corpus that never declares
+        // one. Count 204/304 block-opener response keys with a detector independent
+        // of the extractor.
+        let mut no_body_responses = 0usize;
+        for api in APIS {
+            assert!(
+                bodyless_responses_declaring_content(api.body).is_empty(),
+                "{}: no 204/304 response may declare content",
+                api.name
+            );
+            for line in api.body.lines() {
+                let t = line.trim_start();
+                if let Some((k, v)) = t.split_once(':') {
+                    let k = k.trim().trim_matches('"').trim_matches('\'');
+                    if (k == "204" || k == "304")
+                        && v.split('#').next().unwrap_or(v).trim().is_empty()
+                    {
+                        no_body_responses += 1;
+                    }
+                }
+            }
+        }
+        assert!(
+            no_body_responses >= 20,
+            "expected many 204/304 responses across specs, got {no_body_responses}"
+        );
+    }
+
     /// Line numbers (1-based) of OpenAPI 3.0.x number-valued schema keywords whose
     /// declared value is not a JSON number — `minimum`, `maximum`, `multipleOf` —
     /// plus any `multipleOf` that is not strictly greater than 0.
