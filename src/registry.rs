@@ -9562,6 +9562,320 @@ components:
         );
     }
 
+    /// The 1-based line numbers, in document order, of every named **Example
+    /// Object** — an entry under an OpenAPI `examples:` map — that declares
+    /// neither `value` nor `externalValue` (nor a `$ref`), without a YAML dep.
+    ///
+    /// In OpenAPI 3.0.x an `examples:` field (on a Media Type, a Parameter, a
+    /// Header, or `components.examples`) is a *map* of named Example Objects, and
+    /// an Example Object carries the sample payload in exactly one of `value` (an
+    /// embedded literal) or `externalValue` (a URI to it) — the two are mutually
+    /// exclusive and one is what makes the example an example. A named entry that
+    /// declares neither (only a `summary`/`description`, or an empty block left by
+    /// a half-finished paste) documents *no* sample at all: a Redoc/Swagger "try
+    /// it" panel renders an empty example and a codegen client's sample generator
+    /// has nothing to emit, exactly where a caller reads how to build the payload.
+    ///
+    /// The Example-Object analogue of `media_types_missing_schema` /
+    /// `every_parameter_declares_a_schema_or_content` (each pins the one field that
+    /// gives its object meaning): CamaraSim documents its scenario matrix as named
+    /// examples on every response's media type (`swapped`/`notSwapped`, one per
+    /// functional case), and a `value:` line lost or dedented in the paste that
+    /// vendors a new spec leaves a contentless example no other contract test
+    /// inspects — `no_object_declares_both_example_and_examples` checks the
+    /// `example`/`examples` pair never *co-occurs*, the numeric/length example
+    /// tests bound a schema-level singular `example:`, and neither ever looks
+    /// inside a named example for its `value`.
+    ///
+    /// Pure structural scan. An `examples:` *map* is the key `examples` opening a
+    /// block (no inline scalar); an `examples:` nested inside an outer
+    /// `example:`/`examples:` payload is sample data (an ancestor walk skips it),
+    /// mirroring the sibling example tests' `inside_example` guard. Its named
+    /// entries sit at the first deeper indent under it; for each such entry that
+    /// opens a block (an inline-valued entry — a flow `$ref`/object — carries its
+    /// own value and is skipped), the entry's own child indent is scanned for a
+    /// `value:`/`externalValue:`/`$ref:` key, bounded by the dedent that closes the
+    /// entry so a `value` nested inside a *different* example's payload never
+    /// satisfies it. A block-form `$ref:` entry is exempt (a Reference Object
+    /// inherits the referenced Example Object's `value`).
+    fn example_objects_missing_value(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        // The `(key, inline-value)` of a line, inline comment stripped; the value is
+        // empty when the key opens a block. `None` when the line has no `key:`.
+        let key_of = |l: &str| -> Option<(String, String)> {
+            let (k, v) = l.trim_start().split_once(':')?;
+            let v = v.split('#').next().unwrap_or(v).trim();
+            Some((k.trim().to_string(), v.to_string()))
+        };
+        // True when line `i` (indent `c`) sits inside an outer `example:`/`examples:`
+        // payload — some enclosing container key up the indent ladder is
+        // `example`/`examples` — so an `examples:` there is sample data, not the
+        // OpenAPI examples field. Mirrors the sibling example tests' guard.
+        let inside_example_payload = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = key_of(l) {
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            // An `examples:` map: the key opens a block (no inline scalar) and is not
+            // itself sample data inside an example payload.
+            let Some((k, v)) = key_of(line) else {
+                continue;
+            };
+            if k != "examples" || !v.is_empty() {
+                continue;
+            }
+            let c = indent(line);
+            if inside_example_payload(i, c) {
+                continue;
+            }
+            // The named entries sit at the first deeper indent under the map.
+            let mut child_indent = None;
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) <= c {
+                    break; // an empty examples map — no entries to inspect
+                }
+                child_indent = Some(indent(l));
+                break;
+            }
+            let Some(ci) = child_indent else { continue };
+            // Walk each named-example key at exactly `ci` within the map's block.
+            let mut n = i + 1;
+            while n < lines.len() {
+                let l = lines[n];
+                if l.trim().is_empty() {
+                    n += 1;
+                    continue;
+                }
+                let li = indent(l);
+                if li <= c {
+                    break; // dedented out of the examples map
+                }
+                if li == ci {
+                    // An inline-valued entry (a flow `$ref`/object) carries its own
+                    // value; only a block-opening entry is scanned for a `value` child.
+                    let inline_valued =
+                        key_of(l).is_some_and(|(_, ev)| !ev.is_empty());
+                    if !inline_valued {
+                        let mut obj_child = None;
+                        let mut has_value = false;
+                        let mut m = n + 1;
+                        while m < lines.len() {
+                            let ll = lines[m];
+                            if ll.trim().is_empty() {
+                                m += 1;
+                                continue;
+                            }
+                            let mi = indent(ll);
+                            if mi <= ci {
+                                break; // out of this Example Object
+                            }
+                            if obj_child.is_none() {
+                                obj_child = Some(mi);
+                            }
+                            if Some(mi) == obj_child {
+                                if let Some((kk, _)) = key_of(ll) {
+                                    if kk == "value"
+                                        || kk == "externalValue"
+                                        || kk == "$ref"
+                                    {
+                                        has_value = true;
+                                        break;
+                                    }
+                                }
+                            }
+                            m += 1;
+                        }
+                        if !has_value {
+                            out.push(n + 1);
+                        }
+                    }
+                }
+                n += 1;
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_example_object_declares_a_value() {
+        // Contract-harness invariant (OpenAPI 3.0.x structural rule): every named
+        // Example Object a mounted spec declares under an `examples:` map MUST carry
+        // one of `value`/`externalValue` — the field that supplies the sample the
+        // example exists to show. An Example Object with neither (only a
+        // `summary`/`description`, or an entry emptied by a half-finished edit)
+        // documents no payload at all, so a Redoc/Swagger "try it" prefill renders an
+        // empty example and a codegen client's sample generator has nothing to emit —
+        // right where a caller reads how to build the request/response.
+        //
+        // CamaraSim expresses its per-scenario functional cases as named examples on
+        // every response media type (one `value:` per case), so a `value:` dropped or
+        // dedented in the paste that vendors a new spec is a routine hazard. It is
+        // invisible to every existing test: `no_object_declares_both_example_and_examples`
+        // checks the `example`/`examples` pair never co-occurs, the numeric/length
+        // `example` tests bound a schema-level singular `example:`, and the
+        // media-type/parameter tests pin a payload's `schema`/`content` — none looks
+        // inside a named Example Object for its `value`. Verified true across all
+        // mounted specs before asserting.
+        for api in APIS {
+            let contentless = example_objects_missing_value(api.body);
+            assert!(
+                contentless.is_empty(),
+                "{} spec declares a named Example Object under an `examples:` map with \
+                 neither a `value` nor an `externalValue` (a documented sample that \
+                 shows nothing) at entry line(s): {:?}",
+                api.name,
+                contentless
+            );
+        }
+    }
+
+    #[test]
+    fn example_object_value_extraction_rules() {
+        // Unit-cover `example_objects_missing_value` so the contract test above can't
+        // pass vacuously and its detection is pinned: a named example carrying a
+        // `value` passes; one with only `summary`/`description` is flagged; an
+        // `externalValue` entry and a block-`$ref` entry pass (both supply/inherit a
+        // value); a `value` nested inside one example's payload never satisfies a
+        // *different* value-less sibling (dedent-bounded child scan); a `components.
+        // examples` reusable Example Object is scanned the same way; a second media
+        // type's examples map is inspected independently; and an `examples:` nested
+        // inside an outer `example:` payload (sample data) is skipped entirely.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              examples:
+                good:
+                  summary: has a value
+                  value:
+                    ok: true
+                bad:
+                  summary: no value here
+                  description: still no value
+                ext:
+                  externalValue: https://example.com/e.json
+                reffed:
+                  $ref: \"#/components/examples/Shared\"
+            application/xml:
+              examples:
+                alsoBad:
+                  summary: xml example without a value
+components:
+  examples:
+    Shared:
+      value:
+        ok: false
+  schemas:
+    S:
+      type: object
+      example:
+        examples:
+          fakeExample:
+            summary: sample data, not a real Example Object
+";
+        // Flagged, in document order: line 19 (`bad`, only `summary`/`description`)
+        // and line 28 (`alsoBad`, only `summary`). Not flagged: `good` (line 15, its
+        // `value:` child at line 17); `ext` (line 22, an `externalValue` child); `reffed`
+        // (line 24, a block-`$ref` — a Reference Object inherits its value); `Shared`
+        // (line 32 under `components.examples`, its `value:` child at line 33); and
+        // `fakeExample` (line 40) whose `examples:` opener (line 39) sits inside the
+        // schema's `example:` payload (line 38) and is skipped as sample data.
+        assert_eq!(example_objects_missing_value(body), vec![19, 28]);
+
+        // Non-vacuous floor: across every registered spec every named Example Object
+        // declares its `value`/`externalValue` (the invariant the contract test
+        // asserts), and the corpus actually declares many named examples (a `value:`
+        // per functional case on every response) — so the value-lookup path runs on
+        // real data and a broken (always-empty) extractor can't hide behind a corpus
+        // with no named examples. Count entries with a detector independent of the
+        // extractor's value lookup.
+        let mut named_examples = 0usize;
+        for api in APIS {
+            assert!(
+                example_objects_missing_value(api.body).is_empty(),
+                "{}: every named Example Object must declare a value or externalValue",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            let is_examples_map = |l: &str| {
+                l.trim_start()
+                    .split_once(':')
+                    .is_some_and(|(k, v)| {
+                        k.trim() == "examples"
+                            && v.split('#').next().unwrap_or(v).trim().is_empty()
+                    })
+            };
+            for (i, line) in lines.iter().enumerate() {
+                if !is_examples_map(line) {
+                    continue;
+                }
+                let c = indent(line);
+                // Count the direct child keys at the map's first deeper indent.
+                let mut ci = None;
+                let mut j = i + 1;
+                while j < lines.len() {
+                    let l = lines[j];
+                    if l.trim().is_empty() {
+                        j += 1;
+                        continue;
+                    }
+                    let li = indent(l);
+                    if li <= c {
+                        break;
+                    }
+                    let entry_indent = *ci.get_or_insert(li);
+                    if li == entry_indent {
+                        named_examples += 1;
+                    }
+                    j += 1;
+                }
+            }
+        }
+        assert!(
+            named_examples >= 100,
+            "expected many named Example Objects across specs, got {named_examples}"
+        );
+    }
+
     /// Extract the 1-based line number of every Discriminator Object a spec
     /// declares that is **missing its `propertyName`** — without a YAML dep.
     ///

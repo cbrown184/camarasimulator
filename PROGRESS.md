@@ -3322,6 +3322,34 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - an Example-Object-`value` contract test (`src/registry.rs`
+    `every_example_object_declares_a_value`) asserts every named Example Object a
+    mounted spec declares under an `examples:` map carries one of
+    `value`/`externalValue` — the field that supplies the sample the example
+    exists to show. An entry with neither (only a `summary`/`description`, or one
+    emptied by a half-finished edit) documents no payload, so a Redoc/Swagger "try
+    it" prefill renders empty and a codegen sample generator has nothing to emit —
+    right where a caller reads how to build the request/response. CamaraSim
+    expresses its per-scenario functional cases as named examples on every response
+    media type (one `value:` per case), so a `value:` dropped/dedented in a vendor
+    paste is a routine hazard. Invisible to every existing test:
+    `no_object_declares_both_example_and_examples` checks the `example`/`examples`
+    pair never co-occurs, the numeric/length `example` tests bound a schema-level
+    singular `example:`, and the media-type/parameter tests pin a payload's
+    `schema`/`content` — none looks inside a named Example Object for its value. The
+    Example-Object analogue of `media_types_missing_schema`. Pure
+    `example_objects_missing_value` extractor (no YAML dep): locates each `examples:`
+    map (key opening a block, not itself inside an `example:`/`examples:` payload via
+    an ancestor walk), then for each block-opening named entry scans its own child
+    indent for a `value:`/`externalValue:`/`$ref:` (a block-`$ref` entry inherits;
+    an inline-valued entry carries its own value), dedent-bounded so a `value`
+    nested in a *different* entry's payload never satisfies a value-less sibling.
+    Unit-covered (`example_object_value_extraction_rules`: a value-bearing entry, an
+    `externalValue` entry, a block-`$ref` entry, and a `components.examples` reusable
+    pass; two value-less entries across two media types flagged in document order
+    `[19, 28]`; an `examples:` inside an `example:` payload skipped; plus a ≥100
+    named-example non-vacuous floor via an independent counter). Verified true across
+    all mounted specs (493 named Example Objects, 0 without a value) before asserting.
   - a `pattern` non-empty-string contract test (`src/registry.rs`
     `every_pattern_declares_a_non_empty_string`) asserts every Schema Object
     `pattern` keyword carries a non-empty regex string. `pattern` constrains a
@@ -4691,6 +4719,42 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-16 — Contract-test harness: added an **Example-Object-`value`**
+  spec-structural contract test (`src/registry.rs`
+  `every_example_object_declares_a_value`) — every named Example Object a mounted
+  spec declares under an `examples:` map must carry one of `value`/`externalValue`,
+  the field that supplies the sample the example exists to show. An entry with
+  neither (only a `summary`/`description`, or one emptied by a half-finished edit)
+  documents no payload at all, so a Redoc/Swagger "try it" prefill renders an empty
+  example and a codegen client's sample generator has nothing to emit — right where
+  a caller reads how to build the request/response. CamaraSim expresses its
+  per-scenario functional cases as named examples on every response media type (one
+  `value:` per case), so a `value:` dropped or dedented in the paste that vendors a
+  new spec is a routine hazard. Invisible to every existing test: the
+  Example-Object analogue of `media_types_missing_schema` /
+  `every_parameter_declares_a_schema_or_content` (each pins the one field that gives
+  its object meaning) — `no_object_declares_both_example_and_examples` checks the
+  `example`/`examples` pair never co-occurs, the numeric/length `example` tests
+  bound a schema-level singular `example:`, and the media-type/parameter tests pin a
+  payload's `schema`/`content`; none looks inside a named Example Object for its
+  value. New pure `example_objects_missing_value` extractor (no YAML dep): locates
+  each `examples:` map (the key opening a block, not itself sample data inside an
+  `example:`/`examples:` payload via an ancestor walk), then for each block-opening
+  named entry scans the entry's own child indent for a `value:`/`externalValue:`/
+  `$ref:` (a block-`$ref` entry inherits the referenced Example Object's value; an
+  inline-valued entry — a flow `$ref`/object — carries its own), dedent-bounded so a
+  `value` nested inside a *different* entry's payload never satisfies a value-less
+  sibling. Surveyed the corpus first (493 named Example Objects across the mounted
+  specs, 0 without a value/externalValue) → no drift to fix. Unit-covered
+  (`example_object_value_extraction_rules`: a value-bearing entry, an `externalValue`
+  entry, a block-`$ref` entry, and a `components.examples` reusable Example Object
+  pass; two value-less entries across two media types flagged in document order
+  `[19, 28]`; an `examples:` nested inside a schema's `example:` payload skipped as
+  sample data; plus a ≥100 named-example non-vacuous floor via an independent
+  counter). `cargo test` 2631 green (was 2629; +2); `cargo build --release`
+  succeeds, no warnings. No new dependency; test-only change (the extractor and
+  tests live in the `#[cfg(test)]` module). — binary (release): 5.1M (5,314,968 B;
+  unchanged)
 - 2026-08-16 — Contract-test harness: added an **`enum`-is-a-sequence**
   spec-structural contract test (`src/registry.rs` `every_enum_field_is_a_sequence`)
   — every schema `enum` field a mounted spec declares must be a *sequence* (array).
