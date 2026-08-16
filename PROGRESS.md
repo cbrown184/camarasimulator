@@ -3323,6 +3323,25 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - a path-key-no-trailing-slash contract test (`src/registry.rs`
+    `every_path_item_key_has_no_trailing_slash`) asserts no `paths:` key a mounted
+    spec declares, other than the root `/`, ends with a trailing slash (the Spectral
+    `path-keys-no-trailing-slash` lint). OpenAPI treats `/foo` and `/foo/` as two
+    distinct Path Items, so a stray trailing slash documents a route (`/sessions/`)
+    that disagrees with the simulator's own `/sessions` handler — a client binds the
+    path as written and requests one the server never serves. Invisible to the sibling
+    path tests: `every_path_template_key_is_well_formed` validates brace/whitespace/
+    `?`/`#` structure but treats `/` as an ordinary path character (a trailing `/foo/`
+    passes it), the slash-prefix test checks only the leading `/`, and the distinct-keys
+    test checks only uniqueness — none inspects the key's final character. Pure
+    `path_keys_with_trailing_slash` extractor (no YAML dep) reuses the unit-covered
+    `path_item_keys` (top-level `paths:` scoping, key unquoted, `x-` extensions
+    excluded), flagging each returned template longer than the bare root `/` that ends
+    with `/`. Unit-covered (`path_key_trailing_slash_extraction_rules`: `/sessions/`,
+    templated `/sessions/{id}/`, and quoted `"/orders/"` flagged in document order;
+    root `/`, `/sessions`, `/sessions/{id}`, and an out-of-`paths:` schema `example: /a/`
+    not flagged; ≥100 path-key corpus floor). Surveyed the corpus first (136 path keys,
+    0 trailing-slash) → no drift.
   - an operation-tag-declared-globally contract test (`src/registry.rs`
     `every_operation_tag_is_declared_globally`) asserts every tag an operation lists in
     its `tags` array is declared in the document's top-level `tags` list (the
@@ -4820,6 +4839,31 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-16 — Contract-test harness: added a **path-key-no-trailing-slash** contract
+  test (`src/registry.rs` `every_path_item_key_has_no_trailing_slash`) — no `paths:` key
+  a mounted spec declares, other than the bare root `/`, may end with a trailing slash
+  (the well-known Spectral `path-keys-no-trailing-slash` lint). OpenAPI treats `/foo` and
+  `/foo/` as two **distinct** Path Items, so a stray trailing slash (a segment pasted from
+  a sibling that kept its separator, a `/` typed after the last segment) documents a route
+  — `/sessions/` — that disagrees with the simulator's own `/sessions` handler: a
+  Redoc/Swagger "try it" panel and a codegen client bind the path exactly as written and
+  send a request the server never serves. Invisible to every sibling path test:
+  `every_path_template_key_is_well_formed` validates each key's brace/whitespace/`?`/`#`
+  structure but treats `/` as an ordinary path character (a trailing `/foo/` sails
+  through), the slash-prefix test checks only the *leading* `/`, and the distinct-keys
+  test checks only *uniqueness* — none inspects the key's final character. New pure
+  `path_keys_with_trailing_slash` extractor (no YAML dep) reuses the unit-covered
+  `path_item_keys` (top-level `paths:` scoping, key unquoted, `x-` Paths-Object extensions
+  excluded) and flags each returned template longer than the bare root `/` that ends with
+  `/`; the root `/` is exempt (its slash is the path, not a trailing separator). Surveyed
+  the corpus first (136 path keys, 0 trailing-slash) → no drift to fix. Unit-covered
+  (`path_key_trailing_slash_extraction_rules`: a trailing-slash `/sessions/`, a templated
+  `/sessions/{id}/`, and a quoted `"/orders/"` flagged in document order; the root `/`,
+  `/sessions`, `/sessions/{id}`, and an out-of-`paths:` schema `example: /a/` not flagged;
+  plus a ≥100 path-key corpus floor via the independent `path_item_keys`). `cargo test`
+  2645 green (was 2643; +2); `cargo build --release` succeeds, no warnings. No new
+  dependency; test-only change (the extractor and both tests live in the `#[cfg(test)]`
+  module). — binary (release): 5.1M (5,314,968 B; unchanged)
 - 2026-08-16 — Contract-test harness: added a **Server-Object-`url`** contract test
   (`src/registry.rs` `every_server_object_declares_a_url`) — every entry in a mounted
   spec's top-level `servers:` array must declare a non-empty `url`, the Server Object's

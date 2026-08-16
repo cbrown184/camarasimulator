@@ -20434,4 +20434,154 @@ paths:
             "expected server entries across specs, got {server_entries}"
         );
     }
+
+    /// The path-template key of every Path Item a spec declares under `paths:`
+    /// that ends with a trailing slash — other than the bare root `/` itself.
+    ///
+    /// OpenAPI treats `/foo` and `/foo/` as two *distinct* Path Items, and a URL
+    /// path's trailing slash is almost always an editing slip (a segment pasted
+    /// from a sibling that kept its separator, a `/` typed after the last
+    /// segment). A Redoc/Swagger "try it" panel and a codegen client bind the
+    /// route exactly as written, so a `/sessions/` in the spec documents a route
+    /// that disagrees with the simulator's own `/sessions` handler — the caller
+    /// is handed a path the server never serves. The well-known Spectral
+    /// `path-keys-no-trailing-slash` lint. The root path `/` is exempt: it has no
+    /// name segment before the slash, so the slash *is* the path rather than a
+    /// trailing separator.
+    ///
+    /// Invisible to the sibling path tests: `every_path_template_key_is_well_formed`
+    /// validates each key's brace/whitespace/`?`/`#` structure but treats `/` as
+    /// an ordinary path character, so a trailing `/foo/` sails through it; the
+    /// slash-prefix test checks only the *leading* `/`, and the distinct-keys
+    /// test checks only *uniqueness*. None inspects the key's final character.
+    ///
+    /// Reuses the (unit-covered) `path_item_keys` extractor — which already
+    /// scopes to the top-level `paths:` block, unquotes the key, and excludes
+    /// `x-` Paths-Object extensions — then flags each returned template longer
+    /// than the bare root `/` that ends with `/`. Returns the offending keys in
+    /// document order.
+    fn path_keys_with_trailing_slash(body: &str) -> Vec<String> {
+        path_item_keys(body)
+            .into_iter()
+            .filter(|k| k.len() > 1 && k.ends_with('/'))
+            .collect()
+    }
+
+    #[test]
+    fn every_path_item_key_has_no_trailing_slash() {
+        // Contract-harness invariant (OpenAPI Paths-Object structural/style rule,
+        // the well-known Spectral `path-keys-no-trailing-slash` lint): no `paths:`
+        // key a mounted spec declares, other than the root `/`, may end with a
+        // trailing slash. OpenAPI treats `/foo` and `/foo/` as two distinct Path
+        // Items, so a stray trailing slash documents a route (`/sessions/`) that
+        // disagrees with the simulator's own `/sessions` handler — a Redoc/Swagger
+        // "try it" panel and a codegen client bind the path exactly as written and
+        // send a request the server never serves.
+        //
+        // Invisible to every sibling path test: `every_path_template_key_is_well_formed`
+        // validates brace/whitespace/`?`/`#` structure but treats `/` as an
+        // ordinary path character (a trailing `/foo/` passes it), the slash-prefix
+        // test checks only the leading `/`, and the distinct-keys test checks only
+        // uniqueness. None inspects the key's final character. Verified true across
+        // every mounted spec before asserting.
+        for api in APIS {
+            let bad = path_keys_with_trailing_slash(api.body);
+            assert!(
+                bad.is_empty(),
+                "{} spec declares a `paths:` key with a trailing slash \
+                 (OpenAPI treats `/foo/` as distinct from `/foo`): {:?}",
+                api.name,
+                bad
+            );
+        }
+    }
+
+    #[test]
+    fn path_key_trailing_slash_extraction_rules() {
+        // Unit-cover `path_keys_with_trailing_slash` so the contract test above
+        // can't pass vacuously and its accept/reject boundary is pinned: an
+        // ordinary `/sessions` and a templated `/sessions/{id}` key pass; a
+        // trailing-slash `/sessions/` and a templated `/sessions/{id}/` are
+        // flagged in document order; the bare root `/` is exempt (its slash is the
+        // path, not a trailing separator); and a quoted `"/orders/"` key is
+        // unquoted before the final-character check so its trailing slash is still
+        // caught. A `/`-looking value outside the `paths:` block (a schema
+        // property's example) is not a path key, so it is never read.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /:
+    get:
+      operationId: getRoot
+      responses:
+        '200':
+          description: ok
+  /sessions:
+    get:
+      operationId: getSessions
+      responses:
+        '200':
+          description: ok
+  /sessions/:
+    get:
+      operationId: listSessions
+      responses:
+        '200':
+          description: ok
+  /sessions/{id}:
+    get:
+      operationId: getSession
+      responses:
+        '200':
+          description: ok
+  /sessions/{id}/:
+    get:
+      operationId: getSessionSlash
+      responses:
+        '200':
+          description: ok
+  \"/orders/\":
+    get:
+      operationId: getOrders
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    Thing:
+      type: object
+      properties:
+        path:
+          type: string
+          example: /a/
+";
+        // Flagged, in document order: the trailing-slash `/sessions/`, the
+        // templated `/sessions/{id}/`, and the quoted `/orders/` (unquoted first).
+        // Not flagged: the root `/` (exempt), `/sessions`, `/sessions/{id}`, and
+        // the schema property `example: /a/` (outside the `paths:` block).
+        assert_eq!(
+            path_keys_with_trailing_slash(body),
+            vec!["/sessions/", "/sessions/{id}/", "/orders/"]
+        );
+
+        // Non-vacuous floor: across every registered spec no path key carries a
+        // trailing slash (the invariant the contract test asserts), and the
+        // corpus actually declares many path keys — so the final-character path
+        // runs on real data and a broken (always-empty) extractor can't hide
+        // behind a corpus with no path items. Count keys with the independent
+        // (unit-covered) `path_item_keys` extractor.
+        let mut keys = 0usize;
+        for api in APIS {
+            assert!(
+                path_keys_with_trailing_slash(api.body).is_empty(),
+                "{}: no path key may carry a trailing slash",
+                api.name
+            );
+            keys += path_item_keys(api.body).len();
+        }
+        assert!(keys >= 100, "expected many path keys across specs, got {keys}");
+    }
 }
