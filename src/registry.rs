@@ -16354,6 +16354,310 @@ components:
         );
     }
 
+    /// Line numbers (1-based), in document order, of every `nullable:` modifier that
+    /// sits on a Schema Object carrying **no type context** — neither a sibling
+    /// `type:` scalar nor a sibling composition keyword (`allOf`/`anyOf`/`oneOf`/
+    /// `$ref`) — without a YAML dep.
+    ///
+    /// In OpenAPI 3.0.x `nullable` is a *modifier* on a typed schema: it extends a
+    /// declared type's value space to also admit `null` (`type: string` +
+    /// `nullable: true` ⇒ "a string or null"). On its own it is meaningless — a
+    /// `nullable: true` with no type to extend admits nothing new, so the `null` the
+    /// author meant to allow is silently disallowed: a validator ignores the keyword
+    /// and a Redoc/Swagger/codegen client drops it exactly where a caller reads or
+    /// builds the payload. Because a bare `$ref` ignores its siblings in 3.0.x, the
+    /// canonical *nullable reference* idiom wraps the ref in a composition —
+    /// `nullable: true` beside `allOf: [ $ref ]` (or `anyOf`/`oneOf`) — so a sibling
+    /// composition keyword is an equally valid type context and is NOT flagged.
+    ///
+    /// This is the modifier-placement analogue of `every_facet_keyword_sits_on_its_
+    /// required_type` / `every_numeric_facet_sits_on_a_numeric_type` (which pin a
+    /// *validation facet* to its constrained type but never look at `nullable`), and the
+    /// placement complement of `every_boolean_schema_keyword_carries_a_boolean` (which
+    /// checks `nullable`'s value *type* is a boolean but never whether it has a type to
+    /// modify). Only a `nullable:` carrying an inline boolean (`true`/`false`) is judged
+    /// — a `nullable:` opening a block (a property literally *named* `nullable`) has no
+    /// inline modifier value and is skipped, as is a `nullable:` inside an
+    /// `example:`/`examples:` payload (sample data, walked up the ancestor chain). The
+    /// type context is found by the same dedent-bounded down-then-up same-indent sibling
+    /// scan the facet-placement extractors use.
+    fn nullable_modifiers_without_a_type_context(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        // The inline boolean value of a `nullable:` line (inline comment + surrounding
+        // quotes stripped); `None` for any other key, a block opener (no inline value —
+        // a property literally *named* `nullable`), or a non-boolean value (its value
+        // type is `every_boolean_schema_keyword_carries_a_boolean`'s concern — here we
+        // only need to confirm this is a real `nullable` modifier occurrence).
+        let nullable_bool = |l: &str| -> Option<bool> {
+            let (k, v) = l.trim_start().split_once(':')?;
+            if k.trim() != "nullable" {
+                return None;
+            }
+            let v = v
+                .split('#')
+                .next()
+                .unwrap_or(v)
+                .trim()
+                .trim_matches('"')
+                .trim_matches('\'');
+            match v {
+                "true" => Some(true),
+                "false" => Some(false),
+                _ => None,
+            }
+        };
+        // True when line `i` (indent `c`) sits inside an `example:`/`examples:` payload.
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        // True when a line is a sibling that supplies a type context: a `type:` scalar
+        // with a non-empty value, or a composition keyword (`allOf`/`anyOf`/`oneOf`/
+        // `$ref`).
+        let is_context = |l: &str| -> bool {
+            let Some((k, v)) = l.trim_start().split_once(':') else {
+                return false;
+            };
+            let k = k.trim();
+            if matches!(k, "allOf" | "anyOf" | "oneOf" | "$ref") {
+                return true;
+            }
+            if k == "type" {
+                // a property literally *named* `type` opens a block (empty inline value)
+                // and is not itself a type declaration; a real `type:` carries a scalar.
+                return !v.split('#').next().unwrap_or(v).trim().is_empty();
+            }
+            false
+        };
+        // True when the object holding line `i` (indent `c`) has a same-indent sibling
+        // supplying a type context: scan down through the object's block then up,
+        // dedent-bounded so a nested or following object's keyword never pairs.
+        let has_type_context = |i: usize, c: usize| -> bool {
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_context(l) {
+                    return true;
+                }
+                j += 1;
+            }
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_context(l) {
+                    return true;
+                }
+            }
+            false
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            if nullable_bool(line).is_none() {
+                continue;
+            }
+            let c = indent(line);
+            if inside_example(i, c) {
+                continue;
+            }
+            if !has_type_context(i, c) {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_nullable_modifier_sits_on_a_typed_schema() {
+        // Contract-harness invariant (OpenAPI 3.0.x structural rule): every `nullable`
+        // modifier a mounted spec declares MUST sit on a Schema Object that has a type
+        // to modify — a sibling `type:` scalar, or a sibling composition keyword
+        // (`allOf`/`anyOf`/`oneOf`/`$ref`, the canonical *nullable reference* idiom).
+        // `nullable` extends a declared type's value space to also admit `null`; with no
+        // type to extend it is a no-op, so the `null` the author meant to allow is
+        // silently disallowed — a validator ignores the keyword and a Redoc/Swagger/
+        // codegen client drops it exactly where a caller reads or builds the payload.
+        //
+        // The modifier-placement analogue of the facet-placement tests
+        // (`every_facet_keyword_sits_on_its_required_type` /
+        // `every_numeric_facet_sits_on_a_numeric_type`), which pin a *validation facet*
+        // to its constrained type but never look at `nullable`; and the placement
+        // complement of `every_boolean_schema_keyword_carries_a_boolean`, which checks
+        // `nullable`'s value is a boolean but never whether it has a type to modify.
+        // Verified true across all mounted specs before asserting (the 3.0.x nullable-
+        // reference idiom — `nullable: true` beside `allOf: [ $ref ]` — is a valid type
+        // context and is correctly not flagged).
+        for api in APIS {
+            let orphans = nullable_modifiers_without_a_type_context(api.body);
+            assert!(
+                orphans.is_empty(),
+                "{} spec declares a `nullable` modifier with no type to modify (no \
+                 sibling `type:` scalar and no `allOf`/`anyOf`/`oneOf`/`$ref` \
+                 composition — a no-op that silently disallows the intended null) at \
+                 `nullable:` line(s): {:?}",
+                api.name,
+                orphans
+            );
+        }
+    }
+
+    #[test]
+    fn nullable_modifier_placement_extraction_rules() {
+        // Unit-cover `nullable_modifiers_without_a_type_context` so the contract test
+        // above can't pass vacuously and its detection is pinned: a `nullable` beside a
+        // `type:` scalar (declared before *or* after it) passes; a `nullable` beside an
+        // `allOf`/`anyOf`/`oneOf` composition or a sibling `$ref` (the nullable-reference
+        // idiom) passes; an orphan `nullable` whose only sibling is a `description`
+        // (whether `true` or `false` — placement is judged regardless of value) is
+        // flagged in document order; a property literally *named* `nullable` (a block
+        // opener, no inline value) is skipped; and a `nullable:` inside an `example:`
+        // payload is skipped.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    GoodTyped:
+      type: string
+      nullable: true
+    GoodTypedAfter:
+      nullable: true
+      type: integer
+    GoodAllOf:
+      nullable: true
+      allOf:
+        - $ref: \"#/components/schemas/GoodTyped\"
+    GoodRef:
+      nullable: true
+      $ref: \"#/components/schemas/GoodTyped\"
+    BadOrphan:
+      nullable: true
+      description: no type here
+    BadOrphanFalse:
+      description: still no type
+      nullable: false
+    NamedNullable:
+      type: object
+      properties:
+        nullable:
+          type: boolean
+    InExample:
+      type: object
+      example:
+        nullable: true
+        id: abc
+";
+        // Flagged, in document order: line 28 (`BadOrphan.nullable: true`, whose only
+        // sibling is a `description` — no `type`, no composition) and line 32
+        // (`BadOrphanFalse.nullable: false`, likewise orphaned — placement is judged
+        // regardless of the boolean value). Not flagged: `GoodTyped` (a `type: string`
+        // sibling above), `GoodTypedAfter` (a `type: integer` sibling below, found by
+        // the down-scan), `GoodAllOf` (an `allOf` composition sibling), `GoodRef` (a
+        // sibling `$ref`); `NamedNullable`'s property literally *named* `nullable` (a
+        // block opener, no inline value); and the `nullable: true` inside the
+        // `example:` payload (sample data).
+        assert_eq!(nullable_modifiers_without_a_type_context(body), vec![28, 32]);
+
+        // Non-vacuous floor: across every registered spec every `nullable` modifier
+        // sits on a schema with a type context (the invariant the contract test
+        // asserts), and the corpus actually declares many `nullable` modifiers (each on
+        // a `type:` scalar or an `allOf`/`$ref` nullable-reference composition) — so the
+        // context-detection path runs on real data and a broken (always-empty) extractor
+        // can't hide behind a corpus that never declares a bounded `nullable`. Count
+        // context-bearing nullables with a detector independent of the extractor's
+        // negation.
+        let mut with_context = 0usize;
+        for api in APIS {
+            assert!(
+                nullable_modifiers_without_a_type_context(api.body).is_empty(),
+                "{}: every `nullable` modifier must sit on a schema with a type context",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            let is_nullable = |l: &str| {
+                l.trim_start().split_once(':').is_some_and(|(k, v)| {
+                    let v = v
+                        .split('#')
+                        .next()
+                        .unwrap_or(v)
+                        .trim()
+                        .trim_matches('"')
+                        .trim_matches('\'');
+                    k.trim() == "nullable" && (v == "true" || v == "false")
+                })
+            };
+            let is_ctx = |l: &str| {
+                l.trim_start().split_once(':').is_some_and(|(k, v)| {
+                    let k = k.trim();
+                    matches!(k, "allOf" | "anyOf" | "oneOf" | "$ref")
+                        || (k == "type"
+                            && !v.split('#').next().unwrap_or(v).trim().is_empty())
+                })
+            };
+            for (i, l) in lines.iter().enumerate() {
+                if !is_nullable(l) {
+                    continue;
+                }
+                let c = indent(l);
+                let lo = i.saturating_sub(8);
+                let hi = (i + 8).min(lines.len());
+                let ctx = (lo..hi).any(|j| j != i && indent(lines[j]) == c && is_ctx(lines[j]));
+                if ctx {
+                    with_context += 1;
+                }
+            }
+        }
+        assert!(
+            with_context >= 10,
+            "expected many context-bearing `nullable` modifiers across specs, got {with_context}"
+        );
+    }
+
     /// Line numbers (1-based), in document order, of every `additionalProperties:`
     /// keyword whose inline *scalar* value is neither the JSON boolean `true`/`false`
     /// nor an inline flow-mapping schema (`{ … }`) — a value OpenAPI 3.0.x forbids.

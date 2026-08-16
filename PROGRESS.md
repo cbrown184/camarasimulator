@@ -4586,6 +4586,38 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-16 — Contract-test harness: added a **`nullable` modifier placement**
+  spec-structural contract test (`src/registry.rs`
+  `every_nullable_modifier_sits_on_a_typed_schema`) — every `nullable` modifier a
+  mounted spec declares must sit on a Schema Object with a type to modify: a sibling
+  `type:` scalar **or** a sibling composition keyword (`allOf`/`anyOf`/`oneOf`/`$ref`).
+  In OpenAPI 3.0.x `nullable` extends a *declared type's* value space to also admit
+  `null`; with no type to extend it is a no-op, so the `null` the author meant to allow
+  is silently disallowed — a validator ignores the keyword and a Redoc/Swagger/codegen
+  client drops it exactly where a caller reads/builds the payload. The modifier-placement
+  analogue of the facet-placement tests (`every_facet_keyword_sits_on_its_required_type`
+  / `every_numeric_facet_sits_on_a_numeric_type`), which pin a *validation facet* to its
+  constrained type but never look at `nullable`; and the placement complement of
+  `every_boolean_schema_keyword_carries_a_boolean`, which checks `nullable`'s value is a
+  boolean but never whether it has a type to modify. New pure
+  `nullable_modifiers_without_a_type_context` extractor (no YAML dep): judges only a
+  `nullable:` carrying an inline boolean (`true`/`false`) — a `nullable:` opening a block
+  (a property literally *named* `nullable`) and a `nullable:` inside an
+  `example:`/`examples:` payload (ancestor-chain walk) are skipped — and finds the type
+  context by the same dedent-bounded down-then-up same-indent sibling scan the
+  facet-placement extractors use. Crucially the canonical 3.0.x **nullable-reference
+  idiom** (`nullable: true` beside `allOf: [ $ref ]`, since a bare `$ref` ignores its
+  siblings) is a valid type context and is correctly NOT flagged. Surveyed the corpus
+  first (17 `nullable: true` sites — 13 on a `type:` scalar, 4 on an `allOf`/`$ref`
+  nullable-reference composition; 0 orphaned) → no drift to fix. Unit-covered
+  (`nullable_modifier_placement_extraction_rules`: `nullable` on a `type:` before/after,
+  on `allOf`, on a sibling `$ref` all pass; two orphaned `nullable` — `true` and `false`,
+  placement judged regardless of value — flagged in document order `[28, 32]`; a property
+  named `nullable` and an `example:`-payload `nullable` skipped; plus a ≥10 context-bearing
+  non-vacuous floor via an independent counter). `cargo test` 2617 green (was 2615; +2);
+  `cargo build --release` succeeds, no warnings. No new dependency; test-only change (the
+  extractor lives in the `#[cfg(test)]` module). — binary (release): 5.1M (5,314,968 B;
+  unchanged)
 - 2026-08-16 — Contract-test harness: added an **`additionalProperties` boolean-scalar**
   spec-structural contract test (`src/registry.rs`
   `every_additional_properties_scalar_is_a_boolean`) — every `additionalProperties` with
