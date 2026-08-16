@@ -3322,6 +3322,24 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - a response-`description` non-empty contract test (`src/registry.rs`
+    `every_response_description_is_non_empty`) asserts that where a mounted spec gives
+    a Response Object an inline `description`, that description carries text.
+    `description` is the single REQUIRED field of a Response Object and summarises the
+    outcome, so a present-but-empty value (`description: ""`/`''`, a bare `description:`
+    null, or an empty block scalar) documents nothing — a Redoc/Swagger/codegen client
+    renders a described-yet-blank status. The value-side complement of
+    `every_declared_response_has_a_description`, which accepts a `description:` key by
+    presence alone (or a `$ref`) and never inspects its value; mirrors the suite's
+    non-emptiness guards. Pure `responses_with_empty_description` extractor (no YAML
+    dep) reuses `responses_missing_description`'s response-object scoping, then judges
+    the response's own indent-10 `description:` value empty (bare/null, exactly-empty
+    quoted `""`/`''` by two leading quote chars — `''''` = one `'` is text — or an
+    empty `|`/`>` block scalar). A property literally named `description` inside a
+    `content` schema/`headers` entry (deeper than indent 10) and a `$ref` response are
+    never reached. Unit-covered (`response_description_non_empty_extraction_rules`,
+    incl. a ≥100 indent-10 inline-description floor). Verified true across all mounted
+    specs (all inline response descriptions non-empty) before asserting.
   - an Example-Object-`value` contract test (`src/registry.rs`
     `every_example_object_declares_a_value`) asserts every named Example Object a
     mounted spec declares under an `examples:` map carries one of
@@ -4719,6 +4737,40 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-16 — Contract-test harness: added a **response-`description` non-empty**
+  spec-structural contract test (`src/registry.rs`
+  `every_response_description_is_non_empty`) — where a mounted spec gives a Response
+  Object an inline `description`, that description must carry text. `description` is
+  the single REQUIRED field of an OpenAPI Response Object and exists to summarise the
+  outcome, so a present-but-empty value — `description: ""`/`''`, a bare
+  `description:` (a YAML null), or an empty block scalar — documents nothing: a
+  Redoc/Swagger "try it" panel and a codegen client render a described-yet-blank
+  status right where a caller reads what the response means. The value-side complement
+  of `every_declared_response_has_a_description`, which accepts a `description:` key by
+  *presence* alone (or a `$ref`) and never inspects its value — so a description
+  truncated to empty by a half-finished paste satisfies it, its blankness unseen;
+  mirrors the suite's non-emptiness guards (`every_spec_declares_a_non_empty_info_description`,
+  `every_pattern_declares_a_non_empty_string`). New pure `responses_with_empty_description`
+  extractor (no YAML dep) reuses `responses_missing_description`'s exact response-object
+  scoping (4-space verb → 6-space `responses:` → 8-space status/`default`/`NXX` entry),
+  then locates the response's own 10-space `description:` and judges its value empty:
+  a bare/null value, an exactly-empty quoted `""`/`''` (recognised by two leading
+  matching quote chars, never by comment-stripping — so a `#` inside a real
+  description isn't read as a comment and `''''` = one `'` counts as text), or a block
+  scalar (`|`/`>`) with no non-blank line following it deeper than the field indent.
+  Matching at exactly indent 10 means a property literally *named* `description` inside
+  a `content` schema or a `headers` entry is never the response's own; a `$ref`
+  response is never reached. Surveyed the corpus first (all inline response
+  descriptions non-empty; the only bare `description:` lines are schema *properties*
+  named `description`, far deeper than indent 10) → no drift to fix. Unit-covered
+  (`response_description_non_empty_extraction_rules`: `ok`, quoted text, `''''`, and a
+  block scalar *with* content pass; empty `""`/`''`, a bare null, and an empty block
+  scalar flagged in document order `["GET /a 201","GET /a 202","POST /a 200","POST /a 201"]`;
+  a `content`-schema `description` property ignored, a `$ref` response never reached;
+  plus a ≥100 indent-10 inline-description corpus floor via an independent counter).
+  `cargo test` 2633 green (was 2631; +2); `cargo build --release` succeeds, no
+  warnings. No new dependency; test-only change (the extractor and tests live in the
+  `#[cfg(test)]` module). — binary (release): 5.1M (5,314,968 B; unchanged)
 - 2026-08-16 — Contract-test harness: added an **Example-Object-`value`**
   spec-structural contract test (`src/registry.rs`
   `every_example_object_declares_a_value`) — every named Example Object a mounted

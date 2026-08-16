@@ -18780,4 +18780,310 @@ components:
             "expected many sequence `enum` fields across specs, got {seq_enums}"
         );
     }
+
+    /// The `METHOD /path <status>` label of every **response entry** a spec
+    /// declares whose Response Object carries an inline `description` field with an
+    /// **empty** value — a present-but-blank description — without a YAML dep.
+    ///
+    /// `description` is the single REQUIRED field of an OpenAPI Response Object and
+    /// exists to give the outcome a human-readable summary; a present-but-empty
+    /// value — `description: ""`/`''`, a bare `description:` (a YAML null), or an
+    /// empty block scalar — documents nothing, so a Redoc/Swagger "try it" panel
+    /// and a codegen client render a described-yet-blank status right where a caller
+    /// reads what the response means. It is the value-side complement of
+    /// [`responses_missing_description`], which accepts a `description:` key (or a
+    /// `$ref`) by *presence* alone and never inspects its value.
+    ///
+    /// Reuses that helper's exact response-object scoping (a 4-space HTTP-verb key
+    /// under a 2-space `/…` path item beneath the top-level `paths:` block → its
+    /// 6-space `responses:` block → each 8-space status/`default`/`NXX` entry), then
+    /// locates the response's own 10-space `description:` field and judges its value
+    /// empty when it is:
+    /// * a bare `description:` (nothing after the colon → a YAML null); or
+    /// * an exactly-empty quoted string (`""`/`''`, optionally trailed by a
+    ///   `# comment`) — recognised by two leading matching quote chars, never by
+    ///   comment-stripping, so a `#` inside a real description is never read as a
+    ///   comment and an escaped-quote scalar (`''''` = one `'`) is not empty; or
+    /// * a block scalar (`|`/`>`, any chomping/indent indicator) with no non-blank
+    ///   line following it deeper than the field indent.
+    ///
+    /// Matching the field at exactly the response object's own child indent (10)
+    /// means a `description` nested deeper — a property literally *named*
+    /// `description` inside a `content` schema, or a `headers` entry — is never the
+    /// response's own and so is never inspected; a response with no indent-10
+    /// `description` at all is left to [`responses_missing_description`], and a
+    /// `$ref` response has no description of its own and is never reached here.
+    fn responses_with_empty_description(body: &str) -> Vec<String> {
+        const METHODS: [&str; 8] =
+            ["get", "put", "post", "delete", "patch", "options", "head", "trace"];
+        let is_status_key = |key: &str| -> bool {
+            key == "default"
+                || (key.len() == 3
+                    && matches!(key.as_bytes()[0], b'1'..=b'5')
+                    && key.as_bytes()[1..]
+                        .iter()
+                        .all(|&c| c.is_ascii_digit() || c == b'X'))
+        };
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        // Whether the `description:` at line `m` (child indent `ci`), with inline
+        // value `rest` (everything after the first colon), carries no text.
+        let value_is_empty = |rest: &str, m: usize, ci: usize| -> bool {
+            let v = rest.trim();
+            if v.is_empty() {
+                return true; // bare `description:` → a YAML null
+            }
+            if v.starts_with('|') || v.starts_with('>') {
+                // Block scalar: content lives on the following deeper lines.
+                let mut k = m + 1;
+                while k < lines.len() {
+                    let l = lines[k];
+                    if l.trim().is_empty() {
+                        k += 1;
+                        continue;
+                    }
+                    // First non-blank line: content only if indented past the field.
+                    return indent(l) <= ci;
+                }
+                return true; // EOF with no content line — an empty block
+            }
+            // Exactly-empty quoted string: two leading matching quote chars with
+            // nothing but optional whitespace/comment after them.
+            let b = v.as_bytes();
+            if b.len() >= 2 && (b[0] == b'"' || b[0] == b'\'') && b[1] == b[0] {
+                let after = v[2..].trim_start();
+                if after.is_empty() || after.starts_with('#') {
+                    return true;
+                }
+            }
+            false
+        };
+        let mut out = Vec::new();
+        let mut in_paths = false;
+        let mut path: Option<String> = None;
+        for (i, line) in lines.iter().enumerate() {
+            let is_top_level_key =
+                !line.is_empty() && !line.starts_with(char::is_whitespace);
+            if is_top_level_key {
+                in_paths = line.trim_end() == "paths:";
+                path = None;
+                continue;
+            }
+            if !in_paths {
+                continue;
+            }
+            if let Some(rest) = line.strip_prefix("  ") {
+                if !rest.starts_with(char::is_whitespace) && rest.starts_with('/') {
+                    let key = rest.trim_end().strip_suffix(':').unwrap_or(rest.trim_end());
+                    path = Some(key.to_string());
+                    continue;
+                }
+            }
+            let Some(current_path) = path.as_deref() else { continue };
+            if indent(line) != 4 {
+                continue;
+            }
+            let key = line.trim_start();
+            let Some(name) = key.strip_suffix(':') else { continue };
+            if name.contains(char::is_whitespace) || !METHODS.contains(&name) {
+                continue;
+            }
+            // Within this operation's block, find the 6-space `responses:` key, then
+            // inspect each 8-space response entry under it.
+            let mut in_responses = false;
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                let li = indent(l);
+                if li <= 4 {
+                    break; // dedented out of this operation
+                }
+                if li == 6 {
+                    in_responses = l.trim_start().strip_suffix(':') == Some("responses");
+                    j += 1;
+                    continue;
+                }
+                if in_responses && li == 8 {
+                    if let Some(k) = l.trim_start().strip_suffix(':') {
+                        let status = k.trim_matches(|c| c == '"' || c == '\'');
+                        if is_status_key(status) {
+                            // Find this response object's own 10-space `description:`.
+                            let mut m = j + 1;
+                            while m < lines.len() {
+                                let e = lines[m];
+                                if e.trim().is_empty() {
+                                    m += 1;
+                                    continue;
+                                }
+                                if indent(e) <= 8 {
+                                    break; // dedented out of this response entry
+                                }
+                                if indent(e) == 10 {
+                                    if let Some((field, rest)) = e.trim_start().split_once(':') {
+                                        if field == "description" {
+                                            if value_is_empty(rest, m, 10) {
+                                                out.push(format!(
+                                                    "{} {} {}",
+                                                    name.to_uppercase(),
+                                                    current_path,
+                                                    status
+                                                ));
+                                            }
+                                            break; // one description per response object
+                                        }
+                                    }
+                                }
+                                m += 1;
+                            }
+                        }
+                    }
+                }
+                j += 1;
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_response_description_is_non_empty() {
+        // Contract-harness invariant (OpenAPI structural rule): where a mounted spec
+        // gives a Response Object an inline `description`, that description MUST carry
+        // text. `description` is the single REQUIRED field of a Response Object and
+        // exists to summarise the outcome, so a present-but-empty value —
+        // `description: ""`/`''`, a bare `description:` (a YAML null), or an empty
+        // block scalar — documents nothing: a Redoc/Swagger "try it" panel and a
+        // codegen client render a described-yet-blank status exactly where a caller
+        // reads what the response means.
+        //
+        // The value-side complement of `every_declared_response_has_a_description`,
+        // which accepts a `description:` key by presence alone (or a `$ref`) and
+        // never inspects its value — so a description truncated to empty by a
+        // half-finished paste satisfies it, its blankness unseen. Mirrors the suite's
+        // non-emptiness guards for the other value-bearing keywords
+        // (`every_spec_declares_a_non_empty_info_description`,
+        // `every_pattern_declares_a_non_empty_string`). Verified true across all
+        // mounted specs before asserting.
+        for api in APIS {
+            let empty = responses_with_empty_description(api.body);
+            assert!(
+                empty.is_empty(),
+                "{} spec declares a response whose `description` (the single REQUIRED \
+                 field of an OpenAPI Response Object) is present but empty: {:?}",
+                api.name,
+                empty
+            );
+        }
+    }
+
+    #[test]
+    fn response_description_non_empty_extraction_rules() {
+        // Unit-cover `responses_with_empty_description` so the contract test above
+        // can't pass vacuously and its accept/reject boundary is pinned: an inline
+        // non-empty description, a quoted-text one, an escaped-quote `''''` (one `'`),
+        // and a block scalar *with* content pass; a bare `description:` (null), an
+        // empty quoted `""`/`''`, and an empty block scalar are flagged in document
+        // order; a `description` nested inside a `content` schema (not the response's
+        // own indent) is ignored, and a `$ref` response is never reached.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+        '201':
+          description: \"\"
+        '202':
+          description:
+        '400':
+          $ref: \"../../shared/errors.yaml#/components/responses/BadRequest\"
+    post:
+      operationId: postA
+      responses:
+        '200':
+          description: ''
+        '201':
+          description: |
+        '202':
+          description: |
+            a multi-line summary
+        '203':
+          content:
+            application/json:
+              schema:
+                properties:
+                  description:
+                    type: string
+          description: real
+        '204':
+          description: ''''
+components:
+  schemas:
+    W:
+      type: object
+";
+        // Flagged, in document order: GET /a 201 (empty `\"\"`), GET /a 202 (bare
+        // null), POST /a 200 (empty `''`), POST /a 201 (empty block scalar). Not
+        // flagged: GET /a 200 (`ok`); GET /a 400 (a `$ref`, no description of its
+        // own); POST /a 202 (a block scalar *with* a content line); POST /a 203 (its
+        // own `description: real` at indent 10 — the property literally named
+        // `description` inside the response's `content` schema sits far deeper and is
+        // ignored); POST /a 204 (`''''` holds one `'`, text).
+        assert_eq!(
+            responses_with_empty_description(body),
+            vec![
+                "GET /a 201".to_string(),
+                "GET /a 202".to_string(),
+                "POST /a 200".to_string(),
+                "POST /a 201".to_string(),
+            ]
+        );
+
+        // Non-vacuous floor: across every registered spec no response description is
+        // empty (the invariant the contract test asserts), and the corpus actually
+        // declares many inline (non-`$ref`) descriptions at the response object's own
+        // child indent — so the value-inspection path runs on real data and a broken
+        // (always-empty) extractor can't hide behind a corpus with no descriptions to
+        // check. Count indent-10 `description:` fields under `paths:` with a detector
+        // independent of the extractor's emptiness comparison. This is a superset of
+        // response descriptions (a parameter's or a request body's own `description`
+        // also lands at indent 10 under a path item), which only strengthens the
+        // floor — every one is a real, non-empty inline description the corpus carries.
+        let mut inline_descriptions = 0usize;
+        for api in APIS {
+            assert!(
+                responses_with_empty_description(api.body).is_empty(),
+                "{}: every inline response `description` must be non-empty",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            let mut in_paths = false;
+            for l in &lines {
+                if !l.is_empty() && !l.starts_with(char::is_whitespace) {
+                    in_paths = l.trim_end() == "paths:";
+                    continue;
+                }
+                if in_paths
+                    && indent(l) == 10
+                    && l.trim_start().split_once(':').map(|(k, _)| k) == Some("description")
+                {
+                    inline_descriptions += 1;
+                }
+            }
+        }
+        assert!(
+            inline_descriptions >= 100,
+            "expected many inline response descriptions across specs, got {inline_descriptions}"
+        );
+    }
 }
