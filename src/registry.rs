@@ -9751,6 +9751,403 @@ components:
         );
     }
 
+    /// Extract the 1-based line number of every Discriminator Object whose
+    /// `propertyName` is **not listed in the enclosing schema's `required` array**
+    /// — without a YAML dep.
+    ///
+    /// OpenAPI 3.0.3 §4.8.25.1: for a discriminator to be usable the property it
+    /// names in `propertyName` MUST be a required member of the schema — a payload
+    /// can only be routed to a concrete variant when the selecting property is
+    /// guaranteed present. A discriminator whose `propertyName` is *optional*
+    /// (absent from `required`, or the schema declaring no `required` array at all)
+    /// is a broken polymorphic schema: a Redoc/Swagger/codegen client can be handed
+    /// a payload with no discriminating value and cannot pick a variant to
+    /// deserialize or generate, so the polymorphism fails exactly where a caller
+    /// reads or builds the body.
+    ///
+    /// This is the *required-membership* complement of
+    /// `discriminators_missing_property_name` (which only checks the `propertyName`
+    /// field is present); no existing test links the named property to the schema's
+    /// `required` list — the required-array tests
+    /// (`every_required_array_lists_distinct_entries`,
+    /// `every_required_entry_names_a_declared_property`,
+    /// `every_required_array_sits_on_an_object_type`) inspect a `required` array's
+    /// entries, membership and sibling type, never a discriminator, and the
+    /// discriminator test checks only field presence.
+    ///
+    /// For each block-form `discriminator:` at indent `c`: its `propertyName`
+    /// scalar is read from the discriminator's own block (a child indented past
+    /// `c`, bounded by the dedent to `c` that closes the object). A discriminator
+    /// with no `propertyName` is skipped (that omission is
+    /// `discriminators_missing_property_name`'s concern). The enclosing schema
+    /// object's `required:` array is then located among the `discriminator:`
+    /// siblings — a same-indent (`c`) key found by scanning the object's block down
+    /// then up, dedent-bounded exactly like `schema_bounds_inverted`, so a nested or
+    /// neighbouring object's `required` never pairs — and its entries collected (an
+    /// inline flow `[a, b]` or the block `- ` items indented past the key). The
+    /// discriminator is flagged when the `propertyName` value is absent from those
+    /// entries, including when the schema declares no sibling `required` at all.
+    fn discriminators_with_optional_property_name(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        // The inline scalar of a `name:` key (inline comment + surrounding quotes
+        // stripped); `None` for a different key or a block opener (empty value).
+        let scalar = |l: &str, name: &str| -> Option<String> {
+            let (k, v) = l.trim_start().split_once(':')?;
+            if k.trim() != name {
+                return None;
+            }
+            let v = v
+                .split('#')
+                .next()
+                .unwrap_or(v)
+                .trim()
+                .trim_matches('"')
+                .trim_matches('\'');
+            if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            }
+        };
+        // The `required` array entries of the schema object owning the
+        // `discriminator:` at line `i` (indent `c`): find a same-indent `required:`
+        // sibling (down through the object's block, then up, dedent-bounded), then
+        // read its entries — an inline flow `[a, b, …]` or the block `- ` items
+        // indented past it. `None` when the object declares no `required:` sibling.
+        let required_entries = |i: usize, c: usize| -> Option<HashSet<String>> {
+            let key_is = |l: &str, name: &str| -> bool {
+                l.trim_start()
+                    .split_once(':')
+                    .is_some_and(|(k, _)| k.trim() == name)
+            };
+            let read_entries = |ri: usize, rline: &str| -> HashSet<String> {
+                let mut set = HashSet::new();
+                let after = rline
+                    .trim_start()
+                    .split_once(':')
+                    .map(|(_, v)| v)
+                    .unwrap_or("");
+                let after = after.split('#').next().unwrap_or(after).trim();
+                if let Some(inner) = after.strip_prefix('[') {
+                    // inline flow sequence: `required: [a, b, …]`
+                    for tok in inner.trim_end_matches(']').split(',') {
+                        let t = tok.trim().trim_matches('"').trim_matches('\'');
+                        if !t.is_empty() {
+                            set.insert(t.to_string());
+                        }
+                    }
+                    return set;
+                }
+                // block sequence: `- name` items indented past the `required:` key
+                let rc = indent(rline);
+                let mut j = ri + 1;
+                while j < lines.len() {
+                    let l = lines[j];
+                    if l.trim().is_empty() {
+                        j += 1;
+                        continue;
+                    }
+                    if indent(l) <= rc {
+                        break;
+                    }
+                    if let Some(item) = l.trim_start().strip_prefix('-') {
+                        let t = item
+                            .split('#')
+                            .next()
+                            .unwrap_or(item)
+                            .trim()
+                            .trim_matches('"')
+                            .trim_matches('\'');
+                        if !t.is_empty() {
+                            set.insert(t.to_string());
+                        }
+                    }
+                    j += 1;
+                }
+                set
+            };
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && key_is(l, "required") {
+                    return Some(read_entries(j, l));
+                }
+                j += 1;
+            }
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && key_is(l, "required") {
+                    return Some(read_entries(k, l));
+                }
+            }
+            None
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            // A Discriminator Object: block-form `discriminator:` (no inline value).
+            let Some((k, v)) = line.trim_start().split_once(':') else {
+                continue;
+            };
+            if k.trim() != "discriminator"
+                || !v.split('#').next().unwrap_or(v).trim().is_empty()
+            {
+                continue;
+            }
+            let c = indent(line);
+            // Read the discriminator's `propertyName` child (within its block).
+            let mut prop: Option<String> = None;
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) <= c {
+                    break; // dedented out of this discriminator object
+                }
+                if let Some(p) = scalar(l, "propertyName") {
+                    prop = Some(p);
+                    break;
+                }
+                j += 1;
+            }
+            let Some(prop) = prop else {
+                continue; // missing propertyName — the sibling test's concern
+            };
+            let listed = required_entries(i, c).is_some_and(|set| set.contains(&prop));
+            if !listed {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_discriminator_property_name_is_required() {
+        // Contract-harness invariant (OpenAPI 3.0.3 §4.8.25.1): the property a
+        // Discriminator Object names in `propertyName` MUST be a *required* member
+        // of the enclosing schema — the payload can only be routed to a concrete
+        // variant when the selecting property is guaranteed present. A discriminator
+        // whose `propertyName` is optional (absent from the schema's `required`
+        // array, or the schema declaring no `required` at all) is a broken
+        // polymorphic schema: a Redoc/Swagger/codegen client can be handed a payload
+        // with no discriminating value and cannot pick a variant to deserialize or
+        // generate — the polymorphism fails at exactly the point a caller reads or
+        // builds the body.
+        //
+        // The *required-membership* complement of
+        // `every_discriminator_declares_a_property_name` (which checks only that the
+        // `propertyName` field is present): CamaraSim's polymorphic families
+        // (`Area`/`Device`/`AccessDetail`) all key off a required discriminator
+        // property, and a discriminator block pasted from a sibling can keep
+        // `propertyName` while its `required:` sibling drifts (a renamed property, a
+        // dropped `required` line). No existing test links the named property to the
+        // schema's `required` list — the required-array tests inspect a `required`
+        // array's entries, membership and sibling type, never a discriminator.
+        // Verified true across all mounted specs before asserting.
+        for api in APIS {
+            let offenders = discriminators_with_optional_property_name(api.body);
+            assert!(
+                offenders.is_empty(),
+                "{} spec declares a `discriminator` whose `propertyName` is not \
+                 listed in the enclosing schema's `required` array (an optional \
+                 discriminator property a client can't switch on) at \
+                 `discriminator:` line(s): {:?}",
+                api.name,
+                offenders
+            );
+        }
+    }
+
+    #[test]
+    fn discriminator_property_name_required_extraction_rules() {
+        // Unit-cover `discriminators_with_optional_property_name` so the contract
+        // test above can't pass vacuously and its detection is pinned: a
+        // discriminator whose `propertyName` is listed in a same-object `required`
+        // block passes; one listed in an inline-flow `required: [ … ]` passes; a
+        // `required` declared *below* the discriminator (down-scan) still pairs; a
+        // `propertyName` absent from the `required` entries is flagged; a schema
+        // with no `required` sibling at all is flagged; and a discriminator missing
+        // `propertyName` entirely is skipped (that omission is the sibling
+        // `discriminators_missing_property_name`'s concern, not this test's).
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    GoodBlock:
+      type: object
+      required:
+        - kind
+      discriminator:
+        propertyName: kind
+      properties:
+        kind:
+          type: string
+    GoodFlow:
+      type: object
+      required: [type]
+      discriminator:
+        propertyName: type
+      properties:
+        type:
+          type: string
+    GoodRequiredBelow:
+      type: object
+      discriminator:
+        propertyName: areaType
+        mapping:
+          CIRCLE: '#/components/schemas/Circle'
+      required:
+        - areaType
+      properties:
+        areaType:
+          type: string
+    BadNotListed:
+      type: object
+      required:
+        - other
+      discriminator:
+        propertyName: kind
+      properties:
+        kind:
+          type: string
+        other:
+          type: string
+    BadNoRequired:
+      type: object
+      discriminator:
+        propertyName: kind
+      properties:
+        kind:
+          type: string
+    MissingPropName:
+      type: object
+      discriminator:
+        mapping:
+          CIRCLE: '#/components/schemas/Circle'
+      required:
+        - areaType
+      properties:
+        areaType:
+          type: string
+";
+        // Flagged, in document order: `BadNotListed`'s discriminator at line 46 (its
+        // `required` lists only `other`, not the named `kind`) and `BadNoRequired`'s
+        // at line 55 (the schema declares no `required` sibling). Not flagged:
+        // `GoodBlock` (line 18, `kind` in the block `required`), `GoodFlow` (line 26,
+        // `type` in the inline-flow `required: [type]`), `GoodRequiredBelow` (line 33,
+        // `areaType` in a `required` declared *below* the discriminator — down-scan),
+        // and `MissingPropName` (line 62, no `propertyName` — the sibling presence
+        // test's concern).
+        assert_eq!(
+            discriminators_with_optional_property_name(body),
+            vec![46, 55]
+        );
+
+        // Non-vacuous floor: across every registered spec every discriminator's
+        // `propertyName` is listed in its schema's `required` array (the invariant
+        // the contract test asserts), and the corpus actually declares several such
+        // discriminators (the `Area`/`Device`/`AccessDetail` families) — so the
+        // membership-comparison path runs on real data and a broken (always-empty)
+        // extractor can't hide behind a corpus that never pairs a discriminator with
+        // a required property. Count required-property discriminators with a detector
+        // independent of the extractor's sibling-scan: a block-form `discriminator:`
+        // whose `propertyName` value appears verbatim as some `- <value>` list item
+        // anywhere in the same spec.
+        let mut required_discriminators = 0usize;
+        for api in APIS {
+            assert!(
+                discriminators_with_optional_property_name(api.body).is_empty(),
+                "{}: every discriminator propertyName must be a required member",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            for (i, l) in lines.iter().enumerate() {
+                if l.trim() != "discriminator:" {
+                    continue;
+                }
+                let c = indent(l);
+                let mut prop: Option<String> = None;
+                let mut j = i + 1;
+                while j < lines.len() {
+                    let x = lines[j];
+                    if x.trim().is_empty() {
+                        j += 1;
+                        continue;
+                    }
+                    if indent(x) <= c {
+                        break;
+                    }
+                    if let Some((k, v)) = x.trim_start().split_once(':') {
+                        if k.trim() == "propertyName" {
+                            let v = v
+                                .split('#')
+                                .next()
+                                .unwrap_or(v)
+                                .trim()
+                                .trim_matches('"')
+                                .trim_matches('\'');
+                            if !v.is_empty() {
+                                prop = Some(v.to_string());
+                            }
+                            break;
+                        }
+                    }
+                    j += 1;
+                }
+                let Some(prop) = prop else {
+                    continue;
+                };
+                let listed = lines.iter().any(|x| {
+                    x.trim_start().strip_prefix('-').is_some_and(|r| {
+                        r.split('#')
+                            .next()
+                            .unwrap_or(r)
+                            .trim()
+                            .trim_matches('"')
+                            .trim_matches('\'')
+                            == prop
+                    })
+                });
+                if listed {
+                    required_discriminators += 1;
+                }
+            }
+        }
+        assert!(
+            required_discriminators >= 5,
+            "expected several required-property discriminators across specs, got {required_discriminators}"
+        );
+    }
+
     /// Extract the 1-based line number of every `oneOf`/`anyOf`/`allOf` keyword a
     /// spec declares whose value is **not a sequence** (an array of schemas) —
     /// without a YAML dep.

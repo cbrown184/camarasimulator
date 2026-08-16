@@ -3322,6 +3322,23 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - a discriminator required-property contract test (`src/registry.rs`
+    `every_discriminator_property_name_is_required`) asserts every Discriminator
+    Object's `propertyName` is listed in the enclosing schema's `required` array
+    (OpenAPI 3.0.3 §4.8.25.1) — an optional discriminator property leaves a client
+    with no guaranteed value to switch on, so it can't pick a variant to
+    deserialize/generate. The required-membership complement of
+    `every_discriminator_declares_a_property_name` (field presence only); no other
+    test links the named property to the schema's `required` list. Pure
+    `discriminators_with_optional_property_name` extractor (no YAML dep): reads the
+    `propertyName` child, finds the same-indent `required:` sibling by a
+    dedent-bounded down-then-up scan (mirroring `schema_bounds_inverted`), collects
+    its entries (inline flow or block `- ` items), flags an absent property; a
+    discriminator missing `propertyName` is left to the sibling presence test.
+    Unit-covered (`discriminator_property_name_required_extraction_rules`, incl. a
+    ≥5 required-property discriminator floor). Verified true across all mounted
+    specs (8 discriminators — `Area`/`Device`/`AccessDetail` families — all
+    required) before asserting.
   - a non-empty-composer contract test (`src/registry.rs`
     `every_composer_keyword_lists_at_least_one_subschema`) asserts every
     `oneOf`/`anyOf`/`allOf` a mounted spec declares lists at least one subschema.
@@ -4654,6 +4671,31 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-16 — Contract-test harness: added a **discriminator required-property**
+  spec-structural contract test (`src/registry.rs`
+  `every_discriminator_property_name_is_required`) — every Discriminator Object's
+  `propertyName` must be listed in the enclosing schema's `required` array
+  (OpenAPI 3.0.3 §4.8.25.1). A discriminator whose selecting property is optional
+  (absent from `required`, or the schema declaring no `required` at all) is a broken
+  polymorphic schema: a Redoc/Swagger/codegen client can be handed a payload with no
+  discriminating value and cannot pick a variant to deserialize or generate. The
+  required-membership complement of `every_discriminator_declares_a_property_name`
+  (which checks only that the field is present); no existing test links the named
+  property to the schema's `required` list. New pure
+  `discriminators_with_optional_property_name` extractor (no YAML dep): reads each
+  block-form `discriminator:`'s `propertyName` child, locates the same-indent
+  `required:` sibling by a dedent-bounded down-then-up scan (mirroring
+  `schema_bounds_inverted`), collects its entries (inline flow `[a, b]` or block
+  `- ` items), and flags a `propertyName` absent from them; a discriminator missing
+  `propertyName` is skipped (the sibling presence test's concern). Surveyed the
+  corpus first (8 discriminators across the mounted specs — `Area`/`Device`/
+  `AccessDetail` families — all listing their `propertyName` in `required`) → no
+  drift to fix. Unit-covered (`discriminator_property_name_required_extraction_rules`:
+  block-`required`, inline-flow-`required`, and `required`-declared-below cases pass;
+  a not-listed and a no-`required` case flagged in document order `[46, 55]`; a
+  missing-`propertyName` discriminator skipped; plus an independent ≥5 required-property
+  discriminator corpus floor). `cargo test` green (2625 tests); `cargo build --release`
+  ok. Binary (release): 5,314,968 bytes (~5.1 MB) — unchanged, test-only, no new dep.
 - 2026-08-16 — Contract-test harness: added a **non-empty composer** spec-structural
   contract test (`src/registry.rs` `every_composer_keyword_lists_at_least_one_subschema`)
   — every `oneOf`/`anyOf`/`allOf` a mounted spec declares must list at least one
