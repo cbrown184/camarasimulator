@@ -227,6 +227,10 @@ servers:
         default: http://localhost:8080
         description: API root, e.g. the CamaraSim base URL.
 
+tags:
+  - name: Cluster
+    description: Operations for discovering the Kubernetes clusters available to host application deployments
+
 paths:
   /apps:
     post:

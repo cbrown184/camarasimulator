@@ -3323,6 +3323,22 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - an operation-tag-declared-globally contract test (`src/registry.rs`
+    `every_operation_tag_is_declared_globally`) asserts every tag an operation lists in
+    its `tags` array is declared in the document's top-level `tags` list (the
+    `operation-tag-defined` lint) — the global list gives a tag its
+    description/order/`externalDocs`, so an undeclared operation tag renders as an
+    anonymous group. Caught real drift: `edge-application-management/vwip` had a lone
+    `Cluster` operation tag with no global `tags:` block → added the matching global
+    declaration in the same pass. Pure `undeclared_operation_tags` extractor (no YAML
+    dep): pass 1 collects global tag names (`name:` under the indent-0 `tags:` block),
+    pass 2 scopes operation tags like `operations_without_summary` (6-space `tags:` under
+    a path-item method; block list or inline flow, quoted/multi-word handled) and flags
+    each tag the global list never declares. A `components` schema property named `tags`
+    and the global list itself are skipped. Unit-covered
+    (`operation_tag_declaration_extraction_rules`: declared block/inline/quoted-multi-word
+    tags pass; undeclared `Gamma`/`Delta` flagged in order; schema property ignored; ≥3
+    operation-tag-block corpus floor).
   - an error-example `status`-matches-response-key contract test (`src/registry.rs`
     `every_error_example_status_matches_its_response_key`) asserts that where a
     Response Object keyed by a numeric HTTP status declares an example whose value
@@ -4804,6 +4820,31 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-16 — Contract-test harness: added an **operation-tag-declared-globally** contract
+  test (`src/registry.rs` `every_operation_tag_is_declared_globally`) — every tag an operation
+  lists in its `tags` array must be declared in the document's top-level `tags` list (the
+  well-known `operation-tag-defined` lint). The global list is where a tag gains its
+  `description`/order/`externalDocs`, so an operation tag absent from it renders in
+  Redoc/Swagger as an anonymous, undescribed group. **Found and fixed real drift:**
+  `edge-application-management/vwip` declared a lone `Cluster` operation tag (on `getClusters`)
+  but had **no** top-level `tags:` block, so the tag dangled — added the matching global
+  `tags:` declaration (`Cluster` + description) in the same pass. No other test reads a tag
+  (the summary/operationId/responses series pins an operation's own fields; the info/externalDocs
+  guards pin document metadata). New pure `undeclared_operation_tags` extractor (no YAML dep):
+  pass 1 collects global tag names from every `name:` under the indent-0 `tags:` block; pass 2
+  scopes operation tags like `operations_without_summary` (4-space verb under a 2-space `/…`
+  path item under `paths:`) to the operation's own 6-space `tags:` — block list (`- Cluster`)
+  or inline flow (`tags: [A, B]`), quoted/multi-word scalars handled — and flags each tag the
+  global list never declares (`METHOD /path -> tag`, document order). A schema property literally
+  named `tags` (never an operation's 6-space child) and the global list itself are never read as
+  operation tags. Unit-covered (`operation_tag_declaration_extraction_rules`: declared block +
+  inline + quoted multi-word tags pass; undeclared block `Gamma` and inline `Delta` flagged in
+  order; `components` `tags` schema property ignored; plus a ≥3 operation-tag-block corpus floor
+  via an independent counter). Verified true across all mounted specs after the fix (4 operation
+  tag references — 3 iot-sim + 1 edge — all globally declared). `cargo test` 2641 green (was 2639;
+  +2); `cargo build --release` succeeds, no warnings. No new dependency; the extractor and tests
+  live in the `#[cfg(test)]` module, and the spec change is documentation-only. — binary (release):
+  5.1M (5,314,968 B; unchanged)
 - 2026-08-16 — Contract-test harness: added an **externalDocs-`url`** contract test
   (`src/registry.rs` `every_external_docs_object_declares_a_url`) — every `externalDocs`
   field a mounted spec declares must carry a non-empty `url`, the External Documentation

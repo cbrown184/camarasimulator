@@ -19926,4 +19926,293 @@ components:
             "expected External Documentation Objects across specs, got {ext_docs}"
         );
     }
+
+    /// The `METHOD /path -> <tag>` label of every **operation tag reference** a
+    /// mounted spec declares that is not declared in the document's top-level
+    /// `tags` list — without a YAML dep.
+    ///
+    /// OpenAPI's global `tags` list is where a tag is given its identity (name,
+    /// description, `externalDocs`); an operation `tags` entry naming a tag that
+    /// the list never declares renders in Redoc/Swagger as an anonymous,
+    /// unordered group right where a caller browses the API by resource — the
+    /// well-known `operation-tag-defined` lint. Global tag names are collected
+    /// from every `name:` under the top-level `tags:` block (block form; each
+    /// item is a Tag Object with a `name`). Operation tags are scoped like
+    /// [`operations_without_summary`] (a 4-space HTTP-verb key under a 2-space
+    /// `/…` path item beneath the top-level `paths:` block), then the operation's
+    /// own 6-space `tags:` — a block list of plain scalars (`- Cluster`) or an
+    /// inline flow (`tags: [Cluster, Foo]`). A schema property literally named
+    /// `tags` (never at an operation's 6-space child indent under a method) and
+    /// the global `tags:` list itself (indent 0) are never read as operation tags.
+    fn undeclared_operation_tags(body: &str) -> Vec<String> {
+        const METHODS: [&str; 8] =
+            ["get", "put", "post", "delete", "patch", "options", "head", "trace"];
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        // Strip surrounding matching quotes; else drop a trailing `# comment` from
+        // a plain scalar and trim. `"Big Group"`/`'Big Group'` -> `Big Group`.
+        let scalar = |v: &str| -> String {
+            let v = v.trim();
+            let b = v.as_bytes();
+            if b.len() >= 2 && (b[0] == b'"' || b[0] == b'\'') && b[b.len() - 1] == b[0] {
+                return v[1..v.len() - 1].to_string();
+            }
+            v.split('#').next().unwrap_or(v).trim().to_string()
+        };
+
+        // Pass 1 — global tag names: every `name:` value inside the top-level
+        // `tags:` block (from a bare indent-0 `tags:` until the next indent-0 key).
+        let mut declared: Vec<String> = Vec::new();
+        let mut in_global_tags = false;
+        for line in &lines {
+            let is_top = !line.is_empty() && !line.starts_with(char::is_whitespace);
+            if is_top {
+                in_global_tags = line.trim_end() == "tags:";
+                continue;
+            }
+            if !in_global_tags {
+                continue;
+            }
+            let t = line.trim_start();
+            let t = t.strip_prefix("- ").unwrap_or(t);
+            if let Some(v) = t.strip_prefix("name:") {
+                let name = scalar(v);
+                if !name.is_empty() {
+                    declared.push(name);
+                }
+            }
+        }
+
+        // Pass 2 — operation tags, scoped to a 6-space `tags:` inside a path-item
+        // method, flagging each referenced tag the global list never declared.
+        let mut out = Vec::new();
+        let mut in_paths = false;
+        let mut path: Option<String> = None;
+        for (i, line) in lines.iter().enumerate() {
+            let is_top = !line.is_empty() && !line.starts_with(char::is_whitespace);
+            if is_top {
+                in_paths = line.trim_end() == "paths:";
+                path = None;
+                continue;
+            }
+            if !in_paths {
+                continue;
+            }
+            if let Some(rest) = line.strip_prefix("  ") {
+                if !rest.starts_with(char::is_whitespace) && rest.starts_with('/') {
+                    let key = rest.trim_end().strip_suffix(':').unwrap_or(rest.trim_end());
+                    path = Some(key.to_string());
+                    continue;
+                }
+            }
+            let Some(current_path) = path.as_deref() else { continue };
+            if indent(line) != 4 {
+                continue;
+            }
+            let key = line.trim_start();
+            let Some(name) = key.strip_suffix(':') else { continue };
+            if name.contains(char::is_whitespace) || !METHODS.contains(&name) {
+                continue;
+            }
+            let method = name.to_uppercase();
+            // Within this operation block, find its own 6-space `tags:` (at most
+            // one), gather its tag scalars, flag the undeclared ones, and stop.
+            for (j, l) in lines[i + 1..].iter().enumerate() {
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) <= 4 {
+                    break; // dedented out of this operation
+                }
+                if indent(l) != 6 {
+                    continue;
+                }
+                let Some((k, v)) = l.trim_start().split_once(':') else {
+                    continue;
+                };
+                if k.trim() != "tags" {
+                    continue;
+                }
+                let vtrim = v.trim();
+                let mut refs: Vec<String> = Vec::new();
+                if !vtrim.is_empty() {
+                    // Inline flow `[a, b]` (or a lone scalar): strip the brackets
+                    // and split on commas.
+                    let inner = vtrim.trim_start_matches('[').trim_end_matches(']');
+                    for part in inner.split(',') {
+                        let s = scalar(part);
+                        if !s.is_empty() {
+                            refs.push(s);
+                        }
+                    }
+                } else {
+                    // Block list: `- <tag>` items indented past the `tags:` key,
+                    // until a dedent to the key indent or shallower.
+                    let t_idx = i + 1 + j;
+                    let mut m = t_idx + 1;
+                    while m < lines.len() {
+                        let ll = lines[m];
+                        if ll.trim().is_empty() {
+                            m += 1;
+                            continue;
+                        }
+                        if indent(ll) <= 6 {
+                            break;
+                        }
+                        if let Some(item) = ll.trim_start().strip_prefix("- ") {
+                            let s = scalar(item);
+                            if !s.is_empty() {
+                                refs.push(s);
+                            }
+                        }
+                        m += 1;
+                    }
+                }
+                for tag in refs {
+                    if !declared.iter().any(|d| d == &tag) {
+                        out.push(format!("{method} {current_path} -> {tag}"));
+                    }
+                }
+                break; // one tags block per operation
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_operation_tag_is_declared_globally() {
+        // Contract-harness invariant (OpenAPI Tag Object usage; the well-known
+        // `operation-tag-defined` lint): every tag an operation lists in its
+        // `tags` array MUST be declared in the document's top-level `tags` list.
+        // That global list is where a tag gains its identity — its `description`,
+        // its display order, any `externalDocs` — so an operation tag absent from
+        // it renders in Redoc/Swagger as an anonymous, undescribed, arbitrarily
+        // ordered group right where a caller browses the API by resource. A live
+        // hazard in these specs: an operation is drafted from a sibling and pasted
+        // with its `tags:` line intact while the global `tags:` block is never
+        // added (or a tag is renamed on the operation but not in the list), so the
+        // reference dangles.
+        //
+        // No existing test reads a tag: the summary/operationId/responses series
+        // pins an operation's *own* fields, and the info/externalDocs guards pin
+        // document-level metadata — none cross-checks an operation tag against the
+        // global list. Verified true across every mounted spec before asserting
+        // (edge-application-management's lone `Cluster` operation tag gained the
+        // matching global declaration in the same pass).
+        for api in APIS {
+            let undeclared = undeclared_operation_tags(api.body);
+            assert!(
+                undeclared.is_empty(),
+                "{} spec references operation tag(s) not declared in its top-level \
+                 `tags` list (an undeclared tag renders as an anonymous group): {:?}",
+                api.name,
+                undeclared
+            );
+        }
+    }
+
+    #[test]
+    fn operation_tag_declaration_extraction_rules() {
+        // Unit-cover the `undeclared_operation_tags` extractor so the contract
+        // test above can't pass vacuously and its accept/reject boundary is
+        // pinned: a block-list operation tag that the global list declares passes;
+        // an inline-flow tag that it declares passes; a quoted multi-word tag
+        // matched against a multi-word global `name` passes; a block-list and an
+        // inline-flow tag with *no* matching global declaration are flagged in
+        // document order; and a schema property literally named `tags` (under
+        // `components`, never an operation's 6-space child) is never read as an
+        // operation tag.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+tags:
+  - name: Alpha
+    description: the alpha group
+  - name: Beta
+  - name: Big Group
+paths:
+  /a:
+    get:
+      operationId: getA
+      tags:
+        - Alpha
+      responses:
+        '200':
+          description: ok
+    post:
+      operationId: postA
+      tags:
+        - Gamma
+      responses:
+        '201':
+          description: created
+  /b:
+    get:
+      operationId: getB
+      tags: [Beta, Delta]
+      responses:
+        '204':
+          description: no content
+  /c:
+    get:
+      operationId: getC
+      tags:
+        - \"Big Group\"
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    Widget:
+      type: object
+      properties:
+        tags:
+          type: array
+          items:
+            type: string
+";
+        // Flagged, in document order: `POST /a`'s block-list `Gamma` and `GET /b`'s
+        // inline-flow `Delta` — neither declared in the global `tags` list. Not
+        // flagged: `GET /a` `Alpha` and `GET /b` `Beta` (declared, block + inline),
+        // `GET /c`'s quoted multi-word `\"Big Group\"` (declared as `Big Group`),
+        // and the `tags` *schema property* under `components.schemas.Widget`.
+        assert_eq!(
+            undeclared_operation_tags(body),
+            vec![
+                "POST /a -> Gamma".to_string(),
+                "GET /b -> Delta".to_string(),
+            ]
+        );
+
+        // Non-vacuous floor: across every registered spec every operation tag is
+        // declared globally (the invariant the contract test asserts), and the
+        // corpus actually declares operation `tags:` blocks — so the
+        // membership-check path runs on real data and a broken (always-empty)
+        // extractor can't hide behind a corpus with no operation tags. Count the
+        // blocks with a detection independent of the extractor.
+        let mut op_tag_blocks = 0usize;
+        for api in APIS {
+            assert!(
+                undeclared_operation_tags(api.body).is_empty(),
+                "{}: every operation tag must be declared in the global tags list",
+                api.name
+            );
+            op_tag_blocks += api
+                .body
+                .lines()
+                .filter(|l| {
+                    let ind = l.len() - l.trim_start().len();
+                    ind == 6
+                        && l.trim_start().split_once(':').map(|(k, _)| k.trim())
+                            == Some("tags")
+                })
+                .count();
+        }
+        assert!(
+            op_tag_blocks >= 3,
+            "expected operation tag blocks across specs, got {op_tag_blocks}"
+        );
+    }
 }
