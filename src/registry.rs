@@ -10462,6 +10462,292 @@ components:
         );
     }
 
+    /// Extract every discriminator `mapping` **target** — the schema a mapping
+    /// entry `<value>: <target>` routes a payload to — that is an intra-document
+    /// component pointer the spec does not define, returned as
+    /// `#/components/<section>/<name>@line <n>` in document order (no YAML dep).
+    ///
+    /// A Discriminator Object's optional `mapping` maps each discriminator value to
+    /// the concrete schema it selects; a target is either an explicit local pointer
+    /// (`#/components/schemas/Circle`) or the OpenAPI shorthand of a bare component
+    /// name (`Circle` ⇒ `#/components/schemas/Circle`). Either way the target MUST
+    /// name a schema the document DEFINES: a mapping pointing at a schema that was
+    /// renamed after the block was pasted, or one that only ever existed in the
+    /// sibling API the discriminator was copied from, is a dangling route — a
+    /// Redoc/Swagger/codegen client handed a discriminating value it can map to no
+    /// variant, so the polymorphism breaks exactly where a caller deserialises the
+    /// payload.
+    ///
+    /// This is the *mapping-target* complement of the ref-resolution family:
+    /// `local_component_refs_resolve_within_their_own_spec` dereferences a spec's
+    /// own `$ref:` pointers against its `components:` block, but a discriminator
+    /// mapping target is **not** a `$ref` — it is a bare pointer/name value under
+    /// `mapping:` — so it escapes that scan entirely, as it does the discriminator
+    /// tests (`discriminators_missing_property_name` /
+    /// `discriminators_with_optional_property_name` check only the `propertyName`
+    /// field, never the mapping's targets). Reuses the (unit-covered)
+    /// `component_pointers` for the set of defined components.
+    ///
+    /// A cross-file target (a non-empty file half, `errors.yaml#/…`) is skipped —
+    /// the cross-file ref tests own those; only the intra-document
+    /// `#/components/<section>/<name>` granularity `component_pointers` resolves is
+    /// checked. Handles a quoted discriminator key containing a colon
+    /// (`"Wi-Fi:WPA_PERSONAL": …`) and a quoted target value.
+    fn discriminator_mapping_dangling_targets(body: &str) -> Vec<String> {
+        // The target value of a `mapping:` entry `<key>: <target>`, unquoted; `None`
+        // for a sequence item, a block opener, or an empty value. The key may be
+        // single/double quoted and itself contain a `:` (`"Wi-Fi:WPA": target`), so
+        // a quoted key is consumed up to its closing quote before the separating `:`.
+        fn mapping_entry_target(s: &str) -> Option<String> {
+            let s = s.trim();
+            if s.starts_with('-') {
+                return None; // a YAML sequence item, not a mapping entry
+            }
+            let after_colon = if let Some(r) = s.strip_prefix('"') {
+                let end = r.find('"')?;
+                r[end + 1..].trim_start().strip_prefix(':')?
+            } else if let Some(r) = s.strip_prefix('\'') {
+                let end = r.find('\'')?;
+                r[end + 1..].trim_start().strip_prefix(':')?
+            } else {
+                s.split_once(':')?.1
+            };
+            let v = after_colon.trim();
+            // Strip a surrounding quote pair (the value up to the closing quote) or,
+            // for an unquoted scalar, take the first whitespace-delimited token.
+            let v = if let Some(r) = v.strip_prefix('"') {
+                r.split('"').next().unwrap_or(r)
+            } else if let Some(r) = v.strip_prefix('\'') {
+                r.split('\'').next().unwrap_or(r)
+            } else {
+                v.split_whitespace().next().unwrap_or(v)
+            };
+            if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            }
+        }
+
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let defined = component_pointers(body);
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            if line.trim() != "discriminator:" {
+                continue;
+            }
+            let disc_indent = indent(line);
+            // Find this discriminator's `mapping:` child (a key indented past the
+            // discriminator, before the block dedents to a sibling/ancestor).
+            let mut j = i + 1;
+            let mut map_indent = None;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) <= disc_indent {
+                    break; // discriminator block closed with no `mapping`
+                }
+                if l.trim() == "mapping:" {
+                    map_indent = Some(indent(l));
+                    break;
+                }
+                j += 1;
+            }
+            let Some(map_indent) = map_indent else {
+                continue;
+            };
+            // Read the mapping entries (indented past `mapping:`).
+            let mut k = j + 1;
+            while k < lines.len() {
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    k += 1;
+                    continue;
+                }
+                if indent(l) <= map_indent {
+                    break; // mapping block closed
+                }
+                if let Some(target) = mapping_entry_target(l) {
+                    let pointer = if target.starts_with("#/") {
+                        target.clone()
+                    } else if target.contains('#') {
+                        k += 1;
+                        continue; // cross-file pointer: owned by the cross-file ref tests
+                    } else {
+                        // OpenAPI shorthand: a bare name ⇒ #/components/schemas/<name>.
+                        format!("#/components/schemas/{target}")
+                    };
+                    // Only top-level component pointers (#/components/<section>/<name>).
+                    if pointer.split('/').count() == 4
+                        && pointer.starts_with("#/components/")
+                        && !defined.contains(&pointer)
+                    {
+                        out.push(format!("{pointer}@line {}", k + 1));
+                    }
+                }
+                k += 1;
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_discriminator_mapping_target_is_a_defined_component() {
+        // Contract-harness invariant (OpenAPI 3.0.x structural rule): every target a
+        // Discriminator Object's `mapping` names — the concrete schema a discriminator
+        // value routes a payload to — MUST resolve to a component the same document
+        // DEFINES. A mapping entry is `<value>: <schema>`, where the schema is a local
+        // pointer (`#/components/schemas/Circle`) or the OpenAPI bare-name shorthand
+        // (`Circle`). A target that resolves to nothing (a schema renamed after the
+        // discriminator block was pasted, or one that only lived in the sibling API it
+        // was copied from) is a dangling route: a Redoc/Swagger/codegen client handed
+        // that discriminating value can map it to no variant, so the polymorphism
+        // (CamaraSim uses discriminators for the `Area`/`Device`/`AccessDetail` family)
+        // breaks exactly where a caller deserialises the body.
+        //
+        // Invisible to every existing test: a mapping target is NOT a `$ref` — it is a
+        // bare pointer/name value under `mapping:` — so
+        // `local_component_refs_resolve_within_their_own_spec` (which scans `$ref:`
+        // lines) never sees it, and the discriminator tests
+        // (`every_discriminator_declares_a_property_name`,
+        // `every_discriminator_property_name_is_required`) inspect only the
+        // `propertyName` field, never the mapping's targets. Verified true across all
+        // mounted specs before asserting.
+        for api in APIS {
+            let dangling = discriminator_mapping_dangling_targets(api.body);
+            assert!(
+                dangling.is_empty(),
+                "{} spec declares a `discriminator.mapping` target naming a component \
+                 the document does not define — a dangling route the polymorphism can \
+                 never resolve: {:?}",
+                api.name,
+                dangling
+            );
+        }
+    }
+
+    #[test]
+    fn discriminator_mapping_target_extraction_rules() {
+        // Unit-cover the `discriminator_mapping_dangling_targets` extractor so the
+        // contract test above can't pass vacuously and its detection is pinned: a
+        // mapping target is flagged only when the intra-document component it names
+        // (an explicit `#/…` pointer or a bare-name shorthand) is not defined; an
+        // explicit pointer and a bare name that DO resolve pass; a quoted key
+        // containing a colon is parsed correctly; a cross-file target is skipped; and
+        // a discriminator with no `mapping` contributes nothing.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    Good:
+      oneOf:
+        - $ref: '#/components/schemas/Circle'
+        - $ref: '#/components/schemas/Poly'
+      discriminator:
+        propertyName: kind
+        mapping:
+          circle: '#/components/schemas/Circle'
+          poly: Poly
+    BadPointer:
+      discriminator:
+        propertyName: kind
+        mapping:
+          gone: '#/components/schemas/Ghost'
+    BadBareName:
+      discriminator:
+        propertyName: kind
+        mapping:
+          missing: Nowhere
+    Quoted:
+      discriminator:
+        propertyName: accessType
+        mapping:
+          \"Wi-Fi:WPA\": '#/components/schemas/Circle'
+    CrossFile:
+      discriminator:
+        propertyName: kind
+        mapping:
+          ext: 'other.yaml#/components/schemas/Thing'
+    NoMapping:
+      discriminator:
+        propertyName: kind
+    Circle:
+      type: object
+    Poly:
+      type: object
+";
+        // Flagged, in document order: `BadPointer`'s `#/components/schemas/Ghost`
+        // (line 27, an explicit pointer naming an undefined schema) and
+        // `BadBareName`'s `Nowhere` (line 32, a bare-name shorthand resolving to the
+        // undefined `#/components/schemas/Nowhere`). Not flagged: `Good`'s `Circle`
+        // pointer / `Poly` bare name (both defined below), `Quoted`'s target (its
+        // colon-bearing quoted key parses, target `Circle` is defined), `CrossFile`'s
+        // cross-file `other.yaml#/…` target (skipped — the cross-file ref tests'
+        // concern), and `NoMapping` (no mapping block).
+        assert_eq!(
+            discriminator_mapping_dangling_targets(body),
+            vec![
+                "#/components/schemas/Ghost@line 27".to_string(),
+                "#/components/schemas/Nowhere@line 32".to_string(),
+            ]
+        );
+
+        // Non-vacuous floor: across every registered spec every discriminator mapping
+        // target resolves (the invariant the contract test asserts), and the corpus
+        // actually declares several mapping entries (the `AccessDetail`/`Area`/
+        // `GeoReference` discriminators), so the resolution path runs on real data and
+        // a broken (always-empty) extractor can't hide behind a corpus that never maps
+        // a discriminator. Count mapping entries with a detector independent of the
+        // extractor's target parsing.
+        let mut mapping_entries = 0usize;
+        for api in APIS {
+            assert!(
+                discriminator_mapping_dangling_targets(api.body).is_empty(),
+                "{}: every discriminator mapping target must resolve to a defined component",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            for (i, l) in lines.iter().enumerate() {
+                if l.trim() != "mapping:" {
+                    continue;
+                }
+                let mi = indent(l);
+                let mut k = i + 1;
+                while k < lines.len() {
+                    let x = lines[k];
+                    if x.trim().is_empty() {
+                        k += 1;
+                        continue;
+                    }
+                    if indent(x) <= mi {
+                        break;
+                    }
+                    mapping_entries += 1;
+                    k += 1;
+                }
+            }
+        }
+        assert!(
+            mapping_entries >= 5,
+            "expected several discriminator mapping entries across specs, got {mapping_entries}"
+        );
+    }
+
     /// Extract the 1-based line number of every `oneOf`/`anyOf`/`allOf` keyword a
     /// spec declares whose value is **not a sequence** (an array of schemas) —
     /// without a YAML dep.

@@ -3323,6 +3323,24 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - a discriminator-mapping-target-resolves contract test (`src/registry.rs`
+    `every_discriminator_mapping_target_is_a_defined_component`) asserts every target
+    a Discriminator Object's `mapping` names (`<value>: <schema>`) resolves to a
+    component the same document defines. A mapping target is a local pointer
+    (`#/components/schemas/Circle`) or the OpenAPI bare-name shorthand (`Circle`); a
+    dangling one (a schema renamed after the block was pasted, or one that only lived
+    in the sibling API it was copied from) is a route the polymorphism can never
+    resolve. Invisible to the ref family: a mapping target is NOT a `$ref` (it is a
+    bare value under `mapping:`), so `local_component_refs_resolve_within_their_own_spec`
+    never scans it, and the discriminator tests check only `propertyName`. Pure
+    `discriminator_mapping_dangling_targets` extractor (no YAML dep) reuses the
+    unit-covered `component_pointers` for the defined set; handles a colon-bearing
+    quoted key (`"Wi-Fi:WPA_PERSONAL": …`) and skips cross-file targets. Unit-covered
+    (`discriminator_mapping_target_extraction_rules`: an undefined pointer + undefined
+    bare name flagged in document order; a resolving pointer/bare name, a quoted key,
+    a cross-file target, and a mapping-less discriminator not flagged; ≥5 mapping-entry
+    corpus floor). Surveyed the corpus first (7 mapping targets across 3 specs, 0
+    dangling) → no drift.
   - a path-key-no-trailing-slash contract test (`src/registry.rs`
     `every_path_item_key_has_no_trailing_slash`) asserts no `paths:` key a mounted
     spec declares, other than the root `/`, ends with a trailing slash (the Spectral
@@ -4859,6 +4877,35 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-16 — Contract-test harness: added a **discriminator-mapping-target-resolves**
+  contract test (`src/registry.rs` `every_discriminator_mapping_target_is_a_defined_component`)
+  — every target a Discriminator Object's `mapping` names (`<value>: <schema>`) must
+  resolve to a component the same document defines. A mapping target is the concrete
+  schema a discriminator value routes a payload to, written as a local pointer
+  (`#/components/schemas/Circle`) or the OpenAPI bare-name shorthand (`Circle`). A
+  dangling target — a schema renamed after the discriminator block was pasted, or one
+  that only ever lived in the sibling API it was copied from — is a route a
+  Redoc/Swagger/codegen client can map no discriminating value to, so the polymorphism
+  breaks where the payload is deserialised. Invisible to every sibling test: a mapping
+  target is **not** a `$ref` (it is a bare pointer/name value under `mapping:`), so
+  `local_component_refs_resolve_within_their_own_spec` (which scans `$ref:` lines) never
+  sees it, and the discriminator tests (`every_discriminator_declares_a_property_name`,
+  `every_discriminator_property_name_is_required`) inspect only the `propertyName` field,
+  never the mapping's targets. New pure `discriminator_mapping_dangling_targets` extractor
+  (no YAML dep): scopes each block-form `discriminator:` to its `mapping:` child
+  (dedent-bounded), parses each entry's target (handling a colon-bearing quoted key like
+  `"Wi-Fi:WPA_PERSONAL":` and a quoted value), resolves an explicit `#/…` pointer or a
+  bare-name shorthand against the unit-covered `component_pointers`, and skips cross-file
+  targets (owned by the cross-file ref tests). Surveyed the corpus first (7 mapping
+  targets across `network-access-domains`/`iot-sim-fraud-prevention`/`most-frequent-location`,
+  all resolve) → no drift to fix. Unit-covered (`discriminator_mapping_target_extraction_rules`:
+  an undefined pointer `#/components/schemas/Ghost` and an undefined bare name `Nowhere`
+  flagged in document order; a resolving pointer/bare name, a colon-bearing quoted key, a
+  cross-file `other.yaml#/…` target, and a mapping-less discriminator not flagged; plus a
+  ≥5 mapping-entry corpus floor via an independent counter). `cargo test` 2649 green (was
+  2647; +2); `cargo build --release` succeeds, no warnings. No new dependency; test-only
+  change (the extractor and both tests live in the `#[cfg(test)]` module). — binary
+  (release): 5.1M (5,314,968 B; unchanged)
 - 2026-08-16 — Contract-test harness: added an **operation-`description`-non-empty**
   contract test (`src/registry.rs` `every_operation_description_is_non_empty`) — where a
   path-item operation declares a `description`, that description must carry text. An
