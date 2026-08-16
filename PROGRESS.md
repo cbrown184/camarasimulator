@@ -3322,6 +3322,22 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - a quoted-string `example` length-bound contract test (`src/registry.rs`
+    `every_example_respects_its_string_length_bounds`) asserts every Schema Object's
+    quoted-string `example` has a character length within its sibling `minLength`/
+    `maxLength` — an `example` is a sample instance, so a string below `minLength` or
+    above `maxLength` is one the schema's own validator rejects (a Redoc "try it"
+    prefill / codegen sample the bound can never hold). The string-length complement of
+    `every_example_is_within_its_numeric_bounds` (numeric `minimum`/`maximum`); together
+    they cover both value families an `example` carries, and neither
+    `every_example_matches_its_schema_type` (type only) nor the size-bound tests (bounds'
+    own domain/ordering) compares an example's *length* to its bounds. Pure
+    `examples_outside_their_length_bounds` extractor (no YAML dep) mirrors the numeric
+    example test's exact-indent dedent-bounded sibling scan (down then up), inspects only
+    quoted-string examples (`chars().count()`, unquoted left to the numeric/type tests),
+    and skips `example:` payloads via the ancestor walk; unit-covered so the contract
+    can't pass vacuously. Verified true across all mounted specs (71 quoted-string
+    example↔length-bound sibling pairs, 0 out of bounds).
   - a no-body-status-has-no-content contract test (`src/registry.rs`
     `no_bodyless_status_response_declares_content`) asserts no `204`/`304` Response
     Object declares `content`. HTTP `204 No Content` / `304 Not Modified` forbid a
@@ -4527,6 +4543,24 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-16 — Contract-test harness: added a **quoted-string example length-bound**
+  spec-structural contract test (`src/registry.rs`
+  `every_example_respects_its_string_length_bounds`) — every Schema Object's
+  quoted-string `example` must have a character length within its sibling `minLength`/
+  `maxLength`. An `example` is a sample instance, so a string below `minLength` / above
+  `maxLength` is one the schema's own validator rejects (a Redoc "try it" prefill /
+  codegen sample the bound can never legally hold). The string-length complement of
+  `every_example_is_within_its_numeric_bounds` (numeric min/max); no prior test compared
+  a string example's *length* to its bounds (`…matches_its_schema_type` checks type; the
+  size-bound tests check the bounds' own domain/ordering). New pure
+  `examples_outside_their_length_bounds` extractor (no YAML dep) mirrors the numeric
+  example test's exact-indent dedent-bounded sibling scan (down then up), inspects only
+  quoted-string examples (`chars().count()`; unquoted left to the numeric/type tests),
+  skips `example:` payloads via the ancestor walk; unit-covered
+  (`example_length_bound_extraction_rules`) so the contract can't pass vacuously.
+  Verified true across all mounted specs (71 example↔length-bound sibling pairs, 0 out
+  of bounds). 2609 → 2611 tests green (cargo test). No new dep. — binary (release):
+  5.1M (5314968 B)
 - 2026-08-16 — Contract-test harness: added a **no-body-status-has-no-content**
   spec-structural contract test (`src/registry.rs`
   `no_bodyless_status_response_declares_content`) — no `204 No Content` / `304 Not

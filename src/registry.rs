@@ -14603,6 +14603,355 @@ components:
         );
     }
 
+    /// The 1-based line numbers, in document order, of every `example:` keyword whose
+    /// inline **quoted-string** value has a character length outside a sibling string
+    /// bound — `minLength` or `maxLength` — declared in the same Schema Object, without
+    /// a YAML dep. The string-length analogue of `examples_outside_their_numeric_bounds`
+    /// (which guards a numeric example against `minimum`/`maximum`); together the two
+    /// cover both value families an `example` can carry.
+    ///
+    /// In OpenAPI 3.0.x (JSON Schema) an `example` is a sample *instance* of the schema,
+    /// so it MUST satisfy the schema's own constraints. Where the object bounds a string
+    /// with `minLength`/`maxLength`, a quoted example shorter than `minLength` or longer
+    /// than `maxLength` is a self-contradictory schema: the schema advertises a sample
+    /// its own validator rejects, so a Redoc/Swagger "try it" prefill and a codegen
+    /// client's generated sample carry a value the length bound can never legally hold.
+    /// `minLength`/`maxLength` count characters, so length is measured in Unicode scalar
+    /// values (`chars().count()`), matching a validator.
+    ///
+    /// Only an `example` carrying an inline *quoted* scalar (a single- or double-quoted
+    /// string) and at least one same-object string-length bound sibling is inspected;
+    /// each bound is scanned at the example's own indent, down through the object's block
+    /// then up, dedent-bounded exactly like `examples_outside_their_numeric_bounds`, so a
+    /// nested or following sibling object's bound never pairs, and read only when it is a
+    /// non-negative-integer scalar. Skipped: an `example:` that opens a block (an
+    /// object/array or block-scalar example, or a property literally named `example`); an
+    /// *unquoted* example (a bare number/boolean is the numeric-bound / type test's
+    /// concern, and a bare string is a rare ambiguous case left to the type test); an
+    /// example with no length-bound sibling; and an `example:` nested inside an outer
+    /// `example:`/`examples:` payload (sample data, not a schema keyword). The comparison
+    /// is inclusive — only a length strictly below `minLength` or strictly above
+    /// `maxLength` is flagged.
+    fn examples_outside_their_length_bounds(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        // The inline scalar of a `name:` key (inline comment stripped; surrounding
+        // quotes preserved so a quoted token stays distinguishable from a bare number);
+        // `None` when the line is a different key or opens a block (no inline value).
+        let raw_inline = |l: &str, name: &str| -> Option<String> {
+            let (k, v) = l.trim_start().split_once(':')?;
+            if k.trim() != name {
+                return None;
+            }
+            let v = v.split('#').next().unwrap_or(v).trim();
+            if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            }
+        };
+        // A same-indent non-negative-integer length bound sibling `key` in the same
+        // object as line `i` (indent `c`): scan down through the object's block then up,
+        // dedent-bounded so a nested or following object's bound never pairs. A quoted or
+        // non-integer bound has no length to compare against and is treated as absent
+        // (its own domain is `every_size_bound_is_a_non_negative_integer`'s concern).
+        let sibling_len = |i: usize, c: usize, key: &str| -> Option<usize> {
+            let parse_len = |l: &str| -> Option<usize> {
+                let raw = raw_inline(l, key)?;
+                if raw.starts_with('"') || raw.starts_with('\'') {
+                    return None; // quoted → not a plain integer
+                }
+                raw.parse::<usize>().ok()
+            };
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c {
+                    if let Some(n) = parse_len(l) {
+                        return Some(n);
+                    }
+                }
+                j += 1;
+            }
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c {
+                    if let Some(n) = parse_len(l) {
+                        return Some(n);
+                    }
+                }
+            }
+            None
+        };
+        // True when line `i` (indent `c`) sits inside an outer `example:`/`examples:`
+        // payload — some enclosing container key up the indent ladder is
+        // `example`/`examples` (mirroring `examples_outside_their_numeric_bounds`), so an
+        // inner `example` key there is sample data, not a schema keyword.
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        // The character count of a quoted scalar's inner text (one matching leading and
+        // trailing quote stripped); `None` when the value is not a quoted string.
+        let quoted_len = |raw: &str| -> Option<usize> {
+            let inner = raw
+                .strip_prefix('"')
+                .and_then(|s| s.strip_suffix('"'))
+                .or_else(|| raw.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')))?;
+            Some(inner.chars().count())
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some(raw) = raw_inline(line, "example") else {
+                continue;
+            };
+            // Only a quoted-string example has a character length to bound; an unquoted
+            // scalar (number/bool/bare string) is left to the numeric-bound / type tests.
+            let Some(len) = quoted_len(&raw) else {
+                continue;
+            };
+            let c = indent(line);
+            if inside_example(i, c) {
+                continue;
+            }
+            let min = sibling_len(i, c, "minLength");
+            let max = sibling_len(i, c, "maxLength");
+            if min.is_none() && max.is_none() {
+                continue;
+            }
+            let below = min.is_some_and(|m| len < m);
+            let above = max.is_some_and(|m| len > m);
+            if below || above {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_example_respects_its_string_length_bounds() {
+        // Contract-harness invariant (OpenAPI 3.0.x / JSON-Schema structural rule):
+        // where a Schema Object declares a quoted-string `example` beside a `minLength`
+        // and/or `maxLength`, the example's character length MUST lie within those
+        // bounds. An `example` is a sample *instance* of the schema, so a string shorter
+        // than `minLength` or longer than `maxLength` — an over-long token pasted beside
+        // a tightened cap, a placeholder below a raised floor — is a self-contradictory
+        // schema whose own validator rejects the sample it advertises, so a
+        // Redoc/Swagger "try it" prefill and a codegen client's generated sample carry a
+        // value the length bound can never legally hold.
+        //
+        // The string-length complement of `every_example_is_within_its_numeric_bounds`
+        // (which guards a *numeric* example against `minimum`/`maximum`): together the
+        // two cover both value families an `example` can carry, and no existing test
+        // compares a string example's *length* against its bounds —
+        // `every_example_matches_its_schema_type` checks the example's type, and the
+        // size-bound tests (`every_size_bound_is_a_non_negative_integer`,
+        // `every_numeric_bound_is_ordered_low_to_high`) check the bounds' own domain and
+        // ordering, never against an example. Verified true across all mounted specs
+        // before asserting.
+        for api in APIS {
+            let offenders = examples_outside_their_length_bounds(api.body);
+            assert!(
+                offenders.is_empty(),
+                "{} spec declares a quoted-string `example` whose length falls outside \
+                 its sibling `minLength`/`maxLength` bound (a sample the bound's own \
+                 validator would reject) at `example:` line(s): {:?}",
+                api.name,
+                offenders
+            );
+        }
+    }
+
+    #[test]
+    fn example_length_bound_extraction_rules() {
+        // Unit-cover `examples_outside_their_length_bounds` so the contract test above
+        // can't pass vacuously and its detection is pinned: a quoted example whose length
+        // is within its bounds passes; one below a `minLength` (declared above it) and
+        // one above a `maxLength` (declared above it) are flagged in document order; an
+        // example whose length equals a bound passes (inclusive); a `minLength` declared
+        // *below* the example is still paired (down-scan); an unquoted example is skipped
+        // (no quoted-string length to compare); an example with no length-bound sibling
+        // is skipped; an `example:` nested inside an outer `example:` payload is skipped;
+        // an example in one property never pairs with a following property's bound across
+        // the dedent; a property literally named `example` (opening a block) is skipped;
+        // and a block-scalar example (`example: |`) is skipped (its inline value is the
+        // `|` indicator, not a quoted string).
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    GoodLen:
+      type: string
+      minLength: 2
+      maxLength: 8
+      example: \"hello\"
+    TooShort:
+      type: string
+      minLength: 5
+      example: \"ab\"
+    TooLong:
+      type: string
+      maxLength: 3
+      example: \"abcdef\"
+    MinBelow:
+      type: string
+      example: \"abcdefgh\"
+      minLength: 3
+    EqualBound:
+      type: string
+      minLength: 3
+      maxLength: 3
+      example: \"abc\"
+    Unquoted:
+      type: string
+      minLength: 5
+      example: hi
+    InExample:
+      type: object
+      example:
+        minLength: 5
+        example: \"ab\"
+    Split:
+      type: object
+      properties:
+        a:
+          example: \"x\"
+        b:
+          type: string
+          minLength: 5
+    NamedExample:
+      type: object
+      properties:
+        example:
+          type: string
+          minLength: 5
+    BlockExample:
+      type: string
+      maxLength: 2
+      example: |
+        a long block scalar
+";
+        // Flagged, in document order: line 22 (`TooShort.example: \"ab\"` length 2 <
+        // its `minLength: 5` sibling above) and line 26 (`TooLong.example: \"abcdef\"`
+        // length 6 > its `maxLength: 3` sibling above). Not flagged: `GoodLen` (5 in
+        // [2,8]); `MinBelow` (length 8 >= a `minLength: 3` declared *below* it —
+        // down-scan, no max); `EqualBound` (length 3 == both bounds, inclusive);
+        // `Unquoted` (`hi` is unquoted — no quoted-string length, though 2 < 5);
+        // `InExample` (its inner `example: \"ab\"` sits inside the outer `example:`
+        // payload); `Split.a.example: \"x\"`, whose only candidate `minLength: 5` sits in
+        // the following property `Split.b` past a dedent, so the two never pair;
+        // `NamedExample` (an `example:` opening a block has no inline scalar); and
+        // `BlockExample` (its inline value is the block-scalar `|` indicator, not a
+        // quoted string).
+        assert_eq!(examples_outside_their_length_bounds(body), vec![22, 26]);
+
+        // Non-vacuous floor: across every registered spec every quoted-string example
+        // with a sibling length bound lies within it (the invariant the contract test
+        // asserts), and the corpus actually declares many bounded string examples (a
+        // phoneNumber, an id, a hex token) — so the length-comparison path runs on real
+        // data and a broken (always-empty) extractor can't hide behind a corpus that
+        // never pairs an example with a length bound. Count pairs with a window detector
+        // independent of the extractor's length comparison.
+        let mut bounded_examples = 0usize;
+        for api in APIS {
+            assert!(
+                examples_outside_their_length_bounds(api.body).is_empty(),
+                "{}: every quoted-string example must lie within its sibling \
+                 minLength/maxLength bound",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            let is_quoted_example = |l: &str| {
+                l.trim_start().split_once(':').is_some_and(|(k, v)| {
+                    if k.trim() != "example" {
+                        return false;
+                    }
+                    let v = v.split('#').next().unwrap_or(v).trim();
+                    (v.starts_with('"') && v.ends_with('"') && v.len() >= 2)
+                        || (v.starts_with('\'') && v.ends_with('\'') && v.len() >= 2)
+                })
+            };
+            let is_int_key = |l: &str, name: &str| {
+                l.trim_start().split_once(':').is_some_and(|(k, v)| {
+                    k.trim() == name
+                        && v.split('#')
+                            .next()
+                            .unwrap_or(v)
+                            .trim()
+                            .parse::<usize>()
+                            .is_ok()
+                })
+            };
+            for (i, l) in lines.iter().enumerate() {
+                if !is_quoted_example(l) {
+                    continue;
+                }
+                let c = indent(l);
+                let lo = i.saturating_sub(8);
+                let hi = (i + 8).min(lines.len());
+                let has_bound = (lo..hi).any(|j| {
+                    j != i
+                        && indent(lines[j]) == c
+                        && (is_int_key(lines[j], "minLength") || is_int_key(lines[j], "maxLength"))
+                });
+                if has_bound {
+                    bounded_examples += 1;
+                }
+            }
+        }
+        assert!(
+            bounded_examples >= 20,
+            "expected many quoted-string example+length-bound sibling pairs across specs, got {bounded_examples}"
+        );
+    }
+
     /// The 1-based line numbers, in document order, of every `properties:` mapping
     /// opener whose sibling `type:` scalar names a JSON type other than `object` —
     /// without a YAML dep.
