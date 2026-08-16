@@ -3322,6 +3322,30 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - a `required`-array object-type contract test (`src/registry.rs`
+    `every_required_array_sits_on_an_object_type`) asserts every **array-form**
+    `required:` a mounted spec declares beside a scalar `type:` sits on `type: object`
+    (or an absent type — an implicit object). JSON-Schema `required` lists the mandatory
+    *members of an object*, so a `required:` array beside a non-object scalar type
+    (`type: array`, `type: string`/`integer`/…) is self-contradictory — a validator
+    ignores the constraint and a Redoc/Swagger/codegen client renders the wrong shape,
+    silently dropping the "mandatory member" contract. The `required`-keyword sibling of
+    `every_properties_object_is_object_typed` (which pins the *other* object-only keyword,
+    `properties`, against its sibling type): `facet_required_type` covers the string/array/
+    object *facet* keywords but not `required`, and the required-array *content* tests
+    (`every_required_array_lists_distinct_entries`,
+    `every_required_entry_names_a_declared_property`) check a `required` array's entries,
+    never its sibling `type:`. Only array-form `required:` (flow `[ … ]` or a block whose
+    first child is a `- ` item) is judged — the scalar `required: true`/`false`
+    Parameter/Request-Body flag opens no members list and is skipped, as is a property
+    literally *named* `required` and a `required:` inside an `example:` payload. A pure
+    `required_arrays_on_a_non_object_type` extractor (no YAML dep; mirrors
+    `properties_openers_with_non_object_type`'s dedent-bounded down-then-up sibling-`type`
+    scan + `inside_example` walk) is unit-covered
+    (`required_array_object_type_extraction_rules`, incl. a ≥100 object-typed-array
+    non-vacuous floor) so the contract can't pass vacuously. Verified true (263 array-form
+    `required:` blocks across all mounted specs, all object-typed — no drift to fix) before
+    asserting.
   - a quoted-string `example` length-bound contract test (`src/registry.rs`
     `every_example_respects_its_string_length_bounds`) asserts every Schema Object's
     quoted-string `example` has a character length within its sibling `minLength`/
@@ -4543,6 +4567,36 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-16 — Contract-test harness: added a **`required`-array object-type**
+  spec-structural contract test (`src/registry.rs`
+  `every_required_array_sits_on_an_object_type`) — every **array-form** `required:` a
+  mounted spec declares beside a scalar `type:` must sit on `type: object` (or an absent
+  type — an implicit object). JSON-Schema `required` lists the mandatory *members of an
+  object*, so a `required:` array beside a non-object scalar type (`type: array`,
+  `type: string`/`integer`/…) is self-contradictory: a validator ignores the constraint
+  and a Redoc/Swagger/codegen client renders the wrong shape, silently dropping the
+  "mandatory member" contract where a caller reads/builds the payload. The
+  `required`-keyword sibling of `every_properties_object_is_object_typed` (which pins the
+  *other* object-only keyword, `properties`): `facet_required_type` covers the
+  string/array/object *facet* keywords (`minLength`/`minItems`/`minProperties`/…) but not
+  `required`, and the required-array *content* tests
+  (`every_required_array_lists_distinct_entries`,
+  `every_required_entry_names_a_declared_property`) check a `required` array's entries,
+  never its sibling `type:`. New pure `required_arrays_on_a_non_object_type` extractor (no
+  YAML dep): judges only array-form `required:` (flow `[ … ]` or a block whose first child
+  is a `- ` item), so the scalar `required: true`/`false` Parameter/Request-Body flag opens
+  no members list and is skipped, as is a property literally *named* `required` (its value
+  is its own schema block) and a `required:` inside an `example:`/`examples:` payload
+  (ancestor-chain walk); the sibling `type:` is found by the dedent-bounded down-then-up
+  same-indent scan of `properties_openers_with_non_object_type`. Surveyed the corpus first
+  (263 array-form `required:` blocks, all object-typed — 0 drift) → no fix needed.
+  Unit-covered (`required_array_object_type_extraction_rules`: flow+block object-typed and
+  implicit-object pass; `type: array`/`type: string`/type-declared-below flagged in
+  document order `[40, 43, 46]`; a scalar `required: true` param flag, a named-`required`
+  property, an example-payload `required:`, and nested object-typed arrays all skipped;
+  plus a ≥100 object-typed-array non-vacuous floor). `cargo test` 2613 green (was 2611);
+  `cargo build --release` succeeds, no warnings. No new dependency; test-only change.
+  — binary (release): 5.1M (5,314,968 B; unchanged)
 - 2026-08-16 — Contract-test harness: added a **quoted-string example length-bound**
   spec-structural contract test (`src/registry.rs`
   `every_example_respects_its_string_length_bounds`) — every Schema Object's

@@ -15284,6 +15284,398 @@ components:
         );
     }
 
+    /// The 1-based line numbers, in document order, of every **array-form** `required:`
+    /// keyword whose sibling `type:` scalar names a JSON type other than `object` —
+    /// without a YAML dep.
+    ///
+    /// In OpenAPI 3.0.x (JSON Schema) `required` lists the mandatory *members of an
+    /// object*, so a Schema Object that declares a `required:` array must be
+    /// object-typed: either `type: object` or no `type` at all (an implicit object). A
+    /// `required:` array sitting beside a scalar `type:` that is *not* `object` —
+    /// `type: array` (a left-over from a retype where the author swapped `items:` for a
+    /// members list), or a scalar `type: string`/`integer`/`number`/`boolean` pasted
+    /// from a sibling — is a self-contradictory schema: JSON-Schema `required` applies
+    /// only to objects, so a validator ignores the constraint and a Redoc/Swagger/codegen
+    /// client renders the wrong shape (a scalar/array field that silently drops the
+    /// "mandatory member" contract) exactly where a caller reads or builds the payload.
+    ///
+    /// Only a `required:` in **array form** — a flow sequence (`required: [a, b]`) or a
+    /// block sequence (an empty inline value whose first non-blank child, deeper indented,
+    /// is a `- ` item) — is inspected; the scalar `required: true`/`false` **flag** of a
+    /// Parameter / Request Body / Schema-property Object opens no members list and is
+    /// skipped (mirroring `required_arrays_with_duplicate_entries`). A property literally
+    /// *named* `required` in a parent `properties:` mapping opens its own schema block
+    /// (its first child is a schema keyword like `type:`, not a `- ` item), so it is never
+    /// mistaken for an array. Of the array-form occurrences, only one with a `type:`
+    /// *scalar sibling* in the same Schema Object (same indent, scanning down through the
+    /// object's block then up, dedent-bounded exactly like
+    /// `properties_openers_with_non_object_type` / `format_type_mismatches`) is judged; a
+    /// `required:` whose sibling `type:` is absent (an implicit object, or an inherited
+    /// type via `allOf`/`$ref`) or opens a block (a property literally named `type`) is
+    /// skipped — nothing conflicting to compare — as is a `required:` inside an
+    /// `example:`/`examples:` payload (sample data, not a schema keyword), detected by
+    /// walking the ancestor chain.
+    fn required_arrays_on_a_non_object_type(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        // The inline scalar of a `type:` key (inline comment + surrounding quotes
+        // stripped); `None` when the line is a different key or opens a block.
+        let type_scalar = |l: &str| -> Option<String> {
+            let (k, v) = l.trim_start().split_once(':')?;
+            if k.trim() != "type" {
+                return None;
+            }
+            let v = v
+                .split('#')
+                .next()
+                .unwrap_or(v)
+                .trim()
+                .trim_matches('"')
+                .trim_matches('\'');
+            if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            }
+        };
+        // True when a `required:` line at index `i` opens an **array** — a flow `[ … ]`
+        // inline value, or a block whose first non-blank following line is deeper-indented
+        // and a `- ` sequence item. A scalar value (`true`/`false`) or a block whose first
+        // child is a mapping key (a property literally named `required`) is not an array.
+        let is_array_required = |i: usize, rest: &str| -> bool {
+            let rest = rest.split('#').next().unwrap_or(rest).trim();
+            if rest.starts_with('[') {
+                return true; // flow sequence
+            }
+            if !rest.is_empty() {
+                return false; // a scalar (`true`/`false`) or other inline value
+            }
+            let c = indent(lines[i]);
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                return indent(l) > c && l.trim_start().starts_with("- ");
+            }
+            false
+        };
+        // True when line `i` (indent `c`) sits inside an `example:`/`examples:` payload —
+        // some enclosing container key up the indent ladder is `example`/`examples`
+        // (mirroring `properties_openers_with_non_object_type`).
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        // The sibling `type:` scalar in the same object as line `i` (indent `c`): scan
+        // down through the object's block for a same-indent `type`, then up, dedent-bounded
+        // so a nested/following object's `type` never pairs.
+        let sibling_type = |i: usize, c: usize| -> Option<String> {
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c {
+                    if let Some(v) = type_scalar(l) {
+                        return Some(v);
+                    }
+                }
+                j += 1;
+            }
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c {
+                    if let Some(v) = type_scalar(l) {
+                        return Some(v);
+                    }
+                }
+            }
+            None
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some(rest) = line.trim_start().strip_prefix("required:") else {
+                continue;
+            };
+            if !is_array_required(i, rest) {
+                continue; // a scalar `required: true`/`false` flag opens no members list
+            }
+            let c = indent(line);
+            if inside_example(i, c) {
+                continue;
+            }
+            if let Some(ty) = sibling_type(i, c) {
+                if ty != "object" {
+                    out.push(i + 1);
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_required_array_sits_on_an_object_type() {
+        // Contract-harness invariant (OpenAPI 3.0.x / JSON-Schema structural rule):
+        // `required` lists the mandatory *members of an object*, so wherever a mounted
+        // spec declares a `required:` array beside a scalar `type:`, that type MUST be
+        // `object` (or absent — an implicit object). A `required:` array sitting beside a
+        // non-object scalar type — `type: array`, or a `type: string`/`integer`/`number`/
+        // `boolean` — is a self-contradictory schema: JSON-Schema `required` applies only
+        // to objects, so a validator ignores the constraint and a Redoc/Swagger/codegen
+        // client renders the wrong shape (a scalar/array field that silently drops the
+        // "mandatory member" contract) exactly where a caller reads or builds the payload.
+        //
+        // The `required`-keyword sibling of `every_properties_object_is_object_typed`:
+        // that pins the *other* object-only keyword (`properties`) against its sibling
+        // type, this pins `required`. Neither `facet_required_type` (which covers the
+        // string/array/object *facet* keywords — `minLength`/`minItems`/`minProperties`/…
+        // — but not `required`) nor the required-array *content* tests
+        // (`every_required_array_lists_distinct_entries`,
+        // `every_required_entry_names_a_declared_property`, which check a `required`
+        // array's entries are unique / name declared properties) ever compares a
+        // `required:` array against its sibling `type:`. The routine hazard in these
+        // hand-tuned specs: a schema retyped `object`→`array` (or a scalar) with its
+        // `required:` block left in place, or a `type: array` pasted from a sibling above
+        // a members list. Verified true across all mounted specs before asserting.
+        for api in APIS {
+            let bad = required_arrays_on_a_non_object_type(api.body);
+            assert!(
+                bad.is_empty(),
+                "{} spec declares a `required:` array beside a non-`object` scalar \
+                 `type:` (a schema with a `required` members list must be object-typed) \
+                 at `required:` line(s): {:?}",
+                api.name,
+                bad
+            );
+        }
+    }
+
+    #[test]
+    fn required_array_object_type_extraction_rules() {
+        // Unit-cover `required_arrays_on_a_non_object_type` so the contract test above
+        // can't pass vacuously and its detection is pinned: an array-form `required:`
+        // (flow or block) beside `type: object`, and one with no sibling type (implicit
+        // object), both pass; an array-form `required:` beside `type: array` or a scalar
+        // `type: string` is flagged (the sibling type declared before *or* after the
+        // array); the scalar `required: true` flag of a parameter is skipped (opens no
+        // members list); a property literally *named* `required` (whose value is its own
+        // schema block, not a `- ` list) is skipped; a `required:` inside an `example:`
+        // payload is skipped; and a nested object's `required:` is judged against its own
+        // sibling type. All in document order.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    GoodObjectFlow:
+      type: object
+      required: [a]
+      properties:
+        a:
+          type: string
+    GoodObjectBlock:
+      type: object
+      required:
+        - b
+      properties:
+        b:
+          type: string
+    ImplicitObject:
+      required: [c]
+      properties:
+        c:
+          type: string
+    BadArray:
+      type: array
+      required: [d]
+    BadStringBlock:
+      type: string
+      required:
+        - e
+    TypeAfter:
+      required: [f]
+      type: integer
+    NamedRequired:
+      type: object
+      properties:
+        required:
+          type: string
+    InExample:
+      type: object
+      example:
+        type: array
+        required:
+          - x
+    Nested:
+      type: object
+      required: [inner]
+      properties:
+        inner:
+          type: object
+          required: [g]
+          properties:
+            g:
+              type: string
+";
+        // Flagged, in document order: line 40 (`BadArray.required: [d]` beside
+        // `type: array`, its sibling declared above), line 43 (`BadStringBlock.required`
+        // block beside `type: string`), and line 46 (`TypeAfter.required: [f]` beside a
+        // `type: integer` declared *below* it, found by the down-scan). Not flagged:
+        // `GoodObjectFlow`/`GoodObjectBlock` (`type: object`); `ImplicitObject` (no
+        // sibling type — an implicit object); the query parameter's scalar
+        // `required: true` (opens no members list); `NamedRequired`'s inner `required:` at
+        // line 51, a property literally *named* `required` whose value is a schema block
+        // (first child `type: string`, not a `- ` item); the `required:` inside
+        // `InExample`'s `example:` payload (sample data); and both `Nested` `required:`
+        // arrays (each beside its own `type: object`).
+        assert_eq!(
+            required_arrays_on_a_non_object_type(body),
+            vec![40, 43, 46]
+        );
+
+        // Non-vacuous floor: across every registered spec every array-form `required:` is
+        // object-typed (the invariant the contract test asserts), and the corpus actually
+        // declares many `required:` arrays beside a `type: object` — so the
+        // type-comparison path runs on real data and a broken (always-empty) extractor
+        // can't hide behind a corpus that never pairs an array with a type. Count
+        // object-typed array-form `required:` blocks with a presence detector independent
+        // of the extractor: a `required:` array opener (flow `[` or a block whose first
+        // child is a `- ` item) whose same-indent object declares `type: object` (scanning
+        // down then up, dedent-bounded).
+        let mut object_typed = 0usize;
+        for api in APIS {
+            assert!(
+                required_arrays_on_a_non_object_type(api.body).is_empty(),
+                "{}: every array-form `required:` must sit on an object type",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            for (i, l) in lines.iter().enumerate() {
+                let Some(rest) = l.trim_start().strip_prefix("required:") else {
+                    continue;
+                };
+                let rest = rest.split('#').next().unwrap_or(rest).trim();
+                let is_array = if rest.starts_with('[') {
+                    true
+                } else if rest.is_empty() {
+                    let c = indent(l);
+                    let mut j = i + 1;
+                    let mut arr = false;
+                    while j < lines.len() {
+                        if lines[j].trim().is_empty() {
+                            j += 1;
+                            continue;
+                        }
+                        arr = indent(lines[j]) > c && lines[j].trim_start().starts_with("- ");
+                        break;
+                    }
+                    arr
+                } else {
+                    false
+                };
+                if !is_array {
+                    continue;
+                }
+                let c = indent(l);
+                let is_object_type = |x: &str| x.trim_start() == "type: object";
+                let mut has = false;
+                let mut j = i + 1;
+                while j < lines.len() {
+                    let x = lines[j];
+                    if x.trim().is_empty() {
+                        j += 1;
+                        continue;
+                    }
+                    if indent(x) < c {
+                        break;
+                    }
+                    if indent(x) == c && is_object_type(x) {
+                        has = true;
+                        break;
+                    }
+                    j += 1;
+                }
+                if !has {
+                    let mut m = i;
+                    while m > 0 {
+                        m -= 1;
+                        let x = lines[m];
+                        if x.trim().is_empty() {
+                            continue;
+                        }
+                        if indent(x) < c {
+                            break;
+                        }
+                        if indent(x) == c && is_object_type(x) {
+                            has = true;
+                            break;
+                        }
+                    }
+                }
+                if has {
+                    object_typed += 1;
+                }
+            }
+        }
+        assert!(
+            object_typed >= 100,
+            "expected many object-typed required arrays across specs, got {object_typed}"
+        );
+    }
+
     // The `type` a string/array/object validation *facet* keyword modifies, or `None`
     // when the key is not a facet keyword. String facets constrain the characters of a
     // string, array facets the elements of an array, object facets the members of an
