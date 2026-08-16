@@ -18209,4 +18209,261 @@ components:
             "expected many non-empty `pattern` keywords across specs, got {patterns}"
         );
     }
+
+    /// The 1-based line numbers, in document order, of every schema `enum` field a
+    /// spec declares whose value is **not a sequence** (array), without a YAML dep.
+    ///
+    /// In OpenAPI 3.0.x (JSON Schema) an `enum` fixes the closed set of values a field
+    /// may take, and the keyword's value MUST be an array. So an `enum:` whose value is
+    /// a bare scalar (`enum: ACTIVE`, `enum: null`), an inline flow mapping
+    /// (`enum: {a: b}`), a block mapping (`enum:` then `key: value` children, no dash),
+    /// or an empty/`null` block (`enum:` with nothing indented under it) is an invalid
+    /// document: a Redoc/Swagger/codegen client and a validator read the field's value
+    /// set from a shape that is not the value *list* they expect, so the intended closed
+    /// set silently doesn't parse at exactly the point a caller reads or builds the
+    /// payload.
+    ///
+    /// This closes a real vacuous-pass gap the sibling enum tests leave open: both
+    /// `every_enum_lists_unique_non_empty_values` (via `enums_with_no_values_or_duplicates`)
+    /// and `every_enum_value_matches_its_schema_type` collect an enum's members only by
+    /// gathering a flow list's `[ … ]` elements or a block list's deeper `- ` items — so
+    /// an `enum:` a paste turned into a mapping or a lone scalar yields **zero** members
+    /// and passes both silently, its broken shape unseen. This test inspects the field's
+    /// *shape* itself, which neither does. It is the `enum` analogue of
+    /// `every_security_field_is_a_sequence` and `every_composer_keyword_declares_a_sequence`.
+    ///
+    /// An `enum:` field is recognised exactly — the key is `enum` and the `:` immediately
+    /// follows (so `enumeration:` / an `x-enum-varnames:` extension never match) — and is
+    /// judged a sequence when: its inline value opens a flow sequence (`[`, covering `[]`
+    /// and `[ … ]`); or, opening a block (empty inline value), its first non-blank,
+    /// non-comment line indented deeper than the key is a `-` sequence item. It is flagged
+    /// when the inline value is any other non-empty scalar/flow, or the block's first
+    /// deeper line is a mapping key (no dash), or the block has no deeper line at all. An
+    /// `enum:` inside an `example:`/`examples:` payload is skipped via the ancestor walk
+    /// (sample data, not the keyword). As with the sibling sequence-shape extractors, a
+    /// schema property literally *named* `enum` opening a mapping would be flagged — the
+    /// specs declare none (a documented scoping trade shared with
+    /// `enums_with_no_values_or_duplicates`, which likewise treats a `- `-item block as
+    /// the enum and a mapping-first-child block as a property named `enum`).
+    fn enum_fields_not_a_sequence(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        // The inline value of an `enum:` line (inline comment stripped, surrounding
+        // whitespace trimmed). `None` when the line is a different key; an empty string
+        // marks a block opener (no inline value).
+        let inline = |l: &str| -> Option<String> {
+            let rest = l.trim_start().strip_prefix("enum")?;
+            let v = rest.strip_prefix(':')?;
+            Some(v.split('#').next().unwrap_or(v).trim().to_string())
+        };
+        // True when line `i` (indent `c`) sits inside an `example:`/`examples:`
+        // payload — some enclosing container key up the indent ladder is
+        // `example`/`examples` (mirroring the other keyword extractors).
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some(v) = inline(line) else { continue };
+            let c = indent(line);
+            if inside_example(i, c) {
+                continue; // example data, not the keyword
+            }
+            if v.starts_with('[') {
+                continue; // an inline flow sequence (`[]` / `[ … ]`) — a sequence
+            }
+            if !v.is_empty() {
+                out.push(i + 1); // a non-empty non-sequence scalar/flow (`ACTIVE`, `null`, `{…}`)
+                continue;
+            }
+            // Block opener: the field is a sequence iff its first non-blank, non-comment
+            // line indented deeper than the key is a `-` sequence item.
+            let mut j = i + 1;
+            let is_seq = loop {
+                if j >= lines.len() {
+                    break false; // no deeper line — an empty/`null` field
+                }
+                let l = lines[j];
+                if l.trim().is_empty() || l.trim_start().starts_with('#') {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) <= c {
+                    break false; // dedented out with nothing under `enum:`
+                }
+                break l.trim_start().starts_with('-');
+            };
+            if !is_seq {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_enum_field_is_a_sequence() {
+        // Contract-harness invariant (OpenAPI 3.0.x / JSON-Schema structural rule):
+        // every schema `enum` field a mounted spec declares MUST be a sequence (array).
+        // The keyword fixes the closed set of values a field may take, so an `enum:`
+        // that is a bare scalar, an inline/block mapping, or an empty/`null` block is an
+        // invalid document: a Redoc/Swagger/codegen client and a validator read the
+        // field's value set from a shape that isn't the value list they expect, so the
+        // intended closed set silently doesn't parse where a caller reads or builds the
+        // payload.
+        //
+        // Closes a real vacuous-pass gap the sibling enum tests leave open: both
+        // `every_enum_lists_unique_non_empty_values` (via
+        // `enums_with_no_values_or_duplicates`) and `every_enum_value_matches_its_schema_type`
+        // collect an enum's members only by gathering a flow list's `[ … ]` elements or a
+        // block list's `- ` items — so an `enum:` a paste turned into a mapping or a lone
+        // scalar yields zero members and passes both silently, its broken shape unseen.
+        // This test inspects the field's shape itself, the `enum` analogue of
+        // `every_security_field_is_a_sequence`. Verified true across all mounted specs
+        // before asserting.
+        for api in APIS {
+            let bad = enum_fields_not_a_sequence(api.body);
+            assert!(
+                bad.is_empty(),
+                "{} spec declares an `enum` field that is not a sequence (array) — a \
+                 closed value set a client and a validator can't parse — at `enum:` \
+                 line(s): {:?}",
+                api.name,
+                bad
+            );
+        }
+    }
+
+    #[test]
+    fn enum_field_sequence_extraction_rules() {
+        // Unit-cover `enum_fields_not_a_sequence` so the contract test above can't pass
+        // vacuously and its detection is pinned: a flow sequence (`enum: [A, B]`), a
+        // block sequence (`enum:` + `- A`), and an inline empty flow (`enum: []`) pass; a
+        // bare scalar (`enum: ACTIVE`), a scalar `null` (`enum: null`), a mapping-form
+        // block (`enum:` + `foo: bar`, no dash), and an empty block (`enum:` with nothing
+        // deeper under it) are flagged in document order; and an `enum:` inside an
+        // `example:` payload is skipped.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    FlowSeq:
+      type: string
+      enum: [ACTIVE, INACTIVE]
+    BlockSeq:
+      type: string
+      enum:
+        - ACTIVE
+        - INACTIVE
+    EmptyFlow:
+      type: string
+      enum: []
+    Scalar:
+      type: string
+      enum: ACTIVE
+    ScalarNull:
+      type: string
+      enum: null
+    MappingBlock:
+      type: string
+      enum:
+        foo: bar
+    EmptyBlock:
+      type: string
+      enum:
+    InExample:
+      type: object
+      example:
+        enum: nope
+";
+        // Flagged, in document order: line 27 (`Scalar.enum: ACTIVE` — a bare scalar),
+        // line 30 (`ScalarNull.enum: null` — a scalar `null`), line 33 (`MappingBlock` —
+        // a block whose first deeper line `foo: bar` is a mapping key, no dash), and line
+        // 37 (`EmptyBlock` — a block `enum:` with only the dedented `InExample:` below
+        // it, i.e. an empty/`null` field). Not flagged: `FlowSeq` (inline flow), `BlockSeq`
+        // (block sequence), `EmptyFlow` (`enum: []`, an inline empty flow sequence —
+        // emptiness is `every_enum_lists_unique_non_empty_values`' concern), and the
+        // `InExample` occurrence (its `enum: nope` sits inside the `example:` payload).
+        assert_eq!(enum_fields_not_a_sequence(body), vec![27, 30, 33, 37]);
+
+        // Non-vacuous floor: across every registered spec every `enum` field is a
+        // sequence (the invariant the contract test asserts), and the corpus actually
+        // declares many enums (status/type/unit value sets, in both flow and block form)
+        // — so the sequence-recognition path runs on real data and a broken
+        // (always-empty) extractor can't hide behind a corpus that never declares one.
+        // Count the sequence-shaped enum fields with a detector independent of the
+        // extractor.
+        let mut seq_enums = 0usize;
+        for api in APIS {
+            assert!(
+                enum_fields_not_a_sequence(api.body).is_empty(),
+                "{}: every `enum` field must be a sequence",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            for (i, l) in lines.iter().enumerate() {
+                let Some(rest) = l.trim_start().strip_prefix("enum") else {
+                    continue;
+                };
+                let Some(val) = rest.strip_prefix(':') else { continue };
+                let val = val.split('#').next().unwrap_or(val).trim();
+                if val.starts_with('[') {
+                    seq_enums += 1; // an inline flow sequence
+                    continue;
+                }
+                if !val.is_empty() {
+                    continue; // a scalar — the extractor flags it, never a sequence
+                }
+                let c = indent(l);
+                let mut j = i + 1;
+                while j < lines.len()
+                    && (lines[j].trim().is_empty() || lines[j].trim_start().starts_with('#'))
+                {
+                    j += 1;
+                }
+                if j < lines.len()
+                    && indent(lines[j]) > c
+                    && lines[j].trim_start().starts_with('-')
+                {
+                    seq_enums += 1; // a deeper `- `-item block sequence
+                }
+            }
+        }
+        assert!(
+            seq_enums >= 100,
+            "expected many sequence `enum` fields across specs, got {seq_enums}"
+        );
+    }
 }

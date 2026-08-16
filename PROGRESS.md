@@ -4691,6 +4691,35 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-16 — Contract-test harness: added an **`enum`-is-a-sequence**
+  spec-structural contract test (`src/registry.rs` `every_enum_field_is_a_sequence`)
+  — every schema `enum` field a mounted spec declares must be a *sequence* (array).
+  JSON Schema / OpenAPI 3.0.x require an `enum`'s value to be an array, so an `enum:`
+  that is a bare scalar (`enum: ACTIVE`), an inline/block mapping, or an empty/`null`
+  block is an invalid document a Redoc/Swagger/codegen client and a validator read
+  from a shape that isn't the value *list* they expect — the closed set silently
+  doesn't parse. Closes a real vacuous-pass gap: both
+  `every_enum_lists_unique_non_empty_values` (via `enums_with_no_values_or_duplicates`)
+  and `every_enum_value_matches_its_schema_type` gather members only from a flow
+  list's `[ … ]` elements or a block list's deeper `- ` items, so an `enum:` a paste
+  turned into a mapping or a lone scalar yields zero members and passes both silently;
+  this test inspects the field's shape itself — the `enum` analogue of
+  `every_security_field_is_a_sequence` / `every_composer_keyword_declares_a_sequence`.
+  New pure `enum_fields_not_a_sequence` extractor (no YAML dep) recognises the key
+  exactly (`enum` + immediate `:`, so `enumeration:`/`x-enum-varnames:` never match),
+  accepts an inline flow (`[`) or a block whose first deeper non-blank/non-comment line
+  is a `-` item, and flags any other non-empty inline scalar/flow, a mapping-first-child
+  block, or an empty block; an `enum:` inside an `example:`/`examples:` payload is
+  skipped (ancestor walk). Surveyed the corpus first (245 enum keywords across the
+  mounted specs — 64 inline-flow, 181 deeper-block `- ` lists; 0 scalar/mapping/empty,
+  0 property literally named `enum`) → no drift to fix. Unit-covered
+  (`enum_field_sequence_extraction_rules`: flow, block-sequence and inline `enum: []`
+  pass; a bare scalar, a scalar `null`, a mapping-form block, and an empty block flagged
+  in document order `[27, 30, 33, 37]`; an `example:`-payload occurrence skipped; plus a
+  ≥100 sequence-enum corpus floor via an independent counter). `cargo test` 2629 green
+  (was 2627; +2); `cargo build --release` succeeds, no warnings. No new dependency;
+  test-only change (the extractor and tests live in the `#[cfg(test)]` module). —
+  binary (release): 5.1M (5,314,968 B; unchanged)
 - 2026-08-16 — Contract-test harness: added a **`pattern` non-empty-string**
   spec-structural contract test (`src/registry.rs`
   `every_pattern_declares_a_non_empty_string`) — every Schema Object `pattern`
