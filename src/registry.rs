@@ -17968,4 +17968,245 @@ components:
             "expected many block-sequence `security` fields across specs, got {seq_fields}"
         );
     }
+
+    /// The 1-based line numbers, in document order, of every schema `pattern:` keyword
+    /// whose inline scalar value is an **empty quoted string** (`''` or `""`), without a
+    /// YAML dep.
+    ///
+    /// In OpenAPI 3.0.x (JSON Schema) `pattern` constrains a string to an ECMA-262 regex
+    /// *source*, and an empty regex matches at position 0 of every string — so
+    /// `pattern: ''` imposes no constraint at all: the schema advertises a format
+    /// restriction its own validator never enforces, and a Redoc/Swagger/codegen client
+    /// drops the intended check silently at exactly the point a caller reads or builds the
+    /// payload. This is the value-side complement of `every_facet_keyword_sits_on_its_required_type`,
+    /// which pins `pattern`'s sibling `type:` but never inspects `pattern`'s own value —
+    /// no existing test reads a `pattern` value at all — and it mirrors the suite's other
+    /// non-emptiness guards (`every_enum_lists_unique_non_empty_values`,
+    /// `every_composer_keyword_lists_at_least_one_subschema`).
+    ///
+    /// Only a `pattern:` carrying an inline scalar is judged, and only the exactly-empty
+    /// quoted forms `''`/`""` are flagged: a non-empty regex (quoted or bare — a real
+    /// pattern begins `'^…`/`"^…`, never `''`), an escaped-quote scalar (`''''` = a string
+    /// holding one `'`), a whitespace-only pattern (a valid regex matching spaces), a
+    /// `pattern:` that opens a block or carries an inline flow `{ … }`/`[ … ]` (a property
+    /// literally *named* `pattern`, i.e. a Schema Object — `patternProperties` never
+    /// matches, its key is a different token), and a `pattern:` inside an
+    /// `example:`/`examples:` payload (sample data, not a schema keyword) are all skipped.
+    /// Matching an empty quoted form by its two leading quote characters — not by
+    /// comment-stripping the value — keeps a `#` *inside* a regex from ever being mistaken
+    /// for an inline comment, so a real pattern is never mis-read as empty.
+    fn patterns_with_empty_value(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        // True when line `i` (indent `c`) sits inside an outer `example:`/`examples:`
+        // payload — some enclosing container key up the indent ladder is
+        // `example`/`examples` (mirroring the value-consistency extractors), so an inner
+        // `pattern` key there is sample data, not a schema keyword.
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        // Whether `vt` (the leading-trimmed inline value) is an exactly-empty quoted
+        // string: it opens with a quote immediately followed by the matching quote, and
+        // nothing but whitespace / a `# comment` follows the closing quote. `''''` (an
+        // escaped single quote — a one-char string) and `'^x$'` (a real pattern) both
+        // fail, since after the second quote non-blank, non-comment text remains.
+        let is_empty_quoted = |vt: &str| -> bool {
+            for q in ['\'', '"'] {
+                if let Some(rest) = vt.strip_prefix(q) {
+                    if let Some(after) = rest.strip_prefix(q) {
+                        let after = after.trim_start();
+                        if after.is_empty() || after.starts_with('#') {
+                            return true;
+                        }
+                    }
+                }
+            }
+            false
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some((k, v)) = line.trim_start().split_once(':') else {
+                continue;
+            };
+            if k.trim() != "pattern" {
+                continue; // `patternProperties` and every other key are a different token
+            }
+            let vt = v.trim();
+            if vt.is_empty() || vt.starts_with('{') || vt.starts_with('[') {
+                continue; // block opener / inline flow → a property named `pattern`, not the keyword
+            }
+            if !is_empty_quoted(vt) {
+                continue; // a non-empty regex (quoted or bare)
+            }
+            let c = indent(line);
+            if inside_example(i, c) {
+                continue;
+            }
+            out.push(i + 1);
+        }
+        out
+    }
+
+    #[test]
+    fn every_pattern_declares_a_non_empty_string() {
+        // Contract-harness invariant (OpenAPI 3.0.x / JSON-Schema structural rule): every
+        // Schema Object `pattern` keyword a mounted spec declares MUST carry a non-empty
+        // regex string. `pattern` constrains a string to an ECMA-262 regular expression,
+        // and an empty regex matches at position 0 of *every* string — so `pattern: ''`
+        // (or `""`) is a vacuous constraint: the schema advertises a format restriction
+        // its own validator never enforces, so a Redoc/Swagger/codegen client silently
+        // drops the intended check exactly where a caller reads or builds the payload
+        // (an author who meant to bound an id/token/phone-number format ends up bounding
+        // nothing).
+        //
+        // The value-side complement of `every_facet_keyword_sits_on_its_required_type`,
+        // which pins `pattern`'s sibling `type:` (string) but never inspects `pattern`'s
+        // own value — no existing test reads a `pattern` value at all. It mirrors the
+        // suite's non-emptiness guards for the other value-bearing keywords
+        // (`every_enum_lists_unique_non_empty_values`,
+        // `every_composer_keyword_lists_at_least_one_subschema`). Verified true across all
+        // mounted specs before asserting.
+        for api in APIS {
+            let offenders = patterns_with_empty_value(api.body);
+            assert!(
+                offenders.is_empty(),
+                "{} spec declares an empty `pattern` string (`''`/`\"\"` — a regex that \
+                 matches every string, silently dropping the intended constraint) at \
+                 `pattern:` line(s): {:?}",
+                api.name,
+                offenders
+            );
+        }
+    }
+
+    #[test]
+    fn pattern_value_non_empty_extraction_rules() {
+        // Unit-cover `patterns_with_empty_value` so the contract test above can't pass
+        // vacuously and its detection is pinned: a non-empty regex — single-quoted,
+        // double-quoted, or bare — passes; an empty `pattern: ''` and `pattern: ""` are
+        // flagged in document order; an escaped-quote scalar (`''''`, a one-char string)
+        // passes; a property literally *named* `pattern` (a block opener) and one carrying
+        // an inline flow schema (`{ … }`) are skipped (not the keyword); a `pattern:`
+        // inside an `example:` payload is skipped; and an empty pattern trailed by a
+        // `# comment` is still flagged (the comment does not make it non-empty).
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    GoodQuoted:
+      type: string
+      pattern: '^x+$'
+    GoodDouble:
+      type: string
+      pattern: \"^y$\"
+    GoodBare:
+      type: string
+      pattern: ^z$
+    EmptySingle:
+      type: string
+      pattern: ''
+    EmptyDouble:
+      type: string
+      pattern: \"\"
+    EscapedQuote:
+      type: string
+      pattern: ''''
+    NamedPattern:
+      type: object
+      properties:
+        pattern:
+          type: string
+    FlowPattern:
+      type: object
+      properties:
+        pattern: {type: string}
+    InExample:
+      type: object
+      example:
+        pattern: ''
+    EmptyWithComment:
+      type: string
+      pattern: '' # legacy
+";
+        // Flagged, in document order: line 25 (`EmptySingle.pattern: ''`), line 28
+        // (`EmptyDouble.pattern: \"\"`) and line 47 (`EmptyWithComment.pattern: '' # legacy`
+        // — the trailing comment does not make the empty regex non-empty). Not flagged:
+        // `GoodQuoted`/`GoodDouble`/`GoodBare` (non-empty regexes); `EscapedQuote`
+        // (`''''` holds one `'`, a one-char string); `NamedPattern` (a `pattern:` opening
+        // a block is a property, not the keyword); `FlowPattern` (an inline flow schema
+        // `{ … }` is a property named `pattern`); and `InExample` (its `pattern: ''` sits
+        // inside the `example:` payload).
+        assert_eq!(patterns_with_empty_value(body), vec![25, 28, 47]);
+
+        // Non-vacuous floor: across every registered spec every schema `pattern` carries a
+        // non-empty regex (the invariant the contract test asserts), and the corpus
+        // actually declares many patterns (phoneNumber `^\\+[1-9]…`, UUID, hex-token and
+        // `dpv:` scopes) — so the empty-value path runs on real data and a broken
+        // (always-empty) extractor can't hide behind a corpus that never declares a
+        // `pattern`. Count the non-empty `pattern` keywords with a detector independent of
+        // the extractor's empty-string comparison.
+        let mut patterns = 0usize;
+        for api in APIS {
+            assert!(
+                patterns_with_empty_value(api.body).is_empty(),
+                "{}: every schema `pattern` must be a non-empty regex string",
+                api.name
+            );
+            for l in api.body.lines() {
+                let Some((k, v)) = l.trim_start().split_once(':') else {
+                    continue;
+                };
+                if k.trim() != "pattern" {
+                    continue;
+                }
+                let vt = v.trim();
+                // A non-empty inline scalar that is neither an empty quoted form nor a
+                // flow/block opener — a real regex.
+                if !vt.is_empty()
+                    && !vt.starts_with('{')
+                    && !vt.starts_with('[')
+                    && vt != "''"
+                    && vt != "\"\""
+                {
+                    patterns += 1;
+                }
+            }
+        }
+        assert!(
+            patterns >= 50,
+            "expected many non-empty `pattern` keywords across specs, got {patterns}"
+        );
+    }
 }

@@ -3322,6 +3322,26 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - a `pattern` non-empty-string contract test (`src/registry.rs`
+    `every_pattern_declares_a_non_empty_string`) asserts every Schema Object
+    `pattern` keyword carries a non-empty regex string. `pattern` constrains a
+    string to an ECMA-262 regex source, and an empty regex matches at position 0
+    of every string — so `pattern: ''`/`""` is a vacuous constraint: the schema
+    advertises a format restriction its own validator never enforces, so a
+    Redoc/Swagger/codegen client silently drops the intended check. The value-side
+    complement of `every_facet_keyword_sits_on_its_required_type` (which pins
+    `pattern`'s sibling `type:` but never its value — no existing test reads a
+    `pattern` value at all); mirrors the suite's non-emptiness guards
+    (`every_enum_lists_unique_non_empty_values`, the non-empty-composer test). Pure
+    `patterns_with_empty_value` extractor (no YAML dep) flags only the exactly-empty
+    quoted forms `''`/`""` — matched by the two leading quote chars, never by
+    comment-stripping, so a `#` *inside* a regex is never mistaken for a comment; a
+    non-empty regex (quoted or bare), an escaped-quote `''''`, a `pattern:` opening a
+    block or inline flow `{ … }` (a property literally named `pattern`;
+    `patternProperties` is a different token), and a `pattern:` inside an `example:`
+    payload are skipped. Unit-covered (`pattern_value_non_empty_extraction_rules`,
+    incl. a ≥50 non-empty-pattern floor). Verified true across all mounted specs
+    (173 patterns, 0 empty) before asserting.
   - a discriminator required-property contract test (`src/registry.rs`
     `every_discriminator_property_name_is_required`) asserts every Discriminator
     Object's `propertyName` is listed in the enclosing schema's `required` array
@@ -4671,6 +4691,37 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-16 — Contract-test harness: added a **`pattern` non-empty-string**
+  spec-structural contract test (`src/registry.rs`
+  `every_pattern_declares_a_non_empty_string`) — every Schema Object `pattern`
+  keyword must carry a non-empty regex string. `pattern` constrains a string to an
+  ECMA-262 regex source, and an empty regex matches at position 0 of every string,
+  so `pattern: ''`/`""` is a vacuous constraint: the schema advertises a format
+  restriction its own validator never enforces, and a Redoc/Swagger/codegen client
+  silently drops the intended check at the point a caller reads/builds the payload.
+  The value-side complement of `every_facet_keyword_sits_on_its_required_type`
+  (which pins `pattern`'s sibling `type:` (string) but never inspects `pattern`'s
+  own value — no existing test reads a `pattern` value at all); mirrors the suite's
+  non-emptiness guards (`every_enum_lists_unique_non_empty_values`, the
+  non-empty-composer test). New pure `patterns_with_empty_value` extractor (no YAML
+  dep): flags a `pattern:` whose leading-trimmed value is an exactly-empty quoted
+  string, recognised by two leading matching quote chars (`''`/`""`, incl. a
+  trailing `# comment`) — never by comment-stripping the value, so a `#` inside a
+  regex is never read as an inline comment and a real pattern is never mis-flagged
+  as empty; a non-empty regex (single/double-quoted or bare), an escaped-quote
+  scalar (`''''` = one `'`), a `pattern:` opening a block or carrying an inline flow
+  `{ … }`/`[ … ]` (a property literally *named* `pattern`; `patternProperties` is a
+  different key token), and a `pattern:` inside an `example:`/`examples:` payload are
+  skipped. Surveyed the corpus first (173 `pattern` keywords across the mounted
+  specs, 0 empty) → no drift to fix. Unit-covered
+  (`pattern_value_non_empty_extraction_rules`: single/double-quoted and bare
+  non-empty regexes pass; `''` and `""` flagged in document order, plus an empty
+  pattern trailed by `# legacy`; an escaped-quote `''''`, a property named `pattern`
+  (block opener + inline flow), and an `example:`-payload occurrence skipped; plus a
+  ≥50 non-empty-pattern floor via an independent counter). `cargo test` 2627 green
+  (was 2625; +2); `cargo build --release` succeeds, no warnings. No new dependency;
+  test-only change (the extractor and tests live in the `#[cfg(test)]` module). —
+  binary (release): 5.1M (5,314,968 B; unchanged)
 - 2026-08-16 — Contract-test harness: added a **discriminator required-property**
   spec-structural contract test (`src/registry.rs`
   `every_discriminator_property_name_is_required`) — every Discriminator Object's
