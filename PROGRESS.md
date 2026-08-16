@@ -4194,6 +4194,33 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     of ≥50 block-form composers over all specs) so the contract can't pass
     vacuously. Verified true (90 block-form composers across all mounted specs, all
     opening a sequence — no drift to fix) before asserting.
+  - a `security`-field-is-a-sequence contract test (`src/registry.rs`
+    `every_security_field_is_a_sequence`) asserts every OpenAPI `security` field a
+    mounted spec declares — the document-root or Operation-Object list of Security
+    Requirement Objects — is a **sequence** (array). The value is a requirement
+    *list* (`[{openId: [scopes]}, …]`, or `[]` to opt out of a global requirement),
+    so a `security:` that is a mapping (`openId: []` with no `-` dash), a bare scalar
+    (`null`), or an empty/`null` block is an invalid document a Redoc/Swagger/codegen
+    client and the resource server can't parse as the requirement list they expect.
+    Closes a real vacuous-pass gap in the sibling security tests: both
+    `every_security_requirement_references_a_defined_scheme`
+    (`security_requirement_schemes`) and `every_security_requirement_declares_a_scope`
+    (`operations_with_scopeless_security`) collect requirement items only by matching
+    `- <scheme>:` sequence items *inside* a `security:` block, so a `security:` a paste
+    turned into a mapping or emptied yields zero items and passes both silently — its
+    broken shape unseen; this test inspects the field's *shape* itself, which none of
+    them does. A pure `security_fields_not_a_sequence` extractor (no YAML dep;
+    recognises the field exactly as its siblings do — key `security`, `:` immediately
+    following, so `securitySchemes:` never matches — accepts an inline flow sequence
+    (`[`) or a block whose first deeper non-blank line is a `- ` item, flags any other
+    non-empty scalar / a mapping-form block / an empty block; skips a `security:`
+    inside an `example:` payload via the ancestor walk) is unit-covered
+    (`security_field_sequence_extraction_rules`: a block sequence + inline `[]` pass,
+    a mapping child / bare scalar / empty block flagged in document order, an
+    example-payload occurrence skipped, plus a ≥30 block-sequence non-vacuous floor)
+    so the contract can't pass vacuously. Verified true (169 sequence `security`
+    fields across all mounted specs, none malformed — no drift to fix) before
+    asserting.
   - a cross-file-`$ref`-targets-a-served-fragment contract test (`src/registry.rs`
     `every_cross_file_ref_targets_a_served_fragment`) asserts every **cross-file**
     `$ref` a mounted spec makes (a `<relative-path>#/…` with a non-empty path before
@@ -4605,6 +4632,36 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-16 — Contract-test harness: added a **`security`-field-is-a-sequence**
+  spec-structural contract test (`src/registry.rs` `every_security_field_is_a_sequence`)
+  — every OpenAPI `security` field a mounted spec declares (document-root or
+  Operation-Object) must be a *sequence* (array of Security Requirement Objects). The
+  value is a requirement *list* (`[{openId: [scopes]}, …]`, or `[]` to opt out of a
+  global requirement), so a `security:` that is a mapping (`openId: []` with no `-`
+  dash), a bare scalar (`null`), or an empty/`null` block is an invalid document a
+  Redoc/Swagger/codegen client and the resource server can't parse as the list they
+  expect. Closes a real vacuous-pass gap: both
+  `every_security_requirement_references_a_defined_scheme` (via
+  `security_requirement_schemes`) and `every_security_requirement_declares_a_scope`
+  (via `operations_with_scopeless_security`) only collect requirement items by matching
+  `- <scheme>:` sequence items *inside* a `security:` block, so a `security:` a paste
+  turned into a mapping or emptied yields zero items and passes both silently — its
+  broken shape unseen. New pure `security_fields_not_a_sequence` extractor (no YAML
+  dep) recognises the field exactly as its siblings do (key `security`, `:` immediately
+  following, so `securitySchemes:` never matches), accepts an inline flow sequence
+  (`[`) or a block whose first deeper non-blank line is a `- ` item, and flags any
+  other non-empty scalar / a mapping-form block / an empty block; a `security:` inside
+  an `example:`/`examples:` payload is skipped (ancestor walk). Surveyed the corpus
+  first (169 sequence `security` fields across the mounted specs — one per
+  OAuth-protected operation, all `- openId:` block sequences; 0 malformed) → no drift
+  to fix. Unit-covered (`security_field_sequence_extraction_rules`: a block sequence
+  and inline `security: []` pass; a mapping child (`openId: []`, no dash), a bare
+  scalar (`null`), and an empty block flagged in document order `[24, 32, 39]`; an
+  `example:`-payload occurrence skipped; plus a ≥30 block-sequence non-vacuous floor
+  via an independent counter). `cargo test` 2621 green (was 2619; +2); `cargo build
+  --release` succeeds, no warnings. No new dependency; test-only change (the extractor
+  and tests live in the `#[cfg(test)]` module). — binary (release): 5.1M (5,314,968 B;
+  unchanged)
 - 2026-08-16 — Contract-test harness: added a **body-less-method request-body**
   spec-structural contract test (`src/registry.rs`
   `no_bodyless_method_operation_declares_a_request_body`) — no `GET`/`DELETE`/`HEAD`

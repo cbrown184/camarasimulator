@@ -17112,4 +17112,256 @@ components:
             "expected many boolean `additionalProperties` across specs, got {boolean_ap}"
         );
     }
+
+    /// The 1-based line numbers, in document order, of every OpenAPI `security`
+    /// field a spec declares whose value is **not a sequence** (array), without a
+    /// YAML dep.
+    ///
+    /// The `security` field of an OpenAPI document — at the root or on an Operation
+    /// Object — is a *Security Requirement Object array* (`[{scheme: [scopes]}, …]`,
+    /// or the empty array `[]` to opt an operation out of a global requirement). So a
+    /// `security:` whose value is a mapping (`security:` opening `openId: []` with no
+    /// `-` dash), a bare scalar (`security: null`), or an empty block (a `security:`
+    /// with nothing indented under it → YAML `null`) is an invalid document: a
+    /// Redoc/Swagger/codegen client and the resource server read the operation's auth
+    /// from a shape that isn't the requirement *list* they expect, so the endpoint's
+    /// declared protection silently doesn't parse.
+    ///
+    /// This closes a genuine vacuous-pass gap in the sibling security tests: both
+    /// [`security_requirement_schemes`] (feeding
+    /// `every_security_requirement_references_a_defined_scheme`) and
+    /// `operations_with_scopeless_security` only ever collect requirement items *from
+    /// within* a `security:` block by matching `- <scheme>:` sequence items — so a
+    /// `security:` a paste turned into a mapping (or emptied) yields **zero**
+    /// requirement items and passes every one of them silently, its broken auth shape
+    /// unseen. This test inspects the field's *shape* itself, which none of them does.
+    ///
+    /// A `security:` field is recognised exactly as its siblings recognise it — the
+    /// key is `security` and the `:` immediately follows (so `securitySchemes:` never
+    /// matches) — and is judged as a sequence when: its inline value opens a flow
+    /// sequence (`[`, covering `[]` and `[ … ]`); or, opening a block (empty inline
+    /// value), the first non-blank line indented deeper than the key is a `- `
+    /// sequence item. It is flagged when the inline value is any other non-empty
+    /// scalar, or the block's first deeper line is a mapping key (no dash), or the
+    /// block has no deeper line at all (an empty/`null` field). A `security:` inside an
+    /// `example:`/`examples:` payload is skipped via the ancestor walk (sample data,
+    /// not the field). As with the sibling security extractors, a schema property
+    /// literally *named* `security` opening a mapping would be flagged — the specs
+    /// declare none (a documented scoping trade shared with
+    /// [`security_requirement_schemes`], which treats every `security:` block as the
+    /// field).
+    fn security_fields_not_a_sequence(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        // The inline value of a `security:` line (inline comment stripped, surrounding
+        // whitespace trimmed). `None` when the line is a different key; an empty string
+        // marks a block opener (no inline value).
+        let inline = |l: &str| -> Option<String> {
+            let rest = l.trim_start().strip_prefix("security")?;
+            let v = rest.strip_prefix(':')?;
+            Some(v.split('#').next().unwrap_or(v).trim().to_string())
+        };
+        // True when line `i` (indent `c`) sits inside an `example:`/`examples:`
+        // payload — some enclosing container key up the indent ladder is
+        // `example`/`examples` (mirroring the other keyword extractors).
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some(v) = inline(line) else { continue };
+            let c = indent(line);
+            if inside_example(i, c) {
+                continue; // example data, not the field
+            }
+            if v.starts_with('[') {
+                continue; // an inline flow sequence (`[]` / `[ … ]`) — a sequence
+            }
+            if !v.is_empty() {
+                out.push(i + 1); // a non-empty non-sequence scalar (`null`, `{}`, …)
+                continue;
+            }
+            // Block opener: the field is a sequence iff its first non-blank line
+            // indented deeper than the key is a `- ` sequence item.
+            let mut j = i + 1;
+            let is_seq = loop {
+                if j >= lines.len() {
+                    break false; // no deeper line — an empty/`null` field
+                }
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) <= c {
+                    break false; // dedented out with nothing under `security:`
+                }
+                break l.trim_start().starts_with("- ");
+            };
+            if !is_seq {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_security_field_is_a_sequence() {
+        // Contract-harness invariant (OpenAPI 3.0.x structural rule): every `security`
+        // field a mounted spec declares — the document-root or Operation-Object list
+        // of Security Requirement Objects — MUST be a sequence (array). The value is a
+        // requirement *list* (`[{openId: [scopes]}, …]`, or `[]` to opt out of a
+        // global requirement), so a `security:` that is a mapping, a bare scalar, or
+        // an empty/`null` block is an invalid document: a Redoc/Swagger/codegen client
+        // and the resource server read the endpoint's auth from a shape that isn't the
+        // list they expect, so the declared protection silently doesn't parse.
+        //
+        // Closes a real vacuous-pass gap the sibling security tests leave open: both
+        // `every_security_requirement_references_a_defined_scheme` (via
+        // `security_requirement_schemes`) and `every_security_requirement_declares_a_scope`
+        // (via `operations_with_scopeless_security`) collect requirement items only by
+        // matching `- <scheme>:` sequence items *inside* a `security:` block — so a
+        // `security:` a paste turned into a mapping or emptied yields zero items and
+        // passes both silently, its broken shape unseen. This test inspects the
+        // field's shape itself. Verified true across all mounted specs before asserting.
+        for api in APIS {
+            let bad = security_fields_not_a_sequence(api.body);
+            assert!(
+                bad.is_empty(),
+                "{} spec declares a `security` field that is not a sequence (array) — \
+                 an Operation/root Security Requirement list a client and the resource \
+                 server can't parse — at `security:` line(s): {:?}",
+                api.name,
+                bad
+            );
+        }
+    }
+
+    #[test]
+    fn security_field_sequence_extraction_rules() {
+        // Unit-cover `security_fields_not_a_sequence` so the contract test above can't
+        // pass vacuously and its detection is pinned: a block sequence (`security:` +
+        // `- openId: []`) and an inline empty flow sequence (`security: []`) pass; a
+        // mapping-form block (`security:` + `openId: []`, no dash), a bare scalar
+        // (`security: null`), and an empty block (`security:` with nothing under it)
+        // are flagged in document order; and a `security:` inside an `example:` payload
+        // is skipped.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      security:
+        - openId: []
+      responses:
+        '200':
+          description: ok
+  /b:
+    get:
+      operationId: getB
+      security: []
+      responses:
+        '200':
+          description: ok
+  /c:
+    get:
+      operationId: getC
+      security:
+        openId: []
+      responses:
+        '200':
+          description: ok
+  /d:
+    get:
+      operationId: getD
+      security: null
+      responses:
+        '200':
+          description: ok
+  /e:
+    get:
+      operationId: getE
+      security:
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    InExample:
+      type: object
+      example:
+        security: null
+";
+        // Flagged, in document order: line 24 (`/c` — a mapping child `openId: []`
+        // with no dash, not a sequence), line 32 (`/d` — a bare scalar `null`), and
+        // line 39 (`/e` — a `security:` block with only `responses:` at or above its
+        // own indent under it, i.e. an empty/`null` field). Not flagged: `/a` (a block
+        // sequence), `/b` (`security: []`, an inline empty flow sequence), and the
+        // `InExample` occurrence (its `security: null` sits inside the `example:`
+        // payload).
+        assert_eq!(security_fields_not_a_sequence(body), vec![24, 32, 39]);
+
+        // Non-vacuous floor: across every registered spec every `security` field is a
+        // sequence (the invariant the contract test asserts), and the corpus actually
+        // declares many block-sequence `security:` fields (one per OAuth-protected
+        // operation) — so the sequence-recognition path runs on real data and a broken
+        // (always-empty) extractor can't hide behind a corpus that never declares one.
+        // Count the block-sequence fields with a detector independent of the extractor.
+        let mut seq_fields = 0usize;
+        for api in APIS {
+            assert!(
+                security_fields_not_a_sequence(api.body).is_empty(),
+                "{}: every `security` field must be a sequence",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            for (i, l) in lines.iter().enumerate() {
+                if l.trim() != "security:" {
+                    continue;
+                }
+                let c = indent(l);
+                let mut j = i + 1;
+                while j < lines.len() && lines[j].trim().is_empty() {
+                    j += 1;
+                }
+                if j < lines.len()
+                    && indent(lines[j]) > c
+                    && lines[j].trim_start().starts_with("- ")
+                {
+                    seq_fields += 1;
+                }
+            }
+        }
+        assert!(
+            seq_fields >= 30,
+            "expected many block-sequence `security` fields across specs, got {seq_fields}"
+        );
+    }
 }
