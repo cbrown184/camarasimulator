@@ -3322,6 +3322,20 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - a readOnly↔writeOnly mutual-exclusion contract test (`src/registry.rs`
+    `no_property_declares_both_read_only_and_write_only`) asserts no Schema Object
+    declares BOTH `readOnly: true` and `writeOnly: true` — `readOnly` bars the field
+    from a request, `writeOnly` bars it from a response, so both-true is an
+    unsatisfiable property that can appear in neither (a codegen client omits it from
+    every request *and* response model). Both default `false`, so `readOnly: true`
+    beside `writeOnly: false` is a legal read-only field; only the `true`/`true` pair
+    is the fault. Invisible to `every_boolean_schema_keyword_carries_a_boolean`, which
+    validates each modifier's value type but never compares the two. Pure
+    `properties_both_read_only_and_write_only` extractor (no YAML dep) mirrors
+    `schema_bounds_inverted`'s exact-indent, dedent-bounded sibling scan (down then
+    up) and skips `example:` payloads via the `numeric_keyword…` ancestor walk;
+    unit-covered so the contract can't pass vacuously. Verified true across all
+    mounted specs (19 `readOnly`/2 `writeOnly`, always on distinct properties).
   - a registry/wiring contract test (`src/main.rs`
     `catalog_spec_urls_match_served_specs_and_resolve`) asserts the `/` catalog's
     `spec_url` set exactly equals the served API-spec set (new
@@ -4495,6 +4509,30 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-16 — Contract-test harness: added a **readOnly↔writeOnly mutual-exclusion**
+  spec-structural contract test (`src/registry.rs`
+  `no_property_declares_both_read_only_and_write_only`) — no Schema Object may declare
+  BOTH `readOnly: true` and `writeOnly: true`. `readOnly` bars a value from a request,
+  `writeOnly` bars it from a response; both true bars it from either, so the property
+  can never legally appear at all — an unsatisfiable declaration a Redoc/Swagger/codegen
+  client cannot honour (omitted from every generated request *and* response model).
+  Both default `false`, so `readOnly: true` beside `writeOnly: false` is a normal legal
+  read-only field; only the `true`/`true` pair is the fault. Invisible to
+  `every_boolean_schema_keyword_carries_a_boolean`, which validates each modifier's
+  value *type* but never compares the two to each other; no other test pairs two access
+  modifiers. New pure `properties_both_read_only_and_write_only` extractor (no YAML dep)
+  mirrors `schema_bounds_inverted`'s exact-indent, dedent-bounded sibling scan (down
+  then up) so a modifier nested in a sub-schema or belonging to a following property is
+  never mistaken for the pair, and reuses the `numeric_keyword_non_numeric_values`
+  ancestor-walk to skip `readOnly`/`writeOnly` appearing as data in an `example:`
+  payload. Surveyed the corpus first (19 `readOnly` + 2 `writeOnly`, always on distinct
+  properties — 0 both-true) → no drift to fix. Tests: +2 (the contract test + a
+  `read_only_write_only_exclusion_extraction_rules` unit test: sibling-below/above
+  flagged in document order, distinct-property split + `readOnly:true`/`writeOnly:false`
+  guard + `example:`-payload both-true all correctly skipped, ≥15 `readOnly: true`
+  non-vacuous floor via an independent scan). `cargo test` 2607 green (was 2605);
+  `cargo build --release` succeeds, no warnings. No new dependency; test-only change.
+  — binary: 5.1M (5,314,968 B; unchanged)
 - 2026-08-15 — Contract-test harness: added an **example-within-numeric-bounds**
   spec-structural contract test (`src/registry.rs`
   `every_example_is_within_its_numeric_bounds`) — where a Schema Object declares a
