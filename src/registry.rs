@@ -19086,4 +19086,289 @@ components:
             "expected many inline response descriptions across specs, got {inline_descriptions}"
         );
     }
+
+    /// The `METHOD /path` label of every operation a spec declares whose own
+    /// 6-space `summary:` key is present but carries no text — a bare `summary:`
+    /// (a YAML null), an exactly-empty quoted `""`/`''`, or an empty block scalar
+    /// — without a YAML dep.
+    ///
+    /// An operation's `summary` is the short label a Redoc/Swagger client renders
+    /// as the operation's name in its navigation sidebar (and the hint many code
+    /// generators prefer over the operationId); a present-but-empty one documents
+    /// nothing, so the nav renders an anonymous entry exactly where a caller reads
+    /// what the operation does. The value-side complement of
+    /// [`operations_without_summary`], which credits a `summary:` by key presence
+    /// alone (it matches the key name before the colon, whatever the value) and so
+    /// counts a blank one as present — mirroring how `responses_with_empty_description`
+    /// complements `every_declared_response_has_a_description`.
+    ///
+    /// Mirrors [`operations_without_summary`]'s path-item/method scoping (a 4-space
+    /// HTTP-verb key under a 2-space `/…` path item beneath the top-level `paths:`
+    /// block) and inspects only the operation's own 6-space `summary:` — so a
+    /// `summary` nested deeper (an `examples` entry's `summary`) or a Path Item
+    /// Object's own 4-space `summary` is never read, and an operation with *no*
+    /// summary at all is left to `operations_without_summary` (this extractor flags
+    /// only a present-but-blank one). Emptiness is judged exactly as
+    /// `responses_with_empty_description` judges a blank `description`.
+    fn operations_with_empty_summary(body: &str) -> Vec<String> {
+        const METHODS: [&str; 8] =
+            ["get", "put", "post", "delete", "patch", "options", "head", "trace"];
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        // Whether the `summary:` at line `m` (child indent `ci`), with inline value
+        // `rest` (everything after the first colon), carries no text — mirroring
+        // `responses_with_empty_description`'s `value_is_empty`.
+        let value_is_empty = |rest: &str, m: usize, ci: usize| -> bool {
+            let v = rest.trim();
+            if v.is_empty() {
+                return true; // bare `summary:` → a YAML null
+            }
+            if v.starts_with('|') || v.starts_with('>') {
+                // Block scalar: content lives on the following deeper lines.
+                let mut k = m + 1;
+                while k < lines.len() {
+                    let l = lines[k];
+                    if l.trim().is_empty() {
+                        k += 1;
+                        continue;
+                    }
+                    // First non-blank line: content only if indented past the field.
+                    return indent(l) <= ci;
+                }
+                return true; // EOF with no content line — an empty block
+            }
+            // Exactly-empty quoted string: two leading matching quote chars with
+            // nothing but optional whitespace/comment after them.
+            let b = v.as_bytes();
+            if b.len() >= 2 && (b[0] == b'"' || b[0] == b'\'') && b[1] == b[0] {
+                let after = v[2..].trim_start();
+                if after.is_empty() || after.starts_with('#') {
+                    return true;
+                }
+            }
+            false
+        };
+        let mut out = Vec::new();
+        let mut in_paths = false;
+        let mut path: Option<String> = None;
+        for (i, line) in lines.iter().enumerate() {
+            let is_top_level_key =
+                !line.is_empty() && !line.starts_with(char::is_whitespace);
+            if is_top_level_key {
+                in_paths = line.trim_end() == "paths:";
+                path = None;
+                continue;
+            }
+            if !in_paths {
+                continue;
+            }
+            if let Some(rest) = line.strip_prefix("  ") {
+                if !rest.starts_with(char::is_whitespace) && rest.starts_with('/') {
+                    let key = rest.trim_end().strip_suffix(':').unwrap_or(rest.trim_end());
+                    path = Some(key.to_string());
+                    continue;
+                }
+            }
+            let Some(current_path) = path.as_deref() else { continue };
+            if indent(line) != 4 {
+                continue;
+            }
+            let key = line.trim_start();
+            let Some(name) = key.strip_suffix(':') else { continue };
+            if name.contains(char::is_whitespace) || !METHODS.contains(&name) {
+                continue;
+            }
+            // Within this operation's block, inspect its own 6-space `summary:`.
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) <= 4 {
+                    break; // dedented out of this operation
+                }
+                if indent(l) == 6 {
+                    if let Some((field, rest)) = l.trim_start().split_once(':') {
+                        if field == "summary" {
+                            if value_is_empty(rest, j, 6) {
+                                out.push(format!(
+                                    "{} {}",
+                                    name.to_uppercase(),
+                                    current_path
+                                ));
+                            }
+                            break; // one summary per operation
+                        }
+                    }
+                }
+                j += 1;
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_operation_summary_is_non_empty() {
+        // Contract-harness invariant (CAMARA API Design Guidelines + DESIGN §9):
+        // where an operation declares a `summary`, that summary MUST carry text.
+        // `summary` is the short label a Redoc/Swagger client renders as the
+        // operation's name in its navigation sidebar (and the hint many code
+        // generators prefer over the operationId), so a present-but-empty value —
+        // `summary: ""`/`''`, a bare `summary:` (a YAML null), or an empty block
+        // scalar — renders an anonymous nav entry exactly where a caller reads what
+        // the operation does.
+        //
+        // The value-side complement of `every_operation_declares_a_summary`, which
+        // credits a `summary:` by key presence alone (whatever its value) — so a
+        // summary truncated to empty by a half-finished paste satisfies it, its
+        // blankness unseen. Mirrors the suite's non-emptiness guards for the other
+        // value-bearing fields (`every_response_description_is_non_empty`,
+        // `every_spec_declares_a_non_empty_info_title`,
+        // `every_pattern_declares_a_non_empty_string`). Verified true across all
+        // mounted specs before asserting.
+        for api in APIS {
+            let empty = operations_with_empty_summary(api.body);
+            assert!(
+                empty.is_empty(),
+                "{} spec declares operation(s) whose `summary` is present but empty \
+                 (Redoc renders an anonymous nav entry): {:?}",
+                api.name,
+                empty
+            );
+        }
+    }
+
+    #[test]
+    fn operation_summary_non_empty_extraction_rules() {
+        // Unit-cover `operations_with_empty_summary` so the contract test above
+        // can't pass vacuously and its accept/reject boundary is pinned: a non-empty
+        // inline summary and a block scalar *with* content pass; an empty quoted
+        // `''`/`""`, a bare `summary:` (null), and an empty block scalar are flagged
+        // in document order; a `summary` nested inside an `examples` entry (deeper
+        // than the operation's own indent) is ignored; a Path Item Object's own
+        // 4-space `summary` is not an operation's; an operation with *no* summary is
+        // left to the presence test (not flagged here); and an HTTP verb used as a
+        // schema property name is not an operation.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      summary: Get A
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              examples:
+                ok:
+                  summary: ''
+                  value: {}
+    post:
+      operationId: postA
+      summary: ''
+      responses:
+        '201':
+          description: created
+  /b:
+    summary: a path-item summary, not the operation's
+    get:
+      operationId: getB
+      summary:
+      responses:
+        '200':
+          description: ok
+    post:
+      operationId: postB
+      summary: \"\"
+      responses:
+        '201':
+          description: created
+  /c:
+    get:
+      operationId: getC
+      summary: |
+      responses:
+        '200':
+          description: ok
+    post:
+      operationId: postC
+      summary: |
+        A block summary
+      responses:
+        '201':
+          description: created
+    put:
+      operationId: putC
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    Widget:
+      type: object
+      properties:
+        summary:
+          type: string
+";
+        // Flagged, in document order: POST /a (empty `''`), GET /b (bare null),
+        // POST /b (empty `\"\"`), GET /c (empty block scalar). Not flagged: GET /a
+        // (`Get A`, and its nested `examples.ok.summary: ''` sits far deeper than the
+        // operation's own 6-space `summary`, so it is never read); the Path Item
+        // Object's own 4-space `summary` under `/b` (not an operation's); POST /c (a
+        // block scalar *with* a content line); PUT /c (no `summary` — a *missing*
+        // summary is `every_operation_declares_a_summary`'s concern, not this test's);
+        // and the `summary` schema *property* under `components` (not under `paths:`).
+        assert_eq!(
+            operations_with_empty_summary(body),
+            vec![
+                "POST /a".to_string(),
+                "GET /b".to_string(),
+                "POST /b".to_string(),
+                "GET /c".to_string(),
+            ]
+        );
+
+        // Non-vacuous floor: across every registered spec no present operation
+        // summary is empty (the invariant the contract test asserts), and the corpus
+        // actually declares many operation-level summaries — so the value-inspection
+        // path runs on real data and a broken (always-empty) extractor can't hide
+        // behind a corpus with no summaries to check. Count operation-level (indent-6)
+        // `summary:` fields under `paths:` with a detector independent of the
+        // extractor's emptiness comparison (a Path Item Object's own summary sits at
+        // indent 4, so it is never counted here).
+        let mut op_summaries = 0usize;
+        for api in APIS {
+            assert!(
+                operations_with_empty_summary(api.body).is_empty(),
+                "{}: every present operation `summary` must be non-empty",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            let mut in_paths = false;
+            for l in &lines {
+                if !l.is_empty() && !l.starts_with(char::is_whitespace) {
+                    in_paths = l.trim_end() == "paths:";
+                    continue;
+                }
+                if in_paths
+                    && indent(l) == 6
+                    && l.trim_start().split_once(':').map(|(k, _)| k) == Some("summary")
+                {
+                    op_summaries += 1;
+                }
+            }
+        }
+        assert!(
+            op_summaries >= 100,
+            "expected many operation summaries across specs, got {op_summaries}"
+        );
+    }
 }

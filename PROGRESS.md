@@ -3322,6 +3322,23 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - an operation-`summary` non-empty contract test (`src/registry.rs`
+    `every_operation_summary_is_non_empty`) asserts that where an operation declares a
+    `summary`, that summary carries text. `summary` is the short label Redoc/Swagger
+    renders as the operation's name in its nav sidebar (and the hint many generators
+    prefer over the operationId), so a present-but-empty value (`summary: ""`/`''`, a
+    bare `summary:` null, or an empty block scalar) renders an anonymous nav entry. The
+    value-side complement of `every_operation_declares_a_summary`, which credits a
+    `summary:` by key presence alone (whatever its value); mirrors
+    `every_response_description_is_non_empty`. Pure `operations_with_empty_summary`
+    extractor (no YAML dep) reuses `operations_without_summary`'s path-item/method
+    scoping and judges the operation's own indent-6 `summary:` value empty via the same
+    `value_is_empty` logic as the description slice (bare/null, exactly-empty quoted
+    `""`/`''`, empty `|`/`>` block scalar); a nested `examples` entry's `summary`, a
+    Path Item Object's 4-space `summary`, and a *missing* summary (the presence test's
+    concern) are never flagged. Unit-covered (`operation_summary_non_empty_extraction_rules`,
+    incl. a ≥100 indent-6 operation-summary floor). Verified true across all mounted
+    specs (all 173 operation summaries non-empty) before asserting.
   - a response-`description` non-empty contract test (`src/registry.rs`
     `every_response_description_is_non_empty`) asserts that where a mounted spec gives
     a Response Object an inline `description`, that description carries text.
@@ -4737,6 +4754,40 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-16 — Contract-test harness: added an **operation-`summary` non-empty**
+  spec-structural contract test (`src/registry.rs` `every_operation_summary_is_non_empty`)
+  — where an operation declares a `summary`, that summary must carry text. `summary` is
+  the short label a Redoc/Swagger client renders as the operation's name in its nav
+  sidebar (and the hint many code generators prefer over the operationId), so a
+  present-but-empty value — `summary: ""`/`''`, a bare `summary:` (a YAML null), or an
+  empty block scalar — renders an anonymous nav entry right where a caller reads what the
+  operation does. The value-side complement of `every_operation_declares_a_summary`,
+  whose `operations_without_summary` credits a `summary:` by key *presence* alone (it
+  matches the key name before the colon, whatever the value) — so a summary truncated to
+  empty by a half-finished paste satisfies it, its blankness unseen; the direct parallel
+  of last pass's `every_response_description_is_non_empty` over
+  `every_declared_response_has_a_description`, and mirrors the suite's other
+  non-emptiness guards (`every_spec_declares_a_non_empty_info_title`,
+  `every_pattern_declares_a_non_empty_string`). New pure `operations_with_empty_summary`
+  extractor (no YAML dep) reuses `operations_without_summary`'s path-item/method scoping
+  (a 4-space HTTP-verb key under a 2-space `/…` path item beneath top-level `paths:`) and
+  judges the operation's own indent-6 `summary:` value empty via the identical
+  `value_is_empty` logic as `responses_with_empty_description` (bare/null; exactly-empty
+  quoted `""`/`''` recognised by two leading matching quote chars — never comment-strip,
+  so a `#` inside a real summary isn't read as a comment; an empty `|`/`>` block scalar
+  with no deeper content line). A `summary` nested inside an `examples` entry (deeper than
+  indent 6), a Path Item Object's own 4-space `summary`, and an operation with *no*
+  summary (the presence test's concern — this test flags only a present-but-blank one)
+  are never flagged. Surveyed the corpus first (0 empty/bare summaries; 173 operation
+  summaries, all non-empty) → no drift to fix. Unit-covered
+  (`operation_summary_non_empty_extraction_rules`: a non-empty inline summary and a block
+  scalar *with* content pass; an empty `''`/`""`, a bare null, and an empty block scalar
+  flagged in document order `["POST /a","GET /b","POST /b","GET /c"]`; a nested
+  `examples` `summary`, a path-item 4-space `summary`, a missing summary, and a `summary`
+  schema property ignored; plus a ≥100 indent-6 operation-summary floor via an
+  independent counter). `cargo test` 2635 green (was 2633; +2); `cargo build --release`
+  succeeds, no warnings. No new dependency; test-only change (the extractor and tests
+  live in the `#[cfg(test)]` module). — binary (release): 5.1M (5,314,968 B; unchanged)
 - 2026-08-16 — Contract-test harness: added a **response-`description` non-empty**
   spec-structural contract test (`src/registry.rs`
   `every_response_description_is_non_empty`) — where a mounted spec gives a Response
