@@ -4775,6 +4775,28 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     ≥10 example+enum pair non-vacuous floor). Verified true across all mounted specs
     (every enum-bearing example — network-type `5G`, `qosStatus` `AVAILABLE`,
     security-mode `WPA3-Enterprise`, the status enums — is a member; no drift to fix).
+  - an externalDocs-`url` contract test (`src/registry.rs`
+    `every_external_docs_object_declares_a_url`) asserts every `externalDocs` field a
+    mounted spec declares carries a non-empty `url` — the External Documentation
+    Object's single REQUIRED field (OpenAPI §4.8.11.1), which MUST be a URL. An
+    object with no `url` (only a `description`, or one blanked by an edit) is an
+    invalid object whose "read more" reference link renders nowhere. **No existing
+    test touches `externalDocs`**: the info-object series (title/description/license)
+    pins the sibling `info` fields, and the value-non-emptiness guards
+    (`every_response_description_is_non_empty`, `every_pattern_declares_a_non_empty_string`)
+    pin other fields' values — none reads an External Documentation Object. New pure
+    `external_docs_objects_missing_url` extractor (no YAML dep, mirroring
+    `example_objects_missing_value`): flags each `externalDocs:` opener whose block
+    object's own child indent holds no non-empty `url:` (a bare `url:` null and an
+    exactly-empty quoted `''`/`""` count as absent), or whose inline-flow form
+    (`{ url: … }`) names no non-empty `url`; an `externalDocs` inside an
+    `example:`/`examples:` payload (sample data) is skipped via an ancestor walk.
+    Unit-covered (`external_docs_url_extraction_rules`: block-with-url passes,
+    no-url/blank-quoted-url/inline-flow-without-url flagged in document order,
+    inline-flow-with-url passes, example-payload skipped; ≥3 externalDocs non-vacuous
+    floor). Verified true across all mounted specs (3 root-level externalDocs —
+    sponsored-data, iot-sim-fraud-prevention, network-traffic-analysis — all with a
+    url; no drift to fix).
   Full response-vs-schema validation still TODO (would need a YAML/JSON-Schema
   validator — a dependency trade-off, deferred).
 
@@ -4782,6 +4804,24 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-16 — Contract-test harness: added an **externalDocs-`url`** contract test
+  (`src/registry.rs` `every_external_docs_object_declares_a_url`) — every `externalDocs`
+  field a mounted spec declares must carry a non-empty `url`, the External Documentation
+  Object's single REQUIRED field (OpenAPI §4.8.11.1; MUST be a URL). An object with no
+  `url` (only a `description`, or one blanked by an edit) is invalid — its "read more"
+  reference link renders nowhere. No existing test touched `externalDocs`: the info-object
+  series pins the `info` fields and the value-non-emptiness guards pin other fields' values,
+  but none reads an External Documentation Object. New pure `external_docs_objects_missing_url`
+  extractor (no YAML dep, mirroring `example_objects_missing_value`): flags an `externalDocs:`
+  block opener whose object holds no non-empty `url:` (a bare null and an exactly-empty quoted
+  `''`/`""` count as absent), or an inline-flow `{ … }` naming no non-empty `url`; an
+  `externalDocs` inside an `example:`/`examples:` payload is skipped via an ancestor walk.
+  Unit-covered (`external_docs_url_extraction_rules`: block-with-url passes, no-url/blank-url/
+  inline-flow-without-url flagged in document order [12, 33, 37], inline-flow-with-url passes,
+  example-payload skipped; ≥3 externalDocs non-vacuous floor). Verified true across all mounted
+  specs (3 root-level externalDocs — sponsored-data / iot-sim-fraud-prevention /
+  network-traffic-analysis — all with a url; no drift). Full suite 2639 green, no new dep.
+  — binary (release): 5.1M (5,314,968 B)
 - 2026-08-16 — Contract-test harness: added an **error-example `status`-matches-response-key**
   contract test (`src/registry.rs` `every_error_example_status_matches_its_response_key`)
   — where a Response Object keyed by a numeric HTTP status declares an example whose value

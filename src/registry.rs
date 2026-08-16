@@ -19663,4 +19663,267 @@ components:
             "expected many response example status+key pairs across specs, got {status_pairs}"
         );
     }
+
+    /// The 1-based line numbers, in document order, of every **External
+    /// Documentation Object** an `externalDocs:` field opens that does not declare
+    /// a non-empty `url`, without a YAML dep.
+    ///
+    /// In OpenAPI 3.0.x an `externalDocs` field (on the root Object, an Operation,
+    /// a Tag, or a Schema) holds an External Documentation Object whose single
+    /// REQUIRED field is `url` — the link to the reference docs, which MUST be a
+    /// URL (§4.8.11.1). An object with no `url` (only a `description`, or one whose
+    /// `url:` line was dropped/blanked in an edit) is an invalid External
+    /// Documentation Object: the "read more" link a Redoc/Swagger client renders
+    /// from it points nowhere, exactly where a caller looks for the API's upstream
+    /// reference. Every CamaraSim spec that carries an `externalDocs` uses the
+    /// CAMARA-template root block pointing at the API's project repository, so this
+    /// also pins that uniformity.
+    ///
+    /// No other contract test touches `externalDocs`: the `info`-object series
+    /// (`every_spec_declares_a_non_empty_info_title`/`…_description`/`…_license`)
+    /// pins the sibling `info` fields, and the non-emptiness value guards
+    /// (`every_response_description_is_non_empty`,
+    /// `every_pattern_declares_a_non_empty_string`) pin other fields' values —
+    /// none reads an External Documentation Object for its required `url`.
+    ///
+    /// Pure structural scan mirroring `example_objects_missing_value`. An
+    /// `externalDocs:` nested inside an outer `example:`/`examples:` payload is
+    /// sample data (an ancestor walk skips it). For a block-form field (no inline
+    /// scalar) the object's own child indent is scanned for a `url:` key whose
+    /// value is non-empty — a bare `url:` (a YAML null) and an exactly-empty quoted
+    /// string (`''`/`""`) count as absent, matching the suite's non-empty guards.
+    /// An inline-flow field (`externalDocs: { url: … }`) is satisfied only when the
+    /// flow mapping names a `url` key with a non-empty value (a `url`'s own `https:`
+    /// colon sits after the first split, so it is read intact).
+    fn external_docs_objects_missing_url(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        // The `(key, inline-value)` of a line, inline comment stripped; the value is
+        // empty when the key opens a block. `None` when the line has no `key:`.
+        let key_of = |l: &str| -> Option<(String, String)> {
+            let (k, v) = l.trim_start().split_once(':')?;
+            let v = v.split('#').next().unwrap_or(v).trim();
+            Some((k.trim().to_string(), v.to_string()))
+        };
+        // Whether a `url:` value carries no text: a bare null, or an exactly-empty
+        // quoted string (two leading matching quote chars, optionally trailed by a
+        // `# comment`) — an escaped-quote `''''` (one `'`) is not empty.
+        let url_value_is_empty = |v: &str| -> bool {
+            let v = v.trim();
+            if v.is_empty() {
+                return true;
+            }
+            let b = v.as_bytes();
+            if b.len() >= 2 && (b[0] == b'"' || b[0] == b'\'') && b[1] == b[0] {
+                let after = v[2..].trim_start();
+                if after.is_empty() || after.starts_with('#') {
+                    return true;
+                }
+            }
+            false
+        };
+        // True when `externalDocs:` at line `i` (indent `c`) sits inside an outer
+        // `example:`/`examples:` payload — sample data, not the OpenAPI field.
+        // Mirrors the sibling example tests' guard.
+        let inside_example_payload = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = key_of(l) {
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some((k, v)) = key_of(line) else {
+                continue;
+            };
+            if k != "externalDocs" {
+                continue;
+            }
+            let c = indent(line);
+            if inside_example_payload(i, c) {
+                continue;
+            }
+            if !v.is_empty() {
+                // Inline-flow mapping: satisfied iff it names a non-empty `url`. Split
+                // on commas within the braces; a `url:` value's own `https:` colon is
+                // past the first split, so `split_once(':')` reads the url intact.
+                let inner = v.trim_start_matches('{').trim_end_matches('}');
+                let names_url = inner.split(',').any(|pair| {
+                    matches!(pair.split_once(':'),
+                        Some((pk, pv)) if pk.trim() == "url" && !url_value_is_empty(pv))
+                });
+                if !names_url {
+                    out.push(i + 1);
+                }
+                continue;
+            }
+            // Block form: scan the object's own child indent for a non-empty `url:`.
+            let mut obj_child = None;
+            let mut has_url = false;
+            let mut m = i + 1;
+            while m < lines.len() {
+                let ll = lines[m];
+                if ll.trim().is_empty() {
+                    m += 1;
+                    continue;
+                }
+                let mi = indent(ll);
+                if mi <= c {
+                    break; // dedented out of the externalDocs object
+                }
+                if obj_child.is_none() {
+                    obj_child = Some(mi);
+                }
+                if Some(mi) == obj_child {
+                    if let Some((kk, vv)) = key_of(ll) {
+                        if kk == "url" && !url_value_is_empty(&vv) {
+                            has_url = true;
+                            break;
+                        }
+                    }
+                }
+                m += 1;
+            }
+            if !has_url {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_external_docs_object_declares_a_url() {
+        // Contract-harness invariant (OpenAPI External Documentation Object rule,
+        // §4.8.11): every `externalDocs` field a mounted spec declares MUST carry a
+        // non-empty `url` — the object's single REQUIRED field, which MUST be a URL.
+        // An External Documentation Object with no `url` (only a `description`, or
+        // one blanked by a half-finished edit) is an invalid object: the "read more"
+        // reference link Redoc/Swagger renders from it points nowhere, right where a
+        // caller looks for the API's upstream docs. Every CamaraSim spec that carries
+        // an `externalDocs` uses the CAMARA-template root block pointing at the API's
+        // project repository, so this pins that uniformity too.
+        //
+        // No existing test touches `externalDocs`: the info-object series
+        // (title/description/license) pins the sibling `info` fields, and the
+        // value-non-emptiness guards (`every_response_description_is_non_empty`,
+        // `every_pattern_declares_a_non_empty_string`) pin other fields' values —
+        // none reads an External Documentation Object. A missing and a blank `url`
+        // are folded into one line-numbered report. Verified true across every
+        // mounted spec before asserting.
+        for api in APIS {
+            let bad = external_docs_objects_missing_url(api.body);
+            assert!(
+                bad.is_empty(),
+                "{} spec declares an `externalDocs` object with no non-empty `url` \
+                 (the External Documentation Object's one REQUIRED field) at \
+                 line(s): {:?}",
+                api.name,
+                bad
+            );
+        }
+    }
+
+    #[test]
+    fn external_docs_url_extraction_rules() {
+        // Unit-cover `external_docs_objects_missing_url` so the contract test above
+        // can't pass vacuously and its accept/reject boundary is pinned: a block
+        // `externalDocs` with a non-empty `url` passes (url declared after its
+        // `description`); an `externalDocs` with only a `description` (no url), one
+        // whose `url` is an exactly-empty quoted string, and an inline-flow
+        // `externalDocs: { description: … }` naming no `url` are flagged in document
+        // order; an inline-flow `externalDocs: { url: … }` passes; and an
+        // `externalDocs` key inside an `example:` payload (sample data) is skipped.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+externalDocs:
+  description: root docs
+  url: https://example.com/root
+paths:
+  /a:
+    get:
+      operationId: getA
+      externalDocs:
+        description: op docs, no url
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              example:
+                externalDocs:
+                  description: sample only
+  /b:
+    get:
+      operationId: getB
+      externalDocs: { url: https://example.com/b }
+      responses:
+        '204':
+          description: no content
+components:
+  schemas:
+    S:
+      type: object
+      externalDocs:
+        url: ''
+    T:
+      type: object
+      externalDocs: { description: flow, no url }
+";
+        // Flagged, in document order (the `externalDocs:` opener line, not the url
+        // line): line 12 (`/a get` externalDocs, only a description), line 33 (`S`
+        // schema externalDocs, whose `url: ''` is blank), and line 37 (`T` schema
+        // inline-flow externalDocs naming no `url`). Not flagged: the root
+        // externalDocs at line 5 (url present), the `/b get` inline-flow externalDocs
+        // at line 25 (names a non-empty url), and the externalDocs at line 20 (inside
+        // an `example:` payload — sample data, not the field).
+        assert_eq!(external_docs_objects_missing_url(body), vec![12, 33, 37]);
+
+        // Non-vacuous floor: across every registered spec every `externalDocs`
+        // object declares a non-empty `url` (the invariant the contract test
+        // asserts), and the corpus actually declares External Documentation Objects
+        // — so the url-scanning path runs on real data and a broken (always-empty)
+        // extractor can't hide behind a corpus with no `externalDocs`. Count the
+        // fields with a detection independent of the extractor.
+        let mut ext_docs = 0usize;
+        for api in APIS {
+            assert!(
+                external_docs_objects_missing_url(api.body).is_empty(),
+                "{}: every externalDocs object must declare a non-empty url",
+                api.name
+            );
+            ext_docs += api
+                .body
+                .lines()
+                .filter(|l| {
+                    l.trim_start().split_once(':').map(|(k, _)| k.trim())
+                        == Some("externalDocs")
+                })
+                .count();
+        }
+        assert!(
+            ext_docs >= 3,
+            "expected External Documentation Objects across specs, got {ext_docs}"
+        );
+    }
 }
