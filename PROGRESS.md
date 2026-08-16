@@ -1179,6 +1179,7 @@ legs (`profileDownload`, `profileOperation`, `profileResultQuery`) are deferred.
 
 _None._  <!-- agent: put the claimed item + run timestamp here, clear it when done -->
 
+
 ## Backlog (work top-down; respect phases — see docs/DESIGN.md §12)
 
 ### Phase 0 — Auth foundation
@@ -3322,6 +3323,33 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - an error-example `status`-matches-response-key contract test (`src/registry.rs`
+    `every_error_example_status_matches_its_response_key`) asserts that where a
+    Response Object keyed by a numeric HTTP status declares an example whose value
+    carries an integer `status` field, that field equals the response's own
+    status-code key. The CAMARA error model (`CamaraError`) carries the HTTP status
+    into the body's `status`, so an example under `"404"` must show `status: 404`; a
+    `status: 400` pasted into a `"409"` block and left un-retargeted is a
+    self-contradictory sample (the documented body disagrees with the response it
+    illustrates) — a routine hazard in these scenario-table specs where each error
+    case is one hand-written example copied from a sibling. The only test that links
+    an example's `status` body field to its enclosing response key:
+    `every_responses_object_key_is_a_valid_status` checks the response *key* but never
+    reads an example, and the example tests inspect an example against its *own* schema
+    (value/enum/type/bound), never against the containing status. Pure
+    `error_example_status_mismatches` extractor (no YAML dep): flags a `status:` with
+    an inline **integer** value, sitting inside an `example`/`examples`/`value`
+    payload (ancestor walk), whose nearest enclosing Response-Object key is a bare
+    3-digit status and differs from it. Skipped: a non-integer `status` (a lifecycle
+    enum `AVAILABLE`/`ACTIVE`), a `status` under a `default:` response or a named
+    `components.responses` entry (up-walk halts at `responses:` — no numeric key), and
+    a `status:` schema property opening a block. Unit-covered
+    (`error_example_status_match_extraction_rules`: matches under a numeric/named-example
+    key pass; mismatches under a single `example` and a named `examples`/`value` entry
+    flagged in document order `[23, 35]`; non-integer, `default:`, schema-property, and
+    schema-`example` cases skipped; plus a ≥100 example+numeric-key pair floor via an
+    independent up-walk). Verified true across all mounted specs (237 numeric-status
+    response-example pairs, 0 mismatched) before asserting.
   - an operation-`summary` non-empty contract test (`src/registry.rs`
     `every_operation_summary_is_non_empty`) asserts that where an operation declares a
     `summary`, that summary carries text. `summary` is the short label Redoc/Swagger
@@ -4754,6 +4782,35 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-16 — Contract-test harness: added an **error-example `status`-matches-response-key**
+  contract test (`src/registry.rs` `every_error_example_status_matches_its_response_key`)
+  — where a Response Object keyed by a numeric HTTP status declares an example whose value
+  carries an integer `status` field, that field must equal the response's own status-code
+  key. The CAMARA error model (`CamaraError`) carries the HTTP status into the body's
+  `status`, so an example under `"404"` must show `status: 404`; a `status: 400` pasted
+  into a `"409"` block and left un-retargeted is a self-contradictory sample the response's
+  own status contradicts — a routine hazard in these scenario-table specs where each error
+  case is one hand-written example copied from a sibling and re-tuned. The only test linking
+  an example's `status` body field to its enclosing response key: the existing
+  `every_responses_object_key_is_a_valid_status` checks the response *key* is well-formed
+  but never reads an example, and the example tests (value/enum/type/bound) inspect an
+  example against its *own* schema, never against the containing status. New pure
+  `error_example_status_mismatches` extractor (no YAML dep): flags a `status:` with an
+  inline **integer** value, sitting inside an `example`/`examples`/`value` payload (ancestor
+  walk), whose nearest enclosing Response-Object key is a bare 3-digit status and differs
+  from it; the up-walk halts at a `responses:` container so a `status` under a `default:`
+  response or a named `components.responses.<Name>` entry (no numeric key) is skipped, as is
+  a non-integer lifecycle `status` (`AVAILABLE`/`ACTIVE`) and a `status:` schema property
+  opening a block. Surveyed the corpus first (237 numeric-status response-example pairs, 0
+  mismatched) → no drift to fix. Unit-covered (`error_example_status_match_extraction_rules`:
+  matches under a numeric key and a named `examples` entry pass; mismatches under a single
+  `example` and a named `examples`/`value` entry flagged in document order `[23, 35]`; a
+  non-integer `status`, a `default:` response, a schema property named `status`, and a
+  schema-level `example.status` outside any `responses:` block all skipped; plus a ≥100
+  example+numeric-key pair floor via an independent up-walk). `cargo test` 2637 green (was
+  2635; +2); `cargo build --release` succeeds, no warnings. No new dependency; test-only
+  change (the extractor and tests live in the `#[cfg(test)]` module). — binary (release):
+  5.1M (5,314,968 B; unchanged)
 - 2026-08-16 — Contract-test harness: added an **operation-`summary` non-empty**
   spec-structural contract test (`src/registry.rs` `every_operation_summary_is_non_empty`)
   — where an operation declares a `summary`, that summary must carry text. `summary` is

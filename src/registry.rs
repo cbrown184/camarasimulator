@@ -19371,4 +19371,296 @@ components:
             "expected many operation summaries across specs, got {op_summaries}"
         );
     }
+
+    /// The 1-based line numbers, in document order, of every response **example**
+    /// `status:` field whose integer value disagrees with the numeric HTTP status-code
+    /// key of the Response Object that encloses it, without a YAML dep.
+    ///
+    /// The CAMARA error model (`specs/shared/errors.yaml` `CamaraError`) carries the
+    /// HTTP status *into the body* as a `status` field, so an example illustrating a
+    /// `"404"` response MUST show `status: 404`. A sample under one status key that
+    /// carries a different status number — a `status: 400` pasted into a `"409"` block
+    /// and left un-retargeted — is a self-contradictory spec: the documented sample
+    /// disagrees with the very status it illustrates, so a Redoc/Swagger "try it"
+    /// prefill and a codegen client's generated sample show a caller a body whose
+    /// `status` field can never match the response it lives under. A routine hazard in
+    /// these scenario-table-heavy specs, where each error case is one hand-written
+    /// example copied from a sibling and re-tuned.
+    ///
+    /// Invisible to every existing test: `every_responses_object_key_is_a_valid_status`
+    /// checks the response *key* is a well-formed status but never reads an example's
+    /// body, and the example tests (`every_example_object_declares_a_value`, the
+    /// enum/type/bound example tests) inspect an example against its *own* schema, never
+    /// against the status code of the response that contains it. This is the only test
+    /// that links an example's `status` body field to its enclosing response key.
+    ///
+    /// Only a `status:` carrying an inline **integer** scalar, sitting inside an
+    /// `example:`/`examples:`/`value:` payload (some ancestor key up the indent ladder
+    /// is `example`/`examples`/`value`, mirroring the suite's `inside_example` walk)
+    /// whose nearest enclosing Response-Object key is a numeric HTTP status
+    /// (`"NNN"`/`NNN`) is compared. Skipped: a non-integer `status` (a `SessionInfo`/
+    /// `SubscriptionInfo` lifecycle enum such as `AVAILABLE`/`ACTIVE`, which has no
+    /// status-code magnitude); a `status` under a `default:` response or a named
+    /// `components.responses.<Name>` entry (no numeric key to compare — the up-walk
+    /// halts at the `responses:` container or exhausts before any numeric key); and a
+    /// `status:` that opens a block (a schema property literally named `status`, whose
+    /// inline value is empty).
+    fn error_example_status_mismatches(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        // The inline integer value of a `status:` line (inline comment + surrounding
+        // quotes stripped); `None` when the line is a different key, opens a block, or
+        // carries a non-integer scalar (a lifecycle enum, a quoted non-number).
+        let status_int = |l: &str| -> Option<i64> {
+            let (k, v) = l.trim_start().split_once(':')?;
+            if k.trim() != "status" {
+                return None;
+            }
+            let v = v
+                .split('#')
+                .next()
+                .unwrap_or(v)
+                .trim()
+                .trim_matches('"')
+                .trim_matches('\'');
+            v.parse::<i64>().ok()
+        };
+        // The numeric HTTP status-code key of the Response Object enclosing line `i`
+        // (indent `c`), paired with whether the path from `i` up to it passed through
+        // an `example`/`examples`/`value` container. Walk up the indent ladder (strictly
+        // decreasing levels, dedent-tracked like the suite's ancestor walks): the first
+        // shallower key that is a bare 3-digit status → its value; a `responses:`
+        // container reached first → `None` (the enclosing response key was non-numeric —
+        // a `default` or a named `components.responses` entry).
+        let enclosing = |i: usize, c: usize| -> (Option<i64>, bool) {
+            let mut level = c;
+            let mut k = i;
+            let mut in_example = false;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    let key = l
+                        .trim_start()
+                        .split_once(':')
+                        .map(|(x, _)| x.trim())
+                        .unwrap_or("");
+                    if key == "example" || key == "examples" || key == "value" {
+                        in_example = true;
+                    }
+                    if key == "responses" {
+                        return (None, in_example);
+                    }
+                    let bare = key.trim_matches('"').trim_matches('\'');
+                    if bare.len() == 3 && bare.chars().all(|ch| ch.is_ascii_digit()) {
+                        return (bare.parse::<i64>().ok(), in_example);
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            (None, in_example)
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some(sval) = status_int(line) else {
+                continue;
+            };
+            let c = indent(line);
+            let (key, in_example) = enclosing(i, c);
+            if !in_example {
+                continue; // a `status` field outside any example payload
+            }
+            if let Some(kval) = key {
+                if sval != kval {
+                    out.push(i + 1);
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_error_example_status_matches_its_response_key() {
+        // Contract-harness invariant (CAMARA error model, DESIGN §7/§8): the CamaraError
+        // body carries the HTTP status into a `status` field, so where a Response Object
+        // keyed by a numeric HTTP status code declares an example whose value has an
+        // integer `status` field, that field MUST equal the response's own status-code
+        // key. A sample under `"404"` that shows `status: 400` — an error example pasted
+        // from a sibling status and left un-retargeted — is a self-contradictory spec:
+        // the documented body disagrees with the response it illustrates, so a
+        // Redoc/Swagger "try it" prefill and a codegen sample hand a caller a `status`
+        // the response can never legally carry. Verified true across all mounted specs
+        // before asserting.
+        for api in APIS {
+            let bad = error_example_status_mismatches(api.body);
+            assert!(
+                bad.is_empty(),
+                "{} spec declares a response example whose body `status` field disagrees \
+                 with the numeric HTTP status-code key of the response that encloses it \
+                 (a sample the response's own status contradicts) at `status:` line(s): \
+                 {:?}",
+                api.name,
+                bad
+            );
+        }
+    }
+
+    #[test]
+    fn error_example_status_match_extraction_rules() {
+        // Unit-cover `error_example_status_mismatches` so the contract test above can't
+        // pass vacuously and its accept/reject boundary is pinned: a matching example
+        // `status` (under a numeric key or a named `examples` entry) passes; a
+        // mismatching `status` under a single `example:` and one under a named
+        // `examples`/`value:` entry are flagged in document order; a non-integer
+        // `status` (a lifecycle enum) is skipped; a `status` under a `default:` response
+        // (no numeric key) is skipped; a `status:` schema *property* opening a block and
+        // a schema-level `example.status` outside any `responses:` block are skipped.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              examples:
+                ok:
+                  value:
+                    status: 200
+        '404':
+          description: nf
+          content:
+            application/json:
+              example:
+                status: 400
+                code: NOT_FOUND
+        '409':
+          description: c
+          content:
+            application/json:
+              examples:
+                conflict:
+                  value:
+                    status: 409
+                wrong:
+                  value:
+                    status: 422
+        default:
+          description: d
+          content:
+            application/json:
+              example:
+                status: 500
+  /b:
+    post:
+      operationId: postB
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              example:
+                status: ACTIVE
+components:
+  schemas:
+    Info:
+      type: object
+      properties:
+        status:
+          type: string
+      example:
+        status: 200
+";
+        // Flagged, in document order: line 23 (`status: 400` under the `'404'` response)
+        // and line 35 (`status: 422` under the `'409'` response's `wrong` example). Not
+        // flagged: line 17 (`status: 200` under `'200'`, a match) and line 32
+        // (`status: 409` under `'409'`, a match); line 41 (`status: 500` under
+        // `default:` — no numeric key, the up-walk halts at `responses:`); line 51
+        // (`status: ACTIVE` — not an integer); line 57 (a `status:` schema property
+        // opening a block, no inline value); and line 60 (`status: 200` under a schema's
+        // own `example`, outside any `responses:` block).
+        assert_eq!(error_example_status_mismatches(body), vec![23, 35]);
+
+        // Non-vacuous floor: across every registered spec every numeric-status response
+        // example agrees with its response key (the invariant the contract test
+        // asserts), and the corpus actually declares many such example+response-key
+        // pairs — so the status-comparison path runs on real data and a broken
+        // (always-empty) extractor can't hide behind a corpus that never pairs an
+        // example status with a numeric response key. Count pairs with an independent
+        // ancestor walk that never performs the extractor's equality comparison.
+        let mut status_pairs = 0usize;
+        for api in APIS {
+            assert!(
+                error_example_status_mismatches(api.body).is_empty(),
+                "{}: every response example's `status` must equal its response key",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            for (i, l) in lines.iter().enumerate() {
+                let Some((k, v)) = l.trim_start().split_once(':') else {
+                    continue;
+                };
+                if k.trim() != "status" {
+                    continue;
+                }
+                let v = v.split('#').next().unwrap_or(v).trim().trim_matches('"').trim_matches('\'');
+                if v.parse::<i64>().is_err() {
+                    continue;
+                }
+                // Independent up-walk: numeric enclosing response key + an example ancestor.
+                let c = indent(l);
+                let mut level = c;
+                let mut j = i;
+                let mut in_example = false;
+                let mut numeric_key = false;
+                while j > 0 {
+                    j -= 1;
+                    let x = lines[j];
+                    if x.trim().is_empty() {
+                        continue;
+                    }
+                    let li = indent(x);
+                    if li < level {
+                        let key = x.trim_start().split_once(':').map(|(a, _)| a.trim()).unwrap_or("");
+                        if key == "example" || key == "examples" || key == "value" {
+                            in_example = true;
+                        }
+                        if key == "responses" {
+                            break;
+                        }
+                        let bare = key.trim_matches('"').trim_matches('\'');
+                        if bare.len() == 3 && bare.chars().all(|ch| ch.is_ascii_digit()) {
+                            numeric_key = true;
+                            break;
+                        }
+                        level = li;
+                        if li == 0 {
+                            break;
+                        }
+                    }
+                }
+                if in_example && numeric_key {
+                    status_pairs += 1;
+                }
+            }
+        }
+        assert!(
+            status_pairs >= 100,
+            "expected many response example status+key pairs across specs, got {status_pairs}"
+        );
+    }
 }
