@@ -3323,6 +3323,29 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - a server-url-no-trailing-slash contract test (`src/registry.rs`
+    `every_server_url_has_no_trailing_slash`) asserts no Server Object `url` a
+    mounted spec declares, other than a bare root `/`, ends with a trailing slash
+    (the well-known Spectral `oas3-server-trailing-slash` lint). Every path key
+    already begins with `/`, so a server url that also ends with `/` doubles the
+    separator (`{apiRoot}/qos/v1//sessions`) the moment a Redoc/Swagger "try it"
+    panel or a codegen client joins base + path — a route the simulator never
+    serves. The value-side complement of `every_server_object_declares_a_url` /
+    `servers_missing_url`, which pins that each server *declares* a non-empty `url`
+    but never inspects that url's shape (a present-but-slash-terminated url slips
+    past it); no other test reads a url's text — `server_url_undefined_variables`
+    only resolves the `{var}` placeholders, never the trailing character. Pure
+    `server_urls_with_trailing_slash` extractor (no YAML dep) reuses
+    `servers_missing_url`'s top-level-`servers:`-block scoping, unquotes each `url:`
+    value (dash line, inline-flow `- { url: … }`, or continuation), and flags those
+    ending `/` (bare root `/` exempt, mirroring `path_keys_with_trailing_slash`).
+    Within the block every `url:` names a server url (a `variables:` entry carries
+    `default`/`description`/`enum`, never `url`). Unit-covered
+    (`server_url_trailing_slash_extraction_rules`: a `- url: …/` dash url and an
+    inline-flow `- { url: …/ }` flagged in document order; a no-slash url, the bare
+    root `/`, a `variables:` `default:` value ending `/`, and a `url:` schema
+    property outside the block not flagged; ≥40 server-url-line floor). Surveyed
+    the corpus first (61 server urls, all `{apiRoot}/…`, 0 trailing-slash) → no drift.
   - a discriminator-mapping-target-resolves contract test (`src/registry.rs`
     `every_discriminator_mapping_target_is_a_defined_component`) asserts every target
     a Discriminator Object's `mapping` names (`<value>: <schema>`) resolves to a
@@ -4877,6 +4900,41 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-16 — Contract-test harness: added a **server-url-no-trailing-slash**
+  contract test (`src/registry.rs` `every_server_url_has_no_trailing_slash`) — no
+  Server Object `url` a mounted spec declares, other than a bare root `/`, may end
+  with a trailing slash (the well-known Spectral `oas3-server-trailing-slash`
+  lint). Every OpenAPI path key already begins with `/` (pinned by
+  `every_paths_object_declares_slash_prefixed_path_items`), so a server url that
+  itself ends with `/` — `{apiRoot}/qos/v1/` — doubles the separator
+  (`{apiRoot}/qos/v1//sessions`) the moment a Redoc/Swagger "try it" panel or a
+  codegen client joins base + path, handing the caller a route the simulator never
+  serves; a trailing `/` is almost always an editing slip (a separator pasted from
+  a sibling, a `/` typed after the last version segment). The **value-side
+  complement** of `every_server_object_declares_a_url` / `servers_missing_url`,
+  which pins that each server *declares* a non-empty `url` but never inspects that
+  url's shape — a present-but-slash-terminated url slips past it; no other test
+  reads a server url's text (`server_url_undefined_variables` only resolves the
+  `{var}` placeholders a url templates, never its trailing character). New pure
+  `server_urls_with_trailing_slash` extractor (no YAML dep) reuses
+  `servers_missing_url`'s top-level-`servers:`-block scoping (a line == `servers:`
+  at column zero, through the next column-zero key), unquotes each `url:` value
+  (on a dash line `- url: …`, inside an inline-flow `- { url: … }`, or a
+  continuation line) and flags those of length > 1 ending `/`; the bare root `/`
+  is exempt (mirroring `path_keys_with_trailing_slash`). Within the block every
+  `url:` names a server url — a `variables:` entry carries `default`/`description`/
+  `enum`, never `url` — so no server-url-shaped false positive arises. Surveyed the
+  corpus first (61 server urls, all `{apiRoot}/<api>/<version>`, 0 trailing-slash)
+  → no drift to fix. Unit-covered (`server_url_trailing_slash_extraction_rules`: a
+  `- url: "{apiRoot}/x/v1/"` and an inline-flow `- { url: https://…/flow/ }`
+  flagged in document order by the url's own line `[6, 12]`; a no-slash url, the
+  bare root `/`, a `variables:` `default:` value ending `/` (not a `url` key), and
+  a `url:` schema property + `example:` url outside the `servers:` block not
+  flagged; plus a ≥40 server-url-line floor via an independent in-`servers:`-block
+  counter). `cargo test` 2651 green (was 2649; +2); `cargo build --release`
+  succeeds, no warnings. No new dependency; test-only change (the extractor and both
+  tests live in the `#[cfg(test)]` module). — binary (release): 5.1M (5,314,968 B;
+  unchanged)
 - 2026-08-16 — Contract-test harness: added a **discriminator-mapping-target-resolves**
   contract test (`src/registry.rs` `every_discriminator_mapping_target_is_a_defined_component`)
   — every target a Discriminator Object's `mapping` names (`<value>: <schema>`) must

@@ -21150,4 +21150,206 @@ components:
         }
         assert!(keys >= 100, "expected many path keys across specs, got {keys}");
     }
+
+    /// The 1-based line number of every Server Object `url` in a mounted spec's
+    /// top-level `servers:` array whose value ends with a trailing slash — other
+    /// than a bare root `/` — without a YAML dep.
+    ///
+    /// A Server Object's `url` is the base URL a client prepends to each
+    /// operation's path, and every OpenAPI path key already begins with `/`
+    /// (pinned by `every_paths_object_declares_slash_prefixed_path_items`). So a
+    /// server url that itself ends with `/` — `{apiRoot}/qos/v1/` — produces a
+    /// doubled separator (`{apiRoot}/qos/v1//sessions`) the moment a Redoc/Swagger
+    /// "try it" panel or a codegen client joins base + path, a route the simulator
+    /// never serves. A trailing `/` is almost always an editing slip (a separator
+    /// pasted from a sibling, a `/` typed after the last version segment). The
+    /// well-known Spectral `oas3-server-trailing-slash` lint. A url of exactly `/`
+    /// is exempt (the origin root — the slash *is* the url, not a trailing
+    /// separator), mirroring the root-path exemption in
+    /// [`path_keys_with_trailing_slash`].
+    ///
+    /// The value-side complement of [`servers_missing_url`], which pins that each
+    /// server *declares* a non-empty `url` but never inspects that url's shape —
+    /// so a present-but-slash-terminated url slips past it. No other test reads a
+    /// server url's text: `server_url_undefined_variables` only resolves the
+    /// `{var}` placeholders a url templates, never its trailing character.
+    ///
+    /// Scoping mirrors [`servers_missing_url`]: only the top-level `servers:`
+    /// block is scanned (a line == `servers:` at column zero, through the next
+    /// column-zero key), so a `url:` elsewhere (a schema example, a license/
+    /// externalDocs url, a `$ref`) is never read. Within the block every `url:`
+    /// key names a server url (Server Objects carry only `url`/`description`/
+    /// `variables`, and a `variables:` entry has `default`/`description`/`enum`,
+    /// never `url`), whether it sits on a dash line (`- url: …`), inside an
+    /// inline-flow dash (`- { url: … }`), or on a continuation line; the value is
+    /// unquoted (`"…"`/`'…'`) before the final-character check. Returns the
+    /// offending url lines in document order.
+    fn server_urls_with_trailing_slash(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+
+        // The unquoted value of a `url:` key on one `key: value` fragment (a
+        // leading sequence dash stripped by the caller), or None when the key is
+        // not `url`. `split_once(':')` cuts at the first colon, so the key is the
+        // text before it and a url's own `https:` colon stays inside the value.
+        let url_value = |t: &str| -> Option<String> {
+            match t.split_once(':') {
+                Some((k, v)) if k.trim() == "url" => {
+                    Some(v.trim().trim_matches('"').trim_matches('\'').to_string())
+                }
+                _ => None,
+            }
+        };
+
+        // Isolate the top-level `servers:` block (mirrors `servers_missing_url`).
+        let Some(start) = lines.iter().position(|l| *l == "servers:") else {
+            return Vec::new();
+        };
+        let end = lines[start + 1..]
+            .iter()
+            .position(|l| !l.is_empty() && !l.starts_with(char::is_whitespace))
+            .map(|off| start + 1 + off)
+            .unwrap_or(lines.len());
+
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate().take(end).skip(start + 1) {
+            let trimmed = line.trim_start();
+            if trimmed.is_empty() {
+                continue;
+            }
+            // Strip a leading `- ` sequence dash, then read the fragment(s): an
+            // inline-flow mapping (`{ url: …, description: … }`) splits on commas,
+            // otherwise the line is a single `key: value`.
+            let content = trimmed.strip_prefix("- ").unwrap_or(trimmed);
+            let fragments: Vec<&str> = if content.trim_start().starts_with('{') {
+                content
+                    .trim()
+                    .trim_start_matches('{')
+                    .trim_end_matches('}')
+                    .split(',')
+                    .collect()
+            } else {
+                vec![content]
+            };
+            for frag in fragments {
+                if let Some(v) = url_value(frag) {
+                    if v.len() > 1 && v.ends_with('/') {
+                        out.push(i + 1);
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_server_url_has_no_trailing_slash() {
+        // Contract-harness invariant (the well-known Spectral
+        // `oas3-server-trailing-slash` lint): no Server Object `url` a mounted spec
+        // declares — other than a bare root `/` — may end with a trailing slash.
+        // Every path key already begins with `/`, so a server url that also ends
+        // with `/` doubles the separator (`{apiRoot}/qos/v1//sessions`) the moment
+        // a Redoc/Swagger "try it" panel or a codegen client joins base + path,
+        // handing the caller a route the simulator never serves.
+        //
+        // The value-side complement of `every_server_object_declares_a_url` /
+        // `servers_missing_url`, which pins that each server *declares* a non-empty
+        // `url` but never inspects that url's shape — a present-but-slash-terminated
+        // url slips past it. No other test reads a server url's text:
+        // `server_url_undefined_variables` only resolves the `{var}` placeholders a
+        // url templates, never its trailing character. Verified true across every
+        // mounted spec before asserting.
+        for api in APIS {
+            let bad = server_urls_with_trailing_slash(api.body);
+            assert!(
+                bad.is_empty(),
+                "{} spec declares a `servers:` url with a trailing slash \
+                 (path keys already start with `/`, so a trailing slash doubles \
+                 the separator) at line(s): {:?}",
+                api.name,
+                bad
+            );
+        }
+    }
+
+    #[test]
+    fn server_url_trailing_slash_extraction_rules() {
+        // Unit-cover `server_urls_with_trailing_slash` so the contract test above
+        // can't pass vacuously and its accept/reject boundary is pinned: a
+        // `- url: …/` dash-line server url and an inline-flow `- { url: …/ }` are
+        // flagged in document order (by the url's own line); a url with no trailing
+        // slash, a bare root `/` (exempt), and a `variables:` `default:` whose value
+        // ends in `/` (not a `url` key) all pass; and a `url:` schema property
+        // outside the `servers:` block is never read.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+servers:
+  - url: \"{apiRoot}/x/v1/\"
+    variables:
+      apiRoot:
+        default: http://localhost:8080/
+  - url: \"{apiRoot}/y/v2\"
+  - url: /
+  - { url: https://example.com/flow/ }
+  - { url: https://example.com/flow }
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  url:
+                    type: string
+                    example: http://x/a/
+";
+        // Flagged, in document order (each url's own line): line 6 (the templated
+        // url ending `/`) and line 12 (the inline-flow url ending `/`). Not flagged:
+        // line 9 (a `variables:` `default:` value — not a `url` key), line 10
+        // (`{apiRoot}/y/v2`, no trailing slash), line 11 (the bare root `/`, exempt),
+        // line 13 (inline-flow url with no trailing slash). The schema property
+        // literally named `url` (line 26) with an `example: http://x/a/` is outside
+        // the `servers:` block, so it is never read.
+        assert_eq!(server_urls_with_trailing_slash(body), vec![6, 12]);
+
+        // Non-vacuous floor: across every registered spec no server url carries a
+        // trailing slash (the invariant the contract test asserts), and the corpus
+        // actually declares server url entries — so the trailing-character path runs
+        // on real data and a broken (always-empty) extractor can't hide behind a
+        // corpus with no servers. Count the entries with a detection independent of
+        // the extractor: `- url:` dash lines inside a top-level `servers:` block.
+        let mut server_url_lines = 0usize;
+        for api in APIS {
+            assert!(
+                server_urls_with_trailing_slash(api.body).is_empty(),
+                "{}: no server url may carry a trailing slash",
+                api.name
+            );
+            let mut in_servers = false;
+            for line in api.body.lines() {
+                let is_top = !line.is_empty() && !line.starts_with(char::is_whitespace);
+                if is_top {
+                    in_servers = line.trim_end() == "servers:";
+                    continue;
+                }
+                if in_servers {
+                    let t = line.trim_start().strip_prefix("- ").unwrap_or("");
+                    if t.split_once(':').map(|(k, _)| k.trim()) == Some("url") {
+                        server_url_lines += 1;
+                    }
+                }
+            }
+        }
+        assert!(
+            server_url_lines >= 40,
+            "expected server url entries across specs, got {server_url_lines}"
+        );
+    }
 }
