@@ -20215,4 +20215,223 @@ components:
             "expected operation tag blocks across specs, got {op_tag_blocks}"
         );
     }
+
+    /// The 1-based line number of every **Server Object** in a mounted spec's
+    /// top-level `servers:` array that declares no non-empty `url` — without a
+    /// YAML dep.
+    ///
+    /// `url` is the *single REQUIRED* field of an OpenAPI Server Object
+    /// (§4.7.5.1): it is the base URL (optionally templated with `{var}`
+    /// placeholders) every Redoc/Swagger "try it" panel and codegen client
+    /// prepends to each operation's path to build a concrete request URL. A
+    /// server entry with no `url` — only a `description`, or one blanked by a
+    /// half-finished edit — is an invalid object from which no request URL can be
+    /// formed. Every CamaraSim spec templates its base path as `{apiRoot}/…` on a
+    /// single server, so this pins that uniformity too. Distinct from
+    /// [`server_url_undefined_variables`], which assumes a `url` and checks each
+    /// `{var}` it names resolves to a `variables:` `default:` — it never flags a
+    /// server that declares *no* `url` at all (its brace-scan finds nothing to
+    /// resolve), which is exactly the gap this test closes.
+    ///
+    /// Scoping mirrors [`server_url_undefined_variables`]: only the top-level
+    /// `servers:` block is scanned (a line == `servers:` at column zero, through
+    /// the next column-zero key), so a deeper `url:` (a schema example, a `$ref`
+    /// mention, a path/operation-level `servers` — none of which the corpus uses)
+    /// is never read. Each server entry is a block-sequence item — a line whose
+    /// trimmed text starts with `- ` at the block's item indent — spanning to the
+    /// next such dash or the block's end; the item is satisfied when a non-empty
+    /// `url:` appears on the dash line itself (`- url: …`), on an inline-flow dash
+    /// line (`- { url: … }`), or on any continuation line within the item. A bare
+    /// `url:` (a YAML null) and an exactly-empty quoted string (`''`/`""`) count as
+    /// absent, matching the suite's other non-empty guards. An inline-flow
+    /// `servers:` array (`servers: [ … ]`, which the `servers:`-alone match skips)
+    /// is a documented non-concern — the corpus has none.
+    fn servers_missing_url(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        // Whether a `url:` value carries no text: a bare null, or an exactly-empty
+        // quoted string (two leading matching quote chars). A `url`'s own `https:`
+        // colon sits after the first `split_once(':')`, so the value is read intact.
+        let url_value_is_empty = |v: &str| -> bool {
+            let v = v.trim();
+            if v.is_empty() {
+                return true;
+            }
+            let b = v.as_bytes();
+            if b.len() >= 2 && (b[0] == b'"' || b[0] == b'\'') && b[1] == b[0] {
+                let after = v[2..].trim_start();
+                if after.is_empty() || after.starts_with('#') {
+                    return true;
+                }
+            }
+            false
+        };
+        // Does a single line declare a non-empty `url:` key? (Dash prefix stripped
+        // by the caller; the first `:` splits the key from the value.)
+        let line_has_url = |t: &str| -> bool {
+            matches!(t.split_once(':'),
+                Some((k, v)) if k.trim() == "url" && !url_value_is_empty(v))
+        };
+
+        // Isolate the top-level `servers:` block.
+        let Some(start) = lines.iter().position(|l| *l == "servers:") else {
+            return Vec::new();
+        };
+        let end = lines[start + 1..]
+            .iter()
+            .position(|l| !l.is_empty() && !l.starts_with(char::is_whitespace))
+            .map(|off| start + 1 + off)
+            .unwrap_or(lines.len());
+
+        // The block's item indent: the indent of its first `- ` sequence dash.
+        let Some(item_indent) = (start + 1..end)
+            .filter(|&i| !lines[i].trim().is_empty())
+            .find(|&i| lines[i].trim_start().starts_with("- "))
+            .map(|i| indent(lines[i]))
+        else {
+            return Vec::new(); // no server entries
+        };
+
+        // Collect the absolute indices of each server entry's dash line.
+        let dashes: Vec<usize> = (start + 1..end)
+            .filter(|&i| indent(lines[i]) == item_indent && lines[i].trim_start().starts_with("- "))
+            .collect();
+
+        let mut out = Vec::new();
+        for (n, &dash) in dashes.iter().enumerate() {
+            let span_end = dashes.get(n + 1).copied().unwrap_or(end);
+            let mut has_url = false;
+            // The dash line itself: an inline-flow mapping (`- { … }`) or the item's
+            // first `key: value` (commonly `- url: …`).
+            let dash_content = lines[dash].trim_start().strip_prefix("- ").unwrap_or("");
+            if dash_content.trim_start().starts_with('{') {
+                let inner = dash_content.trim().trim_start_matches('{').trim_end_matches('}');
+                has_url = inner.split(',').any(line_has_url);
+            } else if line_has_url(dash_content) {
+                has_url = true;
+            }
+            // Continuation lines within the item.
+            if !has_url {
+                for i in dash + 1..span_end {
+                    if lines[i].trim().is_empty() {
+                        continue;
+                    }
+                    if line_has_url(lines[i].trim_start()) {
+                        has_url = true;
+                        break;
+                    }
+                }
+            }
+            if !has_url {
+                out.push(dash + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_server_object_declares_a_url() {
+        // Contract-harness invariant (OpenAPI Server Object rule, §4.7.5): every
+        // entry in a mounted spec's top-level `servers:` array MUST declare a
+        // non-empty `url` — the Server Object's single REQUIRED field, the base URL
+        // a client prepends to each operation's path. A server with no `url` (only
+        // a `description`, or one blanked by a half-finished edit) yields no request
+        // URL: a Redoc/Swagger "try it" panel and a codegen client have no base to
+        // build against, right where a caller sends the first request.
+        //
+        // The value-side complement of `every_server_url_variable_is_defined_with_a_default`
+        // / `server_url_undefined_variables`, which assumes a `url` is present and
+        // only checks each `{var}` it templates resolves to a `variables:` default —
+        // a server declaring *no* url slips past it (nothing to resolve). No other
+        // test reads the Server Object: the info-object series pins `info`, and the
+        // non-emptiness guards pin other fields. Verified true across every mounted
+        // spec before asserting.
+        for api in APIS {
+            let bad = servers_missing_url(api.body);
+            assert!(
+                bad.is_empty(),
+                "{} spec declares a `servers:` entry with no non-empty `url` \
+                 (the Server Object's one REQUIRED field) at line(s): {:?}",
+                api.name,
+                bad
+            );
+        }
+    }
+
+    #[test]
+    fn server_url_extraction_rules() {
+        // Unit-cover `servers_missing_url` so the contract test above can't pass
+        // vacuously and its accept/reject boundary is pinned: a `- url: …` dash-line
+        // server and an inline-flow `- { url: … }` server pass; a server with only a
+        // `description` (no url), one whose `url` is an exactly-empty quoted string,
+        // and an inline-flow `- { description: … }` naming no url are flagged in
+        // document order (by their dash line). A `url:` outside the top-level
+        // `servers:` block (a schema property) is never read.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+servers:
+  - url: \"{apiRoot}/x/v1\"
+    variables:
+      apiRoot:
+        default: http://localhost:8080
+  - description: no url here
+  - url: ''
+  - { url: https://example.com/flow }
+  - { description: flow, no url }
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  url:
+                    type: string
+";
+        // Flagged, in document order (each server's dash line): line 10 (the
+        // `description`-only server), line 11 (`url: ''` blank), and line 13 (the
+        // inline-flow server naming no `url`). Not flagged: line 6 (`- url:` with a
+        // template url), line 12 (inline-flow with a non-empty url). The schema
+        // property literally named `url` (line 27) is outside the `servers:` block,
+        // so it is never read.
+        assert_eq!(servers_missing_url(body), vec![10, 11, 13]);
+
+        // Non-vacuous floor: across every registered spec every `servers:` entry
+        // declares a non-empty url (the invariant the contract test asserts), and
+        // the corpus actually declares server entries — so the url-scanning path
+        // runs on real data and a broken (always-empty) extractor can't hide behind
+        // a corpus with no servers. Count the entries with a detection independent
+        // of the extractor: dash-sequence items inside a top-level `servers:` block.
+        let mut server_entries = 0usize;
+        for api in APIS {
+            assert!(
+                servers_missing_url(api.body).is_empty(),
+                "{}: every servers entry must declare a non-empty url",
+                api.name
+            );
+            let mut in_servers = false;
+            for line in api.body.lines() {
+                let is_top = !line.is_empty() && !line.starts_with(char::is_whitespace);
+                if is_top {
+                    in_servers = line.trim_end() == "servers:";
+                    continue;
+                }
+                if in_servers && line.trim_start().starts_with("- ") {
+                    server_entries += 1;
+                }
+            }
+        }
+        assert!(
+            server_entries >= 40,
+            "expected server entries across specs, got {server_entries}"
+        );
+    }
 }

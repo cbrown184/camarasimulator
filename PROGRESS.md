@@ -4820,6 +4820,33 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-16 — Contract-test harness: added a **Server-Object-`url`** contract test
+  (`src/registry.rs` `every_server_object_declares_a_url`) — every entry in a mounted
+  spec's top-level `servers:` array must declare a non-empty `url`, the Server Object's
+  single REQUIRED field (OpenAPI §4.7.5.1) and the base URL a Redoc/Swagger "try it"
+  panel and every codegen client prepend to each operation's path. A server with no
+  `url` (only a `description`, or one blanked by a half-finished edit) yields no request
+  URL. The value-side complement of `every_server_url_variable_is_defined_with_a_default`
+  / `server_url_undefined_variables`, which *assumes* a `url` and only checks each `{var}`
+  it templates resolves to a `variables:` `default:` — a server declaring **no** url at
+  all slips past it (nothing to resolve), the exact gap this closes; no other test reads
+  the Server Object. New pure `servers_missing_url` extractor (no YAML dep) reuses
+  `server_url_undefined_variables`'s top-level-`servers:`-block scoping (a bare indent-0
+  `servers:` through the next indent-0 key), splits the block into dash-sequence items at
+  the block's item indent, and flags each item (by its dash line) with no non-empty
+  `url:` on the dash line (`- url: …`), in an inline-flow dash (`- { url: … }`), or on a
+  continuation line; a bare/null `url:` and an exactly-empty quoted `''`/`""` count as
+  absent (shared `url_value_is_empty` logic). A `url:` outside the `servers:` block (a
+  schema property, an example) is never read; an inline-flow `servers: [ … ]` array (none
+  in the corpus) is a documented non-concern. Surveyed the corpus first (every spec's
+  server declares a `{apiRoot}/…` url; 0 missing) → no drift to fix. Unit-covered
+  (`server_url_extraction_rules`: a `- url:` dash server and an inline-flow `- { url: … }`
+  pass; a description-only server, a `url: ''` blank, and an inline-flow naming no url
+  flagged in document order `[10, 11, 13]`; a schema property named `url` outside the
+  block ignored; plus a ≥40 server-entry non-vacuous floor via an independent dash-item
+  counter). `cargo test` 2643 green (was 2641; +2); `cargo build --release` succeeds, no
+  warnings. No new dependency; test-only change (the extractor and tests live in the
+  `#[cfg(test)]` module). — binary (release): 5.1M (5,314,968 B; unchanged)
 - 2026-08-16 — Contract-test harness: added an **operation-tag-declared-globally** contract
   test (`src/registry.rs` `every_operation_tag_is_declared_globally`) — every tag an operation
   lists in its `tags` array must be declared in the document's top-level `tags` list (the
