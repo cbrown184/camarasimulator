@@ -9941,6 +9941,213 @@ components:
         );
     }
 
+    /// Extract the 1-based line number of every `oneOf`/`anyOf`/`allOf` a spec
+    /// declares whose value is an **empty** flow sequence (`[]`) — without a YAML
+    /// dep.
+    ///
+    /// In OpenAPI 3.0.x the schema-composition keywords `oneOf`, `anyOf` and
+    /// `allOf` are arrays of Schema Objects, and the JSON-Schema dialect they use
+    /// (Wright Draft 00 / draft-04) requires each such array to have **at least one
+    /// element**. An empty composer is not just pointless but broken: an empty
+    /// `oneOf`/`anyOf` is *unsatisfiable* — no instance can match "exactly/at least
+    /// one of nothing", so the schema validates nothing — and an empty `allOf`
+    /// composes no constraint at all, so a Redoc/Swagger/codegen client renders an
+    /// empty or contradictory model exactly where a caller reads or builds the
+    /// payload. CamaraSim leans on `allOf` to extend the shared `CamaraError` with
+    /// each API's `code` enum and for the `Area`/`Device` polymorphic families, so
+    /// an accidentally-emptied composer (a `- ` block collapsed to `[]` in an edit)
+    /// silently drops that composition.
+    ///
+    /// The non-emptiness complement of `composers_not_a_sequence`
+    /// (`every_composer_keyword_declares_a_sequence`), which checks a composer *is*
+    /// a sequence but accepts any `[`-opening value — so a well-formed but empty
+    /// `allOf: []` sails through it — and no other test looks at a composer's
+    /// element *count*. It mirrors `every_enum_lists_unique_non_empty_values`'s
+    /// non-emptiness guard for the value-list keyword. An empty composer is only
+    /// expressible as an inline flow sequence (a block-form composer with no `- `
+    /// items has no value at all, which the sequence-ness test already flags), so
+    /// only an inline `oneOf`/`anyOf`/`allOf` whose value opens with `[` and whose
+    /// bracket closes on the same line with nothing but whitespace between is
+    /// flagged; a non-empty flow (`[ {…} ]`), a block form, a non-`[` scalar (the
+    /// sequence-ness test's concern), a property literally *named* for the keyword
+    /// (it opens a block, empty inline value), and a keyword inside an
+    /// `example:`/`examples:` payload (ancestor-chain walk) are all skipped. A
+    /// multi-line flow whose `[` does not close on the keyword's line is treated as
+    /// non-empty (its items sit on following lines).
+    fn empty_composer_sequences(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        // True when line `i` (indent `c`) sits inside an `example:`/`examples:`
+        // payload — some enclosing container key up the indent ladder is
+        // `example`/`examples` (mirroring `composers`/`items` siblings).
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some((k, v)) = line.trim_start().split_once(':') else {
+                continue;
+            };
+            let k = k.trim();
+            if k != "oneOf" && k != "anyOf" && k != "allOf" {
+                continue;
+            }
+            // Strip a trailing `# comment`; what remains, trimmed, is the inline
+            // value (empty ⇒ a block form / property-named-for-the-keyword — the
+            // sequence-ness test's concern, never an inline empty array).
+            let inline = v.split('#').next().unwrap_or(v).trim();
+            let Some(rest) = inline.strip_prefix('[') else {
+                continue; // block form or a non-`[` scalar — not an inline sequence
+            };
+            // Empty iff the bracket closes on this line with only whitespace inside.
+            let Some(close) = rest.find(']') else {
+                continue; // multi-line flow: items are on following lines
+            };
+            if rest[..close].trim().is_empty() && !inside_example(i, indent(line)) {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_composer_keyword_lists_at_least_one_subschema() {
+        // Contract-harness invariant (OpenAPI 3.0.x / JSON-Schema draft-04
+        // structural rule): every `oneOf`/`anyOf`/`allOf` a mounted spec declares
+        // MUST list at least one subschema. The dialect OpenAPI 3.0.x uses requires
+        // a composition array to be non-empty, and an empty one is broken beyond
+        // pointlessness: an empty `oneOf`/`anyOf` is *unsatisfiable* (nothing can
+        // match one-of/any-of an empty set), and an empty `allOf` composes no
+        // constraint — so a validator and a Redoc/Swagger/codegen client render a
+        // contradictory or empty model exactly where a caller reads or builds the
+        // payload.
+        //
+        // The non-emptiness complement of `every_composer_keyword_declares_a_sequence`,
+        // which checks a composer *is* a sequence but — matching how it accepts an
+        // inline `[ … ]` by its opening bracket alone — lets a well-formed but empty
+        // `allOf: []` through; no other test inspects a composer's element count. A
+        // live hazard in these `allOf`-heavy specs (the shared `CamaraError`
+        // `code`-enum extension, the `Area`/`Device` families), where a `- ` block
+        // can collapse to `[]` in an edit and silently drop the composition. Mirrors
+        // `every_enum_lists_unique_non_empty_values`'s non-emptiness guard for the
+        // sibling value-list keyword. Verified true across all mounted specs before
+        // asserting.
+        for api in APIS {
+            let empties = empty_composer_sequences(api.body);
+            assert!(
+                empties.is_empty(),
+                "{} spec declares an empty `oneOf`/`anyOf`/`allOf` (`[]`) — a \
+                 composition with no subschemas, unsatisfiable for oneOf/anyOf — at \
+                 line(s): {:?}",
+                api.name,
+                empties
+            );
+        }
+    }
+
+    #[test]
+    fn composer_non_empty_extraction_rules() {
+        // Unit-cover `empty_composer_sequences` so the contract test above can't
+        // pass vacuously and its detection is pinned: a non-empty inline flow
+        // (`oneOf: [ {…}, {…} ]`) and a block-form composer both pass; an empty
+        // inline flow — `oneOf: []`, `anyOf: [ ]` (whitespace inside), and
+        // `allOf: []  # trailing comment` — is flagged in document order; a property
+        // literally *named* `oneOf` (it opens a block — empty inline value, not a
+        // `[`) is skipped; and an empty `allOf: []` sitting inside an `example:`
+        // payload is skipped (example data, not a schema keyword).
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    GoodInline:
+      oneOf: [ { type: string }, { type: integer } ]
+    GoodBlock:
+      allOf:
+        - $ref: '#/components/schemas/Base'
+        - type: object
+    BadEmptyOneOf:
+      oneOf: []
+    BadEmptyAnyOf:
+      anyOf: [ ]
+    BadEmptyAllOf:
+      allOf: []  # nothing here
+    NamedOneOf:
+      type: object
+      properties:
+        oneOf:
+          type: string
+    InExample:
+      type: object
+      example:
+        allOf: []
+";
+        // Flagged, in document order: `BadEmptyOneOf.oneOf` (line 21, `[]`),
+        // `BadEmptyAnyOf.anyOf` (line 23, `[ ]` — whitespace inside), and
+        // `BadEmptyAllOf.allOf` (line 25, `[]` before a trailing comment). Not
+        // flagged: `GoodInline` (a non-empty flow), `GoodBlock` (a block form with
+        // `- ` items), `NamedOneOf.properties.oneOf` (a property named `oneOf`
+        // opening a block — empty inline value, not a `[`), and `InExample`'s
+        // `allOf: []` (inside the outer `example:` payload).
+        assert_eq!(empty_composer_sequences(body), vec![21, 23, 25]);
+
+        // Non-vacuous floor: across every registered spec every composer lists at
+        // least one subschema (the invariant), and the corpus actually declares many
+        // composers (`allOf` over `CamaraError` + the polymorphic families) — so the
+        // scan runs on real data and a broken (always-empty) extractor can't hide
+        // behind a corpus that never declares a composer. Count composer keywords
+        // with a detection independent of the extractor.
+        let mut composers = 0usize;
+        for api in APIS {
+            assert!(
+                empty_composer_sequences(api.body).is_empty(),
+                "{}: every `oneOf`/`anyOf`/`allOf` must list at least one subschema",
+                api.name
+            );
+            for line in api.body.lines() {
+                let t = line.trim();
+                if t == "oneOf:" || t == "anyOf:" || t == "allOf:" {
+                    composers += 1;
+                }
+            }
+        }
+        assert!(
+            composers >= 50,
+            "expected many composer keywords across specs, got {composers}"
+        );
+    }
+
     /// Extract the 1-based line number of every `items:` a spec declares whose
     /// value is a **sequence** — the invalid OpenAPI 3.0.x tuple form — without a
     /// YAML dep.

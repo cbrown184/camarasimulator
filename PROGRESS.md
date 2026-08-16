@@ -3322,6 +3322,28 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - a non-empty-composer contract test (`src/registry.rs`
+    `every_composer_keyword_lists_at_least_one_subschema`) asserts every
+    `oneOf`/`anyOf`/`allOf` a mounted spec declares lists at least one subschema.
+    OpenAPI 3.0.x's JSON-Schema dialect (Wright Draft 00 / draft-04) requires a
+    composition array to be non-empty, and an empty one is broken beyond
+    pointlessness: an empty `oneOf`/`anyOf` is *unsatisfiable* (nothing matches
+    one-of/any-of an empty set) and an empty `allOf` composes no constraint, so a
+    validator/Redoc/codegen client renders a contradictory or empty model. The
+    non-emptiness complement of `every_composer_keyword_declares_a_sequence`, which
+    checks a composer *is* a sequence but — accepting an inline `[ … ]` by its
+    opening bracket alone — lets a well-formed but empty `allOf: []` through; no
+    other test inspects a composer's element count. Mirrors
+    `every_enum_lists_unique_non_empty_values`'s non-emptiness guard for the sibling
+    value-list keyword. Pure `empty_composer_sequences` extractor (no YAML dep):
+    an empty composer is only expressible as an inline flow (`[]`), so it flags an
+    `oneOf`/`anyOf`/`allOf` whose value opens with `[` and closes on the same line
+    with only whitespace between; a non-empty flow, a block form (the sequence-ness
+    test's concern), a property literally *named* for the keyword, and a keyword
+    inside an `example:` payload (ancestor walk) are skipped. Unit-covered
+    (`composer_non_empty_extraction_rules`, incl. a ≥50 composer non-vacuous floor).
+    Verified true across all mounted specs (108 composers — 98 `allOf`/3 `oneOf`/7
+    `anyOf`, 0 empty) before asserting.
   - a body-less-method request-body contract test (`src/registry.rs`
     `no_bodyless_method_operation_declares_a_request_body`) asserts no
     `GET`/`DELETE`/`HEAD` operation declares a `requestBody`. A body on these
@@ -4632,6 +4654,37 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-16 — Contract-test harness: added a **non-empty composer** spec-structural
+  contract test (`src/registry.rs` `every_composer_keyword_lists_at_least_one_subschema`)
+  — every `oneOf`/`anyOf`/`allOf` a mounted spec declares must list at least one
+  subschema. OpenAPI 3.0.x's JSON-Schema dialect (Wright Draft 00 / draft-04) requires a
+  composition array to be non-empty, and an empty one is broken beyond pointlessness: an
+  empty `oneOf`/`anyOf` is *unsatisfiable* (no instance matches one-of/any-of an empty
+  set, so the schema validates nothing) and an empty `allOf` composes no constraint at
+  all — so a validator and a Redoc/Swagger/codegen client render a contradictory or empty
+  model exactly where a caller reads or builds the payload. The non-emptiness complement
+  of `every_composer_keyword_declares_a_sequence` (`composers_not_a_sequence`), which
+  checks a composer *is* a sequence but — matching how it accepts an inline `[ … ]` by its
+  opening bracket alone — lets a well-formed but empty `allOf: []` through; no other test
+  inspects a composer's element *count*. Mirrors `every_enum_lists_unique_non_empty_values`'s
+  non-emptiness guard for the sibling value-list keyword. New pure
+  `empty_composer_sequences` extractor (no YAML dep): an empty composer is only expressible
+  as an inline flow sequence (a block-form composer with no `- ` items has no value at all,
+  already flagged by the sequence-ness test), so it flags only an `oneOf`/`anyOf`/`allOf`
+  whose inline value opens with `[` and whose bracket closes on the same line with nothing
+  but whitespace between (`[]`, `[ ]`, `[]  # comment`); a non-empty flow (`[ {…} ]`), a
+  block form, a non-`[` scalar (the sequence-ness test's concern), a property literally
+  *named* for the keyword, and a keyword inside an `example:`/`examples:` payload (ancestor
+  walk) are skipped, and a multi-line flow whose `[` does not close on the keyword's line
+  is treated as non-empty. Surveyed the corpus first (108 composer keywords across the
+  mounted specs — 98 `allOf`/3 `oneOf`/7 `anyOf`, 0 empty) → no drift to fix. Unit-covered
+  (`composer_non_empty_extraction_rules`: a non-empty inline flow and a block form pass;
+  three empty inline flows — `[]`, `[ ]`, `[]  # comment` — flagged in document order
+  `[21, 23, 25]`; a property named `oneOf` and an `example:`-payload `allOf: []` skipped;
+  plus a ≥50 composer non-vacuous floor via an independent counter). `cargo test` 2623
+  green (was 2621; +2); `cargo build --release` succeeds, no warnings. No new dependency;
+  test-only change (the extractor and tests live in the `#[cfg(test)]` module). — binary
+  (release): 5.1M (5,314,968 B; unchanged)
 - 2026-08-16 — Contract-test harness: added a **`security`-field-is-a-sequence**
   spec-structural contract test (`src/registry.rs` `every_security_field_is_a_sequence`)
   — every OpenAPI `security` field a mounted spec declares (document-root or
