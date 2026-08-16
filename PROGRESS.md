@@ -3322,6 +3322,25 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - a body-less-method request-body contract test (`src/registry.rs`
+    `no_bodyless_method_operation_declares_a_request_body`) asserts no
+    `GET`/`DELETE`/`HEAD` operation declares a `requestBody`. A body on these
+    methods has no defined semantics — RFC 9110 (§9.3.1/§9.3.2/§9.3.5) leaves it
+    undefined and OpenAPI 3.0.x says a `requestBody` outside the body-bearing
+    methods "SHALL be ignored" — so a client/codegen tool drops it, and the CAMARA
+    guidelines reserve request bodies for POST/PUT/PATCH (which is why CamaraSim's
+    read APIs use `POST /retrieve` when they need a body). The complement of
+    `every_request_body_declares_content`, which inspects a *declared* body's shape
+    but deliberately exempts a GET/DELETE that declares none — this flags the
+    GET/DELETE/HEAD that declares one at all. Pure
+    `bodyless_method_operations_with_request_body` extractor (no YAML dep) mirrors
+    `request_bodies_missing_content`'s path-item/method scoping (a 4-space verb key
+    under a 2-space `/…` path item, then the 6-space `requestBody:` child), so a
+    `requestBody` under `components.requestBodies` or a schema property *named*
+    `requestBody` is never mistaken for an operation's; unit-covered
+    (`bodyless_method_request_body_extraction_rules`, incl. a ≥30 body-less-method
+    non-vacuous floor). Verified true across all mounted specs (75 GET/DELETE/HEAD
+    operations, 0 carrying a `requestBody`) before asserting.
   - an `additionalProperties` boolean-scalar contract test (`src/registry.rs`
     `every_additional_properties_scalar_is_a_boolean`) asserts every
     `additionalProperties` with an inline **scalar** value is the JSON boolean
@@ -4586,6 +4605,40 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-16 — Contract-test harness: added a **body-less-method request-body**
+  spec-structural contract test (`src/registry.rs`
+  `no_bodyless_method_operation_declares_a_request_body`) — no `GET`/`DELETE`/`HEAD`
+  operation a mounted spec declares may carry a `requestBody`. A request body on
+  these methods has no defined semantics: RFC 9110 leaves a GET (§9.3.1), HEAD
+  (§9.3.2), or DELETE (§9.3.5) payload's meaning undefined, and the OpenAPI 3.0.x
+  spec says a `requestBody` outside the methods with explicitly-defined body
+  semantics "SHALL be ignored" by consumers — so a client/codegen tool silently
+  drops it; the CAMARA API Design Guidelines match that, reserving request bodies
+  for POST/PUT/PATCH (a read or delete carries its inputs in the path or query,
+  which is exactly why CamaraSim's read APIs use `POST /retrieve` when they need a
+  body). The complement of `every_request_body_declares_content`, which inspects a
+  *declared* body's shape but deliberately exempts a GET/DELETE that declares none —
+  this catches the GET/DELETE/HEAD that declares one at all; invisible to the
+  method/path scoping tests (`operations_without_responses`, the path-templating and
+  parameter tests), which inspect an operation's responses, path variables, or
+  parameters, never whether a body-less method mistakenly consumes a body. New pure
+  `bodyless_method_operations_with_request_body` extractor (no YAML dep) mirrors
+  `request_bodies_missing_content`'s path-item/method scoping exactly — a 4-space
+  HTTP-verb key under a 2-space `/…` path item beneath the top-level `paths:` block,
+  then the 6-space `requestBody:` child (a Request Body Object is a direct child of
+  the Operation Object) — so a `requestBody` under `components.requestBodies`, or a
+  schema property literally *named* `requestBody`, is not an operation's and is never
+  seen. Surveyed the corpus first (75 GET/DELETE/HEAD operations across the mounted
+  specs, 0 carrying a `requestBody` — the reads that need a body are all `POST
+  /retrieve`) → no drift to fix. Unit-covered
+  (`bodyless_method_request_body_extraction_rules`: a `requestBody` under `post`
+  passes; three under `get`/`delete`/`head` flagged with their `METHOD /path` labels
+  in document order; a body-less method with no body and a schema property named
+  `requestBody` both skipped; plus a ≥30 body-less-method non-vacuous floor via an
+  independent counter). `cargo test` 2619 green (was 2617; +2); `cargo build
+  --release` succeeds, no warnings. No new dependency; test-only change (the
+  extractor and tests live in the `#[cfg(test)]` module). — binary (release): 5.1M
+  (5,314,968 B; unchanged)
 - 2026-08-16 — Contract-test harness: added a **`nullable` modifier placement**
   spec-structural contract test (`src/registry.rs`
   `every_nullable_modifier_sits_on_a_typed_schema`) — every `nullable` modifier a

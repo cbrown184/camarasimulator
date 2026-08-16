@@ -2815,6 +2815,92 @@ mod tests {
         out
     }
 
+    /// The `METHOD /path` label of every body-less-method operation
+    /// (`GET`/`DELETE`/`HEAD`) a spec declares that nonetheless carries a
+    /// `requestBody` — without a YAML dep.
+    ///
+    /// A request body on these methods has no defined semantics: RFC 9110
+    /// (§9.3.1 GET, §9.3.2 HEAD, §9.3.5 DELETE) leaves the payload's meaning
+    /// undefined, and the OpenAPI 3.0.x spec says a `requestBody` outside the
+    /// methods with explicitly-defined body semantics "SHALL be ignored" by
+    /// consumers — so a client/codegen tool drops it. The CAMARA API Design
+    /// Guidelines match that, reserving request bodies for POST/PUT/PATCH (a read
+    /// or delete carries its inputs in the path or query — exactly why CamaraSim's
+    /// read APIs use `POST /retrieve` when they need a body). A `requestBody:`
+    /// under a `get`/`delete`/`head` is therefore a body silently discarded at the
+    /// point a caller believed it was sent.
+    ///
+    /// The complement of [`request_bodies_missing_content`], which inspects a
+    /// *declared* body's shape but deliberately exempts a GET/DELETE that declares
+    /// none — this flags the GET/DELETE/HEAD that declares one at all. Mirrors that
+    /// sibling's path-item/method scoping exactly (a 4-space HTTP-verb key under a
+    /// 2-space `/…` path item beneath the top-level `paths:` block); within such an
+    /// operation it looks for the 6-space `requestBody:` key (a Request Body Object
+    /// is a direct child of the Operation Object). A `requestBody` elsewhere — a
+    /// component under `components.requestBodies`, or a schema property literally
+    /// *named* `requestBody` — is not under an operation, so it is never seen.
+    fn bodyless_method_operations_with_request_body(body: &str) -> Vec<String> {
+        const BODYLESS: [&str; 3] = ["get", "delete", "head"];
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let mut out = Vec::new();
+        let mut in_paths = false;
+        let mut path: Option<String> = None;
+        for (i, line) in lines.iter().enumerate() {
+            let is_top_level_key =
+                !line.is_empty() && !line.starts_with(char::is_whitespace);
+            if is_top_level_key {
+                in_paths = line.trim_end() == "paths:";
+                path = None;
+                continue;
+            }
+            if !in_paths {
+                continue;
+            }
+            if let Some(rest) = line.strip_prefix("  ") {
+                if !rest.starts_with(char::is_whitespace) && rest.starts_with('/') {
+                    let key =
+                        rest.trim_end().strip_suffix(':').unwrap_or(rest.trim_end());
+                    path = Some(key.to_string());
+                    continue;
+                }
+            }
+            let Some(current_path) = path.as_deref() else { continue };
+            if indent(line) != 4 {
+                continue;
+            }
+            let key = line.trim_start();
+            let Some(name) = key.strip_suffix(':') else { continue };
+            if name.contains(char::is_whitespace) || !BODYLESS.contains(&name) {
+                continue;
+            }
+            // Within this operation's block, look for a 6-space `requestBody:` key
+            // (a Request Body Object is a direct child of the Operation Object).
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                let li = indent(l);
+                if li <= 4 {
+                    break; // dedented out of this operation
+                }
+                if li == 6 {
+                    if let Some((k, _)) = l.trim_start().split_once(':') {
+                        if k == "requestBody" {
+                            out.push(format!("{} {}", name.to_uppercase(), current_path));
+                            break;
+                        }
+                    }
+                }
+                j += 1;
+            }
+        }
+        out
+    }
+
     /// Enumerate every Media Type Object under a `content:` mapping (in a request
     /// body, a response, or a parameter) that declares no `schema` — nor an inline
     /// `$ref` — as `"<path> <media-type>"` in document order, without a YAML dep.
@@ -5965,6 +6051,165 @@ components:
             total_ops += operation_ids(api.body).len();
         }
         assert!(total_ops >= 100, "expected many operations across specs, got {total_ops}");
+    }
+
+    #[test]
+    fn no_bodyless_method_operation_declares_a_request_body() {
+        // Contract-harness invariant (OpenAPI 3.0.x semantics + CAMARA API Design
+        // Guidelines): no `GET`/`DELETE`/`HEAD` operation a mounted spec declares
+        // may carry a `requestBody`. A request body on these methods has no defined
+        // semantics — RFC 9110 leaves a GET (§9.3.1), HEAD (§9.3.2), or DELETE
+        // (§9.3.5) payload's meaning undefined, and the OpenAPI 3.0.x spec says a
+        // `requestBody` outside the methods with explicitly-defined body semantics
+        // "SHALL be ignored" by consumers — so a client/codegen tool drops it. The
+        // CAMARA guidelines reserve request bodies for POST/PUT/PATCH (a read or
+        // delete carries its inputs in the path or query, which is exactly why
+        // CamaraSim's read APIs use `POST /retrieve` when they need a body). A
+        // `requestBody` under a `get`/`delete`/`head` is therefore a body silently
+        // discarded at the point a caller believed it was sending one.
+        //
+        // The complement of `every_request_body_declares_content`, which inspects a
+        // *declared* body's shape but deliberately exempts a GET/DELETE that
+        // declares none: this catches the GET/DELETE/HEAD that declares one at all.
+        // No other contract test sees it — the method/path scoping tests
+        // (`operations_without_responses`, the path-templating and parameter tests)
+        // inspect an operation's responses, path variables, or parameters, never
+        // whether a body-less method mistakenly consumes a body. A live copy-paste
+        // hazard in these specs, where a read endpoint is drafted from a POST
+        // sibling and keeps its pasted `requestBody:` block. Verified true across
+        // all mounted specs before asserting.
+        for api in APIS {
+            let offenders = bodyless_method_operations_with_request_body(api.body);
+            assert!(
+                offenders.is_empty(),
+                "{} spec declares a GET/DELETE/HEAD operation carrying a \
+                 `requestBody` (a body OpenAPI 3.0.x / RFC 9110 leave with no \
+                 defined semantics — reserve request bodies for POST/PUT/PATCH): \
+                 {:?}",
+                api.name,
+                offenders
+            );
+        }
+    }
+
+    #[test]
+    fn bodyless_method_request_body_extraction_rules() {
+        // Unit-cover `bodyless_method_operations_with_request_body` so the contract
+        // test above can't pass vacuously and its scoping is pinned: a `requestBody`
+        // under a `post` is never flagged (a body is well-defined there); one under
+        // a `get`/`delete`/`head` is flagged with its `METHOD /path` label; a
+        // body-less method that declares *no* `requestBody` is not flagged; and a
+        // `requestBody:` that is not an operation's — a schema property literally
+        // named `requestBody` under `components` — is never seen (it is not under
+        // `paths:`).
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /good:
+    post:
+      operationId: postGood
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        '200':
+          description: ok
+  /read/{id}:
+    get:
+      operationId: getRead
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        '200':
+          description: ok
+    delete:
+      operationId: deleteRead
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        '204':
+          description: gone
+  /probe:
+    head:
+      operationId: probeHead
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        '200':
+          description: ok
+  /clean/{id}:
+    get:
+      operationId: getClean
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    Thing:
+      type: object
+      properties:
+        requestBody:
+          type: string
+";
+        // Flagged, in document order: `GET /read/{id}` and `DELETE /read/{id}`
+        // (both declare a `requestBody` under a body-less method) and `HEAD /probe`.
+        // Not flagged: `POST /good` (a body is well-defined on POST); `GET
+        // /clean/{id}` (a body-less method with no `requestBody` — only a
+        // `parameters:` block); and the schema property literally *named*
+        // `requestBody` under `components.schemas.Thing.properties`, which is not
+        // under `paths:` and so is never an operation's request body.
+        assert_eq!(
+            bodyless_method_operations_with_request_body(body),
+            vec![
+                "GET /read/{id}".to_string(),
+                "DELETE /read/{id}".to_string(),
+                "HEAD /probe".to_string(),
+            ]
+        );
+
+        // Non-vacuous floor: across every registered spec no body-less-method
+        // operation declares a `requestBody` (the invariant the contract test
+        // asserts), and the corpus actually declares many GET/DELETE/HEAD
+        // operations — so the scan runs on a real, non-empty population rather than
+        // an empty loop. Count body-less method keys with a detector independent of
+        // the extractor.
+        let mut bodyless_ops = 0usize;
+        for api in APIS {
+            assert!(
+                bodyless_method_operations_with_request_body(api.body).is_empty(),
+                "{}: no GET/DELETE/HEAD operation may declare a `requestBody`",
+                api.name
+            );
+            for line in api.body.lines() {
+                if matches!(line.trim(), "get:" | "delete:" | "head:") {
+                    bodyless_ops += 1;
+                }
+            }
+        }
+        assert!(
+            bodyless_ops >= 30,
+            "expected many GET/DELETE/HEAD operations across specs, got {bodyless_ops}"
+        );
     }
 
     #[test]
