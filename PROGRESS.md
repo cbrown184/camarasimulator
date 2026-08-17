@@ -3310,8 +3310,9 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 ## Cross-cutting (do alongside the item that needs it)
 - [~] `errors.rs`: base CAMARA error model done (`src/errors.rs`, `specs/shared/errors.yaml`); per-version catalogs still TODO (DESIGN §8)
   <!-- format-example family now covers uuid / date-time / uri / int32 / int64 / double /
-       ipv4 (`every_ipv4_format_example_is_a_well_formed_ipv4`); ipv6 / date the natural
-       next siblings if a further slice is wanted. -->
+       float / ipv4 / ipv6 / date (`every_date_format_example_is_a_well_formed_date`);
+       the string formats byte / binary / email / hostname / password are the natural
+       next siblings if a further slice is wanted (survey the corpus for pairs first). -->
 
 - [x] `registry.rs`: canonical URL versioning + `/` catalog wiring (DESIGN §9).
   All three §9 discovery endpoints served: `GET /` (catalog), `GET
@@ -5088,6 +5089,48 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-17 — Contract-test harness: added a **date format-example** contract test
+  (`src/registry.rs` `every_date_format_example_is_a_well_formed_date`) — every inline
+  `example` a mounted spec declares beside a **same-indent** `format: date` sibling must
+  be a well-formed RFC 3339 `full-date` (`YYYY-MM-DD`). The date-only sibling of
+  `every_date_time_format_example_is_a_well_formed_datetime`; together they close the
+  date/date-time pair (the format-example family now spans uuid / date-time / uri /
+  int32 / int64 / double / float / ipv4 / ipv6 / date). A sub-case of Spectral's
+  `oas3-valid-schema-example` (validate an example against its schema, format included):
+  an `example` is a sample *instance*, so a `format: date` field's example that isn't a
+  valid full-date — a placeholder beside the format, a digit dropped from a hand-typed
+  `YYYY-MM-DD`, or a `date-time` value with a time-and-offset tail pasted into a
+  date-only slot — advertises a sample the format's own validator rejects, and codegen
+  that maps `date` onto a date-only type carries a value no `date`-typed field can hold.
+  Extends the example-value family (`every_example_matches_its_schema_type` reads only
+  the JSON *type*, `every_example_respects_its_string_length_bounds` only the declared
+  length, neither the calendar grammar the format itself fixes) to the `date` format.
+  New pure `date_format_examples_malformed` extractor (no YAML dep) is
+  `datetime_format_examples_malformed` with the sibling-format probe swapped to match
+  `date` **exactly** (so `date-time`, the wider format, never pairs — the analogue of
+  the int32/int64, double/float, and ipv4/ipv6 mutual exclusions): same inline-scalar
+  read + dedent-bounded same-indent `format` sibling scan + block-scalar skip +
+  `example:`/`examples:`-payload ancestor guard; new `is_well_formed_rfc3339_full_date`
+  (the date half of `is_well_formed_rfc3339_datetime`: exactly 10 chars, 4-digit year,
+  `-` separators, month `01..=12`, day `01..=31`, no time part). **Strictly tighter than
+  the date-time check — a `2024-01-01T00:00:00Z` that `date-time` admits is rejected in a
+  `date` slot** (the date/date-time range analogue of int32 rejecting an int64-only
+  value). **Surveyed the corpus first: 4 same-indent inline example+`format:date` pairs
+  across the mounted specs — kyc-tenure `tenureDate` (`2025-01-01`), number-recycling
+  `specifiedDate` (`2025-01-01`), network-traffic-analysis `accessDate` (`2024-06-01`),
+  kyc-fill-in `birthdate` (`1990-05-04`); every value a valid full-date, 0 malformed;
+  kyc-age-verification's `format:date` `birthdate` has no example sibling, correctly
+  skipped → no drift to fix.** Unit-covered (`date_format_example_extraction_rules`:
+  valid `YYYY-MM-DD` incl. `0001-01-01` pass; a `date-time` value, single-digit month,
+  month 13, day 32, two-digit year, wrong separator, trailing whitespace, and a
+  placeholder fail; a valid example passes, a `date-time`-in-`date`-slot and a
+  format-declared-below value flagged in document order `[21,24]`, and no-format/
+  `date-time`-sibling/following-property/block-scalar/inside-`example`-payload/property-
+  literally-named-`example` cases skipped; a ≥3 example+`format:date`-pair floor via an
+  independent same-indent window detector). `cargo test` 2687 green (was 2685; +2);
+  `cargo build --release` succeeds, no warnings. No new dependency; the extractor, the
+  shape helper, and both tests live in the `#[cfg(test)]` module, so nothing ships in the
+  binary. — binary (release): 5.1M (5,314,968 B; unchanged)
 - 2026-08-17 — Contract-test harness: added a **float format-example** contract test
   (`src/registry.rs` `every_float_format_example_is_a_well_formed_float`) — every inline
   `example` a mounted spec declares beside a **same-indent** `format: float` sibling must
