@@ -3323,6 +3323,32 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - a parameter-description contract test (`src/registry.rs`
+    `every_parameter_declares_a_non_empty_description`) asserts every Parameter
+    Object a mounted spec declares carries a non-empty `description` (Spectral's
+    `oas3-parameter-description`). A parameter's `description` is OPTIONAL in
+    OpenAPI, but every CamaraSim vendored parameter populates it — the CommonMark
+    text a Redoc/Swagger `/docs` page renders beside the input slot, and for the
+    query filters (`name`/`status`/`page`/`perPage`) and path ids
+    (`{sessionId}`/`{networkId}`/…) that drive these APIs' functional cases the one
+    place a caller reads what the value means; a dropped/blanked one renders an
+    anonymous slot. The **value-side complement** of the parameter required-field
+    trio (`every_parameter_declares_a_valid_location`/`…_a_name`/
+    `…_a_schema_or_content`): those pin `in`/`name`/value-type and the last two
+    credit a *key*'s presence, but none reads the `description` value — mirrors the
+    suite's non-emptiness guards (`every_response_description_is_non_empty` et al.)
+    on the parameter slot. Pure `parameters_missing_description` extractor (no YAML
+    dep) reuses `parameters_missing_schema_or_content`'s `in:`-anchored object scan
+    (a `$ref` parameter has no inline `in`, so it is exempt — inherits the
+    component's description) and judges the found `description:` value empty by the
+    same rule the response/summary guards use (bare null, exactly-empty quoted
+    `""`/`''`, empty `|`/`>` block scalar); a `description` nested in the
+    parameter's own `schema`/`content` subtree is never the parameter's own.
+    Unit-covered (`parameter_description_extraction_rules`: empty-`""` and
+    schema-nested-only descriptions flagged in document order; non-empty inline +
+    block-scalar descriptions, a `$ref` parameter, and a mapping-form component
+    parameter pass; ≥50 located-parameter floor). Surveyed the corpus first (161
+    Parameter Objects, 0 without a non-empty description) → no drift.
   - an api-servers-present contract test (`src/registry.rs`
     `every_spec_declares_a_non_empty_servers_array`) asserts every mounted spec
     declares a document-root `servers` array holding at least one Server Object
@@ -4946,6 +4972,45 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-17 — Contract-test harness: added a **parameter-description** contract
+  test (`src/registry.rs` `every_parameter_declares_a_non_empty_description`) —
+  every Parameter Object a mounted spec declares must carry a non-empty
+  `description` (Spectral's `oas3-parameter-description`). A parameter's
+  `description` is OPTIONAL in OpenAPI, but every CamaraSim vendored parameter
+  populates it: it is the CommonMark text a Redoc/Swagger `/docs` page renders
+  beside the input slot, and for the query filters (`name`/`status`/`page`/
+  `perPage`) and path ids (`{sessionId}`/`{networkId}`/…) that drive these APIs'
+  functional cases it is the one place a caller reads what a value means; a
+  parameter block pasted from a sibling whose `description:` line was dropped or
+  blanked still keeps its `in`/`name`/`schema`, so it is a structurally valid
+  Parameter Object the required-field trio never sees, yet it renders an anonymous
+  input. The **value-side complement** of that trio
+  (`every_parameter_declares_a_valid_location` / `…_a_name` /
+  `…_a_schema_or_content`): those pin the three REQUIRED fields and the last two
+  credit a *key*'s presence, but none reads the `description` value at all —
+  mirrors the suite's non-emptiness guards (`every_response_description_is_non_empty`,
+  `every_operation_summary_is_non_empty`) on the parameter slot. New pure
+  `parameters_missing_description` extractor (no YAML dep) reuses
+  `parameters_missing_schema_or_content`'s `in:`-anchored object scan (anchor on a
+  parameter's valid `in:` location; scan its own child indent up+down for a
+  mapping/name-first form, down only for an in-first `- in: …` opener; a `$ref`
+  parameter has no inline `in`, so it is never anchored and is exempt — it inherits
+  the referenced component's description) and judges the found `description:` value
+  empty by the same trichotomy the response/summary guards use (bare `description:`
+  null, exactly-empty quoted `""`/`''` by two leading quote chars, an empty `|`/`>`
+  block scalar); a `description` nested inside the parameter's own `schema`/`content`
+  subtree sits past the object's indent and is never the parameter's own. Surveyed
+  the corpus first (161 Parameter Objects across the mounted specs, 0 without a
+  non-empty description) → no drift to fix. Unit-covered
+  (`parameter_description_extraction_rules`: a `query` filter with an empty
+  `description: ""` and a `query` param whose only `description` sits deep in its
+  `schema.properties` flagged in document order `[query@line 23, query@line 28]`;
+  a name-first `header` with an inline description, an in-first `path` with a
+  block-scalar description, a `$ref` parameter, and a mapping-form
+  `components.parameters` entry all pass; plus a ≥50 located-parameter floor).
+  `cargo test` 2657 green (was 2655; +2); `cargo build --release` succeeds, no
+  warnings. No new dependency; test-only change (the extractor and both tests live
+  in the `#[cfg(test)]` module). — binary (release): 5.1M (5,314,968 B; unchanged)
 - 2026-08-17 — Contract-test harness: added an **api-servers-present** contract
   test (`src/registry.rs` `every_spec_declares_a_non_empty_servers_array`) — every
   mounted spec must declare a document-root `servers` array holding at least one

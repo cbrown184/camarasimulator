@@ -2052,6 +2052,135 @@ mod tests {
         out
     }
 
+    /// The `location@line N` label of every parameter a spec declares whose object
+    /// carries no *non-empty* `description:` — the human explanation of what the
+    /// parameter is for (Spectral's `oas3-parameter-description`).
+    ///
+    /// A Parameter Object's `description` is OPTIONAL in OpenAPI, but every CamaraSim
+    /// vendored parameter carries one (the CAMARA-template uniformity these specs
+    /// keep): it is the CommonMark text a Redoc/Swagger `/docs` page renders beside
+    /// the input slot, and — for the query filters and path ids that drive these
+    /// APIs' functional cases — the one place a caller reads what a value means. A
+    /// parameter with none (dropped in a vendor paste) or an empty one
+    /// (`description: ""`/`''`, a bare `description:` null, or an empty block scalar)
+    /// documents an anonymous slot.
+    ///
+    /// The value-side complement of the parameter required-field trio
+    /// ([`parameters_with_invalid_location`] / [`parameters_missing_name`] /
+    /// [`parameters_missing_schema_or_content`]): those pin a parameter's `in`,
+    /// `name`, and value-type, and the last two credit a *key*'s presence, but none
+    /// reads the parameter's `description` value. Mirrors the suite's non-emptiness
+    /// guards ([`responses_with_empty_description`] et al.) on the parameter slot.
+    ///
+    /// Anchors on a parameter's `in:` location line exactly as
+    /// [`parameters_missing_schema_or_content`] does (a mapping key or a `- `
+    /// sequence opener whose value is one of the four valid locations; a `$ref`
+    /// parameter has no inline `in`, so it is never anchored and is exempt — it
+    /// inherits the referenced component's description), then looks for a
+    /// `description:` sibling at the parameter object's own child indent (upward for
+    /// a mapping or name-first form whose opener sits above, downward only for an
+    /// in-first `- in: …` opener whose object starts at the anchor; a `- description:`
+    /// sequence opener at `ind`-2 is read on the dedent, mirroring the name test).
+    /// A `description:` nested deeper — inside the parameter's own `schema:`/`content:`
+    /// subtree — sits past the object's indent and is never the parameter's own. The
+    /// found value is judged empty by the same rule the response/summary guards use
+    /// (bare null, exactly-empty quoted `""`/`''` by two leading quote chars, or an
+    /// empty `|`/`>` block scalar); a parameter with a *non-empty* description clears.
+    fn parameters_missing_description(body: &str) -> Vec<String> {
+        const LOCATIONS: [&str; 4] = ["query", "header", "path", "cookie"];
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        // Whether the `description:` at line `m` (own indent `ci`), with inline value
+        // `rest` (everything after the first colon), carries no text — the same
+        // trichotomy `responses_with_empty_description` judges (bare null, empty
+        // quoted string, empty block scalar).
+        let value_is_empty = |rest: &str, m: usize, ci: usize| -> bool {
+            let v = rest.trim();
+            if v.is_empty() {
+                return true; // bare `description:` → a YAML null
+            }
+            if v.starts_with('|') || v.starts_with('>') {
+                let mut k = m + 1;
+                while k < lines.len() {
+                    let l = lines[k];
+                    if l.trim().is_empty() {
+                        k += 1;
+                        continue;
+                    }
+                    return indent(l) <= ci; // content only if indented past the field
+                }
+                return true; // EOF with no content line — an empty block
+            }
+            let b = v.as_bytes();
+            if b.len() >= 2 && (b[0] == b'"' || b[0] == b'\'') && b[1] == b[0] {
+                let after = v[2..].trim_start();
+                if after.is_empty() || after.starts_with('#') {
+                    return true;
+                }
+            }
+            false
+        };
+        // Whether a `description:` sits at the parameter object's own indent on this
+        // line, and if so whether its value is non-empty. Returns Some(true) for a
+        // non-empty description, Some(false) for an empty one, None for a non-match.
+        let describes = |trimmed: &str, m: usize, ci: usize| -> Option<bool> {
+            let t = trimmed.strip_prefix("- ").unwrap_or(trimmed);
+            let rest = t.strip_prefix("description:")?;
+            Some(!value_is_empty(rest, m, ci))
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let bare = line.trim_start();
+            let key = bare.strip_prefix("- ").unwrap_or(bare);
+            let Some(rest) = key.strip_prefix("in:") else { continue };
+            let loc = rest.trim().trim_matches('"').trim_matches('\'');
+            if !LOCATIONS.contains(&loc) {
+                continue;
+            }
+            let is_seq_opener = bare.len() != key.len();
+            let ind = indent(line) + if is_seq_opener { 2 } else { 0 };
+            let mut has_description = false;
+            // See `parameters_missing_name` for why an in-first `- in: …` opener
+            // scans downward only while a mapping/name-first anchor scans both ways.
+            let steps: &[i64] = if is_seq_opener { &[1] } else { &[-1, 1] };
+            for &step in steps {
+                let mut j = i as i64;
+                loop {
+                    j += step;
+                    if j < 0 || j as usize >= lines.len() {
+                        break;
+                    }
+                    let l = lines[j as usize];
+                    if l.trim().is_empty() {
+                        break;
+                    }
+                    let li = indent(l);
+                    if li < ind {
+                        // Dedented out of this parameter object. A `- description:`
+                        // sequence-item opener would sit at `ind`-2 — read it before
+                        // leaving (mirrors the name/type tests' opener read).
+                        if li + 2 == ind {
+                            if let Some(true) = describes(l.trim_start(), j as usize, ind) {
+                                has_description = true;
+                            }
+                        }
+                        break;
+                    }
+                    if li != ind {
+                        continue; // a nested child (e.g. the parameter's own schema)
+                    }
+                    if let Some(true) = describes(l.trim_start(), j as usize, ind) {
+                        has_description = true;
+                    }
+                }
+            }
+            if !has_description {
+                out.push(format!("{}@line {}", loc, i + 1));
+            }
+        }
+        out
+    }
+
     /// The `parameters@line N: …` label of every `parameters:` array a spec
     /// declares that repeats a `(name, location)` pair — the OpenAPI uniqueness
     /// rule for the Parameter Object ("A unique parameter is defined by a
@@ -6549,6 +6678,145 @@ components:
             assert!(
                 parameters_missing_schema_or_content(api.body).is_empty(),
                 "{}: every located parameter must declare a `schema` or `content`",
+                api.name
+            );
+            for line in api.body.lines() {
+                let bare = line.trim_start();
+                let key = bare.strip_prefix("- ").unwrap_or(bare);
+                if let Some(rest) = key.strip_prefix("in:") {
+                    let loc = rest.trim().trim_matches('"').trim_matches('\'');
+                    if LOCATIONS.contains(&loc) {
+                        total_located += 1;
+                    }
+                }
+            }
+        }
+        assert!(
+            total_located >= 50,
+            "expected many located parameters across specs, got {total_located}"
+        );
+    }
+
+    #[test]
+    fn every_parameter_declares_a_non_empty_description() {
+        // Contract-harness invariant (Spectral `oas3-parameter-description` +
+        // CAMARA-template uniformity): every parameter a mounted spec declares MUST
+        // carry a non-empty `description`. A Parameter Object's `description` is
+        // OPTIONAL in OpenAPI, but every CamaraSim vendored parameter populates it —
+        // it is the CommonMark text a Redoc/Swagger `/docs` page renders beside the
+        // input slot, and for the query filters (`name`/`status`/`page`/`perPage`)
+        // and path ids (`{sessionId}`/`{networkId}`/…) that drive these APIs'
+        // functional cases it is the one place a caller reads what the value means.
+        //
+        // The value-side complement of the Parameter Object required-field trio —
+        // `every_parameter_declares_a_valid_location` (the `in` half),
+        // `every_parameter_declares_a_name` (the `name` half), and
+        // `every_parameter_declares_a_schema_or_content` (the value-type half): those
+        // pin the three REQUIRED fields, and the last two credit a *key*'s presence,
+        // but none reads the parameter's `description` value at all. Mirrors the
+        // suite's non-emptiness guards (`every_response_description_is_non_empty`,
+        // `every_operation_summary_is_non_empty`) on the parameter slot. The break it
+        // catches: a parameter block pasted from a sibling whose `description:` line
+        // was dropped or blanked (an empty scalar / a `description:` with nothing
+        // after it) — still a structurally valid Parameter Object (it keeps its
+        // `in`/`name`/`schema`), so the trio never sees it, yet it renders an
+        // anonymous input. A `$ref` parameter has no inline `description` of its own
+        // (it inherits the referenced component's) and is exempt. Verified true
+        // across all mounted specs (every declared parameter carries a non-empty
+        // description) before asserting.
+        for api in APIS {
+            let undescribed = parameters_missing_description(api.body);
+            assert!(
+                undescribed.is_empty(),
+                "{} spec declares parameter(s) with a valid `in` location but no \
+                 non-empty `description` (Spectral `oas3-parameter-description`; the \
+                 input slot its /docs page renders has no explanation): {:?}",
+                api.name,
+                undescribed
+            );
+        }
+    }
+
+    #[test]
+    fn parameter_description_extraction_rules() {
+        // Unit-cover the `parameters_missing_description` extractor so the contract
+        // test above can't pass vacuously and its detection is pinned: a parameter is
+        // flagged only when its object (anchored on a valid `in:` location) carries no
+        // non-empty `description:` sibling — in both sequence forms (name-first and
+        // in-first) and the mapping (components.parameters) form; a present-but-empty
+        // description (blank, `""`, or an empty block scalar) is flagged; a `$ref`
+        // parameter (no inline `in`) is exempt; and a `description` nested inside the
+        // parameter's own `schema` does NOT satisfy it.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      parameters:
+        - name: x-correlator
+          in: header
+          description: Correlation id, echoed back.
+          schema:
+            type: string
+        - in: path
+          name: id
+          required: true
+          description: |
+            The resource id. Any prior-minted value reads back.
+          schema:
+            type: string
+        - name: filter
+          in: query
+          description: \"\"
+          schema:
+            type: string
+        - name: page
+          in: query
+          schema:
+            type: object
+            properties:
+              description:
+                type: string
+        - $ref: '#/components/parameters/Shared'
+      responses:
+        '200':
+          description: ok
+components:
+  parameters:
+    Shared:
+      name: shared
+      in: query
+      description: A shared query filter.
+      schema:
+        type: string
+";
+        // Flagged, in document order (each labelled by its own `in:` anchor line):
+        // the `query` filter whose `description:` is an empty `""` (anchor `in: query`
+        // at line 23) and the `query` page param whose only `description:` sits deep
+        // inside its `schema.properties` (anchor at line 28, no own description). Not
+        // flagged: the name-first `header` (its non-empty `description:` sibling), the
+        // in-first `path` (its block-scalar `description:`), the `$ref` parameter (no
+        // inline `in`, never anchored), and the well-formed mapping `Shared`
+        // (`description:` sibling).
+        assert_eq!(
+            parameters_missing_description(body),
+            vec!["query@line 23".to_string(), "query@line 28".to_string()]
+        );
+
+        // Non-vacuous floor: across every registered spec, every located parameter
+        // declares a non-empty description (the invariant the contract test asserts),
+        // and the corpus actually declares many parameter objects, so a broken
+        // extractor can't hide behind an empty scan.
+        const LOCATIONS: [&str; 4] = ["query", "header", "path", "cookie"];
+        let mut total_located = 0usize;
+        for api in APIS {
+            assert!(
+                parameters_missing_description(api.body).is_empty(),
+                "{}: every located parameter must declare a non-empty description",
                 api.name
             );
             for line in api.body.lines() {
