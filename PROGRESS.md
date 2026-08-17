@@ -5018,6 +5018,34 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-17 — Contract-test harness: added a **tag-description** contract test
+  (`src/registry.rs` `every_root_tag_declares_a_non_empty_description`) — every Tag
+  Object a mounted spec declares in its document-root `tags:` list must carry a
+  non-empty `description` (the well-known Spectral `tag-description` lint). A tag's
+  `description` is OPTIONAL in OpenAPI, but it is the prose a Redoc/Swagger `/docs`
+  page (the simulator serves one per spec) renders beneath each tag's navigation-
+  section heading, so a tag with none renders an unlabelled section. The **value-side
+  complement** of the two tag *name* tests (`every_operation_tag_is_defined` /
+  `operation_tags_not_defined`, which read a tag's `name` and the operation references
+  against it but never a tag's own `description`), mirroring the suite's other
+  non-emptiness guards (`every_response_description_is_non_empty`,
+  `every_operation_summary_is_non_empty`) on the root-tag slot. New pure
+  `tags_missing_description` extractor (no YAML dep): walks the column-0 `tags:` block,
+  credits a tag only for a `description:` that is its own **direct** field — inline on
+  the `- ` item line or a continuation at the item's child indent — never one nested
+  deeper (e.g. under the tag's own `externalDocs`), and judges emptiness by the same
+  trichotomy the response/summary guards use (bare `description:` null, exactly-empty
+  quoted `""`/`''`, empty `|`/`>` block scalar). **Surveyed the corpus first (3 root
+  Tag Objects across the mounted specs — iot-sim-fraud-prevention ×2, edge-application-
+  management ×1 — all with non-empty descriptions) → no drift to fix.** Unit-covered
+  (`root_tag_description_extraction_rules`: a real inline description passes; an empty
+  `""`, a missing description, an empty `|` block, and a description nested under
+  `externalDocs` flagged in document order `[8,10,11,13]`; a no-root-tags spec → empty;
+  a ≥3 root-Tag-Object floor via an independent 2-space `- ` item detector).
+  `cargo test` 2663 green (was 2661; +2); `cargo build --release` succeeds, no
+  warnings. No new dependency; the extractor and both tests live in the `#[cfg(test)]`
+  module, so nothing ships in the binary. — binary (release): 5.1M (5,314,968 B;
+  unchanged)
 - 2026-08-17 — Contract-test harness: added a **uuid-format-example** contract test
   (`src/registry.rs` `every_uuid_format_example_is_a_well_formed_uuid`) — every inline
   `example` a mounted spec declares beside a **same-indent** `format: uuid` sibling must

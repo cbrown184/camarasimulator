@@ -22600,4 +22600,245 @@ paths:
             "expected operation tag references across specs, got {tag_refs}"
         );
     }
+
+    /// The 1-based line numbers, in document order, of every root Tag Object (an item of
+    /// the document-root `tags:` list) that declares no non-empty `description`, without
+    /// a YAML dep. Implements the well-known Spectral `tag-description` lint.
+    ///
+    /// A Tag Object's `description` is OPTIONAL in OpenAPI, but a Redoc/Swagger `/docs`
+    /// page (the simulator serves one per spec) renders it as the prose beneath each
+    /// tag's navigation-section heading, so a tag with none renders an unlabelled
+    /// section. The **value-side complement** of the two tag *name* tests
+    /// (`operation_tags_not_defined` / `every_operation_tag_is_defined`, which read a
+    /// tag's `name` and the operation references against it but never a tag's own
+    /// `description`), mirroring the suite's other non-emptiness guards
+    /// (`every_response_description_is_non_empty`, `every_operation_summary_is_non_empty`)
+    /// on the root-tag slot.
+    ///
+    /// A tag is credited only for a `description:` that is its own **direct** field —
+    /// inline on the `- ` item line or a continuation at the item's child indent — never
+    /// one nested deeper (e.g. a `description` under the tag's own `externalDocs`).
+    /// Emptiness is judged by the same trichotomy the response/summary guards use: a bare
+    /// `description:` (a YAML null), an exactly-empty quoted `""`/`''`, or an empty
+    /// `|`/`>` block scalar all count as missing.
+    fn tags_missing_description(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        // Whether a `description:` with inline value `rest` (everything after the first
+        // colon), whose key sits at child indent `ci` on line `m`, carries no text.
+        let value_is_empty = |rest: &str, m: usize, ci: usize| -> bool {
+            let v = rest.trim();
+            if v.is_empty() {
+                return true; // bare `description:` → a YAML null
+            }
+            if v.starts_with('|') || v.starts_with('>') {
+                // Block scalar: content lives on the following deeper lines.
+                let mut k = m + 1;
+                while k < lines.len() {
+                    let l = lines[k];
+                    if l.trim().is_empty() {
+                        k += 1;
+                        continue;
+                    }
+                    // First non-blank line: content only if indented past the field.
+                    return indent(l) <= ci;
+                }
+                return true; // EOF with no content line — an empty block
+            }
+            // Exactly-empty quoted string: two leading matching quote chars with nothing
+            // but optional whitespace/comment after them.
+            let b = v.as_bytes();
+            if b.len() >= 2 && (b[0] == b'"' || b[0] == b'\'') && b[1] == b[0] {
+                let after = v[2..].trim_start();
+                if after.is_empty() || after.starts_with('#') {
+                    return true;
+                }
+            }
+            false
+        };
+        // A direct `key: value` field of a Tag Object — inline on the item's `- ` line
+        // (dash stripped) or a plain continuation line — with the inline comment left in
+        // `value` for the caller's own trichotomy read.
+        let direct_field = |l: &str, is_dash: bool| -> Option<(String, String)> {
+            let t = l.trim_start();
+            let t = if is_dash {
+                t.strip_prefix('-').map(|s| s.trim_start()).unwrap_or(t)
+            } else {
+                t
+            };
+            let (k, v) = t.split_once(':')?;
+            Some((k.trim().to_string(), v.to_string()))
+        };
+        let mut out = Vec::new();
+        let mut in_root_tags = false;
+        let mut i = 0usize;
+        while i < lines.len() {
+            let line = lines[i];
+            let is_top = !line.is_empty() && !line.starts_with(char::is_whitespace);
+            if is_top {
+                in_root_tags = line.trim_end() == "tags:";
+                i += 1;
+                continue;
+            }
+            if !in_root_tags || !line.trim_start().starts_with('-') {
+                i += 1;
+                continue;
+            }
+            // A Tag Object: the `- ` item line plus its child-indent continuation fields.
+            let dash_indent = indent(line);
+            let child_indent = dash_indent + 2;
+            let mut has_desc = false;
+            if let Some((k, v)) = direct_field(line, true) {
+                if k == "description" && !value_is_empty(&v, i, child_indent) {
+                    has_desc = true;
+                }
+            }
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) <= dash_indent {
+                    break; // next `- ` item, or dedented out of the tags block
+                }
+                if indent(l) == child_indent {
+                    if let Some((k, v)) = direct_field(l, false) {
+                        if k == "description" && !value_is_empty(&v, j, child_indent) {
+                            has_desc = true;
+                        }
+                    }
+                }
+                j += 1;
+            }
+            if !has_desc {
+                out.push(i + 1);
+            }
+            i = j; // resume at the next item / dedented line
+        }
+        out
+    }
+
+    #[test]
+    fn every_root_tag_declares_a_non_empty_description() {
+        // Contract-harness invariant (Spectral `tag-description`): every Tag Object a
+        // mounted spec declares in its document-root `tags:` list MUST carry a non-empty
+        // `description`. It is the prose a Redoc/Swagger `/docs` page renders beneath each
+        // tag's navigation-section heading (the simulator serves one docs page per spec),
+        // so a tag with none renders an unlabelled section. No existing test reads a
+        // tag's `description`: `every_operation_tag_is_defined` / `operation_tags_not_defined`
+        // read tag *names* and the operation references against them, and nothing else
+        // inspects the root `tags:` list. Verified true across all mounted specs (every
+        // root Tag Object carries a non-empty description) before asserting.
+        for api in APIS {
+            let missing = tags_missing_description(api.body);
+            assert!(
+                missing.is_empty(),
+                "{} spec declares a root Tag Object with no non-empty `description` \
+                 (Spectral `tag-description`) at `tags` item line(s): {:?}",
+                api.name,
+                missing
+            );
+        }
+    }
+
+    #[test]
+    fn root_tag_description_extraction_rules() {
+        // Unit-cover `tags_missing_description` so the contract test above can't pass
+        // vacuously and its accept/reject boundary is pinned: a tag with a real inline
+        // description passes; an exactly-empty quoted `description: ""`, a tag with no
+        // `description` field, an empty `|` block-scalar description, and a tag whose only
+        // `description` sits nested under its own `externalDocs` (not a direct field) are
+        // each flagged in document order; and an operation-level `description` under
+        // `paths:` — outside the root `tags:` block — is never read as a tag's.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+tags:
+  - name: Good
+    description: a real description
+  - name: Empty
+    description: \"\"
+  - name: Missing
+  - name: Blank
+    description: |
+  - name: Nested
+    externalDocs:
+      url: https://x
+      description: not the tag's own
+paths:
+  /a:
+    get:
+      operationId: getA
+      description: an operation description, not a tag's
+      tags:
+        - Good
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    X:
+      type: object
+";
+        // Flagged, in document order: line 8 (`Empty`, `description: \"\"`), line 10
+        // (`Missing`, no description field), line 11 (`Blank`, an empty `|` block whose
+        // next non-blank line dedents to the following item), line 13 (`Nested`, whose
+        // only `description` sits under `externalDocs` at a deeper indent, not a direct
+        // field). Not flagged: line 6 (`Good`, a real continuation description); and the
+        // operation `description` on line 21 is under `paths:`, never inside the root
+        // `tags:` block.
+        assert_eq!(tags_missing_description(body), vec![8, 10, 11, 13]);
+
+        // A spec with no root `tags:` block has no Tag Object to check → empty.
+        let no_tags = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+";
+        assert!(tags_missing_description(no_tags).is_empty());
+
+        // Non-vacuous floor: across every registered spec every root Tag Object carries a
+        // non-empty description (the invariant the contract test asserts), and the corpus
+        // actually declares root Tag Objects — so the description path runs on real data
+        // and a broken (always-empty) extractor can't hide behind a corpus with no tags.
+        // Count Tag Objects with a detector independent of the description read: 2-space
+        // `- ` items directly under a column-0 `tags:` key.
+        let mut tag_objects = 0usize;
+        for api in APIS {
+            assert!(
+                tags_missing_description(api.body).is_empty(),
+                "{}: every root Tag Object must declare a non-empty description",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            let mut in_root = false;
+            for line in &lines {
+                let is_top = !line.is_empty() && !line.starts_with(char::is_whitespace);
+                if is_top {
+                    in_root = line.trim_end() == "tags:";
+                    continue;
+                }
+                if in_root && indent(line) == 2 && line.trim_start().starts_with("- ") {
+                    tag_objects += 1;
+                }
+            }
+        }
+        assert!(
+            tag_objects >= 3,
+            "expected root Tag Objects across specs, got {tag_objects}"
+        );
+    }
 }
