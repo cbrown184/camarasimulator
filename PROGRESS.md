@@ -5088,6 +5088,44 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-17 — Contract-test harness: added a **float format-example** contract test
+  (`src/registry.rs` `every_float_format_example_is_a_well_formed_float`) — every inline
+  `example` a mounted spec declares beside a **same-indent** `format: float` sibling must
+  be a well-formed, finite IEEE-754 **single-precision** value. The single-precision
+  companion of `every_double_format_example_is_a_well_formed_double`; together they close
+  the numeric format-example family (`…int32…`/`…int64…`/`…double…`/`…float…`) over the
+  four numeric formats a CAMARA schema uses. Over the corpus's only `format: float` fields
+  — carrier-billing's monetary `amount`/`taxAmount`. A sub-case of Spectral's
+  `oas3-valid-schema-example` (validate an example against its schema, format included): an
+  `example` is a sample *instance*, so a `format: float` field's example that isn't a
+  finite single-precision value — a placeholder beside the format, trailing junk from a
+  fat-fingered decimal, or a magnitude that overflows the *single-precision* range to a
+  non-finite value — advertises a sample the format's own validator rejects, and codegen
+  that maps `float` onto a 32-bit float carries a value no `float`-typed field can hold.
+  New pure `float_format_examples_malformed` extractor (no YAML dep) is
+  `double_format_examples_malformed` with the sibling-format probe swapped to match `float`
+  **exactly** (so `double`, the double-precision format, never pairs — the mirror of the
+  double extractor's exclusion of `float`, and the analogue of the int32/int64 split): same
+  inline-scalar read + dedent-bounded same-indent `format` sibling scan + block-scalar skip
+  + `example:`/`examples:`-payload ancestor guard; new `is_well_formed_float` (shape +
+  finiteness via `str::parse::<f32>` + `is_finite`). **Parsed as `f32`, not `f64`, so it is
+  strictly tighter than the double check — a value like `1e40` that a `double` admits but a
+  `float` cannot hold is rejected here** (`1e40` is a finite `f64` yet a non-finite `f32`),
+  the float/double range analogue of int32 rejecting `i32::MAX+1` that int64 accepts.
+  **Surveyed the corpus first (carrier-billing declares 4 `format: float` fields but only
+  1 carries an inline `example` — `amount: 9.99`, a valid finite float; the other 3
+  (taxAmount/amount/taxAmount) have no example sibling and are correctly skipped; `float`
+  appears in no other mounted spec) → no drift to fix.** Unit-covered
+  (`float_format_example_extraction_rules`: integers/decimals/signed/scientific and a large
+  finite `1e30` pass, a placeholder/trailing-junk/`1e40`-f32-overflow/`inf`/`nan`/empty/
+  leading-whitespace fail; a valid example passes, a placeholder, an overflow-to-infinity,
+  and a format-declared-below value flagged in document order `[25,29,32]`, and no-format/
+  `double`-sibling/following-property/block-scalar/inside-`example`-payload/property-
+  literally-named-`example` cases skipped; a ≥1 example+`format:float`-pair floor via an
+  independent same-indent window detector, matching the corpus's single genuine pair).
+  `cargo test` 2685 green (was 2683; +2); `cargo build --release` succeeds, no warnings. No
+  new dependency; the extractor, the shape helper, and both tests live in the `#[cfg(test)]`
+  module, so nothing ships in the binary. — binary (release): 5.1M (5,314,968 B; unchanged)
 - 2026-08-17 — Contract-test harness: added an **ipv6 format-example** contract test
   (`src/registry.rs` `every_ipv6_format_example_is_a_well_formed_ipv6`) — every inline
   `example` a mounted spec declares beside a **same-indent** `format: ipv6` sibling must

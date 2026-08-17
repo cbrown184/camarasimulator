@@ -19012,6 +19012,369 @@ components:
         );
     }
 
+    /// Whether `s` is a well-formed IEEE-754 **single-precision** value — the sample an
+    /// OpenAPI `format: float` field advertises. True iff `s` parses as an `f32` and is
+    /// finite: an integer (`3000`), a decimal (`9.99`), or a signed magnitude (`-0.108`)
+    /// all pass, since each is representable as a float. A non-numeric placeholder
+    /// (`TODO`), a value carrying whitespace (`  5`), trailing junk (`1.2.3`), and a
+    /// magnitude that overflows the *single-precision* range (`1e40`, which parses to a
+    /// non-finite `f32` infinity even though it is a finite `f64`) all fail — exactly the
+    /// samples the `float` format's own validator would reject. The parse is done as
+    /// `f32`, not `f64`, so this is stricter than `is_well_formed_double`: a value like
+    /// `1e40` that a `double` admits but a `float` cannot hold is rejected here (the
+    /// float/double analogue of the int32/int64 range split). JSON has no `Infinity`/`NaN`
+    /// literal, so the finiteness check also rejects `inf`/`nan` spellings that
+    /// `str::parse::<f32>` would otherwise accept. Shape + finiteness only
+    /// (`str::parse::<f32>`, which trims nothing); no dep.
+    fn is_well_formed_float(s: &str) -> bool {
+        s.parse::<f32>().map(|f| f.is_finite()).unwrap_or(false)
+    }
+
+    /// The 1-based line numbers, in document order, of every `example:` keyword whose
+    /// inline scalar value sits in a Schema Object declaring a *same-indent*
+    /// `format: float` sibling yet is not a well-formed single-precision value, without a
+    /// YAML dep. The **single-precision** companion of `double_format_examples_malformed`,
+    /// over the corpus's `format: float` fields — the monetary `amount`/`taxAmount`
+    /// fields (carrier-billing).
+    ///
+    /// In OpenAPI 3.0.x (JSON Schema) an `example` is a sample *instance* of the schema,
+    /// so a `format: float` field's example MUST be a value the `float` format admits: a
+    /// finite IEEE-754 single-precision value (the well-known Spectral
+    /// `oas3-valid-schema-example` validates an example against its schema, format
+    /// included). A malformed one — a placeholder beside the format, trailing junk from a
+    /// fat-fingered decimal, or a magnitude that overflows the single-precision range to a
+    /// non-finite value — advertises a sample the format's own validator rejects, so a
+    /// Redoc/Swagger "try it" prefill and a codegen client that maps `float` onto a 32-bit
+    /// float carry a value no `float`-typed field can hold.
+    ///
+    /// Only an `example` carrying an **inline scalar** (a numeric literal; a stray
+    /// surrounding quote is tolerated so a quoted `"9.99"` still reads as `9.99`,
+    /// mirroring the sibling format-example extractors' `trim_matches`) with a same-indent
+    /// `format: float` sibling in the same Schema Object is inspected. A block-scalar
+    /// example (`example: >-` / `example: |`) opens no inline value and is skipped (a
+    /// numeric example never takes that form, but the guard mirrors the siblings). The
+    /// `format: float` sibling is matched **exactly** (`double`, the double-precision
+    /// format, is a different format and never pairs — the analogue of the `int32`/`int64`
+    /// mutual exclusion), scanned at the example's own indent down through the object's
+    /// block then up, dedent-bounded exactly like `double_format_examples_malformed`, so a
+    /// *following* property's `format: float` past a dedent never pairs with this
+    /// property's example. An `example:` nested inside an outer `example:`/`examples:`
+    /// payload (sample data, not a schema keyword) is skipped. Float shape + finiteness is
+    /// judged by `is_well_formed_float`.
+    fn float_format_examples_malformed(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let raw_inline = |l: &str, name: &str| -> Option<String> {
+            let (k, v) = l.trim_start().split_once(':')?;
+            if k.trim() != name {
+                return None;
+            }
+            let v = v.split('#').next().unwrap_or(v).trim();
+            if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            }
+        };
+        // Whether a same-indent `format:` sibling of line `i` (indent `c`) in the same
+        // Schema Object names `float` (exactly — not `double`): scan down through the
+        // object's block then up, dedent-bounded so a nested or following object's
+        // `format` never pairs.
+        let sibling_is_float_format = |i: usize, c: usize| -> bool {
+            let is_float_format = |l: &str| -> bool {
+                raw_inline(l, "format")
+                    .map(|v| v.trim_matches('"').trim_matches('\'') == "float")
+                    .unwrap_or(false)
+            };
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_float_format(l) {
+                    return true;
+                }
+                j += 1;
+            }
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_float_format(l) {
+                    return true;
+                }
+            }
+            false
+        };
+        // True when line `i` (indent `c`) sits inside an outer `example:`/`examples:`
+        // payload — some enclosing container key up the indent ladder is
+        // `example`/`examples`, so an inner `example` key there is sample data.
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some(raw) = raw_inline(line, "example") else {
+                continue;
+            };
+            // A block-scalar opener (`>`/`|`, optionally with a `+`/`-`/digit chomping
+            // indicator) carries its value on the following lines, not inline — skip it.
+            if raw.starts_with('>') || raw.starts_with('|') {
+                continue;
+            }
+            let c = indent(line);
+            if inside_example(i, c) {
+                continue;
+            }
+            if !sibling_is_float_format(i, c) {
+                continue;
+            }
+            let value = raw.trim_matches('"').trim_matches('\'');
+            if !is_well_formed_float(value) {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_float_format_example_is_a_well_formed_float() {
+        // Contract-harness invariant (OpenAPI 3.0.x / JSON-Schema structural rule):
+        // where a Schema Object declares an inline `example` beside a same-indent
+        // `format: float`, the example MUST be a finite single-precision value. An
+        // `example` is a sample *instance* of the schema, so a value that is not a valid
+        // float — a placeholder beside the format, trailing junk from a fat-fingered
+        // decimal, or a magnitude that overflows the single-precision range to a
+        // non-finite value — is a self-contradictory schema whose own validator rejects
+        // the sample it advertises, so a Redoc/Swagger "try it" prefill and a codegen
+        // client that maps `float` onto a 32-bit float carry a value no `float`-typed
+        // field (a monetary `amount` / `taxAmount`) can legally hold.
+        //
+        // The single-precision companion of
+        // `every_double_format_example_is_a_well_formed_double`; together they close the
+        // numeric format-example family (int32 / int64 / double / float) over the four
+        // numeric formats a CAMARA schema uses. Verified true across all mounted specs
+        // before asserting.
+        for api in APIS {
+            let offenders = float_format_examples_malformed(api.body);
+            assert!(
+                offenders.is_empty(),
+                "{} spec declares an `example` beside a same-indent `format: float` that \
+                 is not a well-formed single-precision value (a sample the format's own \
+                 validator would reject) at `example:` line(s): {:?}",
+                api.name,
+                offenders
+            );
+        }
+    }
+
+    #[test]
+    fn float_format_example_extraction_rules() {
+        // Unit-cover `is_well_formed_float` and `float_format_examples_malformed` so the
+        // contract test above can't pass vacuously and its detection is pinned.
+        //
+        // Shape check: the small integers, decimals, and signed magnitudes the specs use
+        // all pass (a whole number is a valid float); a non-numeric placeholder, trailing
+        // junk from a mistyped decimal, a magnitude that overflows the *single-precision*
+        // range to a non-finite infinity (crucially `1e40`, which is a finite `f64` but a
+        // non-finite `f32` — the stricter-than-double case), an `inf`/`nan` spelling JSON
+        // has no literal for, an empty value, and a value carrying whitespace all fail.
+        assert!(is_well_formed_float("0"));
+        assert!(is_well_formed_float("3000")); // integer is a valid float
+        assert!(is_well_formed_float("9.99")); // decimal (a corpus monetary amount)
+        assert!(is_well_formed_float("-0.108")); // signed fraction
+        assert!(is_well_formed_float("94.56"));
+        assert!(is_well_formed_float("1e5")); // scientific notation
+        assert!(is_well_formed_float("1e30")); // large but finite as f32
+        assert!(!is_well_formed_float("TODO")); // placeholder
+        assert!(!is_well_formed_float("1.2.3")); // trailing junk
+        assert!(!is_well_formed_float("1e40")); // overflows f32 to infinity (finite as f64)
+        assert!(!is_well_formed_float("inf")); // no JSON Infinity literal
+        assert!(!is_well_formed_float("nan")); // no JSON NaN literal
+        assert!(!is_well_formed_float("")); // empty
+        assert!(!is_well_formed_float("  5")); // leading whitespace
+
+        // Extractor: a valid float beside a same-indent `format: float` passes; a
+        // placeholder, an overflow-to-infinity, and a value with the format *below* it
+        // (down-scan) are flagged; a value with no `format` sibling and one whose sibling
+        // is a *different* format (`double`) are skipped; an example in one property never
+        // pairs with a *following* property's `format: float` across the dedent; a
+        // block-scalar example is skipped; an inner `example` inside an outer `example:`
+        // payload is skipped; and a property literally named `example` (opening a block)
+        // is skipped.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    GoodFloat:
+      type: number
+      format: float
+      example: 9.99
+    GoodIntAsFloat:
+      type: number
+      format: float
+      example: 3000
+    BadPlaceholder:
+      type: number
+      format: float
+      example: TODO
+    BadOverflow:
+      type: number
+      format: float
+      example: 1e40
+    FormatBelow:
+      type: number
+      example: nope
+      format: float
+    NoFormat:
+      type: number
+      example: 42
+    DoubleFmt:
+      type: number
+      format: double
+      example: nope
+    Split:
+      type: object
+      properties:
+        a:
+          type: string
+          enum: [DAY, NIGHT]
+          example: DAY
+        b:
+          type: number
+          format: float
+          example: 51.5
+    Folded:
+      type: number
+      format: float
+      example: >-
+        3.14
+    InExample:
+      type: object
+      example:
+        format: float
+        example: notanumber
+    NamedExample:
+      type: object
+      properties:
+        example:
+          type: number
+          format: float
+";
+        // Flagged, in document order: BadPlaceholder.example (line 25, `TODO` is not
+        // numeric), BadOverflow.example (line 29, `1e40` overflows the single-precision
+        // range to a non-finite infinity), and FormatBelow.example (line 32, value `nope`
+        // with its `format: float` a line below — down-scan pairs it). Not flagged:
+        // GoodFloat (valid `9.99`); GoodIntAsFloat (valid `3000` — an integer is a float);
+        // NoFormat (no `format` sibling); DoubleFmt (sibling is `double`, not `float` — so
+        // its `nope` is out of scope, the analogue of the int32/int64 mutual exclusion);
+        // Split.a.example `DAY` (its only `format: float` is the *following* property
+        // Split.b, past a dedent); Split.b.example (valid `51.5`); Folded (block-scalar
+        // opener `>-`, no inline value); InExample's inner `example: notanumber` (inside
+        // the outer `example:` payload); NamedExample's `example:` property (opens a
+        // block, no inline value).
+        assert_eq!(float_format_examples_malformed(body), vec![25, 29, 32]);
+
+        // Non-vacuous floor: across every registered spec every `example` beside a
+        // same-indent `format: float` is a well-formed float (the invariant the contract
+        // test asserts), and the corpus actually declares at least one such pair (the
+        // carrier-billing monetary `amount` example `9.99`) — so the float comparison
+        // path runs on real data and a broken (always-empty) extractor can't hide behind
+        // a corpus that never pairs an example with a float format. Count pairs with a
+        // same-indent detector independent of the extractor's shape comparison.
+        let mut float_examples = 0usize;
+        for api in APIS {
+            assert!(
+                float_format_examples_malformed(api.body).is_empty(),
+                "{}: every example beside a same-indent `format: float` must be a \
+                 well-formed single-precision value",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            let is_key = |l: &str, name: &str, val: Option<&str>| {
+                l.trim_start().split_once(':').is_some_and(|(k, v)| {
+                    k.trim() == name
+                        && val.is_none_or(|want| {
+                            v.split('#').next().unwrap_or(v).trim().trim_matches('"').trim_matches('\'')
+                                == want
+                        })
+                })
+            };
+            for (i, l) in lines.iter().enumerate() {
+                if !is_key(l, "example", None) {
+                    continue;
+                }
+                let v = l
+                    .trim_start()
+                    .split_once(':')
+                    .map(|(_, v)| v.split('#').next().unwrap_or(v).trim())
+                    .unwrap_or("");
+                // Inline scalar only (skip empty + block-scalar openers), mirroring the
+                // extractor so the floor counts exactly the pairs it inspects.
+                if v.is_empty() || v.starts_with('>') || v.starts_with('|') {
+                    continue;
+                }
+                let c = indent(l);
+                let lo = i.saturating_sub(6);
+                let hi = (i + 6).min(lines.len());
+                let has_float_format = (lo..hi).any(|j| {
+                    j != i && indent(lines[j]) == c && is_key(lines[j], "format", Some("float"))
+                });
+                if has_float_format {
+                    float_examples += 1;
+                }
+            }
+        }
+        assert!(
+            float_examples >= 1,
+            "expected at least one example + same-indent `format: float` pair across specs, got {float_examples}"
+        );
+    }
+
     /// Whether `s` is a well-formed IPv4 address instance — the sample an OpenAPI
     /// `format: ipv4` field advertises. True iff `s` is dotted-quad decimal: exactly
     /// four `.`-separated octets, each a run of 1–3 ASCII digits whose value is in
