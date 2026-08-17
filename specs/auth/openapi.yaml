@@ -34,6 +34,7 @@ info:
   version: 0.0.1
   license:
     name: Apache-2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0.html
 servers:
   - url: /
 paths:

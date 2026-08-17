@@ -3349,6 +3349,26 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     block-scalar descriptions, a `$ref` parameter, and a mapping-form component
     parameter pass; ≥50 located-parameter floor). Surveyed the corpus first (161
     Parameter Objects, 0 without a non-empty description) → no drift.
+  - an info-license-url contract test (`src/registry.rs`
+    `every_info_license_declares_a_url`) asserts every served spec's `info.license`
+    declares a non-empty `url` (the Spectral `license-url` lint). The License
+    Object's `url` is OPTIONAL (only `name` is REQUIRED, pinned by
+    `every_spec_declares_a_valid_info_license`), but every CamaraSim spec carries the
+    CAMARA-template `url: …/LICENSE-2.0.html` — the hyperlink a Redoc/Swagger `/docs`
+    page renders on the licence label. The **url-side complement** of the name test,
+    which never reads `url` — so a dropped/blanked `url:` passed it, rendering an
+    unlinked label. Pure `info_license_url` extractor (no YAML dep) mirrors
+    `info_license_name`'s `info:`-scoped 2-space-`license:`/4-space-child scan,
+    returning the missing/no-url/present trichotomy (reported distinctly); the
+    child key is `split_once(':')`-cut so the url's own `https:` colon stays in the
+    value. Scope covers the mounted business APIs **and** the shared
+    `auth/openapi.yaml` OIDC spec (also served with a `/docs` page). Unit-covered
+    (`info_license_url_extraction_rules`: name-first/url-first, scheme colon
+    preserved, no-`url`/blank-`url`/no-`license` distinguished, sibling-field block
+    end, deeper component `license:` not read; served-spec non-empty floor).
+    **Surveyed the corpus first (61 served specs): the one drift was
+    `specs/auth/openapi.yaml`, whose licence block carried `name` but no `url` —
+    fixed in the same pass; all 60 business specs already had it.**
   - an api-servers-present contract test (`src/registry.rs`
     `every_spec_declares_a_non_empty_servers_array`) asserts every mounted spec
     declares a document-root `servers` array holding at least one Server Object
@@ -4972,6 +4992,37 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-17 — Contract-test harness: added an **info-license-url** contract test
+  (`src/registry.rs` `every_info_license_declares_a_url`) — every served spec's
+  `info.license` must declare a non-empty `url` (the well-known Spectral
+  `license-url` lint). The License Object's `url` is OPTIONAL in OpenAPI (only
+  `name` is REQUIRED, pinned by `every_spec_declares_a_valid_info_license`), but
+  every CamaraSim spec carries the CAMARA-template
+  `url: https://www.apache.org/licenses/LICENSE-2.0.html` — the hyperlink a
+  Redoc/Swagger `/docs` page renders on the licence label. The url-side complement
+  of the existing license test (which pins `name` but never reads `url`, so a
+  dropped/blanked `url:` slipped past it, rendering an unlinked label). New pure
+  `info_license_url` extractor (no YAML dep) mirrors `info_license_name`'s
+  `info:`-scoped scan (2-space `license:`, 4-space grandchild), returning the
+  missing / no-url / present trichotomy (reported distinctly); the `url:` child is
+  `split_once(':')`-cut so the url's own `https:` colon stays inside the value.
+  **Surveyed the corpus first — this pass caught real drift: 60/61 served specs
+  had the url, but `specs/auth/openapi.yaml` (the shared OIDC spec, served at
+  `/auth/openapi.yaml` with its own `/docs` page) declared `name: Apache-2.0` with
+  no `url` — fixed in the same pass by adding the LICENSE-2.0.html url**, so the
+  whole served corpus is now uniform. The contract test's scope therefore covers
+  the mounted business APIs *and* the auth spec (guarding the fix). Unit-covered
+  (`info_license_url_extraction_rules`: name-first + url-first ordering, the scheme
+  colon preserved, no-url/blank-url/no-license distinguished, a sibling-field
+  block end, a deeper component `license:`/`url:` not credited; served-spec
+  non-empty floor). Confirmed the test fails without the auth fix (stashed the spec
+  change → the contract test flagged `auth`) and passes with it. Embedded auth spec
+  now carries the url (binary contains 61 `LICENSE-2.0.html` occurrences, was 60).
+  `cargo test` 2659 green (was 2657; +2); `cargo build --release` succeeds, no
+  warnings. No new dependency; the extractor and both tests live in the
+  `#[cfg(test)]` module, so the only shipped change is the one-line auth-spec url.
+  — binary (release): 5.1M (5,314,968 B; unchanged — the ~63-byte spec line fits
+  existing rodata alignment slack)
 - 2026-08-17 — Contract-test harness: added a **parameter-description** contract
   test (`src/registry.rs` `every_parameter_declares_a_non_empty_description`) —
   every Parameter Object a mounted spec declares must carry a non-empty

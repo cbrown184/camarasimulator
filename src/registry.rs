@@ -534,6 +534,77 @@ mod tests {
         None
     }
 
+    /// Extract `info.license.url` from an embedded OpenAPI body, without a YAML
+    /// dep, distinguishing a missing `license` from a present one with no `url`.
+    ///
+    /// A License Object's `url` is OPTIONAL in OpenAPI (only `name` is REQUIRED),
+    /// but every CamaraSim vendored spec carries the CAMARA-template
+    /// `license: { name: Apache-2.0, url: https://www.apache.org/licenses/LICENSE-2.0.html }`,
+    /// and the well-known Spectral `license-url` lint recommends the field be
+    /// present: it is the hyperlink a Redoc/Swagger `/docs` page renders on the
+    /// licence label and the address a codegen client records as the API's terms.
+    /// A licence block whose `url:` was dropped (or blanked) still parses as a valid
+    /// document, so it slips past the structural/identity tests, yet renders an
+    /// unlinked licence label.
+    ///
+    /// Returns the missing/no-url/present trichotomy — mirroring
+    /// [`info_license_name`]'s shape for the `name` field:
+    ///   * `None` — the `info` object declares no `license:` field at all.
+    ///   * `Some(None)` — `info.license` is present but declares no `url:` child.
+    ///   * `Some(Some(url))` — `info.license.url` is present; `url` is its unquoted
+    ///     scalar (possibly empty, which the contract test rejects).
+    ///
+    /// Scoping mirrors [`info_license_name`] exactly: only the top-level `info:`
+    /// block is scanned, `license:` is matched at its 2-space direct-child indent
+    /// and `url:` at the 4-space grandchild indent, and a following non-blank line
+    /// at indent ≤ 2 (a sibling `info` field) ends the licence block — so a deeper
+    /// schema `license:`/`url:` (a component property) or a `url:` outside the block
+    /// is never credited. `split_once(':')` on the child key leaves the url's own
+    /// `https:` colon inside the value.
+    fn info_license_url(body: &str) -> Option<Option<String>> {
+        let lines: Vec<&str> = body.lines().collect();
+        let mut in_info = false;
+        for (i, line) in lines.iter().enumerate() {
+            let is_top_level_key =
+                !line.is_empty() && !line.starts_with(char::is_whitespace);
+            if is_top_level_key {
+                in_info = line.trim_end() == "info:";
+                continue;
+            }
+            if !in_info {
+                continue;
+            }
+            // `license:` is a direct child of `info:` at exactly 2 spaces.
+            if line.strip_prefix("  license:").is_none() {
+                continue;
+            }
+            // Scan the licence block for its `url:` grandchild (4-space indent),
+            // stopping at the next non-blank line indented ≤ 2 (a sibling `info`
+            // field), which ends the block.
+            for l in &lines[i + 1..] {
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let indent = l.len() - l.trim_start().len();
+                if indent <= 2 {
+                    break;
+                }
+                // A 4-space `url:` child — split at the first colon so the url's own
+                // `https:` colon stays in the value.
+                if indent == 4 {
+                    if let Some((k, v)) = l.split_once(':') {
+                        if k.trim() == "url" {
+                            let v = v.trim().trim_matches('"').trim_matches('\'');
+                            return Some(Some(v.to_string()));
+                        }
+                    }
+                }
+            }
+            return Some(None);
+        }
+        None
+    }
+
     /// Extract every URL-template variable a spec's `servers[].url` references but
     /// does **not** back with a Server Variable Object carrying a non-empty
     /// `default:` — without a YAML dep.
@@ -3596,6 +3667,59 @@ mod tests {
     }
 
     #[test]
+    fn every_info_license_declares_a_url() {
+        // Contract-harness invariant (the well-known Spectral `license-url` lint +
+        // CAMARA-template uniformity): every served spec's `info.license` MUST
+        // declare a non-empty `url`. The License Object's `url` is OPTIONAL in
+        // OpenAPI (only `name` is REQUIRED, pinned by
+        // `every_spec_declares_a_valid_info_license`), but every CamaraSim spec
+        // carries the CAMARA-template `url:
+        // https://www.apache.org/licenses/LICENSE-2.0.html` — the hyperlink a
+        // Redoc/Swagger `/docs` page renders on the licence label and the address a
+        // codegen client records as the API's terms.
+        //
+        // The **url-side complement** of `every_spec_declares_a_valid_info_license`,
+        // which pins the License Object's `name` but never reads its `url` — so a
+        // licence block whose `url:` line was dropped (or blanked) in an edit still
+        // passes it, yet renders an unlinked licence label. `None` (no `license:`),
+        // `Some(None)` (present but no `url:` child), and `Some(Some(""))` (blank
+        // url) are reported distinctly so a failure names the exact drift.
+        //
+        // Scope includes the shared `auth/openapi.yaml` OIDC spec as well as the
+        // mounted business APIs: it too is served (at `/auth/openapi.yaml`) with its
+        // own Redoc `/docs` page, so its License Object should be as complete. (This
+        // pass added the `url:` the auth spec previously lacked — the one corpus
+        // drift this lint catches; all 60 business specs already carried it.)
+        for (name, body) in APIS
+            .iter()
+            .map(|a| (a.name, a.body))
+            .chain(std::iter::once((
+                "auth",
+                include_str!("../specs/auth/openapi.yaml"),
+            )))
+        {
+            match info_license_url(body) {
+                Some(Some(url)) => assert!(
+                    !url.is_empty(),
+                    "{} spec declares an empty `info.license.url` — the licence \
+                     label its /docs page renders is unlinked",
+                    name
+                ),
+                Some(None) => panic!(
+                    "{} spec declares `info.license` with no `url:` child — the \
+                     recommended licence hyperlink (Spectral `license-url`) is absent",
+                    name
+                ),
+                None => panic!(
+                    "{} spec declares no `info.license` — the CAMARA-template \
+                     licence block is absent from the `info` object",
+                    name
+                ),
+            }
+        }
+    }
+
+    #[test]
     fn every_server_url_variable_is_defined_with_a_default() {
         // Contract-harness invariant (OpenAPI Server Object / Server Variable
         // Object rule): every `{name}` a spec's `servers[].url` templates MUST be
@@ -4838,6 +4962,77 @@ components:
                 matches!(info_license_name(api.body), Some(Some(ref n)) if !n.is_empty()),
                 "{} spec must declare a non-empty info.license.name",
                 api.name
+            );
+        }
+    }
+
+    #[test]
+    fn info_license_url_extraction_rules() {
+        // Unit-cover the `info_license_url` extractor so the contract test above
+        // can't pass vacuously and its scoping is pinned: the missing/no-url/present
+        // trichotomy, name-first vs url-first child ordering, the url's own `https:`
+        // colon staying in the value, a blank url, a sibling `info` field ending the
+        // block before a url, and a deeper component `license:`/`url:` not being
+        // mistaken for the `info` one.
+
+        // Present, name-first (the CAMARA-template form) → the url, with its scheme
+        // colon preserved.
+        assert_eq!(
+            info_license_url(
+                "info:\n  title: t\n  license:\n    name: Apache-2.0\n    url: https://x/y\n"
+            ),
+            Some(Some("https://x/y".to_string()))
+        );
+        // Present, url-first — the `url:` grandchild is still found.
+        assert_eq!(
+            info_license_url("info:\n  license:\n    url: https://m.example/l\n    name: MIT\n"),
+            Some(Some("https://m.example/l".to_string()))
+        );
+        // Present but only a `name:` child (no `url:`) → Some(None).
+        assert_eq!(
+            info_license_url("info:\n  license:\n    name: Apache-2.0\n  version: \"1\"\n"),
+            Some(None)
+        );
+        // Present with a blank `url:` → Some(Some("")), distinct from no-url.
+        assert_eq!(
+            info_license_url("info:\n  license:\n    name: X\n    url:\n"),
+            Some(Some(String::new()))
+        );
+        // No `license:` under `info` at all → None.
+        assert_eq!(
+            info_license_url("info:\n  title: t\n  version: \"1\"\npaths: {}\n"),
+            None
+        );
+        // A sibling `info` field at ≤2-space indent ends the licence block before
+        // any deeper `url:` line → Some(None) (the trailing url is not credited).
+        assert_eq!(
+            info_license_url("info:\n  license:\n  version: \"1\"\n    url: https://nope\n"),
+            Some(None)
+        );
+        // A deeper `license:`/`url:` inside a component schema (outside `info:`,
+        // more than 2 spaces in) is never mistaken for info's → None.
+        assert_eq!(
+            info_license_url(
+                "info:\n  title: t\npaths: {}\ncomponents:\n  schemas:\n    S:\n      license:\n        url: https://x\n"
+            ),
+            None
+        );
+
+        // Non-vacuous floor: every served spec (the mounted business APIs plus the
+        // shared auth spec) declares a non-empty info.license.url — the population
+        // the contract test asserts over is real and non-empty.
+        for (name, body) in APIS
+            .iter()
+            .map(|a| (a.name, a.body))
+            .chain(std::iter::once((
+                "auth",
+                include_str!("../specs/auth/openapi.yaml"),
+            )))
+        {
+            assert!(
+                matches!(info_license_url(body), Some(Some(ref u)) if !u.is_empty()),
+                "{} spec must declare a non-empty info.license.url",
+                name
             );
         }
     }
