@@ -5041,6 +5041,30 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-17 — Contract-test harness: added a **no-eval-in-markdown** contract test
+  (`src/registry.rs` `no_prose_field_contains_an_eval_call`) — the direct companion of
+  last pass's `no_prose_field_contains_a_script_tag`, completing the well-known Spectral
+  core markdown content-hazard pair. No markdown **prose** field a mounted spec declares
+  (a `description`, `summary`, or `title`) may contain an `eval(` call: each such field is
+  CommonMark the Redoc/Swagger `/docs` page the simulator serves per spec (`apis::openapi`)
+  renders as HTML, so an `eval(` pasted into a vendored description is stored script that
+  would run if the surrounding markup ever executed. New pure `prose_fields_with_eval`
+  extractor (no YAML dep) is the script-tag extractor with only the probe swapped —
+  identical inline-scalar read + block-scalar (`|`/`>`) content-line scan (more-indented
+  than the key to the first dedent, blank lines skipped) over the same three prose keys —
+  with a case-insensitive `eval(` probe (so `EVAL(`/`Eval(` fire; the trailing `(` keeps it
+  a call form, so the bare word "evaluate" never fires); an `eval(` in a non-prose value
+  (an `example`, an enum member) is out of the markdown-field scope and left unflagged.
+  **Surveyed the corpus first (0 occurrences of a case-insensitive `eval(` anywhere in the
+  mounted specs, prose or otherwise — including no `retrieval(` prose that a substring
+  match would catch) → no drift to fix.** Unit-covered (`eval_extraction_rules`: an inline
+  `eval(` description, an uppercase `EVAL(` summary, a block-scalar `eval(` content line,
+  and an inline `eval(` title flagged in document order `[5,10,13,22]`; clean prose plus an
+  `example: eval(…)` non-prose value not flagged; the bare word "evaluate" and a fully-clean
+  spec → empty; a ≥500 prose-field floor via an independent key counter). `cargo test` 2669
+  green (was 2667; +2); `cargo build --release` succeeds, no warnings. No new dependency;
+  the extractor and both tests live in the `#[cfg(test)]` module, so nothing ships in the
+  binary. — binary (release): 5.1M (5,314,968 B; unchanged)
 - 2026-08-17 — Contract-test harness: added a **no-script-tags-in-markdown** contract
   test (`src/registry.rs` `no_prose_field_contains_a_script_tag`) — no markdown **prose**
   field a mounted spec declares (a `description`, `summary`, or `title`) may contain a

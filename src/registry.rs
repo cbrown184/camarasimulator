@@ -23421,4 +23421,188 @@ paths:
             "expected a large body of prose fields across specs, got {prose_fields}"
         );
     }
+
+    /// The 1-based line numbers, in document order, of every line carrying an `eval(`
+    /// call inside a markdown **prose** field's value — a `description`, `summary`, or
+    /// `title` — without a YAML dep. The direct companion of
+    /// `prose_fields_with_script_tags`: same three prose keys, same inline-scalar and
+    /// block-scalar value shapes, only the probe differs (`eval(` in place of `<script`).
+    ///
+    /// These are the CommonMark fields a Redoc/Swagger `/docs` page renders as HTML — the
+    /// simulator serves one such page per spec (`apis::openapi` + `/docs`). The well-known
+    /// Spectral core rule pair guards two hazards a rendered markdown description can carry:
+    /// `no-script-tags-in-markdown` (a `<script` tag) and `no-eval-in-markdown` (an `eval(`
+    /// call — script that would run if the surrounding markup ever executed). No CamaraSim
+    /// prose legitimately needs `eval(`, so any is drift.
+    ///
+    /// The probe is case-insensitive (mirroring the sibling's `<script` probe), so `EVAL(`
+    /// and `Eval(` are caught as well as `eval(`; the trailing `(` keeps it a call form, so
+    /// the bare word "evaluate" never fires (though, like Spectral's own substring match,
+    /// `retrieval(` would — the corpus carries no such prose). Only the three prose keys are
+    /// inspected — an `eval(` inside a non-prose value (an `example`, an `enum` member) is
+    /// out of this rule's markdown scope and left unflagged, exactly as Spectral's
+    /// markdown-field target does.
+    fn prose_fields_with_eval(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let is_prose_key = |k: &str| matches!(k, "description" | "summary" | "title");
+        let has_eval = |s: &str| s.to_ascii_lowercase().contains("eval(");
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < lines.len() {
+            let line = lines[i];
+            let Some((k, v)) = line.trim_start().split_once(':') else {
+                i += 1;
+                continue;
+            };
+            if !is_prose_key(k.trim()) {
+                i += 1;
+                continue;
+            }
+            let val = v.trim();
+            // A block-scalar opener (`|`/`>`, with any chomping/indent indicator): scan
+            // the block's content lines (more indented than the key, to the first dedent),
+            // flagging each that carries an `eval(`. Blank lines inside the block are
+            // skipped, not treated as a dedent.
+            if val.starts_with('|') || val.starts_with('>') {
+                let key_indent = indent(line);
+                let mut j = i + 1;
+                while j < lines.len() {
+                    let bl = lines[j];
+                    if bl.trim().is_empty() {
+                        j += 1;
+                        continue;
+                    }
+                    if indent(bl) <= key_indent {
+                        break;
+                    }
+                    if has_eval(bl) {
+                        out.push(j + 1);
+                    }
+                    j += 1;
+                }
+                i = j;
+                continue;
+            }
+            // An inline scalar value: scan it directly.
+            if has_eval(val) {
+                out.push(i + 1);
+            }
+            i += 1;
+        }
+        out
+    }
+
+    #[test]
+    fn no_prose_field_contains_an_eval_call() {
+        // Contract-harness invariant (Spectral `no-eval-in-markdown`): no markdown prose
+        // field a mounted spec declares — a `description`, `summary`, or `title` — may
+        // contain an `eval(` call. Each such field is CommonMark that the Redoc/Swagger
+        // `/docs` page the simulator serves per spec (`apis::openapi`) renders as HTML; an
+        // `eval(` embedded in a vendored description is stored script that would run if the
+        // surrounding markup ever executed — the second half of the Spectral markdown
+        // content-hazard pair whose first half is `no_prose_field_contains_a_script_tag`.
+        // Verified true across all mounted specs before asserting.
+        for api in APIS {
+            let offenders = prose_fields_with_eval(api.body);
+            assert!(
+                offenders.is_empty(),
+                "{} spec embeds an `eval(` call in a markdown prose field \
+                 (description/summary/title) — a code-injection hazard in the served Redoc \
+                 `/docs` page (Spectral `no-eval-in-markdown`) at line(s): {:?}",
+                api.name,
+                offenders
+            );
+        }
+    }
+
+    #[test]
+    fn eval_extraction_rules() {
+        // Unit-cover `prose_fields_with_eval` so the contract test above can't pass
+        // vacuously and its detection is pinned: an inline `eval(` in a `description`, an
+        // uppercase `EVAL(` in a `summary` (case-insensitive), an `eval(` on a block-scalar
+        // `description`'s content line, and an inline `eval(` in a `title` are each flagged
+        // in document order; a clean prose field is passed; and an `eval(` sitting in a
+        // non-prose value (an `example`) is left unflagged (out of the markdown-field
+        // scope), as is a clean `description` beside it.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+  description: intro eval(alert(1))
+paths:
+  /a:
+    get:
+      operationId: getA
+      summary: hi EVAL(x)
+      description: |
+        A safe first line.
+        Danger eval(document.cookie)
+        Another safe line.
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    X:
+      type: object
+      title: X eval(y)
+      properties:
+        p:
+          type: string
+          example: eval(notprose)
+          description: clean text
+";
+        // Flagged, in document order: line 5 (`info.description` inline `eval(`), line 10
+        // (`summary` inline uppercase `EVAL(` — case-insensitive), line 13 (a block-scalar
+        // `description` content line carrying `eval(`), and line 22 (`title` inline
+        // `eval(`). Not flagged: line 3/12/14/17/27 (clean prose), and line 26
+        // (`example: eval(…` — a non-prose value, outside the markdown-field scope).
+        assert_eq!(prose_fields_with_eval(body), vec![5, 10, 13, 22]);
+
+        // The bare word "evaluate" (no `(` immediately after `eval`) never fires; nor does a
+        // clean spec.
+        let clean = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+  description: the operator will evaluate the request before scoring
+paths:
+  /a:
+    get:
+      operationId: getA
+      summary: does a thing
+      responses:
+        '200':
+          description: ok
+";
+        assert!(prose_fields_with_eval(clean).is_empty());
+
+        // Non-vacuous floor: across every registered spec no prose field carries an `eval(`
+        // (the invariant the contract test asserts), and the corpus actually declares a large
+        // body of prose — so the content-scan path runs on real data and a broken
+        // (always-empty) extractor can't hide behind a corpus with nothing to scan. Count
+        // prose-field keys with a detector independent of the `eval(` probe.
+        let mut prose_fields = 0usize;
+        for api in APIS {
+            assert!(
+                prose_fields_with_eval(api.body).is_empty(),
+                "{}: no description/summary/title prose field may embed an `eval(` call",
+                api.name
+            );
+            for l in api.body.lines() {
+                if let Some((k, _)) = l.trim_start().split_once(':') {
+                    if matches!(k.trim(), "description" | "summary" | "title") {
+                        prose_fields += 1;
+                    }
+                }
+            }
+        }
+        assert!(
+            prose_fields >= 500,
+            "expected a large body of prose fields across specs, got {prose_fields}"
+        );
+    }
 }
