@@ -5084,6 +5084,42 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-17 — Contract-test harness: added a **double format-example** contract test
+  (`src/registry.rs` `every_double_format_example_is_a_well_formed_double`) — every inline
+  `example` a mounted spec declares beside a **same-indent** `format: double` sibling must
+  be a well-formed, finite IEEE-754 double. The **floating-point** companion of the
+  integer-format tests (`every_int32_format_example_is_a_well_formed_int32` /
+  `…int64…`), over the corpus's *fractional* format — the coordinate (lat/long), radius,
+  rate, and monetary-amount `format: double` fields. A sub-case of Spectral's
+  `oas3-valid-schema-example` (validate an example against its schema, format included): an
+  `example` is a sample *instance*, so a `format: double` field's example that isn't a
+  finite double — a placeholder, trailing junk from a fat-fingered decimal, or a magnitude
+  that overflows to a non-finite infinity — advertises a sample the format's own validator
+  rejects, and codegen that maps `double` onto a 64-bit float carries a value no
+  `double`-typed field can hold. Extends the example-value family
+  (`every_example_matches_its_schema_type` reads only the JSON *type*,
+  `every_example_is_within_its_numeric_bounds` only the declared `minimum`/`maximum`,
+  neither the double range the format itself fixes) to floating-point format conformance.
+  New pure `double_format_examples_malformed` extractor (no YAML dep) is
+  `int64_format_examples_malformed` with the sibling-format probe swapped to match `double`
+  **exactly** (so `float`, the single-precision format, never pairs — the analogue of the
+  int32/int64 mutual exclusion): same inline-scalar read + dedent-bounded same-indent
+  `format` sibling scan + block-scalar skip + `example:`/`examples:`-payload ancestor guard;
+  new `is_well_formed_double` (shape + finiteness via `str::parse::<f64>` + `is_finite`, so a
+  placeholder, trailing junk, an overflow-to-infinity, and an `inf`/`nan` spelling JSON has
+  no literal for all fail). **Surveyed the corpus first (20 same-indent example+`format:double`
+  pairs across the mounted specs — lat/long/radius/rate/amount fields, every value a finite
+  double in `[-52, 5000]`, 0 malformed) → no drift to fix.** Unit-covered
+  (`double_format_example_extraction_rules`: integers/decimals/signed/scientific pass, a
+  placeholder/trailing-junk/overflow-infinity/`inf`/`nan`/empty/leading-whitespace fail; a
+  valid example passes, a placeholder, an overflow-to-infinity, and a format-declared-below
+  value flagged in document order `[25,29,32]`, and no-format/`float`-sibling/following-
+  property/block-scalar/inside-`example`-payload/property-literally-named-`example` cases
+  skipped; a ≥10 example+`format:double`-pair floor via an independent same-indent window
+  detector). `cargo test` 2679 green (was 2677; +2); `cargo build --release` succeeds, no
+  warnings. No new dependency; the extractor, the shape helper, and both tests live in the
+  `#[cfg(test)]` module, so nothing ships in the binary. — binary (release): 5.1M
+  (5,314,968 B; unchanged)
 - 2026-08-17 — Contract-test harness: added an **int64 format-example** contract test
   (`src/registry.rs` `every_int64_format_example_is_a_well_formed_int64`) — every inline
   `example` a mounted spec declares beside a **same-indent** `format: int64` sibling must

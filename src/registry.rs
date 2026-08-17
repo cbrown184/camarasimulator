@@ -18652,6 +18652,366 @@ components:
         );
     }
 
+    /// Whether `s` is a well-formed IEEE-754 double-precision value — the sample an
+    /// OpenAPI `format: double` field advertises. True iff `s` parses as an `f64` and
+    /// is finite: an integer (`3000`), a decimal (`51.5074`), or a signed magnitude
+    /// (`-0.108`) all pass, since a whole number is representable as a double. A
+    /// non-numeric placeholder (`TODO`), a value carrying whitespace (`  5`), trailing
+    /// junk (`1.2.3`), and a magnitude that overflows the double range (`1e400`, which
+    /// parses to a non-finite infinity) all fail — exactly the samples the `double`
+    /// format's own validator would reject. JSON has no `Infinity`/`NaN` literal, so
+    /// the finiteness check also rejects `inf`/`nan` spellings that `str::parse::<f64>`
+    /// would otherwise accept. Shape + finiteness only (`str::parse::<f64>`, which
+    /// trims nothing); no dep.
+    fn is_well_formed_double(s: &str) -> bool {
+        s.parse::<f64>().map(|f| f.is_finite()).unwrap_or(false)
+    }
+
+    /// The 1-based line numbers, in document order, of every `example:` keyword whose
+    /// inline scalar value sits in a Schema Object declaring a *same-indent*
+    /// `format: double` sibling yet is not a well-formed double-precision value, without
+    /// a YAML dep. The floating-point companion of `int32_format_examples_malformed` /
+    /// `int64_format_examples_malformed`, over the corpus's *fractional* format — the
+    /// coordinate (lat/long), radius, rate, and monetary-amount `format: double` fields.
+    ///
+    /// In OpenAPI 3.0.x (JSON Schema) an `example` is a sample *instance* of the
+    /// schema, so a `format: double` field's example MUST be a value the `double`
+    /// format admits: a finite IEEE-754 double (the well-known Spectral
+    /// `oas3-valid-schema-example` validates an example against its schema, format
+    /// included). A malformed one — a placeholder beside the format, trailing junk from
+    /// a fat-fingered decimal, or a magnitude that overflows the double range to a
+    /// non-finite value — advertises a sample the format's own validator rejects, so a
+    /// Redoc/Swagger "try it" prefill and a codegen client that maps `double` onto a
+    /// 64-bit float carry a value no `double`-typed field can hold.
+    ///
+    /// Only an `example` carrying an **inline scalar** (a numeric literal; a stray
+    /// surrounding quote is tolerated so a quoted `"51.5"` still reads as `51.5`,
+    /// mirroring the sibling format-example extractors' `trim_matches`) with a
+    /// same-indent `format: double` sibling in the same Schema Object is inspected. A
+    /// block-scalar example (`example: >-` / `example: |`) opens no inline value and is
+    /// skipped (a numeric example never takes that form, but the guard mirrors the
+    /// siblings). The `format: double` sibling is matched **exactly** (`float`, the
+    /// single-precision format, is a different format and never pairs — the analogue of
+    /// the `int32`/`int64` mutual exclusion), scanned at the example's own indent down
+    /// through the object's block then up, dedent-bounded exactly like
+    /// `int64_format_examples_malformed`, so a *following* property's `format: double`
+    /// past a dedent never pairs with this property's example. An `example:` nested
+    /// inside an outer `example:`/`examples:` payload (sample data, not a schema keyword)
+    /// is skipped. Double shape + finiteness is judged by `is_well_formed_double`.
+    fn double_format_examples_malformed(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let raw_inline = |l: &str, name: &str| -> Option<String> {
+            let (k, v) = l.trim_start().split_once(':')?;
+            if k.trim() != name {
+                return None;
+            }
+            let v = v.split('#').next().unwrap_or(v).trim();
+            if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            }
+        };
+        // Whether a same-indent `format:` sibling of line `i` (indent `c`) in the same
+        // Schema Object names `double` (exactly — not `float`): scan down through the
+        // object's block then up, dedent-bounded so a nested or following object's
+        // `format` never pairs.
+        let sibling_is_double_format = |i: usize, c: usize| -> bool {
+            let is_double_format = |l: &str| -> bool {
+                raw_inline(l, "format")
+                    .map(|v| v.trim_matches('"').trim_matches('\'') == "double")
+                    .unwrap_or(false)
+            };
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_double_format(l) {
+                    return true;
+                }
+                j += 1;
+            }
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_double_format(l) {
+                    return true;
+                }
+            }
+            false
+        };
+        // True when line `i` (indent `c`) sits inside an outer `example:`/`examples:`
+        // payload — some enclosing container key up the indent ladder is
+        // `example`/`examples`, so an inner `example` key there is sample data.
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some(raw) = raw_inline(line, "example") else {
+                continue;
+            };
+            // A block-scalar opener (`>`/`|`, optionally with a `+`/`-`/digit chomping
+            // indicator) carries its value on the following lines, not inline — skip it.
+            if raw.starts_with('>') || raw.starts_with('|') {
+                continue;
+            }
+            let c = indent(line);
+            if inside_example(i, c) {
+                continue;
+            }
+            if !sibling_is_double_format(i, c) {
+                continue;
+            }
+            let value = raw.trim_matches('"').trim_matches('\'');
+            if !is_well_formed_double(value) {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_double_format_example_is_a_well_formed_double() {
+        // Contract-harness invariant (OpenAPI 3.0.x / JSON-Schema structural rule):
+        // where a Schema Object declares an inline `example` beside a same-indent
+        // `format: double`, the example MUST be a finite double-precision value. An
+        // `example` is a sample *instance* of the schema, so a value that is not a valid
+        // double — a placeholder beside the format, trailing junk from a fat-fingered
+        // decimal, or a magnitude that overflows the double range to a non-finite value —
+        // is a self-contradictory schema whose own validator rejects the sample it
+        // advertises, so a Redoc/Swagger "try it" prefill and a codegen client that maps
+        // `double` onto a 64-bit float carry a value no `double`-typed field (a
+        // coordinate / radius / rate / amount) can legally hold.
+        //
+        // The floating-point companion of
+        // `every_int32_format_example_is_a_well_formed_int32` /
+        // `every_int64_format_example_is_a_well_formed_int64`, over the corpus's
+        // fractional format — the lat/long, radius, and monetary-amount fields; together
+        // they extend the format-example family (uuid / date-time / uri / int32 / int64)
+        // to the `double` format a CAMARA schema uses for real-valued measurements.
+        // Verified true across all mounted specs before asserting.
+        for api in APIS {
+            let offenders = double_format_examples_malformed(api.body);
+            assert!(
+                offenders.is_empty(),
+                "{} spec declares an `example` beside a same-indent `format: double` that \
+                 is not a well-formed double-precision value (a sample the format's own \
+                 validator would reject) at `example:` line(s): {:?}",
+                api.name,
+                offenders
+            );
+        }
+    }
+
+    #[test]
+    fn double_format_example_extraction_rules() {
+        // Unit-cover `is_well_formed_double` and `double_format_examples_malformed` so
+        // the contract test above can't pass vacuously and its detection is pinned.
+        //
+        // Shape check: the small integers, decimals, and signed magnitudes the specs use
+        // all pass (a whole number is a valid double); a non-numeric placeholder, trailing
+        // junk from a mistyped decimal, a magnitude that overflows the double range to a
+        // non-finite infinity, an `inf`/`nan` spelling JSON has no literal for, an empty
+        // value, and a value carrying whitespace all fail.
+        assert!(is_well_formed_double("0"));
+        assert!(is_well_formed_double("3000")); // integer is a valid double (corpus value)
+        assert!(is_well_formed_double("51.5074")); // decimal (a latitude)
+        assert!(is_well_formed_double("-0.108")); // signed fraction (corpus value)
+        assert!(is_well_formed_double("94.56"));
+        assert!(is_well_formed_double("1e5")); // scientific notation
+        assert!(!is_well_formed_double("TODO")); // placeholder
+        assert!(!is_well_formed_double("1.2.3")); // trailing junk
+        assert!(!is_well_formed_double("1e400")); // overflows to infinity — non-finite
+        assert!(!is_well_formed_double("inf")); // no JSON Infinity literal
+        assert!(!is_well_formed_double("nan")); // no JSON NaN literal
+        assert!(!is_well_formed_double("")); // empty
+        assert!(!is_well_formed_double("  5")); // leading whitespace
+
+        // Extractor: a valid double beside a same-indent `format: double` passes; a
+        // placeholder, an overflow-to-infinity, and a value with the format *below* it
+        // (down-scan) are flagged; a value with no `format` sibling and one whose sibling
+        // is a *different* format (`float`) are skipped; an example in one property never
+        // pairs with a *following* property's `format: double` across the dedent; a
+        // block-scalar example is skipped; an inner `example` inside an outer `example:`
+        // payload is skipped; and a property literally named `example` (opening a block)
+        // is skipped.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    GoodDouble:
+      type: number
+      format: double
+      example: 51.5074
+    GoodIntAsDouble:
+      type: number
+      format: double
+      example: 3000
+    BadPlaceholder:
+      type: number
+      format: double
+      example: TODO
+    BadOverflow:
+      type: number
+      format: double
+      example: 1e400
+    FormatBelow:
+      type: number
+      example: nope
+      format: double
+    NoFormat:
+      type: number
+      example: 42
+    FloatFmt:
+      type: number
+      format: float
+      example: nope
+    Split:
+      type: object
+      properties:
+        a:
+          type: string
+          enum: [DAY, NIGHT]
+          example: DAY
+        b:
+          type: number
+          format: double
+          example: 51.5
+    Folded:
+      type: number
+      format: double
+      example: >-
+        3.14
+    InExample:
+      type: object
+      example:
+        format: double
+        example: notanumber
+    NamedExample:
+      type: object
+      properties:
+        example:
+          type: number
+          format: double
+";
+        // Flagged, in document order: BadPlaceholder.example (line 25, `TODO` is not
+        // numeric), BadOverflow.example (line 29, `1e400` overflows to a non-finite
+        // infinity), and FormatBelow.example (line 32, value `nope` with its
+        // `format: double` a line below — down-scan pairs it). Not flagged: GoodDouble
+        // (valid `51.5074`); GoodIntAsDouble (valid `3000` — an integer is a double);
+        // NoFormat (no `format` sibling); FloatFmt (sibling is `float`, not `double` — so
+        // its `nope` is out of scope, the analogue of the int32/int64 mutual exclusion);
+        // Split.a.example `DAY` (its only `format: double` is the *following* property
+        // Split.b, past a dedent); Split.b.example (valid `51.5`); Folded (block-scalar
+        // opener `>-`, no inline value); InExample's inner `example: notanumber` (inside
+        // the outer `example:` payload); NamedExample's `example:` property (opens a
+        // block, no inline value).
+        assert_eq!(double_format_examples_malformed(body), vec![25, 29, 32]);
+
+        // Non-vacuous floor: across every registered spec every `example` beside a
+        // same-indent `format: double` is a well-formed double (the invariant the
+        // contract test asserts), and the corpus actually declares many such pairs (the
+        // coordinate / radius / rate / amount fields) — so the double comparison path
+        // runs on real data and a broken (always-empty) extractor can't hide behind a
+        // corpus that never pairs an example with a double format. Count pairs with a
+        // same-indent detector independent of the extractor's shape comparison.
+        let mut double_examples = 0usize;
+        for api in APIS {
+            assert!(
+                double_format_examples_malformed(api.body).is_empty(),
+                "{}: every example beside a same-indent `format: double` must be a \
+                 well-formed double-precision value",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            let is_key = |l: &str, name: &str, val: Option<&str>| {
+                l.trim_start().split_once(':').is_some_and(|(k, v)| {
+                    k.trim() == name
+                        && val.is_none_or(|want| {
+                            v.split('#').next().unwrap_or(v).trim().trim_matches('"').trim_matches('\'')
+                                == want
+                        })
+                })
+            };
+            for (i, l) in lines.iter().enumerate() {
+                if !is_key(l, "example", None) {
+                    continue;
+                }
+                let v = l
+                    .trim_start()
+                    .split_once(':')
+                    .map(|(_, v)| v.split('#').next().unwrap_or(v).trim())
+                    .unwrap_or("");
+                // Inline scalar only (skip empty + block-scalar openers), mirroring the
+                // extractor so the floor counts exactly the pairs it inspects.
+                if v.is_empty() || v.starts_with('>') || v.starts_with('|') {
+                    continue;
+                }
+                let c = indent(l);
+                let lo = i.saturating_sub(6);
+                let hi = (i + 6).min(lines.len());
+                let has_double_format = (lo..hi).any(|j| {
+                    j != i && indent(lines[j]) == c && is_key(lines[j], "format", Some("double"))
+                });
+                if has_double_format {
+                    double_examples += 1;
+                }
+            }
+        }
+        assert!(
+            double_examples >= 10,
+            "expected many example + same-indent `format: double` pairs across specs, got {double_examples}"
+        );
+    }
+
     /// The 1-based line numbers, in document order, of every `properties:` mapping
     /// opener whose sibling `type:` scalar names a JSON type other than `object` —
     /// without a YAML dep.
