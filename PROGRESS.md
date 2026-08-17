@@ -5084,6 +5084,41 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-17 — Contract-test harness: added an **int64 format-example** contract test
+  (`src/registry.rs` `every_int64_format_example_is_a_well_formed_int64`) — every inline
+  `example` a mounted spec declares beside a **same-indent** `format: int64` sibling must
+  be a well-formed signed 64-bit integer. The exact numeric companion of last pass's
+  `every_int32_format_example_is_a_well_formed_int32`, over the corpus's *other* integer
+  format — the byte-count / total / capacity `format: int64` fields whose magnitudes
+  deliberately exceed the 32-bit range (e.g. `9007199254740991`). Together they close the
+  format-example family (uuid / date-time / uri / int32 / int64) over the two integer
+  formats a CAMARA schema uses. A sub-case of Spectral's `oas3-valid-schema-example`
+  (validate an example against its schema, format included): an `example` is a sample
+  *instance*, so a `format: int64` field's example that isn't an integer inside the signed
+  64-bit range — a fraction pasted where an integer is meant, a placeholder, or a magnitude
+  that overflows i64 — advertises a sample the format's own validator rejects, and codegen
+  that maps `int64` onto a 64-bit integer would overflow. New pure
+  `int64_format_examples_malformed` extractor (no YAML dep) is `int32_format_examples_malformed`
+  with the sibling-format probe swapped to match `int64` **exactly** (so `int32`, the
+  narrower range, never pairs — the reverse of the exclusion the int32 extractor applies to
+  `int64`): same inline-scalar read + dedent-bounded same-indent `format` sibling scan +
+  block-scalar skip + `example:`/`examples:`-payload ancestor guard; new `is_well_formed_int64`
+  (shape + range via `str::parse::<i64>`, which trims nothing and rejects a fraction or an
+  out-of-range magnitude — no dep). **Surveyed the corpus first (10 same-indent inline
+  example+`format:int64` pairs across the mounted specs via the extractor's dedent-bounded
+  scan — byte-count/total fields, every value in the i64 range, 0 malformed) → no drift to
+  fix.** Unit-covered (`int64_format_example_extraction_rules`: the i64 extrema
+  (`±9223372036854775807`/`…808`) and small ints pass, and crucially `2147483648` (i32::MAX+1,
+  out of int32 range) passes here though the narrower int32 rejects it; a fraction, an
+  overflow/underflow by one, a far overflow, a placeholder, empty, and leading-whitespace all
+  fail; a valid example passes, a fraction, an overflowing magnitude, and a
+  format-declared-below value flagged in document order `[21,25,28]`, and no-format/
+  `int32`-sibling (its `3.5` fraction out of scope)/following-property/block-scalar/inside-
+  `example`-payload/property-literally-named-`example` cases skipped; a ≥6 example+`format:int64`-pair
+  floor via an independent same-indent window detector). `cargo test` 2677 green (was 2675;
+  +2); `cargo build --release` succeeds, no warnings. No new dependency; the extractor, the
+  shape helper, and both tests live in the `#[cfg(test)]` module, so nothing ships in the
+  binary. — binary (release): 5.1M (5,314,968 B; unchanged)
 - 2026-08-17 — Contract-test harness: added an **int32 format-example** contract test
   (`src/registry.rs` `every_int32_format_example_is_a_well_formed_int32`) — every inline
   `example` a mounted spec declares beside a **same-indent** `format: int32` sibling must
