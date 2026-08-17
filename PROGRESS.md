@@ -5089,6 +5089,46 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-17 — Contract-test harness: added a **uri-reference format-example** contract
+  test (`src/registry.rs` `every_uri_reference_format_example_is_a_well_formed_uri_reference`)
+  — every inline `example` a mounted spec declares beside a **same-indent**
+  `format: uri-reference` sibling must be a well-formed RFC 3986 URI-reference. The
+  **relative-URI** companion of `every_uri_format_example_is_a_well_formed_uri`, over the
+  corpus's CloudEvent `source` fields (the `//camarasimulator/<api>` event contexts). A
+  sub-case of Spectral's `oas3-valid-schema-example` (validate an example against its
+  schema, format included): an `example` is a sample *instance*, so a `format:
+  uri-reference` field's example that isn't a valid URI-reference — a placeholder beside
+  the format, a value carrying whitespace, or a bad scheme from a fat-fingered `://` —
+  advertises a sample the format's own validator rejects, and codegen that maps
+  `uri-reference` onto a URI type carries a value no such field (a CloudEvent `source` a
+  consumer keys on) can hold. New pure `uri_reference_format_examples_malformed` extractor
+  (no YAML dep) mirrors `uri_format_examples_malformed` with the sibling-format probe
+  swapped to match `uri-reference` **exactly** (so `uri`, which demands an *absolute* URI,
+  never pairs — the mutual-exclusion analogue of the int32/int64 and ipv4/ipv6 splits):
+  same inline-scalar read + dedent-bounded same-indent `format` sibling scan + block-scalar
+  skip + `example:`/`examples:`-payload ancestor guard; new `is_well_formed_uri_reference`
+  (RFC 3986 §4.1 `URI / relative-ref`: reject empty/whitespace/controls, and — only when a
+  `:` precedes the first `/`, `?`, or `#`, forcing the absolute-URI reading — validate the
+  scheme is `ALPHA *(ALPHA/DIGIT/"+"/"-"/".")`; a relative reference needs no scheme).
+  **Strictly looser than the absolute-URI check — a scheme-relative
+  `//camarasimulator/quality-on-demand` that `is_well_formed_absolute_uri` rejects (no
+  scheme) passes here** (the string-format analogue of `int64` admitting a magnitude
+  `int32` rejects). **Surveyed the corpus first: 4 `format: uri-reference` fields across
+  the mounted specs, 3 carrying an inline example — quality-on-demand / carrier-billing /
+  geofencing-subscriptions CloudEvent `source` (`//camarasimulator/<api>`, every value a
+  valid scheme-relative reference, 0 malformed); click-to-dial's `format: uri-reference`
+  has no example sibling, correctly skipped → no drift to fix.** Unit-covered
+  (`uri_reference_format_example_extraction_rules`: scheme-relative / absolute-path / bare
+  segment / `../` / absolute-URI (`https`/`urn`) pass, empty / whitespace / digit-start
+  scheme / empty-scheme-before-colon fail; the strictly-looser-than-absolute-URI relation
+  pinned; a good scheme-relative example passes, a bad-scheme and a whitespace value with
+  the format below flagged in document order `[21,24]`, and no-format / `uri`-sibling /
+  following-property / block-scalar / inside-`example`-payload / property-literally-named-
+  `example` cases skipped; a ≥3 example+`format:uri-reference`-pair floor via an
+  independent same-indent window detector, matching the corpus's 3 genuine pairs).
+  `cargo test` 2689 green (was 2687; +2); `cargo build --release` succeeds, no warnings. No
+  new dependency; the extractor, the shape helper, and both tests live in the `#[cfg(test)]`
+  module, so nothing ships in the binary. — binary (release): 5.1M (5,314,968 B; unchanged)
 - 2026-08-17 — Contract-test harness: added a **date format-example** contract test
   (`src/registry.rs` `every_date_format_example_is_a_well_formed_date`) — every inline
   `example` a mounted spec declares beside a **same-indent** `format: date` sibling must
