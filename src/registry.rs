@@ -21001,6 +21001,222 @@ paths:
         );
     }
 
+    /// Whether a mounted spec declares a document-root `servers` array, and — when
+    /// it does — whether that array holds at least one Server Object.
+    ///
+    /// The OpenAPI `servers` field names the base URL(s) a client prepends to every
+    /// operation path; each CamaraSim vendored spec sets it to the single templated
+    /// `{apiRoot}/{api}/{version}` server that resolves to the endpoint's mount
+    /// path. Per the OpenAPI spec, when `servers` is *absent* the implied default is
+    /// a lone server with url `/`, so a Redoc/Swagger "try it" panel or a codegen
+    /// client built from a serverless spec targets the docs host's own root instead
+    /// of the API's mount path — the well-known Spectral `oas3-api-servers` lint
+    /// requires the array to be present and non-empty.
+    ///
+    /// The *presence* complement of `servers_missing_url` /
+    /// `server_urls_with_trailing_slash`, which both isolate an *existing* top-level
+    /// `servers:` block and judge the entries inside it: a spec that declares no
+    /// `servers` block, or an empty one, offers those two nothing to judge, so both
+    /// pass it vacuously. This helper judges the array's own presence and arity.
+    ///
+    /// Pure and YAML-dep-free. Finds the document-root (indent-0) `servers` key in
+    /// either form — the block form (`servers:` alone, entries as `- ` dashes on the
+    /// deeper-indented following lines, until the next indent-0 key ends the block)
+    /// or the inline-flow form (`servers: [ … ]` on one line) — and returns:
+    ///   * `Missing` — no document-root `servers` key at all.
+    ///   * `Empty` — the key is present but declares zero entries (an empty flow
+    ///     `[]`/`[ ]`, a bare `servers:` null, or a block with no `- ` item before
+    ///     the dedent).
+    ///   * `Present` — at least one server entry is declared.
+    /// A `servers:` key nested inside a Path Item / Operation (indented, which the
+    /// corpus does not use) is never read — only the document-root array counts.
+    fn servers_array_state(body: &str) -> ServersState {
+        let lines: Vec<&str> = body.lines().collect();
+        // A document-root `servers` key: indent 0, key text exactly `servers` (so a
+        // `serversomething:` line, or an indented Path-Item `servers:`, is skipped).
+        let is_root_servers = |l: &str| -> bool {
+            !l.is_empty()
+                && !l.starts_with(char::is_whitespace)
+                && matches!(l.split_once(':'), Some((k, _)) if k == "servers")
+        };
+        let Some(start) = lines.iter().position(|l| is_root_servers(l)) else {
+            return ServersState::Missing;
+        };
+        let val = lines[start]
+            .split_once(':')
+            .map(|(_, v)| v.trim())
+            .unwrap_or("");
+        // Inline-flow form: `servers: [ … ]` on the one line. The bracketed inner
+        // text (up to the closing `]`, so a trailing comment is ignored) is empty
+        // for `[]`/`[ ]` and non-empty once it names an entry.
+        if let Some(rest) = val.strip_prefix('[') {
+            let inner = match rest.rfind(']') {
+                Some(end) => &rest[..end],
+                None => rest, // unterminated flow (corpus has none) — judge what's here
+            };
+            return if inner.trim().is_empty() {
+                ServersState::Empty
+            } else {
+                ServersState::Present
+            };
+        }
+        // A non-empty, non-flow scalar value is not an array of servers.
+        if !val.is_empty() {
+            return ServersState::Empty;
+        }
+        // Block form: entries are `- ` dashes on the deeper-indented following lines,
+        // until the next document-root (indent-0) key ends the block.
+        let end = lines[start + 1..]
+            .iter()
+            .position(|l| !l.is_empty() && !l.starts_with(char::is_whitespace))
+            .map(|off| start + 1 + off)
+            .unwrap_or(lines.len());
+        let has_entry =
+            (start + 1..end).any(|i| lines[i].trim_start().starts_with("- "));
+        if has_entry {
+            ServersState::Present
+        } else {
+            ServersState::Empty
+        }
+    }
+
+    #[test]
+    fn every_spec_declares_a_non_empty_servers_array() {
+        // Contract-harness invariant (OpenAPI structural rule / Spectral
+        // `oas3-api-servers`): every mounted vendored spec MUST declare a
+        // document-root `servers` array holding at least one Server Object. The
+        // `servers` field names the base URL a client prepends to every operation
+        // path; each CamaraSim spec sets it to the single templated
+        // `{apiRoot}/{api}/{version}` server that resolves to the endpoint's mount
+        // path. Per the OpenAPI spec, when `servers` is absent the implied default
+        // is a lone server with url `/` — so a Redoc/Swagger "try it" panel or a
+        // codegen client built from a serverless spec targets the docs host's own
+        // root instead of the API's mount path, sending its first request to a route
+        // the simulator never serves there.
+        //
+        // The *presence* complement of `every_server_object_declares_a_url` and
+        // `every_server_url_has_no_trailing_slash`: both isolate an existing
+        // top-level `servers:` block and judge the entries inside it, so a spec that
+        // declares *no* `servers` block — or an empty one — slips past both (there
+        // is nothing inside to judge). Nothing else reads the array's own presence:
+        // the info-object series pins `info`, and the url guards assume a server is
+        // already there. `Missing` (no `servers` key) and `Empty` (present but zero
+        // entries) are reported distinctly so a failure names the exact drift.
+        // Verified true across every mounted spec before asserting.
+        for api in APIS {
+            match servers_array_state(api.body) {
+                ServersState::Present => {}
+                ServersState::Empty => panic!(
+                    "{} spec declares an empty `servers` array — no base URL for \
+                     clients to prepend to operation paths (OpenAPI would imply the \
+                     bare-root `/` default)",
+                    api.name
+                ),
+                ServersState::Missing => panic!(
+                    "{} spec declares no document-root `servers` array — a client has \
+                     no base URL and falls back to the docs host root `/`, not the \
+                     API's mount path",
+                    api.name
+                ),
+            }
+        }
+    }
+
+    #[test]
+    fn servers_array_state_extraction_rules() {
+        // Unit-cover `servers_array_state` so the contract test above can't pass
+        // vacuously and its Missing/Empty/Present boundary is pinned.
+
+        // Block form with one entry → Present.
+        let present_block = "\
+openapi: 3.0.3
+servers:
+  - url: \"{apiRoot}/x/v1\"
+paths: {}
+";
+        assert_eq!(servers_array_state(present_block), ServersState::Present);
+
+        // Inline-flow form with one entry → Present.
+        let present_flow = "\
+openapi: 3.0.3
+servers: [ { url: \"https://api.example/x\" } ]
+paths: {}
+";
+        assert_eq!(servers_array_state(present_flow), ServersState::Present);
+
+        // No `servers` key anywhere → Missing.
+        let missing = "\
+openapi: 3.0.3
+info:
+  title: t
+paths: {}
+";
+        assert_eq!(servers_array_state(missing), ServersState::Missing);
+
+        // A bare `servers:` null (block form, no `- ` item before the next root
+        // key) → Empty.
+        let empty_block = "\
+openapi: 3.0.3
+servers:
+paths: {}
+";
+        assert_eq!(servers_array_state(empty_block), ServersState::Empty);
+
+        // Empty inline flow `[]` → Empty (and `[ ]` likewise).
+        let empty_flow = "\
+openapi: 3.0.3
+servers: []
+paths: {}
+";
+        assert_eq!(servers_array_state(empty_flow), ServersState::Empty);
+        let empty_flow_spaced = "\
+openapi: 3.0.3
+servers: [ ]
+paths: {}
+";
+        assert_eq!(servers_array_state(empty_flow_spaced), ServersState::Empty);
+
+        // A `servers:` key nested inside a Path Item (indented) is not the
+        // document-root array — the root declares none, so → Missing.
+        let nested_only = "\
+openapi: 3.0.3
+paths:
+  /a:
+    servers:
+      - url: \"/override\"
+";
+        assert_eq!(servers_array_state(nested_only), ServersState::Missing);
+
+        // Non-vacuous corpus floor: every registered spec declares a Present
+        // servers array (the invariant the contract test asserts), and there are
+        // many of them — so a broken (always-Present) extractor can't hide behind a
+        // corpus that never exercises the Missing/Empty arms, which the literals
+        // above already pin.
+        let mut present = 0usize;
+        for api in APIS {
+            assert_eq!(
+                servers_array_state(api.body),
+                ServersState::Present,
+                "{}: must declare a non-empty document-root servers array",
+                api.name
+            );
+            present += 1;
+        }
+        assert!(present >= 40, "expected many mounted specs, got {present}");
+    }
+
+    /// The presence/arity verdict of a spec's document-root `servers` array —
+    /// the trichotomy `servers_array_state` returns.
+    #[derive(Debug, PartialEq, Eq)]
+    enum ServersState {
+        /// No document-root `servers` key at all.
+        Missing,
+        /// A `servers` key is present but declares zero entries.
+        Empty,
+        /// At least one server entry is declared.
+        Present,
+    }
+
     /// The path-template key of every Path Item a spec declares under `paths:`
     /// that ends with a trailing slash — other than the bare root `/` itself.
     ///

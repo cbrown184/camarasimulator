@@ -3323,6 +3323,29 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - an api-servers-present contract test (`src/registry.rs`
+    `every_spec_declares_a_non_empty_servers_array`) asserts every mounted spec
+    declares a document-root `servers` array holding at least one Server Object
+    (the Spectral `oas3-api-servers` lint). The `servers` field names the base
+    URL a client prepends to every operation path; each spec sets it to the
+    single templated `{apiRoot}/{api}/{version}` server. Per OpenAPI, an *absent*
+    `servers` implies a lone `/` default, so a Redoc/Swagger "try it" panel or a
+    codegen client built from a serverless spec targets the docs host's own root
+    instead of the API's mount path. The *presence* complement of
+    `every_server_object_declares_a_url` / `every_server_url_has_no_trailing_slash`:
+    both isolate an *existing* top-level `servers:` block and judge the entries
+    inside it, so a spec that declares no `servers` block — or an empty one —
+    passes both vacuously (nothing inside to judge); nothing else read the array's
+    own presence. Pure `servers_array_state` extractor (no YAML dep) finds the
+    document-root (indent-0) `servers` key in block (`servers:` + `- ` dashes) or
+    inline-flow (`servers: [ … ]`) form and returns a Missing / Empty / Present
+    trichotomy (reported distinctly so a failure names the drift); an indented
+    Path-Item `servers:` is never read. Unit-covered
+    (`servers_array_state_extraction_rules`: block + inline-flow one-entry arrays →
+    Present; a no-`servers` doc → Missing; a bare `servers:` null, `[]`, and `[ ]`
+    → Empty; a nested Path-Item `servers:` with no root array → Missing; ≥40
+    mounted-spec floor). Surveyed the corpus first (all 60 mounted specs declare a
+    templated `{apiRoot}/…` server) → no drift.
   - an operation-tag-defined contract test (`src/registry.rs`
     `every_operation_tag_is_defined`) asserts every tag an Operation Object's
     `tags` array names is declared as a Tag Object in the document's root `tags:`
@@ -4923,6 +4946,40 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-17 — Contract-test harness: added an **api-servers-present** contract
+  test (`src/registry.rs` `every_spec_declares_a_non_empty_servers_array`) — every
+  mounted spec must declare a document-root `servers` array holding at least one
+  Server Object (the well-known Spectral `oas3-api-servers` lint). The OpenAPI
+  `servers` field names the base URL a client prepends to every operation path;
+  each CamaraSim spec sets it to the single templated `{apiRoot}/{api}/{version}`
+  server that resolves to the endpoint's mount path. Per the OpenAPI spec an
+  *absent* `servers` implies a lone server with url `/`, so a Redoc/Swagger "try
+  it" panel or a codegen client built from a serverless spec targets the docs
+  host's own root instead of the API's mount path — its first request hits a route
+  the simulator never serves there. The **presence** complement of the two
+  existing server-entry lints (`every_server_object_declares_a_url`,
+  `every_server_url_has_no_trailing_slash`): both isolate an *existing* top-level
+  `servers:` block and judge the entries inside it, so a spec that declares no
+  `servers` block — or an empty one — passes both vacuously (nothing inside to
+  judge); no other test reads the array's own presence (the info-object series
+  pins `info`, the url guards assume a server is already there). New pure
+  `servers_array_state` extractor (no YAML dep): finds the document-root (indent-0)
+  `servers` key in the block form (`servers:` alone + `- ` dashes on the
+  deeper-indented following lines until the next indent-0 key) or the inline-flow
+  form (`servers: [ … ]`), returning a Missing / Empty / Present trichotomy
+  (Missing = no key; Empty = a bare `servers:` null, an empty flow `[]`/`[ ]`, or a
+  block with no `- ` item; Present = ≥1 entry) — reported distinctly so a failure
+  names the exact drift; an indented Path-Item `servers:` is never mistaken for the
+  root array. Surveyed the corpus first (all 60 mounted specs declare a templated
+  `{apiRoot}/<api>/<version>` server) → no drift to fix. Unit-covered
+  (`servers_array_state_extraction_rules`: a block one-entry array and an
+  inline-flow `[ { url } ]` → Present; a no-`servers` doc → Missing; a bare
+  `servers:` null, `[]`, and `[ ]` → Empty; a nested Path-Item `servers:` with no
+  root array → Missing; plus a ≥40 mounted-spec floor asserting every registered
+  spec is Present). `cargo test` 2655 green (was 2653; +2); `cargo build --release`
+  succeeds, no warnings. No new dependency; test-only change (the extractor, the
+  `ServersState` enum, and both tests live in the `#[cfg(test)]` module). — binary
+  (release): 5.1M (5,314,968 B; unchanged)
 - 2026-08-17 — Contract-test harness: added an **operation-tag-defined** contract
   test (`src/registry.rs` `every_operation_tag_is_defined`) — every tag an
   Operation Object's `tags` array names must be declared as a Tag Object in the
