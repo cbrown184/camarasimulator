@@ -18665,6 +18665,373 @@ components:
         );
     }
 
+    /// Whether `s` is a well-formed email address instance — the value an OpenAPI
+    /// `format: email` field advertises. A pragmatic addr-spec shape (not the full
+    /// RFC 5322 grammar, which no format validator implements literally): no ASCII
+    /// whitespace or control characters anywhere; exactly one `@` splitting a
+    /// non-empty local part from a domain; the domain a run of dot-separated labels
+    /// (at least two, so a bare `localhost` fails), each label non-empty, made of
+    /// `ALPHA / DIGIT / "-"` and not hyphen-bounded, with an all-alphabetic top
+    /// label (TLD). This matches the corpus's `alice.wonderland@example.com` /
+    /// `holder@example.com` while rejecting the placeholders, whitespace, and
+    /// missing-`@` values a fat-fingered example carries.
+    fn is_well_formed_email(s: &str) -> bool {
+        // No ASCII whitespace or control characters anywhere.
+        if s.is_empty() || s.bytes().any(|b| b.is_ascii_whitespace() || b.is_ascii_control()) {
+            return false;
+        }
+        // Exactly one `@`, splitting a non-empty local part from a non-empty domain.
+        let mut parts = s.split('@');
+        let (Some(local), Some(domain), None) = (parts.next(), parts.next(), parts.next()) else {
+            return false;
+        };
+        if local.is_empty() || domain.is_empty() {
+            return false;
+        }
+        // Domain: at least two dot-separated labels; each label non-empty,
+        // `ALPHA / DIGIT / "-"`, not hyphen-bounded; the last label (TLD) alphabetic.
+        let labels: Vec<&str> = domain.split('.').collect();
+        if labels.len() < 2 {
+            return false;
+        }
+        let last = labels.len() - 1;
+        for (i, label) in labels.iter().enumerate() {
+            if label.is_empty()
+                || label.starts_with('-')
+                || label.ends_with('-')
+                || !label.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+            {
+                return false;
+            }
+            if i == last && !label.bytes().all(|b| b.is_ascii_alphabetic()) {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// The 1-based line numbers, in document order, of every `example:` keyword whose
+    /// inline scalar value sits in a Schema Object declaring a *same-indent*
+    /// `format: email` sibling yet is not a well-formed email address, without a YAML
+    /// dep. The identity-attribute companion of the format-example family (uuid /
+    /// date-time / date / uri / uri-reference / int32 / int64 / double / float /
+    /// ipv4 / ipv6), over the corpus's KYC `email` attributes.
+    ///
+    /// In OpenAPI 3.0.x (JSON Schema) an `example` is a sample *instance* of the
+    /// schema, so a `format: email` field's example MUST be a syntactically valid
+    /// email address (the well-known Spectral `oas3-valid-schema-example` validates
+    /// an example against its schema, format included). A malformed one — a
+    /// placeholder pasted beside the format, a value with stray whitespace, or a
+    /// value with no `@` — advertises a sample the format's own validator rejects, so
+    /// a Redoc/Swagger "try it" prefill and a codegen client's generated sample carry
+    /// a value no `email`-typed field can legally hold.
+    ///
+    /// Only an `example` carrying an **inline scalar** (quoted or unquoted) with a
+    /// same-indent `format: email` sibling in the same Schema Object is inspected. A
+    /// block-scalar example (`example: >-` / `example: |`, whose value continues on
+    /// the following lines) opens no inline value, so it is skipped rather than
+    /// mis-read. The `format: email` sibling is matched **exactly** (`date`, `uri`,
+    /// etc. are different formats and never pair), scanned at the example's own indent
+    /// down through the object's block then up, dedent-bounded exactly like
+    /// `uri_reference_format_examples_malformed`, so a *following* property's
+    /// `format: email` past a dedent never pairs with this property's example. An
+    /// `example:` nested inside an outer `example:`/`examples:` payload (sample data,
+    /// not a schema keyword) is skipped. Email shape is judged by `is_well_formed_email`.
+    fn email_format_examples_malformed(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let raw_inline = |l: &str, name: &str| -> Option<String> {
+            let (k, v) = l.trim_start().split_once(':')?;
+            if k.trim() != name {
+                return None;
+            }
+            let v = v.split('#').next().unwrap_or(v).trim();
+            if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            }
+        };
+        // Whether a same-indent `format:` sibling of line `i` (indent `c`) in the same
+        // Schema Object names `email` (exactly): scan down through the object's block
+        // then up, dedent-bounded so a nested or following object's `format` never pairs.
+        let sibling_is_email_format = |i: usize, c: usize| -> bool {
+            let is_email_format = |l: &str| -> bool {
+                raw_inline(l, "format")
+                    .map(|v| v.trim_matches('"').trim_matches('\'') == "email")
+                    .unwrap_or(false)
+            };
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_email_format(l) {
+                    return true;
+                }
+                j += 1;
+            }
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_email_format(l) {
+                    return true;
+                }
+            }
+            false
+        };
+        // True when line `i` (indent `c`) sits inside an outer `example:`/`examples:`
+        // payload — some enclosing container key up the indent ladder is
+        // `example`/`examples`, so an inner `example` key there is sample data.
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some(raw) = raw_inline(line, "example") else {
+                continue;
+            };
+            // A block-scalar opener (`>`/`|`, optionally with a `+`/`-`/digit chomping
+            // indicator) carries its value on the following lines, not inline — skip it.
+            if raw.starts_with('>') || raw.starts_with('|') {
+                continue;
+            }
+            let c = indent(line);
+            if inside_example(i, c) {
+                continue;
+            }
+            if !sibling_is_email_format(i, c) {
+                continue;
+            }
+            let value = raw.trim_matches('"').trim_matches('\'');
+            if !is_well_formed_email(value) {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_email_format_example_is_a_well_formed_email() {
+        // Contract-harness invariant (OpenAPI 3.0.x / JSON-Schema structural rule):
+        // where a Schema Object declares an inline `example` beside a same-indent
+        // `format: email`, the example MUST be a syntactically valid email address. An
+        // `example` is a sample *instance* of the schema, so a value that is not a
+        // well-formed email — a placeholder pasted beside the format, a value with
+        // stray whitespace, a value with no `@` — is a self-contradictory schema whose
+        // own validator rejects the sample it advertises, so a Redoc/Swagger "try it"
+        // prefill and a codegen client's generated sample carry a value no
+        // `email`-typed field can legally hold.
+        //
+        // The identity-attribute member of the format-example family (uuid /
+        // date-time / date / uri / uri-reference / int32 / int64 / double / float /
+        // ipv4 / ipv6), over the corpus's KYC `email` attributes. Verified true across
+        // all mounted specs before asserting.
+        for api in APIS {
+            let offenders = email_format_examples_malformed(api.body);
+            assert!(
+                offenders.is_empty(),
+                "{} spec declares an `example` beside a same-indent `format: email` \
+                 that is not a well-formed email address (a sample the format's own \
+                 validator would reject) at `example:` line(s): {:?}",
+                api.name,
+                offenders
+            );
+        }
+    }
+
+    #[test]
+    fn email_format_example_extraction_rules() {
+        // Unit-cover `is_well_formed_email` and `email_format_examples_malformed` so
+        // the contract test above can't pass vacuously and its detection is pinned.
+        //
+        // Shape check: dotted/plus-tagged local parts and multi-label domains pass;
+        // an empty value, a value with no `@`, two `@`, an empty local part, an empty
+        // domain, a single-label domain (no dot), an embedded space, a hyphen-bounded
+        // label, and a non-alphabetic TLD all fail.
+        assert!(is_well_formed_email("alice@example.com"));
+        assert!(is_well_formed_email("alice.wonderland@example.com"));
+        assert!(is_well_formed_email("a+b@sub.example.co.uk"));
+        assert!(is_well_formed_email("x@y.io"));
+        assert!(!is_well_formed_email("")); // empty
+        assert!(!is_well_formed_email("no-at-sign.com")); // no `@`
+        assert!(!is_well_formed_email("two@@example.com")); // two `@`
+        assert!(!is_well_formed_email("@example.com")); // empty local part
+        assert!(!is_well_formed_email("alice@")); // empty domain
+        assert!(!is_well_formed_email("alice@localhost")); // single-label domain
+        assert!(!is_well_formed_email("alice@ex ample.com")); // embedded whitespace
+        assert!(!is_well_formed_email("alice@-bad.com")); // hyphen-bounded label
+        assert!(!is_well_formed_email("alice@example.c0m")); // non-alphabetic TLD
+
+        // Extractor: a valid email beside a same-indent `format: email` passes; a
+        // no-`@` value and a whitespace value with the format below it (down-scan) are
+        // flagged; a value whose sibling is a *different* format (`date`) and one with
+        // no `format` sibling are skipped; an example in one property never pairs with a
+        // *following* property's `format: email` across the dedent; a block-scalar
+        // example is skipped; an inner `example` inside an outer `example:` payload is
+        // skipped; and a property literally named `example` (opening a block) is skipped.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    GoodEmail:
+      type: string
+      format: email
+      example: \"alice@example.com\"
+    BadNoAt:
+      type: string
+      format: email
+      example: \"not-an-email\"
+    FormatBelow:
+      type: string
+      example: \"has space@x.com\"
+      format: email
+    NoFormat:
+      type: string
+      example: \"plain@example.com\"
+    DateSibling:
+      type: string
+      format: date
+      example: \"not-an-email\"
+    Split:
+      type: object
+      properties:
+        a:
+          type: string
+          enum: [DAY, NIGHT]
+          example: DAY
+        b:
+          type: string
+          format: email
+          example: \"b@ok.com\"
+    Folded:
+      type: string
+      format: email
+      example: >-
+        folded@example.com
+    InExample:
+      type: object
+      example:
+        format: email
+        example: \"bad thing\"
+    NamedExample:
+      type: object
+      properties:
+        example:
+          type: string
+          format: email
+";
+        // Flagged, in document order: BadNoAt.example (line 21, `not-an-email` has no
+        // `@`) and FormatBelow.example (line 24, value `has space@x.com` carries
+        // whitespace, its `format: email` a line below — down-scan pairs it).
+        // Not flagged: GoodEmail (valid); NoFormat (no `format` sibling); DateSibling
+        // `not-an-email` (sibling is `date`, not `email`); Split.a `DAY` (its only
+        // `format: email` is the *following* property Split.b, past a dedent); Split.b
+        // (valid); Folded (block-scalar opener `>-`, no inline value); InExample's inner
+        // `example: \"bad thing\"` (inside the outer `example:` payload); NamedExample's
+        // `example:` property (opens a block, no inline value).
+        assert_eq!(email_format_examples_malformed(body), vec![21, 24]);
+
+        // Non-vacuous floor: across every registered spec every `example` beside a
+        // same-indent `format: email` is a well-formed email (the invariant the
+        // contract test asserts), and the corpus actually declares such pairs (the KYC
+        // `email` attributes) — so the comparison path runs on real data and a broken
+        // (always-empty) extractor can't hide behind a corpus that never pairs an
+        // example with an email format. Count pairs with a same-indent detector
+        // independent of the extractor's shape comparison.
+        let mut email_examples = 0usize;
+        for api in APIS {
+            assert!(
+                email_format_examples_malformed(api.body).is_empty(),
+                "{}: every example beside a same-indent `format: email` must be a \
+                 well-formed email address",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            let is_key = |l: &str, name: &str, val: Option<&str>| {
+                l.trim_start().split_once(':').is_some_and(|(k, v)| {
+                    k.trim() == name
+                        && val.is_none_or(|want| {
+                            v.split('#').next().unwrap_or(v).trim().trim_matches('"').trim_matches('\'')
+                                == want
+                        })
+                })
+            };
+            for (i, l) in lines.iter().enumerate() {
+                if !is_key(l, "example", None) {
+                    continue;
+                }
+                let v = l
+                    .trim_start()
+                    .split_once(':')
+                    .map(|(_, v)| v.split('#').next().unwrap_or(v).trim())
+                    .unwrap_or("");
+                if v.is_empty() || v.starts_with('>') || v.starts_with('|') {
+                    continue;
+                }
+                let c = indent(l);
+                let lo = i.saturating_sub(6);
+                let hi = (i + 6).min(lines.len());
+                let has_email_format = (lo..hi).any(|j| {
+                    j != i && indent(lines[j]) == c && is_key(lines[j], "format", Some("email"))
+                });
+                if has_email_format {
+                    email_examples += 1;
+                }
+            }
+        }
+        assert!(
+            email_examples >= 2,
+            "expected the KYC example + same-indent `format: email` pairs across specs, \
+             got {email_examples}"
+        );
+    }
+
     /// Whether `s` is a well-formed signed 32-bit integer instance — the value an
     /// OpenAPI `format: int32` field advertises. True iff `s` parses as an `i32`:
     /// an optional leading `-`/`+` sign then ASCII digits, the whole magnitude

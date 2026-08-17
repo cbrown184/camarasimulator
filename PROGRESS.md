@@ -5089,6 +5089,39 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-17 — Contract-test harness: added an **email format-example** contract test
+  (`src/registry.rs` `every_email_format_example_is_a_well_formed_email`) — every inline
+  `example` a mounted spec declares beside a **same-indent** `format: email` sibling must
+  be a well-formed email address. The identity-attribute member of the format-example
+  family (uuid / date-time / date / uri / uri-reference / int32 / int64 / double / float /
+  ipv4 / ipv6), over the corpus's KYC `email` attributes. A sub-case of Spectral's
+  `oas3-valid-schema-example` (validate an example against its schema, format included): an
+  `example` is a sample *instance*, so a `format: email` field's example that isn't a valid
+  email — a placeholder beside the format, a value carrying whitespace, or a value with no
+  `@` — advertises a sample the format's own validator rejects, and codegen that maps
+  `email` onto a validated address type carries a value no `email`-typed field can hold. New
+  pure `email_format_examples_malformed` extractor (no YAML dep) mirrors the sibling
+  format-example extractors with the sibling-format probe matched to `email` **exactly** (so
+  `date`/`uri`/etc. never pair): same inline-scalar read + dedent-bounded same-indent
+  `format` sibling scan + block-scalar skip + `example:`/`examples:`-payload ancestor guard;
+  new `is_well_formed_email` — a pragmatic addr-spec shape (not the unimplementable full RFC
+  5322): no ASCII whitespace/control chars, exactly one `@`, a non-empty local part, and a
+  domain of ≥2 dot-separated `ALPHA/DIGIT/-` labels (none hyphen-bounded) with an
+  all-alphabetic TLD. **Surveyed the corpus first: kyc-fill-in already carried a valid
+  example (`alice.wonderland@example.com`); kyc-age-verification's `format: email` field had
+  none — added `example: holder@example.com` (a genuine spec doc improvement), giving 2 real
+  same-indent pairs, 0 malformed → no drift to fix.** Unit-covered
+  (`email_format_example_extraction_rules`: dotted/plus-tagged locals and multi-label
+  domains pass; empty / no-`@` / two-`@` / empty-local / empty-domain / single-label-domain /
+  embedded-whitespace / hyphen-bounded-label / non-alphabetic-TLD fail; a valid example
+  passes, a no-`@` and a whitespace value with the format below flagged in document order
+  `[21,24]`, and no-format / `date`-sibling / following-property / block-scalar /
+  inside-`example`-payload / property-literally-named-`example` cases skipped; a ≥2
+  example+`format:email`-pair floor via an independent same-indent window detector, matching
+  the corpus's 2 genuine pairs). `cargo test` 2691 green (was 2689; +2); `cargo build
+  --release` succeeds, no warnings. No new dependency; the extractor, the shape helper, and
+  both tests live in the `#[cfg(test)]` module, so nothing ships in the binary. — binary
+  (release): 5.1M (5,314,968 B; unchanged)
 - 2026-08-17 — Contract-test harness: added a **uri-reference format-example** contract
   test (`src/registry.rs` `every_uri_reference_format_example_is_a_well_formed_uri_reference`)
   — every inline `example` a mounted spec declares beside a **same-indent**

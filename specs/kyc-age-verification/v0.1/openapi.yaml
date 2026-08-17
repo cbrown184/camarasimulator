@@ -312,6 +312,7 @@ components:
         email:
           type: string
           format: email
+          example: holder@example.com
         includeContentLock:
           type: boolean
           default: false
