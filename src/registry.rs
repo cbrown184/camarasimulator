@@ -27959,4 +27959,202 @@ paths:
             "expected a large body of prose fields across specs, got {prose_fields}"
         );
     }
+
+    /// The 1-based line numbers, in document order, of every DUPLICATE tag name in the
+    /// document-root `tags:` list — the second and each later occurrence of a name the
+    /// list already declared. Enforces the OpenAPI 3.0.x MUST that "each tag name in the
+    /// list is unique" (the root `tags:` array is a set of Tag Objects, one per name),
+    /// without a YAML dep.
+    ///
+    /// The tag-name member of the suite's distinct-entry family
+    /// (`every_paths_object_lists_distinct_path_keys`,
+    /// `every_properties_object_lists_distinct_property_names`,
+    /// `every_parameter_array_lists_distinct_name_location_pairs`,
+    /// `every_required_array_lists_distinct_entries`,
+    /// `operation_ids_are_unique_within_each_spec`): a duplicated root tag makes two Tag
+    /// Objects claim one navigation section — a Redoc/Swagger `/docs` page (the simulator
+    /// serves one per spec) renders whichever it reads last, silently dropping the other's
+    /// description — and a duplicate born of a copy-pasted `- name:` item left un-relabelled
+    /// is invisible to every existing test: the two tag-name tests
+    /// (`every_operation_tag_is_defined` reads an operation's references against the defined
+    /// set, `every_root_tag_declares_a_non_empty_description` reads each tag's own
+    /// `description`), and nothing ever asks whether a name repeats.
+    ///
+    /// Tag names are read exactly as [`operation_tags_not_defined`] reads its defined set:
+    /// within the column-0 `tags:` block (from that top-level key to the next column-0
+    /// key), a `name:` key — inline on the `- ` item line or on a continuation line — names
+    /// a Tag Object. The name is unquoted before comparison, so a quoted `"Alpha"`
+    /// duplicates a bare `Alpha`. The first occurrence of each name is accepted; only its
+    /// repeats are flagged, at the line of the repeated `name:`.
+    fn duplicate_root_tag_names(body: &str) -> Vec<usize> {
+        let unquote = |s: &str| -> String {
+            let s = s.trim();
+            let s = s
+                .strip_prefix('"')
+                .and_then(|x| x.strip_suffix('"'))
+                .or_else(|| s.strip_prefix('\'').and_then(|x| x.strip_suffix('\'')))
+                .unwrap_or(s);
+            s.to_string()
+        };
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut out = Vec::new();
+        let mut in_root_tags = false;
+        for (i, line) in body.lines().enumerate() {
+            let is_top = !line.is_empty() && !line.starts_with(char::is_whitespace);
+            if is_top {
+                in_root_tags = line.trim_end() == "tags:";
+                continue;
+            }
+            if !in_root_tags {
+                continue;
+            }
+            let t = line.trim_start();
+            let t = t.strip_prefix("- ").unwrap_or(t);
+            if let Some((k, v)) = t.split_once(':') {
+                if k.trim() == "name" {
+                    let v = v.split('#').next().unwrap_or(v);
+                    if !v.trim().is_empty() && !seen.insert(unquote(v)) {
+                        out.push(i + 1); // 1-based line of the repeated `name:`
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_root_tags_list_names_distinct_tags() {
+        // Contract-harness invariant (core-OAS: the root `tags:` array is a set of Tag
+        // Objects — "each tag name in the list MUST be unique"): a mounted spec's
+        // document-root `tags:` list MUST NOT declare the same tag name twice. A repeat
+        // is a malformed document — two Tag Objects contend for one navigation section,
+        // so a `/docs` UI keeps whichever it reads last and drops the other's
+        // description, and a tooling pass that indexes tags by name loses an entry at
+        // exactly the point a reader browses the API. The tag-name analogue of the
+        // suite's other distinct-entry guards (path keys / property names / parameter
+        // name+location pairs / required entries / operationIds); no existing test reads
+        // whether a root tag *name* repeats. Verified true across all mounted specs
+        // before asserting.
+        for api in APIS {
+            let dups = duplicate_root_tag_names(api.body);
+            assert!(
+                dups.is_empty(),
+                "{} spec's root `tags:` list declares a duplicate tag name at line(s): {:?}",
+                api.name,
+                dups
+            );
+        }
+    }
+
+    #[test]
+    fn root_tag_name_distinctness_extraction_rules() {
+        // Unit-cover `duplicate_root_tag_names` so the contract test above can't pass
+        // vacuously and its accept/reject boundary is pinned: the first occurrence of
+        // each name is accepted, a repeat is flagged, a quoted repeat matches a bare
+        // first occurrence, and a `name:` on a continuation line (not the `- ` item
+        // line) participates.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+tags:
+  - name: Alpha
+    description: a
+  - name: Beta
+    description: b
+  - name: \"Alpha\"
+    description: dup
+  - name: Alpha
+    description: triple
+paths:
+  /x:
+    get:
+      operationId: g
+      tags:
+        - Beta
+      responses:
+        '200':
+          description: ok
+";
+        // Flagged, in document order: line 10 (`- name: \"Alpha\"`, whose unquoted
+        // `Alpha` repeats the bare `Alpha` first declared on line 6) and line 12 (a
+        // third `Alpha`). Not flagged: line 6 (`Alpha`, first) and line 8 (`Beta`,
+        // first). The operation's `- Beta` on line 19 is outside the column-0 `tags:`
+        // block (reset at the `paths:` key) and is not a `name:` key, so it is never
+        // read as a root tag.
+        assert_eq!(duplicate_root_tag_names(body), vec![10, 12]);
+
+        // A `name:` on a continuation line (dash line carries a different field) still
+        // participates: the second `Alpha` (line 9) repeats the first (line 6).
+        let continuation = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+tags:
+  - name: Alpha
+    description: a
+  - description: b
+    name: Alpha
+paths: {}
+";
+        assert_eq!(duplicate_root_tag_names(continuation), vec![9]);
+
+        // A spec that declares no root `tags:` list has no duplicates (an operation
+        // `tags` reference is not a root Tag Object).
+        let no_root = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /x:
+    get:
+      operationId: g
+      tags:
+        - Ghost
+      responses:
+        '200':
+          description: ok
+";
+        assert!(duplicate_root_tag_names(no_root).is_empty());
+
+        // Non-vacuous floor: across every registered spec the root `tags:` names are
+        // distinct (the invariant the contract test asserts), and the corpus actually
+        // declares root Tag Objects — so the distinctness path runs on real data and a
+        // broken (never-enters-the-block) extractor can't hide behind a corpus with no
+        // root tags. Count root tag names with a detector independent of the dedup
+        // comparison: `name:` keys inside the column-0 `tags:` block.
+        let mut tag_names = 0usize;
+        for api in APIS {
+            assert!(
+                duplicate_root_tag_names(api.body).is_empty(),
+                "{}: root tag names must be distinct",
+                api.name
+            );
+            let mut in_root_tags = false;
+            for line in api.body.lines() {
+                let is_top = !line.is_empty() && !line.starts_with(char::is_whitespace);
+                if is_top {
+                    in_root_tags = line.trim_end() == "tags:";
+                    continue;
+                }
+                if !in_root_tags {
+                    continue;
+                }
+                let t = line.trim_start();
+                let t = t.strip_prefix("- ").unwrap_or(t);
+                if let Some((k, _)) = t.split_once(':') {
+                    if k.trim() == "name" {
+                        tag_names += 1;
+                    }
+                }
+            }
+        }
+        assert!(
+            tag_names >= 3,
+            "expected root tag names across specs, got {tag_names}"
+        );
+    }
 }

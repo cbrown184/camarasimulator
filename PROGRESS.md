@@ -5121,6 +5121,34 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-17 — Contract-test harness: added a **distinct root tag names** contract test
+  (`src/registry.rs` `every_root_tags_list_names_distinct_tags`) — a mounted spec's
+  document-root `tags:` list must not declare the same tag name twice (the core-OAS MUST
+  that "each tag name in the list is unique"; the root `tags:` array is a *set* of Tag
+  Objects). The tag-name member of the suite's distinct-entry family
+  (`every_paths_object_lists_distinct_path_keys` / `…distinct_property_names` /
+  `…distinct_name_location_pairs` / `every_required_array_lists_distinct_entries` /
+  `operation_ids_are_unique_within_each_spec`): a duplicated root tag makes two Tag Objects
+  contend for one navigation section, so a Redoc/Swagger `/docs` page keeps whichever it
+  reads last and silently drops the other's description — invisible to the two existing
+  tag-name tests (`every_operation_tag_is_defined` reads an operation's references against
+  the defined set; `every_root_tag_declares_a_non_empty_description` reads each tag's own
+  `description`), neither of which asks whether a name *repeats*. New pure
+  `duplicate_root_tag_names` extractor (no YAML dep) reads names exactly as
+  `operation_tags_not_defined` reads its defined set — within the column-0 `tags:` block, a
+  `name:` key on the `- ` item line or a continuation line, unquoted before comparison so a
+  quoted `"Alpha"` duplicates a bare `Alpha` — accepting each name's first occurrence and
+  flagging its repeats at the repeated `name:` line. **Surveyed the corpus first: only 2 of
+  61 served specs carry a root `tags:` list (iot-sim-fraud-prevention → `Bind card fraud
+  prevention` + `Query card fraud prevention`; edge-application-management → `Cluster`); all
+  3 names distinct → 0 drift to fix.** Unit-covered (`root_tag_name_distinctness_extraction_rules`:
+  a quoted repeat + a third occurrence flagged in document order `[10,12]`, a continuation-line
+  `name:` repeat flagged, an operation `tags` reference and a no-root-tags spec both never
+  read as root tags; a ≥3 root-tag-name floor via an independent name-count detector, matching
+  the corpus's 3 names). `cargo test` 2699 green (was 2697; +2); `cargo build --release`
+  succeeds, no warnings. No new dependency; the extractor and both tests live in the
+  `#[cfg(test)]` module, so nothing ships in the binary. — binary (release): 5.1M
+  (5,314,968 B; unchanged)
 - 2026-08-17 — Contract-test harness: added an **info.license.name canonical-identifier**
   contract test (`src/registry.rs` `every_info_license_name_is_the_camara_apache_identifier`)
   — every served spec's `info.license.name` must be exactly the SPDX short identifier
