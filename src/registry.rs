@@ -19012,6 +19012,367 @@ components:
         );
     }
 
+    /// Whether `s` is a well-formed IPv4 address instance — the sample an OpenAPI
+    /// `format: ipv4` field advertises. True iff `s` is dotted-quad decimal: exactly
+    /// four `.`-separated octets, each a run of 1–3 ASCII digits whose value is in
+    /// `0..=255` (`198.51.100.1`, `10.0.0.1`, `192.0.2.10` all pass). A value with the
+    /// wrong number of octets (`1.2.3`, `1.2.3.4.5`), an out-of-range octet (`256.1.1.1`),
+    /// an empty octet (`1..2.3`, a trailing dot), a non-digit octet (a placeholder, a
+    /// sign, embedded whitespace), or an IPv6 spelling (`2001:db8::11`, which has no dots)
+    /// all fail — exactly the samples the `ipv4` format's own validator would reject.
+    /// Leading zeros in an octet (`010`) are tolerated, matching the common
+    /// `format: ipv4` validator (ajv/Spectral). Shape + range only; no dep.
+    fn is_well_formed_ipv4(s: &str) -> bool {
+        let parts: Vec<&str> = s.split('.').collect();
+        parts.len() == 4
+            && parts.iter().all(|p| {
+                !p.is_empty()
+                    && p.len() <= 3
+                    && p.bytes().all(|b| b.is_ascii_digit())
+                    && p.parse::<u16>().map(|n| n <= 255).unwrap_or(false)
+            })
+    }
+
+    /// The 1-based line numbers, in document order, of every `example:` keyword whose
+    /// inline scalar value sits in a Schema Object declaring a *same-indent*
+    /// `format: ipv4` sibling yet is not a well-formed IPv4 address, without a YAML dep.
+    /// The **network-address** companion of the numeric format-example extractors
+    /// (`int32_format_examples_malformed` / `double_format_examples_malformed`), over the
+    /// corpus's device/endpoint `format: ipv4` fields (`ipAddress` / `publicAddress` /
+    /// `ipv4Address` / an app-instance's exposed address).
+    ///
+    /// In OpenAPI 3.0.x (JSON Schema) an `example` is a sample *instance* of the schema,
+    /// so a `format: ipv4` field's example MUST be a value the `ipv4` format admits: a
+    /// dotted-quad IPv4 address (the well-known Spectral `oas3-valid-schema-example`
+    /// validates an example against its schema, format included). A malformed one — a
+    /// placeholder beside the format, an octet typo that overshoots 255, a dropped octet,
+    /// or an IPv6 literal pasted into an IPv4 slot — advertises a sample the format's own
+    /// validator rejects, so a Redoc/Swagger "try it" prefill and a codegen client that
+    /// maps `ipv4` onto a 4-byte address carry a value no `ipv4`-typed field can hold.
+    ///
+    /// Only an `example` carrying an **inline scalar** (a dotted-quad literal; a stray
+    /// surrounding quote is tolerated so a quoted `"198.51.100.1"` still reads as the
+    /// address, mirroring the sibling format-example extractors' `trim_matches`) with a
+    /// same-indent `format: ipv4` sibling in the same Schema Object is inspected. A
+    /// block-scalar example (`example: >-` / `example: |`) opens no inline value and is
+    /// skipped. The `format: ipv4` sibling is matched **exactly** (`ipv6`, a different
+    /// address family, never pairs — the analogue of the `int32`/`int64` and
+    /// `double`/`float` mutual exclusions), scanned at the example's own indent down
+    /// through the object's block then up, dedent-bounded exactly like
+    /// `double_format_examples_malformed`, so a *following* property's `format: ipv4` past
+    /// a dedent never pairs with this property's example. An `example:` nested inside an
+    /// outer `example:`/`examples:` payload (sample data, not a schema keyword) is
+    /// skipped. IPv4 shape + range is judged by `is_well_formed_ipv4`.
+    fn ipv4_format_examples_malformed(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let raw_inline = |l: &str, name: &str| -> Option<String> {
+            let (k, v) = l.trim_start().split_once(':')?;
+            if k.trim() != name {
+                return None;
+            }
+            let v = v.split('#').next().unwrap_or(v).trim();
+            if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            }
+        };
+        // Whether a same-indent `format:` sibling of line `i` (indent `c`) in the same
+        // Schema Object names `ipv4` (exactly — not `ipv6`): scan down through the
+        // object's block then up, dedent-bounded so a nested or following object's
+        // `format` never pairs.
+        let sibling_is_ipv4_format = |i: usize, c: usize| -> bool {
+            let is_ipv4_format = |l: &str| -> bool {
+                raw_inline(l, "format")
+                    .map(|v| v.trim_matches('"').trim_matches('\'') == "ipv4")
+                    .unwrap_or(false)
+            };
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_ipv4_format(l) {
+                    return true;
+                }
+                j += 1;
+            }
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_ipv4_format(l) {
+                    return true;
+                }
+            }
+            false
+        };
+        // True when line `i` (indent `c`) sits inside an outer `example:`/`examples:`
+        // payload — some enclosing container key up the indent ladder is
+        // `example`/`examples`, so an inner `example` key there is sample data.
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some(raw) = raw_inline(line, "example") else {
+                continue;
+            };
+            // A block-scalar opener (`>`/`|`, optionally with a `+`/`-`/digit chomping
+            // indicator) carries its value on the following lines, not inline — skip it.
+            if raw.starts_with('>') || raw.starts_with('|') {
+                continue;
+            }
+            let c = indent(line);
+            if inside_example(i, c) {
+                continue;
+            }
+            if !sibling_is_ipv4_format(i, c) {
+                continue;
+            }
+            let value = raw.trim_matches('"').trim_matches('\'');
+            if !is_well_formed_ipv4(value) {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_ipv4_format_example_is_a_well_formed_ipv4() {
+        // Contract-harness invariant (OpenAPI 3.0.x / JSON-Schema structural rule):
+        // where a Schema Object declares an inline `example` beside a same-indent
+        // `format: ipv4`, the example MUST be a dotted-quad IPv4 address. An `example` is
+        // a sample *instance* of the schema, so a value that is not a valid IPv4 address —
+        // a placeholder beside the format, an octet typo that overshoots 255, a dropped
+        // octet, or an IPv6 literal pasted into an IPv4 slot — is a self-contradictory
+        // schema whose own validator rejects the sample it advertises, so a Redoc/Swagger
+        // "try it" prefill and a codegen client that maps `ipv4` onto a 4-byte address
+        // carry a value no `ipv4`-typed field (an `ipAddress`/`publicAddress`) can hold.
+        //
+        // The **network-address** sibling of the numeric format-example tests
+        // (`every_int32_format_example_is_a_well_formed_int32` /
+        // `every_double_format_example_is_a_well_formed_double`) and the string-format
+        // trio (`…uuid…` / `…date_time…` / `…uri…`); together they extend the
+        // example-value family (`…matches_its_schema_type` reads only the JSON *type*,
+        // `…respects_its_string_length_bounds` only the declared length) to the `ipv4`
+        // format's own address grammar. Verified true across all mounted specs before
+        // asserting.
+        for api in APIS {
+            let offenders = ipv4_format_examples_malformed(api.body);
+            assert!(
+                offenders.is_empty(),
+                "{} spec declares an `example` beside a same-indent `format: ipv4` that \
+                 is not a well-formed IPv4 address (a sample the format's own validator \
+                 would reject) at `example:` line(s): {:?}",
+                api.name,
+                offenders
+            );
+        }
+    }
+
+    #[test]
+    fn ipv4_format_example_extraction_rules() {
+        // Unit-cover `is_well_formed_ipv4` and `ipv4_format_examples_malformed` so the
+        // contract test above can't pass vacuously and its detection is pinned.
+        //
+        // Shape check: the dotted-quad addresses the specs use pass (leading zeros
+        // tolerated, matching the common `format: ipv4` validator); the wrong octet
+        // count, an out-of-range octet, an empty octet, a non-digit octet (a placeholder,
+        // a sign, embedded whitespace), and an IPv6 spelling all fail.
+        assert!(is_well_formed_ipv4("198.51.100.1"));
+        assert!(is_well_formed_ipv4("0.0.0.0"));
+        assert!(is_well_formed_ipv4("255.255.255.255"));
+        assert!(is_well_formed_ipv4("192.168.1.42"));
+        assert!(is_well_formed_ipv4("010.0.0.1")); // leading zero tolerated
+        assert!(!is_well_formed_ipv4("1.2.3")); // too few octets
+        assert!(!is_well_formed_ipv4("1.2.3.4.5")); // too many octets
+        assert!(!is_well_formed_ipv4("256.1.1.1")); // octet out of range
+        assert!(!is_well_formed_ipv4("1.2.3.")); // trailing dot → empty octet
+        assert!(!is_well_formed_ipv4("1..2.3")); // empty octet
+        assert!(!is_well_formed_ipv4("1.2.3.a")); // non-digit octet
+        assert!(!is_well_formed_ipv4("+1.2.3.4")); // sign in octet
+        assert!(!is_well_formed_ipv4("2001:db8::11")); // IPv6 — no dots
+        assert!(!is_well_formed_ipv4("TODO")); // placeholder
+        assert!(!is_well_formed_ipv4("")); // empty
+
+        // Extractor: a valid address beside a same-indent `format: ipv4` passes; an
+        // out-of-range octet, a wrong-shape address, and a value with the format *below*
+        // it (down-scan) are flagged; a value with no `format` sibling and one whose
+        // sibling is a *different* format (`ipv6`) are skipped; an example in one property
+        // never pairs with a *following* property's `format: ipv4` across the dedent; a
+        // block-scalar example is skipped; an inner `example` inside an outer `example:`
+        // payload is skipped; and a property literally named `example` (opening a block)
+        // is skipped.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    GoodIpv4:
+      type: string
+      format: ipv4
+      example: \"198.51.100.1\"
+    BadOctet:
+      type: string
+      format: ipv4
+      example: \"256.1.1.1\"
+    BadShape:
+      type: string
+      format: ipv4
+      example: \"1.2.3\"
+    FormatBelow:
+      type: string
+      example: nope
+      format: ipv4
+    NoFormat:
+      type: string
+      example: \"1.2.3.4\"
+    Ipv6Fmt:
+      type: string
+      format: ipv6
+      example: notanip
+    Split:
+      type: object
+      properties:
+        a:
+          type: string
+          enum: [DAY, NIGHT]
+          example: DAY
+        b:
+          type: string
+          format: ipv4
+          example: \"10.0.0.1\"
+    Folded:
+      type: string
+      format: ipv4
+      example: >-
+        1.2.3.4
+    InExample:
+      type: object
+      example:
+        format: ipv4
+        example: notanip
+    NamedExample:
+      type: object
+      properties:
+        example:
+          type: string
+          format: ipv4
+";
+        // Flagged, in document order: BadOctet.example (line 21, `256.1.1.1` has an octet
+        // above 255), BadShape.example (line 25, `1.2.3` is only three octets), and
+        // FormatBelow.example (line 28, value `nope` with its `format: ipv4` a line below
+        // — down-scan pairs it). Not flagged: GoodIpv4 (valid `198.51.100.1`); NoFormat
+        // (no `format` sibling); Ipv6Fmt (sibling is `ipv6`, not `ipv4` — so its `notanip`
+        // is out of scope, the analogue of the int32/int64 and double/float mutual
+        // exclusions); Split.a.example `DAY` (its only `format: ipv4` is the *following*
+        // property Split.b, past a dedent); Split.b.example (valid `10.0.0.1`); Folded
+        // (block-scalar opener `>-`, no inline value); InExample's inner
+        // `example: notanip` (inside the outer `example:` payload); NamedExample's
+        // `example:` property (opens a block, no inline value).
+        assert_eq!(ipv4_format_examples_malformed(body), vec![21, 25, 28]);
+
+        // Non-vacuous floor: across every registered spec every `example` beside a
+        // same-indent `format: ipv4` is a well-formed IPv4 address (the invariant the
+        // contract test asserts), and the corpus actually declares such pairs (the
+        // device/endpoint address fields) — so the address comparison path runs on real
+        // data and a broken (always-empty) extractor can't hide behind a corpus that
+        // never pairs an example with an ipv4 format. Count pairs with a same-indent
+        // detector independent of the extractor's shape comparison.
+        let mut ipv4_examples = 0usize;
+        for api in APIS {
+            assert!(
+                ipv4_format_examples_malformed(api.body).is_empty(),
+                "{}: every example beside a same-indent `format: ipv4` must be a \
+                 well-formed IPv4 address",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            let is_key = |l: &str, name: &str, val: Option<&str>| {
+                l.trim_start().split_once(':').is_some_and(|(k, v)| {
+                    k.trim() == name
+                        && val.is_none_or(|want| {
+                            v.split('#').next().unwrap_or(v).trim().trim_matches('"').trim_matches('\'')
+                                == want
+                        })
+                })
+            };
+            for (i, l) in lines.iter().enumerate() {
+                if !is_key(l, "example", None) {
+                    continue;
+                }
+                let v = l
+                    .trim_start()
+                    .split_once(':')
+                    .map(|(_, v)| v.split('#').next().unwrap_or(v).trim())
+                    .unwrap_or("");
+                // Inline scalar only (skip empty + block-scalar openers), mirroring the
+                // extractor so the floor counts exactly the pairs it inspects.
+                if v.is_empty() || v.starts_with('>') || v.starts_with('|') {
+                    continue;
+                }
+                let c = indent(l);
+                let lo = i.saturating_sub(6);
+                let hi = (i + 6).min(lines.len());
+                let has_ipv4_format = (lo..hi).any(|j| {
+                    j != i && indent(lines[j]) == c && is_key(lines[j], "format", Some("ipv4"))
+                });
+                if has_ipv4_format {
+                    ipv4_examples += 1;
+                }
+            }
+        }
+        assert!(
+            ipv4_examples >= 4,
+            "expected several example + same-indent `format: ipv4` pairs across specs, got {ipv4_examples}"
+        );
+    }
+
     /// The 1-based line numbers, in document order, of every `properties:` mapping
     /// opener whose sibling `type:` scalar names a JSON type other than `object` —
     /// without a YAML dep.

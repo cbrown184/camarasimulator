@@ -3309,6 +3309,10 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Cross-cutting (do alongside the item that needs it)
 - [~] `errors.rs`: base CAMARA error model done (`src/errors.rs`, `specs/shared/errors.yaml`); per-version catalogs still TODO (DESIGN §8)
+  <!-- format-example family now covers uuid / date-time / uri / int32 / int64 / double /
+       ipv4 (`every_ipv4_format_example_is_a_well_formed_ipv4`); ipv6 / date the natural
+       next siblings if a further slice is wanted. -->
+
 - [x] `registry.rs`: canonical URL versioning + `/` catalog wiring (DESIGN §9).
   All three §9 discovery endpoints served: `GET /` (catalog), `GET
   /{api}/v{n}/openapi.yaml` (spec), `GET /{api}/v{n}/docs` (human-readable Redoc
@@ -5084,6 +5088,45 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-17 — Contract-test harness: added an **ipv4 format-example** contract test
+  (`src/registry.rs` `every_ipv4_format_example_is_a_well_formed_ipv4`) — every inline
+  `example` a mounted spec declares beside a **same-indent** `format: ipv4` sibling must
+  be a well-formed dotted-quad IPv4 address. The **network-address** companion of the
+  numeric format-example tests (`…int32…`/`…int64…`/`…double…`) and the string-format
+  trio (`…uuid…`/`…date_time…`/`…uri…`), over the corpus's device/endpoint
+  `format: ipv4` fields (`ipAddress`/`publicAddress`/`ipv4Address`/an app-instance's
+  exposed address). A sub-case of Spectral's `oas3-valid-schema-example` (validate an
+  example against its schema, format included): an `example` is a sample *instance*, so a
+  `format: ipv4` field's example that isn't a valid IPv4 address — a placeholder beside
+  the format, an octet typo overshooting 255, a dropped octet, or an IPv6 literal pasted
+  into an IPv4 slot — advertises a sample the format's own validator rejects, and codegen
+  that maps `ipv4` onto a 4-byte address carries a value no `ipv4`-typed field can hold.
+  Extends the example-value family (`every_example_matches_its_schema_type` reads only
+  the JSON *type*, `every_example_respects_its_string_length_bounds` only the declared
+  length, neither the address grammar the format itself fixes) to the `ipv4` format. New
+  pure `ipv4_format_examples_malformed` extractor (no YAML dep) is
+  `double_format_examples_malformed` with the sibling-format probe swapped to match `ipv4`
+  **exactly** (so `ipv6`, a different address family, never pairs — the analogue of the
+  int32/int64 and double/float mutual exclusions): same inline-scalar read + dedent-bounded
+  same-indent `format` sibling scan + block-scalar skip + `example:`/`examples:`-payload
+  ancestor guard; new `is_well_formed_ipv4` (exactly four `.`-separated 1–3-digit octets,
+  each `0..=255`; leading zeros tolerated to match the common ajv/Spectral `ipv4`
+  validator; wrong octet count, out-of-range/empty/non-digit octet, and an IPv6 spelling
+  all fail). **Surveyed the corpus first (5 genuine same-object inline example+`format:ipv4`
+  pairs the extractor inspects — application-endpoint-discovery/-registration,
+  iot-sim-fraud-prevention, home-devices-qod, network-traffic-analysis address fields;
+  every value a valid dotted-quad, 0 malformed) → no drift to fix.** Unit-covered
+  (`ipv4_format_example_extraction_rules`: valid dotted-quads incl. `0.0.0.0`/
+  `255.255.255.255`/leading-zero pass; wrong octet count, out-of-range octet, empty/
+  trailing-dot octet, non-digit/sign octet, and an IPv6 spelling fail; a valid example
+  passes, an out-of-range-octet, a wrong-shape, and a format-declared-below value flagged
+  in document order `[21,25,28]`, and no-format/`ipv6`-sibling/following-property/
+  block-scalar/inside-`example`-payload/property-literally-named-`example` cases skipped;
+  a ≥4 example+`format:ipv4`-pair floor via an independent same-indent window detector).
+  `cargo test` 2681 green (was 2679; +2); `cargo build --release` succeeds, no warnings.
+  No new dependency; the extractor, the shape helper, and both tests live in the
+  `#[cfg(test)]` module, so nothing ships in the binary. — binary (release): 5.1M
+  (5,314,968 B; unchanged)
 - 2026-08-17 — Contract-test harness: added a **double format-example** contract test
   (`src/registry.rs` `every_double_format_example_is_a_well_formed_double`) — every inline
   `example` a mounted spec declares beside a **same-indent** `format: double` sibling must
