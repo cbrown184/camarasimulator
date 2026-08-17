@@ -23229,4 +23229,196 @@ paths:
             "expected root Tag Objects across specs, got {tag_objects}"
         );
     }
+
+    /// The 1-based line numbers, in document order, of every line carrying an HTML
+    /// `<script` tag inside a markdown **prose** field's value — a `description`,
+    /// `summary`, or `title` — without a YAML dep. The content-hazard analogue of the
+    /// description-emptiness guards (`every_response_description_is_non_empty`,
+    /// `every_operation_summary_is_non_empty`, `every_operation_description_is_non_empty`,
+    /// `every_root_tag_declares_a_non_empty_description`): those pin that a prose field is
+    /// *present and non-empty*, but none inspects its *content*.
+    ///
+    /// These are exactly the CommonMark fields a Redoc/Swagger `/docs` page renders as
+    /// HTML — the simulator serves one such page per spec (`apis::openapi` + `/docs`) — so
+    /// a `<script>` embedded in a vendored description is stored markup that the docs page
+    /// would execute: a stored-XSS vector, the hazard the well-known Spectral core rule
+    /// `no-script-tags-in-markdown` guards against (its companion `no-eval-in-markdown`
+    /// covers `eval(`). No CamaraSim prose legitimately needs raw `<script>`, so any is
+    /// drift.
+    ///
+    /// Both value shapes a prose field can take are scanned: an **inline** scalar (the
+    /// text after the key's `:` on the same line, internal colons preserved) and a
+    /// **block scalar** (`description: |` / `> …`) whose content lines — everything more
+    /// indented than the key, up to the first dedent — are each scanned. The `<script`
+    /// probe is case-insensitive (matching Spectral's `/<script/i`), so `<SCRIPT>` and
+    /// `<script src=…>` are caught; a lone closing `</script>` never appears without its
+    /// opening tag, which is what fires. Only the three prose keys are inspected — a
+    /// `<script` inside a non-prose value (an `example`, an `enum` member) is out of this
+    /// rule's markdown scope (and such a key never renders as markdown), so it is left
+    /// unflagged, exactly as Spectral's markdown-field target does.
+    fn prose_fields_with_script_tags(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let is_prose_key = |k: &str| matches!(k, "description" | "summary" | "title");
+        let has_script = |s: &str| s.to_ascii_lowercase().contains("<script");
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < lines.len() {
+            let line = lines[i];
+            let Some((k, v)) = line.trim_start().split_once(':') else {
+                i += 1;
+                continue;
+            };
+            if !is_prose_key(k.trim()) {
+                i += 1;
+                continue;
+            }
+            let val = v.trim();
+            // A block-scalar opener (`|`/`>`, with any chomping/indent indicator): scan
+            // the block's content lines (more indented than the key, to the first dedent),
+            // flagging each that carries a `<script`. Blank lines inside the block are
+            // skipped, not treated as a dedent.
+            if val.starts_with('|') || val.starts_with('>') {
+                let key_indent = indent(line);
+                let mut j = i + 1;
+                while j < lines.len() {
+                    let bl = lines[j];
+                    if bl.trim().is_empty() {
+                        j += 1;
+                        continue;
+                    }
+                    if indent(bl) <= key_indent {
+                        break;
+                    }
+                    if has_script(bl) {
+                        out.push(j + 1);
+                    }
+                    j += 1;
+                }
+                i = j;
+                continue;
+            }
+            // An inline scalar value: scan it directly.
+            if has_script(val) {
+                out.push(i + 1);
+            }
+            i += 1;
+        }
+        out
+    }
+
+    #[test]
+    fn no_prose_field_contains_a_script_tag() {
+        // Contract-harness invariant (Spectral `no-script-tags-in-markdown`): no markdown
+        // prose field a mounted spec declares — a `description`, `summary`, or `title` —
+        // may contain a `<script` tag. Each such field is CommonMark that the Redoc/Swagger
+        // `/docs` page the simulator serves per spec (`apis::openapi`) renders as HTML, so a
+        // `<script>` pasted into a vendored description is stored markup the docs page would
+        // execute — a stored-XSS vector. The content-hazard complement of the prose-field
+        // *emptiness* guards (`every_response_description_is_non_empty`,
+        // `every_operation_summary_is_non_empty`, `every_operation_description_is_non_empty`,
+        // `every_root_tag_declares_a_non_empty_description`): those pin that a prose field is
+        // present and non-empty, but none reads its content for markup hazards. Verified true
+        // across all mounted specs before asserting.
+        for api in APIS {
+            let offenders = prose_fields_with_script_tags(api.body);
+            assert!(
+                offenders.is_empty(),
+                "{} spec embeds a `<script` tag in a markdown prose field \
+                 (description/summary/title) — a stored-XSS hazard in the served Redoc \
+                 `/docs` page (Spectral `no-script-tags-in-markdown`) at line(s): {:?}",
+                api.name,
+                offenders
+            );
+        }
+    }
+
+    #[test]
+    fn script_tag_extraction_rules() {
+        // Unit-cover `prose_fields_with_script_tags` so the contract test above can't pass
+        // vacuously and its detection is pinned: an inline `<script>` in a `description`, an
+        // uppercase `<SCRIPT>` in a `summary` (case-insensitive), a `<script src=…>` on a
+        // block-scalar `description`'s content line, and an inline `<script>` in a `title`
+        // are each flagged in document order; a clean prose field is passed; and a `<script`
+        // sitting in a non-prose value (an `example`) is left unflagged (out of the
+        // markdown-field scope), as is a clean `description` beside it.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+  description: intro <script>alert(1)</script>
+paths:
+  /a:
+    get:
+      operationId: getA
+      summary: hi <SCRIPT>x</SCRIPT>
+      description: |
+        A safe first line.
+        Danger <script src=b></script>
+        Another safe line.
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    X:
+      type: object
+      title: X <script>
+      properties:
+        p:
+          type: string
+          example: <script>notprose</script>
+          description: clean text
+";
+        // Flagged, in document order: line 5 (`info.description` inline `<script>`), line 10
+        // (`summary` inline uppercase `<SCRIPT>` — case-insensitive), line 13 (a block-scalar
+        // `description` content line carrying `<script src=b>`), and line 22 (`title` inline
+        // `<script>`). Not flagged: line 3/12/14/17/27 (clean prose), and line 26
+        // (`example: <script>…` — a non-prose value, outside the markdown-field scope).
+        assert_eq!(prose_fields_with_script_tags(body), vec![5, 10, 13, 22]);
+
+        // A spec with no `<script` anywhere in its prose → empty.
+        let clean = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+  description: a perfectly ordinary overview
+paths:
+  /a:
+    get:
+      operationId: getA
+      summary: does a thing
+      responses:
+        '200':
+          description: ok
+";
+        assert!(prose_fields_with_script_tags(clean).is_empty());
+
+        // Non-vacuous floor: across every registered spec no prose field carries a `<script`
+        // (the invariant the contract test asserts), and the corpus actually declares a large
+        // body of prose — so the content-scan path runs on real data and a broken
+        // (always-empty) extractor can't hide behind a corpus with nothing to scan. Count
+        // prose-field keys with a detector independent of the `<script` probe.
+        let mut prose_fields = 0usize;
+        for api in APIS {
+            assert!(
+                prose_fields_with_script_tags(api.body).is_empty(),
+                "{}: no description/summary/title prose field may embed a `<script` tag",
+                api.name
+            );
+            for l in api.body.lines() {
+                if let Some((k, _)) = l.trim_start().split_once(':') {
+                    if matches!(k.trim(), "description" | "summary" | "title") {
+                        prose_fields += 1;
+                    }
+                }
+            }
+        }
+        assert!(
+            prose_fields >= 500,
+            "expected a large body of prose fields across specs, got {prose_fields}"
+        );
+    }
 }

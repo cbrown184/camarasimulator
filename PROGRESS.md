@@ -3323,6 +3323,29 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - a no-script-tags-in-markdown contract test (`src/registry.rs`
+    `no_prose_field_contains_a_script_tag`) asserts no markdown **prose** field a mounted
+    spec declares — a `description`, `summary`, or `title` — contains a `<script` tag (the
+    Spectral core `no-script-tags-in-markdown` rule; its companion `no-eval-in-markdown`
+    guards `eval(`). Each such field is CommonMark the Redoc/Swagger `/docs` page the
+    simulator serves per spec (`apis::openapi`) renders as HTML, so a `<script>` pasted into
+    a vendored description is stored markup the docs page would execute — a stored-XSS
+    vector. The **content-hazard complement** of the prose-field *emptiness* guards
+    (`every_response_description_is_non_empty` / `every_operation_summary_is_non_empty` /
+    `every_operation_description_is_non_empty` / `every_root_tag_declares_a_non_empty_description`):
+    those pin that a prose field is present and non-empty, but none reads its content for
+    markup hazards. Pure `prose_fields_with_script_tags` extractor (no YAML dep) scans both
+    value shapes a prose key can take — an inline scalar (internal colons preserved) and a
+    block scalar (`| `/`>`, content lines to the first dedent, blanks skipped) — with a
+    case-insensitive `<script` probe (matching Spectral's `/<script/i`); a `<script` inside a
+    non-prose value (an `example`, an enum member) is outside the markdown-field scope and
+    left unflagged, exactly as Spectral's field target does. Unit-covered
+    (`script_tag_extraction_rules`: an inline `<script>` description, an uppercase
+    `<SCRIPT>` summary, a block-scalar `<script src=…>` content line, and an inline
+    `<script>` title flagged in document order `[5,10,13,22]`; clean prose and an
+    `example: <script>…` non-prose value passed; a fully clean spec → empty; a ≥500
+    prose-field floor). Surveyed the corpus first (3200 description/summary/title fields
+    across the mounted specs, 0 with a `<script`) → no drift.
   - a uuid-format-example contract test (`src/registry.rs`
     `every_uuid_format_example_is_a_well_formed_uuid`) asserts every inline `example`
     a mounted spec declares beside a **same-indent** `format: uuid` sibling is a
@@ -5018,6 +5041,35 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-17 — Contract-test harness: added a **no-script-tags-in-markdown** contract
+  test (`src/registry.rs` `no_prose_field_contains_a_script_tag`) — no markdown **prose**
+  field a mounted spec declares (a `description`, `summary`, or `title`) may contain a
+  `<script` tag (the well-known Spectral core `no-script-tags-in-markdown` rule; its
+  companion `no-eval-in-markdown` covers `eval(`). Each such field is CommonMark the
+  Redoc/Swagger `/docs` page the simulator serves per spec (`apis::openapi`) renders as
+  HTML, so a `<script>` pasted into a vendored description is stored markup the docs page
+  would execute — a stored-XSS vector, the first *content-hazard* check in a suite that
+  otherwise only pinned prose *presence/emptiness* (`every_response_description_is_non_empty`,
+  `every_operation_summary_is_non_empty`, `every_operation_description_is_non_empty`,
+  `every_root_tag_declares_a_non_empty_description` all read the value's emptiness, never
+  its markup). New pure `prose_fields_with_script_tags` extractor (no YAML dep) scans both
+  value shapes a prose key takes — an inline scalar (the text after the key's `:`, internal
+  colons preserved) and a block scalar (`| `/`>`; content lines more-indented than the key
+  to the first dedent, blank lines skipped not treated as a dedent) — with a
+  case-insensitive `<script` probe (matching Spectral's `/<script/i`, so `<SCRIPT>` and
+  `<script src=…>` fire; a lone `</script>` never appears without its opening tag); a
+  `<script` in a non-prose value (an `example`, an enum member) is outside the
+  markdown-field scope and left unflagged, exactly as Spectral's field target does.
+  **Surveyed the corpus first (3200 description/summary/title prose fields across the
+  mounted specs, 0 carrying a `<script`) → no drift to fix.** Unit-covered
+  (`script_tag_extraction_rules`: an inline `<script>` description, an uppercase `<SCRIPT>`
+  summary, a block-scalar `<script src=b>` content line, and an inline `<script>` title
+  flagged in document order `[5,10,13,22]`; clean prose plus an `example: <script>…`
+  non-prose value not flagged; a fully-clean spec → empty; a ≥500 prose-field floor via an
+  independent key counter). `cargo test` 2667 green (was 2665; +2); `cargo build --release`
+  succeeds, no warnings. No new dependency; the extractor and both tests live in the
+  `#[cfg(test)]` module, so nothing ships in the binary. — binary (release): 5.1M
+  (5,314,968 B; unchanged)
 - 2026-08-17 — Contract-test harness: added a **date-time format-example** contract
   test (`src/registry.rs` `every_date_time_format_example_is_a_well_formed_datetime`)
   — every inline `example` a mounted spec declares beside a **same-indent**
