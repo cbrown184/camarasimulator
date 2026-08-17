@@ -3323,6 +3323,32 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - a uuid-format-example contract test (`src/registry.rs`
+    `every_uuid_format_example_is_a_well_formed_uuid`) asserts every inline `example`
+    a mounted spec declares beside a **same-indent** `format: uuid` sibling is a
+    well-formed UUID (a sub-case of Spectral's `oas3-valid-schema-example`, which
+    validates an example against its schema, format included). An `example` is a
+    sample *instance*, so a `format: uuid` field's example that is not a valid UUID —
+    a placeholder pasted beside the format, a hex digit dropped from a hand-typed uuid
+    — advertises a sample the format's own validator rejects. The **format-conformance
+    complement** of the example-value family: `every_example_matches_its_schema_type`
+    checks the example's JSON *type*, `every_example_respects_its_string_length_bounds`
+    its *length*, `every_example_is_a_member_of_its_enum` its enum membership — none
+    reads the value against its `format`; and the format tests
+    (`every_format_names_a_recognized_format`/`every_format_matches_its_type`) check the
+    `format` keyword's own spelling and host type, never a value carrying it. Pure
+    `uuid_format_examples_malformed` extractor (no YAML dep) reuses
+    `examples_outside_their_length_bounds`' inline-scalar read + dedent-bounded
+    same-indent sibling scan (a media-type/parameter-level example whose `format` sits
+    deeper in its own `schema` is conservatively exempt, never mispaired) + the
+    `example:`/`examples:`-payload ancestor guard; new `is_well_formed_uuid` (8-4-4-4-12
+    hex, case-insensitive, lenient on version/variant nibbles). Unit-covered
+    (`uuid_format_example_extraction_rules`: too-short/too-long/non-hex/mis-hyphenated
+    shapes; a valid quoted + unquoted example pass, a too-short/non-hex/format-declared-
+    below flagged in order `[25,29,32]`, no-format/other-format/inside-example-payload/
+    cross-property/property-named-`example` skipped; ≥30 example+`format:uuid`-pair
+    floor). Surveyed the corpus first (46 same-indent example+`format:uuid` pairs across
+    the mounted specs, 0 malformed) → no drift.
   - a parameter-description contract test (`src/registry.rs`
     `every_parameter_declares_a_non_empty_description`) asserts every Parameter
     Object a mounted spec declares carries a non-empty `description` (Spectral's
@@ -4992,6 +5018,39 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-17 — Contract-test harness: added a **uuid-format-example** contract test
+  (`src/registry.rs` `every_uuid_format_example_is_a_well_formed_uuid`) — every inline
+  `example` a mounted spec declares beside a **same-indent** `format: uuid` sibling must
+  be a well-formed UUID. A sub-case of Spectral's `oas3-valid-schema-example` (validate
+  an example against its schema, format included): an `example` is a sample *instance*,
+  so a `format: uuid` field's example that isn't a valid UUID (a placeholder pasted
+  beside the format, a hex digit dropped from a hand-typed uuid) advertises a sample the
+  format's own validator rejects — a live hazard in these scenario-table specs where a
+  `sessionId`/`paymentId` uuid example is hand-authored per API and copied between
+  siblings. The **format-conformance complement** of the example-value family:
+  `every_example_matches_its_schema_type` checks the example's JSON *type*,
+  `every_example_respects_its_string_length_bounds` its *length*,
+  `every_example_is_a_member_of_its_enum` its enum membership — none reads the value
+  against its `format`; and `every_format_names_a_recognized_format` /
+  `every_format_matches_its_type` check the `format` keyword's own spelling and host
+  type, never a value carrying it. New pure `uuid_format_examples_malformed` extractor
+  (no YAML dep) reuses `examples_outside_their_length_bounds`' inline-scalar read +
+  dedent-bounded same-indent sibling scan (down through the object's block then up, so a
+  nested/following object's `format` never pairs; a media-type/parameter-level example
+  whose `format` sits deeper in its own `schema` is conservatively exempt) + the
+  `example:`/`examples:`-payload ancestor guard; new `is_well_formed_uuid` (8-4-4-4-12
+  hyphenated hex, case-insensitive, lenient on version/variant nibbles so a
+  legitimately-shaped sample is never a false positive). **Surveyed the corpus first (46
+  same-indent example+`format:uuid` pairs across the mounted specs, 0 malformed) → no
+  drift to fix.** Unit-covered (`uuid_format_example_extraction_rules`: the shape check
+  over too-short/too-long/non-hex/mis-hyphenated inputs; a valid quoted + valid unquoted
+  example pass, a too-short/non-hex/format-declared-below example flagged in document
+  order `[25,29,32]`, and no-format/other-format/inside-`example`-payload/cross-property/
+  property-literally-named-`example` cases skipped; a ≥30 example+`format:uuid`-pair floor
+  via an independent same-indent window detector). `cargo test` 2661 green (was 2659; +2);
+  `cargo build --release` succeeds, no warnings. No new dependency; the extractor, the
+  shape helper, and both tests live in the `#[cfg(test)]` module, so nothing ships in the
+  binary. — binary (release): 5.1M (5,314,968 B; unchanged)
 - 2026-08-17 — Contract-test harness: added an **info-license-url** contract test
   (`src/registry.rs` `every_info_license_declares_a_url`) — every served spec's
   `info.license` must declare a non-empty `url` (the well-known Spectral

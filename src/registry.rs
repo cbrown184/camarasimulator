@@ -16864,6 +16864,333 @@ components:
         );
     }
 
+    /// True when `s` is a well-formed UUID string in the canonical 8-4-4-4-12
+    /// hyphenated hex form (case-insensitive), lenient on the version/variant nibbles
+    /// (any hex digit) — a shape-only `format: uuid` check that never false-flags a
+    /// legitimately-shaped sample over its version bits. 36 characters, ASCII hex
+    /// everywhere except a `-` at indices 8/13/18/23.
+    fn is_well_formed_uuid(s: &str) -> bool {
+        let b = s.as_bytes();
+        if b.len() != 36 {
+            return false;
+        }
+        b.iter().enumerate().all(|(i, &c)| match i {
+            8 | 13 | 18 | 23 => c == b'-',
+            _ => c.is_ascii_hexdigit(),
+        })
+    }
+
+    /// The 1-based line numbers, in document order, of every `example:` keyword whose
+    /// inline scalar value sits in a Schema Object declaring a *same-indent*
+    /// `format: uuid` sibling yet is not a well-formed UUID, without a YAML dep. The
+    /// format-conformance analogue of `examples_outside_their_length_bounds` /
+    /// `examples_outside_their_numeric_bounds` (which guard an example's length /
+    /// magnitude against its bounds); this guards a `format: uuid` example against the
+    /// format's own shape.
+    ///
+    /// In OpenAPI 3.0.x (JSON Schema) an `example` is a sample *instance* of the schema,
+    /// so a `format: uuid` field's example MUST be a syntactically valid UUID (the
+    /// well-known Spectral `oas3-valid-schema-example` validates an example against its
+    /// schema, format included). A malformed one — a placeholder pasted beside a
+    /// `format: uuid`, a hex digit dropped from a hand-typed uuid — advertises a sample
+    /// the format's own validator rejects, so a Redoc/Swagger "try it" prefill and a
+    /// codegen client's generated sample carry a value no `uuid`-typed field can legally
+    /// hold. A live hazard in these scenario-table specs, where a `sessionId`/`paymentId`
+    /// uuid example is hand-authored per API and copied between siblings.
+    ///
+    /// Only an `example` carrying an inline scalar (quoted or unquoted; a block/object
+    /// example opens no inline value and is skipped) with a same-indent `format: uuid`
+    /// sibling in the same Schema Object is inspected — the sibling is scanned at the
+    /// example's own indent, down through the object's block then up, dedent-bounded
+    /// exactly like `examples_outside_their_length_bounds`, so a nested or following
+    /// object's `format` never pairs, and a media-type/parameter-level example whose
+    /// `format` sits deeper in its own `schema` (not a same-indent sibling) is
+    /// conservatively exempt rather than mispaired. An `example:` nested inside an outer
+    /// `example:`/`examples:` payload (sample data, not a schema keyword) is skipped. UUID
+    /// shape is judged by `is_well_formed_uuid`.
+    fn uuid_format_examples_malformed(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        // The inline scalar of a `name:` key (inline comment stripped; surrounding
+        // quotes preserved so the caller can strip them uniformly); `None` when the line
+        // is a different key or opens a block (no inline value).
+        let raw_inline = |l: &str, name: &str| -> Option<String> {
+            let (k, v) = l.trim_start().split_once(':')?;
+            if k.trim() != name {
+                return None;
+            }
+            let v = v.split('#').next().unwrap_or(v).trim();
+            if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            }
+        };
+        // Whether a same-indent `format:` sibling of line `i` (indent `c`) in the same
+        // Schema Object names `uuid`: scan down through the object's block then up,
+        // dedent-bounded so a nested or following object's `format` never pairs.
+        let sibling_is_uuid_format = |i: usize, c: usize| -> bool {
+            let is_uuid_format = |l: &str| -> bool {
+                raw_inline(l, "format")
+                    .map(|v| v.trim_matches('"').trim_matches('\'') == "uuid")
+                    .unwrap_or(false)
+            };
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_uuid_format(l) {
+                    return true;
+                }
+                j += 1;
+            }
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_uuid_format(l) {
+                    return true;
+                }
+            }
+            false
+        };
+        // True when line `i` (indent `c`) sits inside an outer `example:`/`examples:`
+        // payload — some enclosing container key up the indent ladder is
+        // `example`/`examples` (mirroring `examples_outside_their_length_bounds`), so an
+        // inner `example` key there is sample data, not a schema keyword.
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some(raw) = raw_inline(line, "example") else {
+                continue;
+            };
+            let c = indent(line);
+            if inside_example(i, c) {
+                continue;
+            }
+            if !sibling_is_uuid_format(i, c) {
+                continue;
+            }
+            let value = raw.trim_matches('"').trim_matches('\'');
+            if !is_well_formed_uuid(value) {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_uuid_format_example_is_a_well_formed_uuid() {
+        // Contract-harness invariant (OpenAPI 3.0.x / JSON-Schema structural rule): where
+        // a Schema Object declares an inline `example` beside a same-indent
+        // `format: uuid`, the example MUST be a syntactically valid UUID. An `example`
+        // is a sample *instance* of the schema, so a value that is not a well-formed UUID
+        // — a placeholder pasted beside a `format: uuid`, a digit dropped from a
+        // hand-typed uuid — is a self-contradictory schema whose own validator rejects
+        // the sample it advertises, so a Redoc/Swagger "try it" prefill and a codegen
+        // client's generated sample carry a value no `uuid`-typed field can legally hold.
+        //
+        // The format-conformance complement of the example-value family:
+        // `every_example_matches_its_schema_type` checks the example's JSON *type*
+        // (string), `every_example_respects_its_string_length_bounds` its *length*, and
+        // `every_example_is_a_member_of_its_enum` its enum membership — none reads the
+        // example against its `format`. The format tests
+        // (`every_format_names_a_recognized_format` / `every_format_matches_its_type`)
+        // check the `format` keyword's own spelling and host type, never a value carrying
+        // that format. Verified true across all mounted specs before asserting.
+        for api in APIS {
+            let offenders = uuid_format_examples_malformed(api.body);
+            assert!(
+                offenders.is_empty(),
+                "{} spec declares an `example` beside a same-indent `format: uuid` that \
+                 is not a well-formed UUID (a sample the format's own validator would \
+                 reject) at `example:` line(s): {:?}",
+                api.name,
+                offenders
+            );
+        }
+    }
+
+    #[test]
+    fn uuid_format_example_extraction_rules() {
+        // Unit-cover `is_well_formed_uuid` and `uuid_format_examples_malformed` so the
+        // contract test above can't pass vacuously and its detection is pinned.
+        //
+        // Shape check: a canonical uuid (both cases) passes; a too-short, too-long,
+        // non-hex, or mis-hyphenated string fails.
+        assert!(is_well_formed_uuid("3fa85f64-5717-4562-b3fc-2c963f66afa6"));
+        assert!(is_well_formed_uuid("3FA85F64-5717-4562-B3FC-2C963F66AFA6"));
+        assert!(!is_well_formed_uuid("3fa85f64-5717-4562-b3fc")); // too short
+        assert!(!is_well_formed_uuid("3fa85f64-5717-4562-b3fc-2c963f66afa6a")); // too long
+        assert!(!is_well_formed_uuid("zzzzzzzz-5717-4562-b3fc-2c963f66afa6")); // non-hex
+        assert!(!is_well_formed_uuid("3fa85f64-57174-562-b3fc-2c963f66afa6")); // mis-hyphenated
+
+        // Extractor: a valid quoted uuid and a valid unquoted uuid (each beside a
+        // same-indent `format: uuid`) pass; a too-short and a non-hex value are flagged;
+        // a bad value whose `format: uuid` is declared *below* it is still paired
+        // (down-scan) and flagged; a value with no `format` sibling and one whose sibling
+        // is a *different* format are skipped; an inner `example` inside an outer
+        // `example:` payload is skipped (sample data); an example in one property never
+        // pairs with a following property's `format` across the dedent; and a property
+        // literally named `example` (opening a block) is skipped.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    GoodUuid:
+      type: string
+      format: uuid
+      example: \"3fa85f64-5717-4562-b3fc-2c963f66afa6\"
+    UnquotedUuid:
+      type: string
+      format: uuid
+      example: 3fa85f64-5717-4562-b3fc-2c963f66afa6
+    ShortUuid:
+      type: string
+      format: uuid
+      example: \"3fa85f64-5717-4562-b3fc\"
+    NotHexUuid:
+      type: string
+      format: uuid
+      example: \"zzzzzzzz-5717-4562-b3fc-2c963f66afa6\"
+    FormatBelow:
+      type: string
+      example: \"nope\"
+      format: uuid
+    NoFormat:
+      type: string
+      example: \"not-a-uuid-but-no-format\"
+    OtherFormat:
+      type: string
+      format: date-time
+      example: \"2024-01-01T00:00:00Z\"
+    InExample:
+      type: object
+      example:
+        format: uuid
+        example: \"bad\"
+    Split:
+      type: object
+      properties:
+        a:
+          example: \"bad\"
+        b:
+          type: string
+          format: uuid
+    NamedExample:
+      type: object
+      properties:
+        example:
+          type: string
+          format: uuid
+";
+        // Flagged, in document order: ShortUuid.example (line 25, too short),
+        // NotHexUuid.example (line 29, non-hex), FormatBelow.example (line 32, value
+        // `nope` with its `format: uuid` a line below — down-scan pairs it). Not flagged:
+        // GoodUuid/UnquotedUuid (valid); NoFormat (no `format` sibling); OtherFormat
+        // (sibling is `date-time`, not `uuid`); InExample's inner `example: \"bad\"` (sits
+        // inside the outer `example:` payload); Split.a.example, whose only `format: uuid`
+        // is in the following property Split.b past a dedent; and NamedExample's `example:`
+        // property opening a block (no inline value).
+        assert_eq!(uuid_format_examples_malformed(body), vec![25, 29, 32]);
+
+        // Non-vacuous floor: across every registered spec every `example` beside a
+        // same-indent `format: uuid` is a well-formed UUID (the invariant the contract
+        // test asserts), and the corpus actually declares many such pairs — so the
+        // uuid-comparison path runs on real data and a broken (always-empty) extractor
+        // can't hide behind a corpus that never pairs an example with a uuid format.
+        // Count pairs with a same-indent detector independent of the extractor's shape
+        // comparison.
+        let mut uuid_examples = 0usize;
+        for api in APIS {
+            assert!(
+                uuid_format_examples_malformed(api.body).is_empty(),
+                "{}: every example beside a same-indent `format: uuid` must be a \
+                 well-formed UUID",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            let is_key = |l: &str, name: &str, val: Option<&str>| {
+                l.trim_start().split_once(':').is_some_and(|(k, v)| {
+                    k.trim() == name
+                        && val.is_none_or(|want| {
+                            v.split('#').next().unwrap_or(v).trim().trim_matches('"').trim_matches('\'')
+                                == want
+                        })
+                })
+            };
+            for (i, l) in lines.iter().enumerate() {
+                if !is_key(l, "example", None) {
+                    continue;
+                }
+                // require an inline value (a block-opening example has none)
+                if l.trim_start().split_once(':').map(|(_, v)| v.split('#').next().unwrap_or(v).trim().is_empty()).unwrap_or(true) {
+                    continue;
+                }
+                let c = indent(l);
+                let lo = i.saturating_sub(6);
+                let hi = (i + 6).min(lines.len());
+                let has_uuid_format = (lo..hi).any(|j| {
+                    j != i && indent(lines[j]) == c && is_key(lines[j], "format", Some("uuid"))
+                });
+                if has_uuid_format {
+                    uuid_examples += 1;
+                }
+            }
+        }
+        assert!(
+            uuid_examples >= 30,
+            "expected many example + same-indent `format: uuid` pairs across specs, got {uuid_examples}"
+        );
+    }
+
     /// The 1-based line numbers, in document order, of every `properties:` mapping
     /// opener whose sibling `type:` scalar names a JSON type other than `object` —
     /// without a YAML dep.
