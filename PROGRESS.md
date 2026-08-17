@@ -3309,10 +3309,14 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Cross-cutting (do alongside the item that needs it)
 - [~] `errors.rs`: base CAMARA error model done (`src/errors.rs`, `specs/shared/errors.yaml`); per-version catalogs still TODO (DESIGN §8)
-  <!-- format-example family now covers uuid / date-time / uri / int32 / int64 / double /
-       float / ipv4 / ipv6 / date (`every_date_format_example_is_a_well_formed_date`);
-       the string formats byte / binary / email / hostname / password are the natural
-       next siblings if a further slice is wanted (survey the corpus for pairs first). -->
+  <!-- format-example family now covers uuid / date-time / date / uri / uri-reference /
+       int32 / int64 / double / float / ipv4 / ipv6 / email / byte
+       (`every_byte_format_example_is_a_well_formed_byte`). This exhausts the standard
+       OpenAPI formats *present in the corpus*: a corpus survey shows the only remaining
+       `format:` values are `byte` (now covered) and a false-positive `phoneNumber`
+       inside a `message:` string; binary / hostname / password never appear. Any future
+       format-example sibling needs a real corpus pair first (add the field's example as
+       a spec doc improvement, mirroring the email/byte passes). -->
 
 - [x] `registry.rs`: canonical URL versioning + `/` catalog wiring (DESIGN §9).
   All three §9 discovery endpoints served: `GET /` (catalog), `GET
@@ -5089,6 +5093,39 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-17 — Contract-test harness: added a **byte (base64) format-example** contract
+  test (`src/registry.rs` `every_byte_format_example_is_a_well_formed_byte`) — every
+  inline `example` a mounted spec declares beside a **same-indent** `format: byte` sibling
+  must be a well-formed base64 string. The base64 member of the format-example family
+  (uuid / date-time / date / uri / uri-reference / int32 / int64 / double / float / ipv4 /
+  ipv6 / email) and the **last standard OpenAPI string format present in the corpus**: a
+  survey found the only `format:` values still uncovered were `byte` (1 occurrence — the
+  Click to Dial recording `content`, inline base64 audio) and a false-positive
+  `phoneNumber` inside a `message:` string; binary / hostname / password never appear. A
+  sub-case of Spectral's `oas3-valid-schema-example` (an `example` is a sample instance, so
+  a `format: byte` example that isn't valid base64 — a placeholder, a value with whitespace,
+  a bad length/alphabet — advertises a sample the format's own validator rejects, and
+  codegen that maps `byte` onto a decoded blob carries a value no such field can hold). New
+  pure `byte_format_examples_malformed` extractor (no YAML dep) mirrors the email sibling
+  with the sibling-format probe matched to `byte` **exactly**: same inline-scalar read +
+  dedent-bounded same-indent `format` sibling scan + block-scalar skip + `example:`/
+  `examples:`-payload ancestor guard; new `is_well_formed_byte` — canonical padded base64
+  (RFC 4648 §4): non-empty, length a multiple of 4, ≤2 trailing `=`, every non-padding char
+  in `A–Z a–z 0–9 + /` (shape only, no decode; URL-safe/unpadded deliberately out of scope
+  as OAS `byte` is canonical padded base64). **Surveyed the corpus first: the Click to Dial
+  recording `content` had `format: byte` but *no* example — added `example: UklGRgAAAABXQVZF`
+  (valid base64 of the `RIFF····WAVE` magic header, a genuine spec doc improvement matching
+  the field's "silent WAV" description), giving 1 real same-indent pair, 0 malformed → no
+  drift to fix.** Unit-covered (`byte_format_example_extraction_rules`: no-pad / one-`=` /
+  two-`==` / full-`+/`-alphabet pass; empty / non-multiple-of-4 / three-`=` / non-alphabet /
+  embedded-whitespace / interior-`=` fail; a valid example passes, a non-base64 and a
+  too-short value with the format below flagged in document order `[21,24]`, and no-format /
+  `date`-sibling / following-property / block-scalar / inside-`example`-payload /
+  property-literally-named-`example` cases skipped; a ≥1 example+`format:byte`-pair floor via
+  an independent same-indent window detector, matching the corpus's 1 genuine pair).
+  `cargo test` 2693 green (was 2691; +2); `cargo build --release` succeeds, no warnings. No
+  new dependency; the extractor, the shape helper, and both tests live in the `#[cfg(test)]`
+  module, so nothing ships in the binary. — binary (release): 5.1M (5,314,968 B; unchanged)
 - 2026-08-17 — Contract-test harness: added an **email format-example** contract test
   (`src/registry.rs` `every_email_format_example_is_a_well_formed_email`) — every inline
   `example` a mounted spec declares beside a **same-indent** `format: email` sibling must

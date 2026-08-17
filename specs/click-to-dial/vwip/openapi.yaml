@@ -766,6 +766,7 @@ components:
           format: byte
           maxLength: 20971520
           description: Base64-encoded audio content of the recording.
+          example: UklGRgAAAABXQVZF
         contentType:
           type: string
           description: The media type of the recording's audio content.
