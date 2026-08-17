@@ -3323,6 +3323,26 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - a server-not-example.com contract test (`src/registry.rs`
+    `every_server_url_avoids_the_example_domain`) asserts no Server Object `url` a mounted
+    spec declares uses the IANA-reserved documentation domain `example.com` (RFC 2606; the
+    Spectral core `oas3-server-not-example.com` lint). A server url is the concrete base a
+    Redoc/Swagger "try it" panel and codegen client prepend to each path, so a placeholder
+    host there points the caller at a domain that never answers — defeating a simulator whose
+    value is a reachable base. The **host-side complement** of the server-url family:
+    `servers_missing_url` checks presence/non-emptiness, `server_urls_with_trailing_slash` the
+    final character, `server_url_undefined_variables` the `{var}` placeholders — none reads the
+    url's host. Pure `server_urls_using_example_domain` extractor (no YAML dep) reuses
+    `server_urls_with_trailing_slash`' top-level-`servers:`-block scan (dash / inline-flow /
+    continuation, value unquoted) with a case-insensitive `example.com` substring probe
+    (matching Spectral's `example\.com`, so a bare host, an `api.example.com` subdomain, and an
+    uppercase `EXAMPLE.COM` all fire); an `example.com` elsewhere (a schema `webhookUrl`/`sink`
+    example, an externalDocs url) is outside the block and never read. Unit-covered
+    (`server_url_example_domain_extraction_rules`: bare/subdomain/uppercase server urls flagged
+    `[10,12,13]`; a `{apiRoot}/…` url, the root `/`, a `variables:` `default:` value carrying
+    `example.com`, and an out-of-block schema `webhookUrl` example all passed; a ≥40 server-url
+    floor). Surveyed the corpus first (66 `example.com` occurrences across the mounted specs,
+    all in schema examples, 0 in a `servers:` `url:`) → no drift.
   - a no-script-tags-in-markdown contract test (`src/registry.rs`
     `no_prose_field_contains_a_script_tag`) asserts no markdown **prose** field a mounted
     spec declares — a `description`, `summary`, or `title` — contains a `<script` tag (the
@@ -5041,6 +5061,34 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-17 — Contract-test harness: added a **server-not-example.com** contract test
+  (`src/registry.rs` `every_server_url_avoids_the_example_domain`) — no Server Object `url`
+  a mounted spec declares may use the IANA-reserved documentation domain `example.com`
+  (RFC 2606; the well-known Spectral core `oas3-server-not-example.com` lint). A server url
+  is the concrete base a Redoc/Swagger "try it" panel and codegen client prepend to each
+  operation path, so a placeholder host there points the caller at a domain that never
+  answers — defeating a simulator whose whole value is a reachable base; and CI can't tell a
+  pasted placeholder from a genuine host. The **host-side complement** of the server-url
+  family (none of which reads the url's host): `servers_missing_url` checks presence/
+  non-emptiness, `server_urls_with_trailing_slash` the final character, and
+  `server_url_undefined_variables` the `{var}` placeholders. New pure
+  `server_urls_using_example_domain` extractor (no YAML dep) reuses
+  `server_urls_with_trailing_slash`' top-level-`servers:`-block scan — dash line (`- url: …`),
+  inline-flow dash (`- { url: … }`), or continuation line, value unquoted — with a
+  case-insensitive `example.com` substring probe (matching Spectral's `example\.com`, so a
+  bare host `https://example.com/x`, an `api.example.com` subdomain, and an uppercase
+  `EXAMPLE.COM` all fire); an `example.com` outside the block (a schema `webhookUrl`/`sink`
+  example, an externalDocs/license url) is never read, and a `variables:` `default:` value is
+  not a `url` key so it never fires. **Surveyed the corpus first (66 `example.com` occurrences
+  across the mounted specs — all in schema examples like `webhookUrl`, 0 in any `servers:`
+  `url:`) → no drift to fix.** Unit-covered (`server_url_example_domain_extraction_rules`:
+  bare-host / `api.example.com` subdomain / uppercase `EXAMPLE.COM` server urls flagged in
+  document order `[10,12,13]`; a `{apiRoot}/…` templated url, the bare root `/`, a `variables:`
+  `default:` value that itself carries `example.com`, and an out-of-block schema `webhookUrl`
+  example all pass; a ≥40 server-url floor via an independent `- url:` dash-line counter).
+  `cargo test` 2671 green (was 2669; +2); `cargo build --release` succeeds, no warnings. No
+  new dependency; the extractor and both tests live in the `#[cfg(test)]` module, so nothing
+  ships in the binary. — binary (release): 5.1M (5,314,968 B; unchanged)
 - 2026-08-17 — Contract-test harness: added a **no-eval-in-markdown** contract test
   (`src/registry.rs` `no_prose_field_contains_an_eval_call`) — the direct companion of
   last pass's `no_prose_field_contains_a_script_tag`, completing the well-known Spectral

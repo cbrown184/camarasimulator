@@ -22747,6 +22747,209 @@ paths:
         );
     }
 
+    /// The 1-based line number of every Server Object `url` in a mounted spec's
+    /// top-level `servers:` array whose value uses the reserved documentation
+    /// domain `example.com` — without a YAML dep.
+    ///
+    /// `example.com` (with `example.net`/`example.org`) is the IANA-reserved
+    /// placeholder domain (RFC 2606 §3) editors paste into a template when a real
+    /// host is not yet known. Left in a *server* `url` it is a live footgun: it is
+    /// the base URL every Redoc/Swagger "try it" panel and codegen client prepends
+    /// to each operation path, so a `https://example.com/qos/v1` server points the
+    /// caller at a domain that will never answer — the whole point of a simulator
+    /// (a concrete, reachable base) is defeated, and CI can't tell the placeholder
+    /// from a genuine host. Every CamaraSim spec templates its base as
+    /// `{apiRoot}/…`, so this also pins that no vendored spec regresses to a pasted
+    /// literal host. The well-known Spectral `oas3-server-not-example.com` lint.
+    ///
+    /// Invisible to every sibling server test: `servers_missing_url` checks only
+    /// that a `url` is *present and non-empty*, `server_urls_with_trailing_slash`
+    /// inspects only the url's *final character*, and `server_url_undefined_
+    /// variables` resolves only the `{var}` placeholders a url templates — none
+    /// reads the url's host. Matching mirrors Spectral's `example\.com` substring
+    /// rule: a case-insensitive `example.com` anywhere in the value fires, so a
+    /// bare host (`https://example.com/x`), a subdomain (`https://api.example.com/x`),
+    /// and an uppercase `EXAMPLE.COM` are all caught.
+    ///
+    /// Scoping mirrors [`server_urls_with_trailing_slash`]: only the top-level
+    /// `servers:` block is scanned (a line == `servers:` at column zero, through
+    /// the next column-zero key), so an `example.com` elsewhere (a schema
+    /// `webhookUrl`/`sink` example, an externalDocs/license url) is never read.
+    /// Within the block every `url:` key names a server url (Server Objects carry
+    /// only `url`/`description`/`variables`, and a `variables:` entry has
+    /// `default`/`description`/`enum`, never `url`), whether it sits on a dash line
+    /// (`- url: …`), inside an inline-flow dash (`- { url: … }`), or on a
+    /// continuation line; the value is unquoted (`"…"`/`'…'`) before the host check.
+    /// Returns the offending url lines in document order.
+    fn server_urls_using_example_domain(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+
+        // The unquoted value of a `url:` key on one `key: value` fragment (a
+        // leading sequence dash stripped by the caller), or None when the key is
+        // not `url`. `split_once(':')` cuts at the first colon, so the key is the
+        // text before it and a url's own `https:` colon stays inside the value.
+        let url_value = |t: &str| -> Option<String> {
+            match t.split_once(':') {
+                Some((k, v)) if k.trim() == "url" => {
+                    Some(v.trim().trim_matches('"').trim_matches('\'').to_string())
+                }
+                _ => None,
+            }
+        };
+
+        // Isolate the top-level `servers:` block (mirrors `servers_missing_url`).
+        let Some(start) = lines.iter().position(|l| *l == "servers:") else {
+            return Vec::new();
+        };
+        let end = lines[start + 1..]
+            .iter()
+            .position(|l| !l.is_empty() && !l.starts_with(char::is_whitespace))
+            .map(|off| start + 1 + off)
+            .unwrap_or(lines.len());
+
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate().take(end).skip(start + 1) {
+            let trimmed = line.trim_start();
+            if trimmed.is_empty() {
+                continue;
+            }
+            // Strip a leading `- ` sequence dash, then read the fragment(s): an
+            // inline-flow mapping (`{ url: …, description: … }`) splits on commas,
+            // otherwise the line is a single `key: value`.
+            let content = trimmed.strip_prefix("- ").unwrap_or(trimmed);
+            let fragments: Vec<&str> = if content.trim_start().starts_with('{') {
+                content
+                    .trim()
+                    .trim_start_matches('{')
+                    .trim_end_matches('}')
+                    .split(',')
+                    .collect()
+            } else {
+                vec![content]
+            };
+            for frag in fragments {
+                if let Some(v) = url_value(frag) {
+                    if v.to_ascii_lowercase().contains("example.com") {
+                        out.push(i + 1);
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_server_url_avoids_the_example_domain() {
+        // Contract-harness invariant (the well-known Spectral
+        // `oas3-server-not-example.com` lint): no Server Object `url` a mounted
+        // spec declares may use the IANA-reserved documentation domain
+        // `example.com` (RFC 2606). A server url is the concrete base every
+        // Redoc/Swagger "try it" panel and codegen client prepends to each path, so
+        // a placeholder host there points the caller at a domain that never answers
+        // — defeating a simulator whose whole value is a reachable base. Every
+        // CamaraSim spec templates its base as `{apiRoot}/…`; this pins that none
+        // regresses to a pasted literal host.
+        //
+        // No sibling server test reads the url's host: `servers_missing_url` checks
+        // only presence/non-emptiness, `server_urls_with_trailing_slash` only the
+        // final character, and `server_url_undefined_variables` only the `{var}`
+        // placeholders. Verified true across every mounted spec before asserting.
+        for api in APIS {
+            let bad = server_urls_using_example_domain(api.body);
+            assert!(
+                bad.is_empty(),
+                "{} spec declares a `servers:` url on the reserved `example.com` \
+                 documentation domain (a placeholder host that never answers) at \
+                 line(s): {:?}",
+                api.name,
+                bad
+            );
+        }
+    }
+
+    #[test]
+    fn server_url_example_domain_extraction_rules() {
+        // Unit-cover `server_urls_using_example_domain` so the contract test above
+        // can't pass vacuously and its accept/reject boundary is pinned: a bare
+        // `example.com` host, a `api.example.com` subdomain, and an uppercase
+        // `EXAMPLE.COM` server url are flagged in document order (by the url's own
+        // line); a templated `{apiRoot}/…` url, a bare root `/`, and a `variables:`
+        // `default:` value that itself carries `example.com` (not a `url` key) all
+        // pass; and a `url:`/`webhookUrl:` schema property outside the `servers:`
+        // block is never read.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+servers:
+  - url: \"{apiRoot}/x/v1\"
+    variables:
+      apiRoot:
+        default: https://example.com/base
+  - url: https://example.com/y/v2
+  - url: /
+  - { url: https://api.example.com/z }
+  - { url: HTTPS://EXAMPLE.COM/w }
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  webhookUrl:
+                    type: string
+                    example: https://example.com/a
+";
+        // Flagged, in document order (each url's own line): line 10 (the bare
+        // `example.com` host), line 12 (the `api.example.com` subdomain), and line
+        // 13 (the uppercase `EXAMPLE.COM`, matched case-insensitively). Not flagged:
+        // line 6 (`{apiRoot}/x/v1`, no placeholder host), line 9 (a `variables:`
+        // `default:` value — not a `url` key), line 11 (the bare root `/`). The
+        // schema property `webhookUrl` (line 28) with an `example: …example.com/a`
+        // is outside the `servers:` block, so it is never read.
+        assert_eq!(server_urls_using_example_domain(body), vec![10, 12, 13]);
+
+        // Non-vacuous floor: across every registered spec no server url uses the
+        // `example.com` domain (the invariant the contract test asserts), and the
+        // corpus actually declares server url entries — so the host check runs on
+        // real data and a broken (always-empty) extractor can't hide behind a
+        // corpus with no servers. Count the entries with a detection independent of
+        // the extractor: `- url:` dash lines inside a top-level `servers:` block.
+        let mut server_url_lines = 0usize;
+        for api in APIS {
+            assert!(
+                server_urls_using_example_domain(api.body).is_empty(),
+                "{}: no server url may use the example.com domain",
+                api.name
+            );
+            let mut in_servers = false;
+            for line in api.body.lines() {
+                let is_top = !line.is_empty() && !line.starts_with(char::is_whitespace);
+                if is_top {
+                    in_servers = line.trim_end() == "servers:";
+                    continue;
+                }
+                if in_servers {
+                    let t = line.trim_start().strip_prefix("- ").unwrap_or("");
+                    if t.split_once(':').map(|(k, _)| k.trim()) == Some("url") {
+                        server_url_lines += 1;
+                    }
+                }
+            }
+        }
+        assert!(
+            server_url_lines >= 40,
+            "expected server url entries across specs, got {server_url_lines}"
+        );
+    }
+
     /// Line numbers (1-based) of operation `tags:` entries naming a tag the
     /// document's root-level `tags:` list does not define — the well-known
     /// core-OAS Spectral `operation-tag-defined` rule, without a YAML dep.
