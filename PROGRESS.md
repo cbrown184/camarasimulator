@@ -3332,6 +3332,20 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - an info.license.url well-formedness contract test (`src/registry.rs`
+    `every_info_license_url_is_a_well_formed_uri`) asserts every served spec's
+    `info.license.url`, when present, is a well-formed absolute URI — the
+    **value-side complement** of `every_info_license_declares_a_url` (Spectral
+    `license-url`), which pins the field's presence/non-emptiness but never reads
+    the value, so a scheme-dropped bare path or a placeholder slips past it yet
+    renders a licence label that hyperlinks nowhere. The url-value analogue of the
+    `format: uri` example family, reusing the same shape-only
+    `is_well_formed_absolute_uri` helper; scope mirrors the presence lint (the
+    mounted business specs + shared `auth/openapi.yaml`). Unit-covered
+    (`info_license_url_wellformedness_rules`: a scheme-bearing url accepted, a
+    scheme-less and a placeholder value caught, + a corpus floor). Surveyed the
+    corpus first (all served specs carry the CAMARA-template Apache-2.0 url) → no
+    drift.
   - an int32 format-example contract test (`src/registry.rs`
     `every_int32_format_example_is_a_well_formed_int32`) asserts every inline `example` a
     mounted spec declares beside a **same-indent** `format: int32` sibling is a well-formed
@@ -5093,6 +5107,26 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-17 — Contract-test harness: added an **info.license.url well-formedness** contract
+  test (`src/registry.rs` `every_info_license_url_is_a_well_formed_uri`) — every served spec's
+  `info.license.url`, when present, must be a well-formed absolute URI. The **value-side
+  complement** of `every_info_license_declares_a_url` (the Spectral `license-url` presence
+  lint): that sibling pins the field is present + non-empty but never reads the value, so a
+  scheme-dropped bare path (`www.apache.org/licenses/LICENSE-2.0.html`, a paste that lost
+  `https://`) or a placeholder (`TODO`) sails through it yet renders a licence label whose
+  Redoc/Swagger `/docs` href points nowhere. The url-value analogue of the `format: uri`
+  example family (`every_uri_format_example_is_a_well_formed_uri`), reusing the same
+  shape-only `is_well_formed_absolute_uri` helper (RFC 3986: a scheme + `:`, no ASCII
+  whitespace/controls) at the value the already-unit-covered `info_license_url` extractor
+  lifts. Scope mirrors the presence lint exactly — the mounted business specs plus the shared
+  `auth/openapi.yaml` OIDC spec (also served with its own `/docs`); a ≥40 checked-url floor
+  keeps it non-vacuous. Unit-covered (`info_license_url_wellformedness_rules`: a scheme-bearing
+  Apache url accepted, a scheme-less bare path and a `TODO` placeholder both caught, + a
+  corpus no-malformed floor). **Surveyed the corpus first: all 61 served specs carry the
+  CAMARA-template `https://www.apache.org/licenses/LICENSE-2.0.html` (well-formed) → 0 drift
+  to fix.** `cargo test` 2695 green (was 2693; +2); `cargo build --release` succeeds, no
+  warnings. No new dependency; both tests live in the `#[cfg(test)]` module, so nothing ships
+  in the binary. — binary (release): 5.1M (5,314,968 B; unchanged)
 - 2026-08-17 — Contract-test harness: added a **byte (base64) format-example** contract
   test (`src/registry.rs` `every_byte_format_example_is_a_well_formed_byte`) — every
   inline `example` a mounted spec declares beside a **same-indent** `format: byte` sibling

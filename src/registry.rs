@@ -3720,6 +3720,117 @@ mod tests {
     }
 
     #[test]
+    fn every_info_license_url_is_a_well_formed_uri() {
+        // Contract-harness invariant (the value-side complement of the Spectral
+        // `license-url` lint): every served spec's `info.license.url`, when present,
+        // MUST be a well-formed absolute URI. `every_info_license_declares_a_url`
+        // already pins that the field is present and non-empty, but it never reads
+        // the value — so a licence block whose `url:` was fat-fingered into a bare
+        // path (`www.apache.org/licenses/LICENSE-2.0.html`, scheme dropped in a
+        // paste) or given a placeholder (`TODO`) still passes it, yet renders a
+        // licence label that hyperlinks nowhere (a Redoc/Swagger `/docs` page and a
+        // codegen client bind the href exactly as written).
+        //
+        // The url-value analogue of the `format: uri` example family
+        // (`every_uri_format_example_is_a_well_formed_uri`): both assert a URI-typed
+        // string is a syntactically valid absolute URI, reusing the same
+        // shape-only `is_well_formed_absolute_uri` helper (RFC 3986: a scheme
+        // followed by `:`, no ASCII whitespace/controls). Scope mirrors the sibling
+        // presence lint exactly — the mounted business specs plus the shared
+        // `auth/openapi.yaml` OIDC spec, which is served with its own `/docs` page.
+        // Verified true across every served spec before asserting (all carry the
+        // CAMARA-template `https://www.apache.org/licenses/LICENSE-2.0.html`).
+        let mut checked = 0usize;
+        for (name, body) in APIS
+            .iter()
+            .map(|a| (a.name, a.body))
+            .chain(std::iter::once((
+                "auth",
+                include_str!("../specs/auth/openapi.yaml"),
+            )))
+        {
+            if let Some(Some(url)) = info_license_url(body) {
+                assert!(
+                    is_well_formed_absolute_uri(&url),
+                    "{} spec's `info.license.url` ({:?}) is not a well-formed absolute \
+                     URI — the licence hyperlink its /docs page renders points nowhere",
+                    name,
+                    url
+                );
+                checked += 1;
+            }
+        }
+        // Non-vacuous floor: the presence lint guarantees every served spec supplies
+        // a url, so this must have inspected a value for all of them.
+        assert!(
+            checked >= 40,
+            "expected a license url in every served spec, only checked {checked}"
+        );
+    }
+
+    #[test]
+    fn info_license_url_wellformedness_rules() {
+        // Pin the accept/reject boundary of the license-url well-formedness check so
+        // the contract test above can't pass vacuously: a scheme-bearing licence
+        // url is accepted, while a scheme-less bare path and a placeholder — the two
+        // realistic drifts a fat-fingered `url:` line produces — are both caught by
+        // `is_well_formed_absolute_uri` at the value `info_license_url` extracts.
+        let good = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+  license:
+    name: Apache-2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0.html
+paths: {}
+";
+        let scheme_dropped = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+  license:
+    name: Apache-2.0
+    url: www.apache.org/licenses/LICENSE-2.0.html
+paths: {}
+";
+        let placeholder = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+  license:
+    name: Apache-2.0
+    url: TODO
+paths: {}
+";
+        // The extractor lifts the url; the shape helper judges it.
+        let url_of = |b| match info_license_url(b) {
+            Some(Some(u)) => u,
+            other => panic!("expected Some(Some(url)), got {other:?}"),
+        };
+        assert!(is_well_formed_absolute_uri(&url_of(good)));
+        assert!(!is_well_formed_absolute_uri(&url_of(scheme_dropped))); // no scheme
+        assert!(!is_well_formed_absolute_uri(&url_of(placeholder))); // not a URI
+
+        // Non-vacuous corpus floor: across every registered spec no license url is
+        // malformed (the invariant the contract test asserts).
+        let malformed: Vec<&str> = APIS
+            .iter()
+            .filter(|a| match info_license_url(a.body) {
+                Some(Some(u)) => !is_well_formed_absolute_uri(&u),
+                _ => false,
+            })
+            .map(|a| a.name)
+            .collect();
+        assert!(
+            malformed.is_empty(),
+            "specs with a malformed license url: {malformed:?}"
+        );
+    }
+
+    #[test]
     fn every_server_url_variable_is_defined_with_a_default() {
         // Contract-harness invariant (OpenAPI Server Object / Server Variable
         // Object rule): every `{name}` a spec's `servers[].url` templates MUST be
