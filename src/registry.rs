@@ -21352,4 +21352,246 @@ paths:
             "expected server url entries across specs, got {server_url_lines}"
         );
     }
+
+    /// Line numbers (1-based) of operation `tags:` entries naming a tag the
+    /// document's root-level `tags:` list does not define — the well-known
+    /// core-OAS Spectral `operation-tag-defined` rule, without a YAML dep.
+    ///
+    /// An Operation Object's `tags` array groups the operation under named tags;
+    /// a Redoc/Swagger UI renders one navigation section per tag and takes each
+    /// section's human-readable label + description from the matching Tag Object
+    /// in the document's root `tags:` list. A tag an operation references but the
+    /// root never declares is an orphan group — the reader gets a bare section
+    /// header with no description, and a typo in an operation tag (`Cluster` vs
+    /// `Clusters`) silently splinters one group into two. So every tag an
+    /// operation names MUST appear in the root `tags:` list.
+    ///
+    /// Defined names are the `name:` of each Tag Object in the column-0 `tags:`
+    /// block (the only place a `name:` key appears under it). Referenced tags are
+    /// the 8-space `- <scalar>` items directly under a 6-space operation `tags:`
+    /// key, scoped to `paths:` like [`operations_without_summary`]; a markdown
+    /// `- ` bullet inside an operation `description:` block scalar — same 8-space
+    /// indent, but a sibling key, never under `tags:` — is therefore not mistaken
+    /// for a tag reference (the collection stops at the dedent out of the `tags:`
+    /// block). Both a defined name and a referenced token are unquoted before
+    /// comparison. A spec that declares no root `tags:` yet references a tag flags
+    /// every reference (an empty defined set), which is exactly the violation.
+    fn operation_tags_not_defined(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let unquote = |s: &str| -> String {
+            let s = s.trim();
+            let s = s
+                .strip_prefix('"')
+                .and_then(|x| x.strip_suffix('"'))
+                .or_else(|| s.strip_prefix('\'').and_then(|x| x.strip_suffix('\'')))
+                .unwrap_or(s);
+            s.to_string()
+        };
+        // Defined tag names: the `name:` of each Tag Object under the column-0
+        // `tags:` block (scan from that top-level key to the next column-0 key).
+        // Within the block a `name:` — on the dash line (`- name: X`) or a
+        // continuation line (`  name: X`) — is always a Tag Object's name.
+        let mut defined: HashSet<String> = HashSet::new();
+        let mut in_root_tags = false;
+        for line in &lines {
+            let is_top = !line.is_empty() && !line.starts_with(char::is_whitespace);
+            if is_top {
+                in_root_tags = line.trim_end() == "tags:";
+                continue;
+            }
+            if !in_root_tags {
+                continue;
+            }
+            let t = line.trim_start();
+            let t = t.strip_prefix("- ").unwrap_or(t);
+            if let Some((k, v)) = t.split_once(':') {
+                if k.trim() == "name" {
+                    let v = v.split('#').next().unwrap_or(v);
+                    if !v.trim().is_empty() {
+                        defined.insert(unquote(v));
+                    }
+                }
+            }
+        }
+        // Referenced tags: 8-space `- <scalar>` items under a 6-space operation
+        // `tags:` key, scoped to the `paths:` tree (an operation is the only
+        // path-item member with a `tags:` field).
+        let mut out = Vec::new();
+        let mut in_paths = false;
+        let mut in_path_item = false;
+        for (i, line) in lines.iter().enumerate() {
+            let is_top = !line.is_empty() && !line.starts_with(char::is_whitespace);
+            if is_top {
+                in_paths = line.trim_end() == "paths:";
+                in_path_item = false;
+                continue;
+            }
+            if !in_paths {
+                continue;
+            }
+            if let Some(rest) = line.strip_prefix("  ") {
+                if !rest.starts_with(char::is_whitespace) && rest.starts_with('/') {
+                    in_path_item = true;
+                    continue;
+                }
+            }
+            if !in_path_item || indent(line) != 6 || line.trim_start() != "tags:" {
+                continue;
+            }
+            // Collect the tag list's 8-space dash items until the block dedents.
+            for (off, l) in lines[i + 1..].iter().enumerate() {
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) <= 6 {
+                    break; // dedented out of the `tags:` block
+                }
+                if indent(l) == 8 {
+                    if let Some(item) = l.trim_start().strip_prefix('-') {
+                        let name = unquote(item.split('#').next().unwrap_or(item));
+                        if !name.is_empty() && !defined.contains(&name) {
+                            out.push(i + 1 + off + 1); // 1-based line of this item
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_operation_tag_is_defined() {
+        // Contract-harness invariant (core-OAS / Spectral `operation-tag-defined`):
+        // every tag an Operation Object's `tags` array names MUST be declared as a
+        // Tag Object in the document's root `tags:` list. A UI groups operations
+        // into one navigation section per tag and takes each section's label +
+        // description from the root Tag Object, so a referenced-but-undeclared tag
+        // renders an orphan section with no description, and a typo splinters a
+        // group in two. No existing test reads a `tags` value: the operation tests
+        // judge `summary`/`operationId`/`responses`, never `tags`, and nothing
+        // inspects the root `tags:` list. Verified true across all mounted specs
+        // before asserting.
+        for api in APIS {
+            let bad = operation_tags_not_defined(api.body);
+            assert!(
+                bad.is_empty(),
+                "{} spec references an operation tag its root `tags:` list does not \
+                 define at `tags` item line(s): {:?}",
+                api.name,
+                bad
+            );
+        }
+    }
+
+    #[test]
+    fn operation_tag_definedness_extraction_rules() {
+        // Unit-cover `operation_tags_not_defined` so the contract test above can't
+        // pass vacuously and its accept/reject boundary is pinned: an operation tag
+        // present in the root `tags:` list passes; an operation tag the root never
+        // declares is flagged; a quoted reference matches a quoted-or-bare root
+        // name; and a markdown `- ` bullet inside an operation `description:` block
+        // scalar — same 8-space indent, but under `description:`, not `tags:` — is
+        // never read as a tag reference.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+tags:
+  - name: Alpha
+    description: a
+  - name: \"Beta\"
+    description: b
+paths:
+  /a:
+    get:
+      operationId: getA
+      tags:
+        - Alpha
+        - Gamma
+      description: |
+        Body text.
+        - a markdown bullet, not a tag
+      responses:
+        '200':
+          description: ok
+    post:
+      operationId: postA
+      tags:
+        - \"Beta\"
+      responses:
+        '200':
+          description: ok
+";
+        // Flagged, in document order: line 16 (`- Gamma`, which the root `tags:`
+        // list never declares). Not flagged: line 15 (`- Alpha`, defined), line 26
+        // (`- \"Beta\"`, whose unquoted `Beta` matches the root `- name: \"Beta\"`),
+        // and the markdown bullet on line 19 (under `description:`, not `tags:`, so
+        // the collection — stopped at the dedent to `description:` on line 17 —
+        // never reaches it).
+        assert_eq!(operation_tags_not_defined(body), vec![16]);
+
+        // A spec that references a tag but declares no root `tags:` list flags the
+        // reference (an empty defined set is exactly the violation).
+        let no_root = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      tags:
+        - Ghost
+      responses:
+        '200':
+          description: ok
+";
+        assert_eq!(operation_tags_not_defined(no_root), vec![10]);
+
+        // Non-vacuous floor: across every registered spec every operation tag is
+        // root-defined (the invariant the contract test asserts), and the corpus
+        // actually declares operation tag references — so the definedness path runs
+        // on real data and a broken (always-empty) extractor can't hide behind a
+        // corpus with no tags. Count referenced tag items with a detector
+        // independent of the definedness comparison: 8-space `- ` items directly
+        // under a 6-space operation `tags:` key inside the `paths:` tree.
+        let mut tag_refs = 0usize;
+        for api in APIS {
+            assert!(
+                operation_tags_not_defined(api.body).is_empty(),
+                "{}: every operation tag must be root-defined",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            let mut in_paths = false;
+            for (i, line) in lines.iter().enumerate() {
+                let is_top = !line.is_empty() && !line.starts_with(char::is_whitespace);
+                if is_top {
+                    in_paths = line.trim_end() == "paths:";
+                    continue;
+                }
+                if in_paths && indent(line) == 6 && line.trim_start() == "tags:" {
+                    for l in &lines[i + 1..] {
+                        if l.trim().is_empty() {
+                            continue;
+                        }
+                        if indent(l) <= 6 {
+                            break;
+                        }
+                        if indent(l) == 8 && l.trim_start().starts_with('-') {
+                            tag_refs += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            tag_refs >= 4,
+            "expected operation tag references across specs, got {tag_refs}"
+        );
+    }
 }

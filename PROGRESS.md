@@ -3323,6 +3323,29 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - an operation-tag-defined contract test (`src/registry.rs`
+    `every_operation_tag_is_defined`) asserts every tag an Operation Object's
+    `tags` array names is declared as a Tag Object in the document's root `tags:`
+    list (the well-known core-OAS / Spectral `operation-tag-defined` rule). A UI
+    renders one navigation section per tag, taking each section's label +
+    description from the root Tag Object, so a referenced-but-undeclared tag is an
+    orphan section with no description and a typo (`Cluster` vs `Clusters`)
+    silently splinters a group in two. Wholly uncovered: no existing test reads a
+    `tags` value — the operation tests judge `summary`/`operationId`/`responses`,
+    never `tags`, and nothing inspected the root `tags:` list. Pure
+    `operation_tags_not_defined` extractor (no YAML dep) collects the defined names
+    from each Tag Object's `name:` under the column-0 `tags:` block, then flags the
+    8-space `- <scalar>` items under a 6-space operation `tags:` key (scoped to
+    `paths:` like `operations_without_summary`) whose unquoted token is not in that
+    set; a markdown `- ` bullet inside an operation `description:` block scalar
+    (same 8-space indent, but under `description:`, so past the dedent out of the
+    `tags:` block) is never mistaken for a reference. Unit-covered
+    (`operation_tag_definedness_extraction_rules`: an undefined `- Gamma` flagged, a
+    defined `- Alpha` and a quoted `- "Beta"` matching a quoted root name not
+    flagged, a description-block bullet not read; a no-root-`tags:` spec flags its
+    reference; ≥4 tag-reference floor). Surveyed the corpus first (4 operation tag
+    references across `iot-sim-fraud-prevention` + `edge-application-management`,
+    all root-defined) → no drift.
   - a server-url-no-trailing-slash contract test (`src/registry.rs`
     `every_server_url_has_no_trailing_slash`) asserts no Server Object `url` a
     mounted spec declares, other than a bare root `/`, ends with a trailing slash
@@ -4900,6 +4923,35 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-17 — Contract-test harness: added an **operation-tag-defined** contract
+  test (`src/registry.rs` `every_operation_tag_is_defined`) — every tag an
+  Operation Object's `tags` array names must be declared as a Tag Object in the
+  document's root `tags:` list (the well-known core-OAS / Spectral
+  `operation-tag-defined` rule). A Redoc/Swagger UI groups operations into one
+  navigation section per tag and takes each section's label + description from the
+  matching root Tag Object, so a referenced-but-undeclared tag renders an orphan
+  section with no description, and a typo in an operation tag (`Cluster` vs
+  `Clusters`) silently splinters one group into two. Wholly uncovered before this
+  pass: no test reads a `tags` value — the operation tests judge
+  `summary`/`operationId`/`responses`, never `tags`, and nothing inspected the root
+  `tags:` list. New pure `operation_tags_not_defined` extractor (no YAML dep)
+  collects the defined names from each Tag Object's `name:` under the column-0
+  `tags:` block (unquoted), then walks the `paths:` tree and flags the 8-space
+  `- <scalar>` items under a 6-space operation `tags:` key (scoping mirrors
+  `operations_without_summary`) whose unquoted token isn't in that set; the
+  collection stops at the dedent out of the `tags:` block, so a markdown `- `
+  bullet inside an operation `description:` block scalar (same 8-space indent, but
+  under `description:`) is never mistaken for a tag reference. Surveyed the corpus
+  first (4 operation tag references across `iot-sim-fraud-prevention` +
+  `edge-application-management`, all root-defined) → no drift to fix. Unit-covered
+  (`operation_tag_definedness_extraction_rules`: an undefined `- Gamma` flagged in
+  document order, a defined `- Alpha` and a quoted `- "Beta"` matching a quoted
+  root `- name: "Beta"` not flagged, a description-block bullet not read; a spec
+  that references a tag but declares no root `tags:` flags the reference; ≥4
+  tag-reference floor via an independent counter). `cargo test` 2653 green (was
+  2651; +2); `cargo build --release` succeeds, no warnings. No new dependency;
+  test-only change (the extractor and both tests live in the `#[cfg(test)]`
+  module). — binary (release): 5.1M (5,314,968 B; unchanged)
 - 2026-08-16 — Contract-test harness: added a **server-url-no-trailing-slash**
   contract test (`src/registry.rs` `every_server_url_has_no_trailing_slash`) — no
   Server Object `url` a mounted spec declares, other than a bare root `/`, may end
