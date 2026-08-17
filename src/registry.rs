@@ -17191,6 +17191,394 @@ components:
         );
     }
 
+    /// True when `s` is a well-formed RFC 3339 `date-time` string — the concrete
+    /// syntax OpenAPI's `format: date-time` names (JSON Schema's `date-time` is
+    /// RFC 3339 §5.6). Shape-only and lenient on the calendar (it range-checks each
+    /// field but never validates the day against the month/year, nor the offset
+    /// against a real zone), mirroring `is_well_formed_uuid`'s shape-only stance so a
+    /// legitimately-shaped sample is never a false positive.
+    ///
+    /// Grammar (RFC 3339 §5.6): `date-time = full-date "T" full-time`, where
+    /// `full-date = YYYY "-" MM "-" DD`,
+    /// `full-time = HH ":" MM ":" SS ["." 1*DIGIT] offset`, and
+    /// `offset = "Z" | ("+" / "-") HH ":" MM`. The date/time separator and the `Z`
+    /// are case-insensitive per §5.6; the fractional-second part is optional and
+    /// `SS` may be `60` (a leap second). Numeric offsets (`+02:00`) and fractional
+    /// seconds (`.312`) both appear in the vendored specs, so both must pass.
+    fn is_well_formed_rfc3339_datetime(s: &str) -> bool {
+        // full-date "T" full-time — the only 'T'/'t' is the separator (the date part
+        // is all digits and '-', so it carries no 't').
+        let Some((date, time)) = s.split_once(['T', 't']) else {
+            return false;
+        };
+        let digits = |sl: &[u8]| sl.iter().all(u8::is_ascii_digit);
+        let two = |b: &[u8], i: usize| (b[i] - b'0') as u32 * 10 + (b[i + 1] - b'0') as u32;
+        // full-date = YYYY-MM-DD
+        let db = date.as_bytes();
+        if db.len() != 10 || db[4] != b'-' || db[7] != b'-' {
+            return false;
+        }
+        if !(digits(&db[0..4]) && digits(&db[5..7]) && digits(&db[8..10])) {
+            return false;
+        }
+        let (month, day) = (two(db, 5), two(db, 8));
+        if !((1..=12).contains(&month) && (1..=31).contains(&day)) {
+            return false;
+        }
+        // full-time = partial-time offset. Split the offset off the tail first:
+        // a trailing 'Z'/'z', else a 6-char numeric offset `±HH:MM`.
+        let (partial, numoffset) = match time.as_bytes().last() {
+            Some(&c) if c == b'Z' || c == b'z' => (&time[..time.len() - 1], None),
+            _ => {
+                if time.len() < 6 {
+                    return false;
+                }
+                let cut = time.len() - 6;
+                (&time[..cut], Some(&time[cut..]))
+            }
+        };
+        // partial-time = HH:MM:SS ["." 1*DIGIT]
+        let (hms, frac) = match partial.split_once('.') {
+            Some((h, f)) => (h, Some(f)),
+            None => (partial, None),
+        };
+        let pb = hms.as_bytes();
+        if pb.len() != 8 || pb[2] != b':' || pb[5] != b':' {
+            return false;
+        }
+        if !(digits(&pb[0..2]) && digits(&pb[3..5]) && digits(&pb[6..8])) {
+            return false;
+        }
+        let (hh, mm, ss) = (two(pb, 0), two(pb, 3), two(pb, 6));
+        if !(hh <= 23 && mm <= 59 && ss <= 60) {
+            return false;
+        }
+        if let Some(f) = frac {
+            if f.is_empty() || !f.bytes().all(|c| c.is_ascii_digit()) {
+                return false;
+            }
+        }
+        // offset = "Z" (handled above via `None`) | ±HH:MM
+        match numoffset {
+            None => true,
+            Some(off) => {
+                let ob = off.as_bytes();
+                ob.len() == 6
+                    && (ob[0] == b'+' || ob[0] == b'-')
+                    && ob[3] == b':'
+                    && digits(&ob[1..3])
+                    && digits(&ob[4..6])
+                    && two(ob, 1) <= 23
+                    && two(ob, 4) <= 59
+            }
+        }
+    }
+
+    /// The 1-based line numbers, in document order, of every `example:` keyword whose
+    /// inline scalar value sits in a Schema Object declaring a *same-indent*
+    /// `format: date-time` sibling yet is not a well-formed RFC 3339 date-time, without
+    /// a YAML dep. The `date-time` analogue of `uuid_format_examples_malformed` (which
+    /// guards a `format: uuid` example against the UUID shape); this guards a
+    /// `format: date-time` example against RFC 3339.
+    ///
+    /// In OpenAPI 3.0.x (JSON Schema) an `example` is a sample *instance* of the schema,
+    /// so a `format: date-time` field's example MUST be a syntactically valid RFC 3339
+    /// date-time (the well-known Spectral `oas3-valid-schema-example` validates an example
+    /// against its schema, format included). A malformed one — a date pasted without its
+    /// time-and-offset tail, a digit dropped from a hand-typed timestamp, a placeholder —
+    /// advertises a sample the format's own validator rejects, so a Redoc/Swagger "try it"
+    /// prefill and a codegen client's generated sample carry a value no `date-time`-typed
+    /// field can legally hold. A live hazard in these scenario-table specs, where
+    /// `lastLocationTime`/`paymentCreationDate`/`startedAt`/`expiresAt` timestamp examples
+    /// are hand-authored per API and copied between siblings.
+    ///
+    /// Only an `example` carrying an inline scalar (quoted or unquoted; a block/object
+    /// example opens no inline value and is skipped) with a same-indent
+    /// `format: date-time` sibling in the same Schema Object is inspected — the sibling is
+    /// scanned at the example's own indent, down through the object's block then up,
+    /// dedent-bounded exactly like `uuid_format_examples_malformed`, so a *following*
+    /// property's `format: date-time` past a dedent never pairs with this property's
+    /// example (an enum/int example whose next sibling property is a timestamp is exempt).
+    /// An `example:` nested inside an outer `example:`/`examples:` payload (sample data,
+    /// not a schema keyword) is skipped. RFC 3339 shape is judged by
+    /// `is_well_formed_rfc3339_datetime`.
+    fn datetime_format_examples_malformed(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let raw_inline = |l: &str, name: &str| -> Option<String> {
+            let (k, v) = l.trim_start().split_once(':')?;
+            if k.trim() != name {
+                return None;
+            }
+            let v = v.split('#').next().unwrap_or(v).trim();
+            if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            }
+        };
+        // Whether a same-indent `format:` sibling of line `i` (indent `c`) in the same
+        // Schema Object names `date-time`: scan down through the object's block then up,
+        // dedent-bounded so a nested or following object's `format` never pairs.
+        let sibling_is_datetime_format = |i: usize, c: usize| -> bool {
+            let is_dt_format = |l: &str| -> bool {
+                raw_inline(l, "format")
+                    .map(|v| v.trim_matches('"').trim_matches('\'') == "date-time")
+                    .unwrap_or(false)
+            };
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_dt_format(l) {
+                    return true;
+                }
+                j += 1;
+            }
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_dt_format(l) {
+                    return true;
+                }
+            }
+            false
+        };
+        // True when line `i` (indent `c`) sits inside an outer `example:`/`examples:`
+        // payload — some enclosing container key up the indent ladder is
+        // `example`/`examples`, so an inner `example` key there is sample data.
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some(raw) = raw_inline(line, "example") else {
+                continue;
+            };
+            let c = indent(line);
+            if inside_example(i, c) {
+                continue;
+            }
+            if !sibling_is_datetime_format(i, c) {
+                continue;
+            }
+            let value = raw.trim_matches('"').trim_matches('\'');
+            if !is_well_formed_rfc3339_datetime(value) {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_date_time_format_example_is_a_well_formed_datetime() {
+        // Contract-harness invariant (OpenAPI 3.0.x / JSON-Schema structural rule): where
+        // a Schema Object declares an inline `example` beside a same-indent
+        // `format: date-time`, the example MUST be a syntactically valid RFC 3339
+        // date-time. An `example` is a sample *instance* of the schema, so a value that is
+        // not a well-formed date-time — a bare date with its time-and-offset tail dropped,
+        // a digit lost from a hand-typed timestamp, a placeholder pasted beside the format
+        // — is a self-contradictory schema whose own validator rejects the sample it
+        // advertises, so a Redoc/Swagger "try it" prefill and a codegen client's generated
+        // sample carry a value no `date-time`-typed field can legally hold.
+        //
+        // The format-conformance sibling of `every_uuid_format_example_is_a_well_formed_uuid`
+        // over the corpus's other heavily-used string format; together they extend the
+        // example-value family (`…matches_its_schema_type` / `…respects_its_string_length_bounds`
+        // / `…is_a_member_of_its_enum`, none of which reads a value against its `format`) to
+        // format conformance. Verified true across all mounted specs before asserting.
+        for api in APIS {
+            let offenders = datetime_format_examples_malformed(api.body);
+            assert!(
+                offenders.is_empty(),
+                "{} spec declares an `example` beside a same-indent `format: date-time` \
+                 that is not a well-formed RFC 3339 date-time (a sample the format's own \
+                 validator would reject) at `example:` line(s): {:?}",
+                api.name,
+                offenders
+            );
+        }
+    }
+
+    #[test]
+    fn datetime_format_example_extraction_rules() {
+        // Unit-cover `is_well_formed_rfc3339_datetime` and `datetime_format_examples_malformed`
+        // so the contract test above can't pass vacuously and its detection is pinned.
+        //
+        // Shape check: the `Z`, numeric-offset, and fractional-second forms the specs use
+        // all pass (case-insensitive `T`/`Z`, leap-second `:60`); a bare date, a dropped
+        // digit, a missing offset, an out-of-range month, and a placeholder all fail.
+        assert!(is_well_formed_rfc3339_datetime("2024-01-01T14:27:08Z"));
+        assert!(is_well_formed_rfc3339_datetime("2023-07-03T14:27:08.312+02:00"));
+        assert!(is_well_formed_rfc3339_datetime("2024-06-01T00:00:00-05:00"));
+        assert!(is_well_formed_rfc3339_datetime("2024-06-01t00:00:00z")); // lowercase T/Z
+        assert!(is_well_formed_rfc3339_datetime("2024-12-31T23:59:60Z")); // leap second
+        assert!(!is_well_formed_rfc3339_datetime("2024-01-01")); // date only, no time
+        assert!(!is_well_formed_rfc3339_datetime("2024-01-01T14:27:08")); // no offset
+        assert!(!is_well_formed_rfc3339_datetime("2024-01-01T14:27:8Z")); // dropped digit
+        assert!(!is_well_formed_rfc3339_datetime("2024-13-01T14:27:08Z")); // month 13
+        assert!(!is_well_formed_rfc3339_datetime("2024-01-01T25:27:08Z")); // hour 25
+        assert!(!is_well_formed_rfc3339_datetime("2024-01-01T14:27:08.Z")); // empty fraction
+        assert!(!is_well_formed_rfc3339_datetime("not-a-timestamp"));
+
+        // Extractor: a valid quoted timestamp beside a same-indent `format: date-time`
+        // passes; a bad value with the format below it (down-scan) is flagged; a bad value
+        // with no `format` sibling and one whose sibling is a *different* format are
+        // skipped; an example in one property never pairs with a *following* property's
+        // `format: date-time` across the dedent; an inner `example` inside an outer
+        // `example:` payload is skipped; and a property literally named `example` (opening
+        // a block) is skipped.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    GoodTime:
+      type: string
+      format: date-time
+      example: \"2024-01-01T14:27:08Z\"
+    BadShort:
+      type: string
+      format: date-time
+      example: \"2024-01-01T14:27:8Z\"
+    FormatBelow:
+      type: string
+      example: \"nope\"
+      format: date-time
+    NoFormat:
+      type: string
+      example: \"not-a-time-but-no-format\"
+    OtherFormat:
+      type: string
+      format: uuid
+      example: \"3fa85f64-5717-4562-b3fc-2c963f66afa6\"
+    Split:
+      type: object
+      properties:
+        a:
+          type: string
+          enum: [DAY, NIGHT]
+          example: DAY
+        b:
+          type: string
+          format: date-time
+          example: \"2024-01-01T00:00:00Z\"
+    InExample:
+      type: object
+      example:
+        format: date-time
+        example: \"bad\"
+    NamedExample:
+      type: object
+      properties:
+        example:
+          type: string
+          format: date-time
+";
+        // Flagged, in document order: BadShort.example (line 21, dropped seconds digit) and
+        // FormatBelow.example (line 24, value `nope` with its `format: date-time` a line
+        // below — down-scan pairs it). Not flagged: GoodTime (valid); NoFormat (no `format`
+        // sibling); OtherFormat (sibling is `uuid`, not `date-time`); Split.a.example `DAY`
+        // (its only `format: date-time` is the *following* property Split.b, past a dedent);
+        // Split.b.example (valid); InExample's inner `example: \"bad\"` (inside the outer
+        // `example:` payload); NamedExample's `example:` property (opens a block, no inline
+        // value).
+        assert_eq!(datetime_format_examples_malformed(body), vec![21, 24]);
+
+        // Non-vacuous floor: across every registered spec every `example` beside a
+        // same-indent `format: date-time` is a well-formed RFC 3339 date-time (the
+        // invariant the contract test asserts), and the corpus actually declares many such
+        // pairs — so the date-time comparison path runs on real data and a broken
+        // (always-empty) extractor can't hide behind a corpus that never pairs an example
+        // with a date-time format. Count pairs with a same-indent detector independent of
+        // the extractor's shape comparison.
+        let mut dt_examples = 0usize;
+        for api in APIS {
+            assert!(
+                datetime_format_examples_malformed(api.body).is_empty(),
+                "{}: every example beside a same-indent `format: date-time` must be a \
+                 well-formed RFC 3339 date-time",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            let is_key = |l: &str, name: &str, val: Option<&str>| {
+                l.trim_start().split_once(':').is_some_and(|(k, v)| {
+                    k.trim() == name
+                        && val.is_none_or(|want| {
+                            v.split('#').next().unwrap_or(v).trim().trim_matches('"').trim_matches('\'')
+                                == want
+                        })
+                })
+            };
+            for (i, l) in lines.iter().enumerate() {
+                if !is_key(l, "example", None) {
+                    continue;
+                }
+                if l.trim_start().split_once(':').map(|(_, v)| v.split('#').next().unwrap_or(v).trim().is_empty()).unwrap_or(true) {
+                    continue;
+                }
+                let c = indent(l);
+                let lo = i.saturating_sub(6);
+                let hi = (i + 6).min(lines.len());
+                let has_dt_format = (lo..hi).any(|j| {
+                    j != i && indent(lines[j]) == c && is_key(lines[j], "format", Some("date-time"))
+                });
+                if has_dt_format {
+                    dt_examples += 1;
+                }
+            }
+        }
+        assert!(
+            dt_examples >= 30,
+            "expected many example + same-indent `format: date-time` pairs across specs, got {dt_examples}"
+        );
+    }
+
     /// The 1-based line numbers, in document order, of every `properties:` mapping
     /// opener whose sibling `type:` scalar names a JSON type other than `object` —
     /// without a YAML dep.

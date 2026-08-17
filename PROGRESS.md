@@ -5018,6 +5018,41 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-17 — Contract-test harness: added a **date-time format-example** contract
+  test (`src/registry.rs` `every_date_time_format_example_is_a_well_formed_datetime`)
+  — every inline `example` a mounted spec declares beside a **same-indent**
+  `format: date-time` sibling must be a well-formed RFC 3339 date-time. The
+  `date-time` sibling of last pass-cluster's `every_uuid_format_example_is_a_well_formed_uuid`
+  over the corpus's *other* heavily-used string format: a sub-case of Spectral's
+  `oas3-valid-schema-example` (validate an example against its schema, format
+  included). An `example` is a sample *instance*, so a `format: date-time` field's
+  example that isn't valid RFC 3339 (a bare date with its time-and-offset tail
+  dropped, a digit lost from a hand-typed timestamp, a placeholder) advertises a
+  sample the format's own validator rejects — a live hazard where
+  `lastLocationTime`/`paymentCreationDate`/`startedAt`/`expiresAt` timestamp examples
+  are hand-authored per API and copied between siblings. New pure
+  `datetime_format_examples_malformed` extractor (no YAML dep) mirrors
+  `uuid_format_examples_malformed`'s inline-scalar read + dedent-bounded same-indent
+  sibling scan + `example:`/`examples:`-payload ancestor guard; new
+  `is_well_formed_rfc3339_datetime` (RFC 3339 §5.6 grammar: `full-date "T" full-time`,
+  case-insensitive `T`/`Z`, optional fractional seconds, `Z` or `±HH:MM` offset,
+  leap-second `:60`; shape-only + field-range checks, lenient on the calendar so a
+  legitimately-shaped sample is never a false positive). **Surveyed the corpus first
+  (53 genuine same-object `example`+`format:date-time` pairs across the mounted specs,
+  0 malformed — the numeric-offset and fractional-second forms all valid) → no drift
+  to fix.** Confirmed a crude ±window survey over-pairs 13 cross-property cases (an
+  enum/int/double example whose *following* sibling property is a timestamp) that the
+  dedent-bounded same-object scan correctly excludes. Unit-covered
+  (`datetime_format_example_extraction_rules`: the shape check over Z/offset/fraction/
+  lowercase/leap-second passes and bare-date/no-offset/dropped-digit/month-13/hour-25/
+  empty-fraction/placeholder fails; a valid quoted example passes, a dropped-digit and
+  a format-declared-below example flagged in document order `[21,24]`, and
+  no-format/other-format/inside-`example`-payload/cross-property/property-literally-named-`example`
+  cases skipped; a ≥30 example+`format:date-time`-pair floor via an independent
+  same-indent window detector). `cargo test` 2665 green (was 2663; +2);
+  `cargo build --release` succeeds, no warnings. No new dependency; the extractor, the
+  shape helper, and both tests live in the `#[cfg(test)]` module, so nothing ships in
+  the binary. — binary (release): 5.1M (5,314,968 B; unchanged)
 - 2026-08-17 — Contract-test harness: added a **tag-description** contract test
   (`src/registry.rs` `every_root_tag_declares_a_non_empty_description`) — every Tag
   Object a mounted spec declares in its document-root `tags:` list must carry a
