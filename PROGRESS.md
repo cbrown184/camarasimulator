@@ -3332,6 +3332,20 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - an info.license.name canonical-identifier contract test (`src/registry.rs`
+    `every_info_license_name_is_the_camara_apache_identifier`) asserts every served
+    spec's `info.license.name` is exactly the SPDX short identifier `Apache-2.0` (the
+    CAMARA Commonalities `camara-license` lint). The **value-side complement** of
+    `every_spec_declares_a_valid_info_license`, which pins the name is present/non-empty
+    but never reads *which* name — so a template-drifted `Apache 2.0` sails past it — as
+    `every_info_license_url_is_a_well_formed_uri` complements the presence-only url lint.
+    Reuses the already-unit-covered `info_license_name` extractor; scope mirrors the
+    license tests (mounted business specs + shared `auth/openapi.yaml`), with a ≥40 floor.
+    Unit-covered (`info_license_name_camara_identifier_rules`: exact `Apache-2.0`
+    accepted, spaced `Apache 2.0` and long-form `Apache License 2.0` rejected, + a corpus
+    no-deviation floor). **Surveyed the corpus first: iot-sim-fraud-prevention and
+    traffic-influence carried the spaced `Apache 2.0` — both fixed to `Apache-2.0` in the
+    same pass; the other 59 served specs already matched.**
   - an info.license.url well-formedness contract test (`src/registry.rs`
     `every_info_license_url_is_a_well_formed_uri`) asserts every served spec's
     `info.license.url`, when present, is a well-formed absolute URI — the
@@ -5107,6 +5121,29 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-17 — Contract-test harness: added an **info.license.name canonical-identifier**
+  contract test (`src/registry.rs` `every_info_license_name_is_the_camara_apache_identifier`)
+  — every served spec's `info.license.name` must be exactly the SPDX short identifier
+  `Apache-2.0` (the CAMARA Commonalities `camara-license` lint pins both License Object
+  fields: `name: Apache-2.0` + `url: …/LICENSE-2.0.html`). The **value-side complement** of
+  `every_spec_declares_a_valid_info_license`, which pins the `name` is present + non-empty but
+  never reads *which* name — so a spaced `Apache 2.0` or a long-form `Apache License 2.0`
+  (both valid, non-empty License Object names, but not the SPDX token a licence scanner / SBOM
+  generator / `/docs` label resolves) sails past it — exactly as
+  `every_info_license_url_is_a_well_formed_uri` complements the presence-only
+  `every_info_license_declares_a_url`. Reuses the already-unit-covered `info_license_name`
+  extractor; new `CAMARA_LICENSE_NAME` const holds the canonical string. Scope mirrors the
+  license tests exactly — the mounted business specs plus the shared `auth/openapi.yaml` OIDC
+  spec (also served with its own `/docs`); a ≥40 checked floor keeps it non-vacuous.
+  Unit-covered (`info_license_name_camara_identifier_rules`: exact `Apache-2.0` accepted, the
+  spaced `Apache 2.0` and long-form `Apache License 2.0` drifts both caught, + a corpus
+  no-deviation floor). **Surveyed the corpus first: 2 of 61 served specs drifted —
+  `iot-sim-fraud-prevention/vwip` and `traffic-influence/vwip` carried the spaced
+  `Apache 2.0`; both corrected to `Apache-2.0` in this same pass (same char count, so no
+  binary change), the other 59 already matched.** `cargo test` 2697 green (was 2695; +2);
+  `cargo build --release` succeeds, no warnings. No new dependency; both tests live in the
+  `#[cfg(test)]` module, so nothing ships in the binary. — binary (release): 5.1M
+  (5,314,968 B; unchanged)
 - 2026-08-17 — Contract-test harness: added an **info.license.url well-formedness** contract
   test (`src/registry.rs` `every_info_license_url_is_a_well_formed_uri`) — every served spec's
   `info.license.url`, when present, must be a well-formed absolute URI. The **value-side

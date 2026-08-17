@@ -3830,6 +3830,98 @@ paths: {}
         );
     }
 
+    /// The exact `info.license.name` the CAMARA Commonalities `camara-license` lint
+    /// mandates: the SPDX short identifier for Apache 2.0. A spaced variant
+    /// (`Apache 2.0`) or a long-form title (`Apache License 2.0`) is a valid, non-empty
+    /// License Object name, but it is not the SPDX identifier tooling keys on.
+    const CAMARA_LICENSE_NAME: &str = "Apache-2.0";
+
+    #[test]
+    fn every_info_license_name_is_the_camara_apache_identifier() {
+        // Contract-harness invariant (the CAMARA Commonalities `camara-license` lint):
+        // every served spec's `info.license.name` MUST be exactly the SPDX short
+        // identifier `Apache-2.0`. CAMARA pins both License Object fields to fixed
+        // values (`name: Apache-2.0` + `url: …/LICENSE-2.0.html`); the SPDX identifier
+        // is what a licence scanner, an SBOM generator, and the Redoc/Swagger `/docs`
+        // label read to resolve the licence unambiguously, so a spaced `Apache 2.0` or
+        // a long-form `Apache License 2.0` — both valid, non-empty names — is the wrong
+        // token and resolves to no SPDX licence.
+        //
+        // The **value-side complement** of `every_spec_declares_a_valid_info_license`,
+        // which pins the `name` is present and non-empty but never reads *which* name —
+        // so a template-drifted `Apache 2.0` sails past it — exactly as
+        // `every_info_license_url_is_a_well_formed_uri` complements the presence-only
+        // `every_info_license_declares_a_url`. Scope mirrors those license tests: the
+        // mounted business specs plus the shared `auth/openapi.yaml` OIDC spec, each
+        // served with its own `/docs` page. Reuses the already-unit-covered
+        // `info_license_name` extractor.
+        //
+        // Surveyed the corpus first: iot-sim-fraud-prevention and traffic-influence
+        // carried the spaced `Apache 2.0`; both were corrected to `Apache-2.0` in this
+        // same pass, so every served spec now matches.
+        let mut checked = 0usize;
+        for (name, body) in APIS
+            .iter()
+            .map(|a| (a.name, a.body))
+            .chain(std::iter::once((
+                "auth",
+                include_str!("../specs/auth/openapi.yaml"),
+            )))
+        {
+            if let Some(Some(license_name)) = info_license_name(body) {
+                assert_eq!(
+                    license_name, CAMARA_LICENSE_NAME,
+                    "{name} spec's `info.license.name` is {license_name:?}, not the \
+                     CAMARA-mandated SPDX identifier {CAMARA_LICENSE_NAME:?}"
+                );
+                checked += 1;
+            }
+        }
+        // Non-vacuous floor: `every_spec_declares_a_valid_info_license` guarantees
+        // every served spec supplies a name, so this must have inspected all of them.
+        assert!(
+            checked >= 40,
+            "expected a license name in every served spec, only checked {checked}"
+        );
+    }
+
+    #[test]
+    fn info_license_name_camara_identifier_rules() {
+        // Pin the accept/reject boundary of the canonical-identifier check so the
+        // contract test above can't pass vacuously: the exact SPDX `Apache-2.0` is
+        // accepted, while the two realistic template drifts — the spaced `Apache 2.0`
+        // and the long-form `Apache License 2.0` — are both caught at the value
+        // `info_license_name` extracts.
+        let with_name = |n: &str| {
+            format!(
+                "openapi: 3.0.3\ninfo:\n  title: t\n  version: 1.0.0\n  \
+                 license:\n    name: {n}\n    url: https://example.org/l\npaths: {{}}\n"
+            )
+        };
+        let name_of = |b: &str| match info_license_name(b) {
+            Some(Some(n)) => n,
+            other => panic!("expected Some(Some(name)), got {other:?}"),
+        };
+        assert_eq!(name_of(&with_name("Apache-2.0")), CAMARA_LICENSE_NAME);
+        assert_ne!(name_of(&with_name("Apache 2.0")), CAMARA_LICENSE_NAME);
+        assert_ne!(name_of(&with_name("Apache License 2.0")), CAMARA_LICENSE_NAME);
+
+        // Non-vacuous corpus floor: across every served spec no license name deviates
+        // from the SPDX identifier (the invariant the contract test asserts).
+        let deviating: Vec<&str> = APIS
+            .iter()
+            .filter(|a| match info_license_name(a.body) {
+                Some(Some(n)) => n != CAMARA_LICENSE_NAME,
+                _ => false,
+            })
+            .map(|a| a.name)
+            .collect();
+        assert!(
+            deviating.is_empty(),
+            "specs whose license name is not the SPDX identifier: {deviating:?}"
+        );
+    }
+
     #[test]
     fn every_server_url_variable_is_defined_with_a_default() {
         // Contract-harness invariant (OpenAPI Server Object / Server Variable
