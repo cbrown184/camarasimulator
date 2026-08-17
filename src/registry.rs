@@ -17579,6 +17579,371 @@ components:
         );
     }
 
+    /// True when `s` is a well-formed absolute URI — the concrete syntax OpenAPI's
+    /// `format: uri` names (JSON Schema's `uri` is an RFC 3986 **absolute** URI,
+    /// which REQUIRES a scheme, unlike the relative-permitting `uri-reference`).
+    /// Shape-only and lenient on the component grammar (it requires a scheme and
+    /// rejects ASCII whitespace / control characters, but never validates the
+    /// authority, path, or percent-encoding), mirroring `is_well_formed_rfc3339_datetime`'s
+    /// shape-only stance so a legitimately-shaped sample is never a false positive.
+    ///
+    /// Grammar (RFC 3986 §3): `URI = scheme ":" hier-part [ "?" query ] [ "#" fragment ]`
+    /// with `scheme = ALPHA *( ALPHA / DIGIT / "+" / "-" / "." )`. An absolute URI
+    /// therefore begins with a scheme followed by a colon; the callback/sink URLs
+    /// the specs use (`https://…`) all satisfy this. A value with no scheme (a bare
+    /// host `application-server.com/cb`, a scheme-relative `//host/x`, a placeholder
+    /// `TODO`) or one carrying whitespace/controls is not a URI a `format: uri`
+    /// field can legally hold.
+    fn is_well_formed_absolute_uri(s: &str) -> bool {
+        // No ASCII whitespace or control characters anywhere (RFC 3986 excludes them
+        // from every URI component; a space is the classic pasted-placeholder tell).
+        if s.is_empty() || s.bytes().any(|b| b.is_ascii_whitespace() || b.is_ascii_control()) {
+            return false;
+        }
+        // scheme = ALPHA *( ALPHA / DIGIT / "+" / "-" / "." ) then ":" — the scheme
+        // is the text up to the first colon (a colon later in the path/authority is
+        // part of `hier-part`, so `split_once` on the first `:` isolates the scheme).
+        let Some((scheme, _rest)) = s.split_once(':') else {
+            return false;
+        };
+        let sb = scheme.as_bytes();
+        !sb.is_empty()
+            && sb[0].is_ascii_alphabetic()
+            && sb
+                .iter()
+                .all(|&b| b.is_ascii_alphanumeric() || b == b'+' || b == b'-' || b == b'.')
+    }
+
+    /// The 1-based line numbers, in document order, of every `example:` keyword whose
+    /// inline scalar value sits in a Schema Object declaring a *same-indent*
+    /// `format: uri` sibling yet is not a well-formed absolute URI, without a YAML
+    /// dep. The `uri` analogue of `datetime_format_examples_malformed` /
+    /// `uuid_format_examples_malformed`, over the corpus's third heavily-used string
+    /// format — the callback/notification `sink`/`webhookUrl` URLs.
+    ///
+    /// In OpenAPI 3.0.x (JSON Schema) an `example` is a sample *instance* of the
+    /// schema, so a `format: uri` field's example MUST be a syntactically valid
+    /// absolute URI (the well-known Spectral `oas3-valid-schema-example` validates an
+    /// example against its schema, format included). A malformed one — a scheme
+    /// dropped in a copy-paste, a placeholder pasted beside the format, a value with
+    /// stray whitespace — advertises a sample the format's own validator rejects, so
+    /// a Redoc/Swagger "try it" prefill and a codegen client's generated sample carry
+    /// a URL no `uri`-typed field (a webhook target the simulator would call back)
+    /// can legally hold.
+    ///
+    /// Only an `example` carrying an **inline scalar** (quoted or unquoted) with a
+    /// same-indent `format: uri` sibling in the same Schema Object is inspected. A
+    /// block-scalar example (`example: >-` / `example: |`, whose value continues on
+    /// the following lines — the folded/literal forms a multi-line `sink` URL takes)
+    /// opens no inline value, so it is skipped rather than mis-read as the literal
+    /// `>-`/`|`. The `format: uri` sibling is matched **exactly** (`uri-reference`,
+    /// which permits a relative URI, is a different format and never pairs), scanned
+    /// at the example's own indent down through the object's block then up,
+    /// dedent-bounded exactly like `datetime_format_examples_malformed`, so a
+    /// *following* property's `format: uri` past a dedent never pairs with this
+    /// property's example. An `example:` nested inside an outer `example:`/`examples:`
+    /// payload (sample data, not a schema keyword) is skipped. URI shape is judged by
+    /// `is_well_formed_absolute_uri`.
+    fn uri_format_examples_malformed(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let raw_inline = |l: &str, name: &str| -> Option<String> {
+            let (k, v) = l.trim_start().split_once(':')?;
+            if k.trim() != name {
+                return None;
+            }
+            let v = v.split('#').next().unwrap_or(v).trim();
+            if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            }
+        };
+        // Whether a same-indent `format:` sibling of line `i` (indent `c`) in the same
+        // Schema Object names `uri` (exactly — not `uri-reference`): scan down through
+        // the object's block then up, dedent-bounded so a nested or following object's
+        // `format` never pairs.
+        let sibling_is_uri_format = |i: usize, c: usize| -> bool {
+            let is_uri_format = |l: &str| -> bool {
+                raw_inline(l, "format")
+                    .map(|v| v.trim_matches('"').trim_matches('\'') == "uri")
+                    .unwrap_or(false)
+            };
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_uri_format(l) {
+                    return true;
+                }
+                j += 1;
+            }
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_uri_format(l) {
+                    return true;
+                }
+            }
+            false
+        };
+        // True when line `i` (indent `c`) sits inside an outer `example:`/`examples:`
+        // payload — some enclosing container key up the indent ladder is
+        // `example`/`examples`, so an inner `example` key there is sample data.
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some(raw) = raw_inline(line, "example") else {
+                continue;
+            };
+            // A block-scalar opener (`>`/`|`, optionally with a `+`/`-`/digit chomping
+            // indicator) carries its value on the following lines, not inline — skip it.
+            if raw.starts_with('>') || raw.starts_with('|') {
+                continue;
+            }
+            let c = indent(line);
+            if inside_example(i, c) {
+                continue;
+            }
+            if !sibling_is_uri_format(i, c) {
+                continue;
+            }
+            let value = raw.trim_matches('"').trim_matches('\'');
+            if !is_well_formed_absolute_uri(value) {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_uri_format_example_is_a_well_formed_uri() {
+        // Contract-harness invariant (OpenAPI 3.0.x / JSON-Schema structural rule):
+        // where a Schema Object declares an inline `example` beside a same-indent
+        // `format: uri`, the example MUST be a syntactically valid absolute URI. An
+        // `example` is a sample *instance* of the schema, so a value that is not a
+        // well-formed URI — a scheme dropped in a copy-paste, a placeholder pasted
+        // beside the format, a value with stray whitespace — is a self-contradictory
+        // schema whose own validator rejects the sample it advertises, so a
+        // Redoc/Swagger "try it" prefill and a codegen client's generated sample carry
+        // a URL no `uri`-typed field (a `sink`/`webhookUrl` the simulator would call
+        // back) can legally hold.
+        //
+        // The format-conformance sibling of `every_uuid_format_example_is_a_well_formed_uuid`
+        // and `every_date_time_format_example_is_a_well_formed_datetime` over the
+        // corpus's third heavily-used string format (the callback/notification URLs);
+        // together they extend the example-value family (`…matches_its_schema_type` /
+        // `…respects_its_string_length_bounds` / `…is_a_member_of_its_enum`, none of
+        // which reads a value against its `format`) to format conformance. Verified
+        // true across all mounted specs before asserting.
+        for api in APIS {
+            let offenders = uri_format_examples_malformed(api.body);
+            assert!(
+                offenders.is_empty(),
+                "{} spec declares an `example` beside a same-indent `format: uri` that \
+                 is not a well-formed absolute URI (a sample the format's own validator \
+                 would reject) at `example:` line(s): {:?}",
+                api.name,
+                offenders
+            );
+        }
+    }
+
+    #[test]
+    fn uri_format_example_extraction_rules() {
+        // Unit-cover `is_well_formed_absolute_uri` and `uri_format_examples_malformed`
+        // so the contract test above can't pass vacuously and its detection is pinned.
+        //
+        // Shape check: the `https`/`http`/`urn`/`mailto` absolute-URI forms the specs
+        // use all pass; a scheme-less bare host, a scheme-relative `//host`, a bare
+        // path, a placeholder word, an empty value, and a value carrying whitespace all
+        // fail.
+        assert!(is_well_formed_absolute_uri("https://application-server.example.com/notifications"));
+        assert!(is_well_formed_absolute_uri("http://endpoint.example.com/sink"));
+        assert!(is_well_formed_absolute_uri("urn:ietf:rfc:3986"));
+        assert!(is_well_formed_absolute_uri("mailto:ops@example.com"));
+        assert!(!is_well_formed_absolute_uri("application-server.com/callback")); // no scheme
+        assert!(!is_well_formed_absolute_uri("//host/path")); // scheme-relative
+        assert!(!is_well_formed_absolute_uri("/notifications")); // bare path
+        assert!(!is_well_formed_absolute_uri("TODO")); // placeholder, no colon
+        assert!(!is_well_formed_absolute_uri("")); // empty
+        assert!(!is_well_formed_absolute_uri("https://host/ path")); // whitespace
+        assert!(!is_well_formed_absolute_uri("1https://x")); // scheme must start ALPHA
+
+        // Extractor: a valid quoted URI beside a same-indent `format: uri` passes; a
+        // bad value with the format below it (down-scan) is flagged; a bad value with
+        // no `format` sibling and one whose sibling is a *different* format
+        // (`uri-reference`) are skipped; an example in one property never pairs with a
+        // *following* property's `format: uri` across the dedent; a block-scalar
+        // example is skipped; an inner `example` inside an outer `example:` payload is
+        // skipped; and a property literally named `example` (opening a block) is
+        // skipped.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    GoodUri:
+      type: string
+      format: uri
+      example: \"https://host.example.com/cb\"
+    BadNoScheme:
+      type: string
+      format: uri
+      example: \"host.example.com/cb\"
+    FormatBelow:
+      type: string
+      example: \"nope\"
+      format: uri
+    NoFormat:
+      type: string
+      example: \"host.example.com/no-format\"
+    UriReference:
+      type: string
+      format: uri-reference
+      example: \"/relative/path\"
+    Split:
+      type: object
+      properties:
+        a:
+          type: string
+          enum: [DAY, NIGHT]
+          example: DAY
+        b:
+          type: string
+          format: uri
+          example: \"https://ok.example.com/x\"
+    Folded:
+      type: string
+      format: uri
+      example: >-
+        https://folded.example.com/very/long/path
+    InExample:
+      type: object
+      example:
+        format: uri
+        example: \"bad\"
+    NamedExample:
+      type: object
+      properties:
+        example:
+          type: string
+          format: uri
+";
+        // Flagged, in document order: BadNoScheme.example (line 21, no scheme) and
+        // FormatBelow.example (line 24, value `nope` with its `format: uri` a line
+        // below — down-scan pairs it). Not flagged: GoodUri (valid); NoFormat (no
+        // `format` sibling); UriReference (sibling is `uri-reference`, not `uri`);
+        // Split.a.example `DAY` (its only `format: uri` is the *following* property
+        // Split.b, past a dedent); Split.b.example (valid); Folded (block-scalar
+        // opener `>-`, no inline value); InExample's inner `example: \"bad\"` (inside
+        // the outer `example:` payload); NamedExample's `example:` property (opens a
+        // block, no inline value).
+        assert_eq!(uri_format_examples_malformed(body), vec![21, 24]);
+
+        // Non-vacuous floor: across every registered spec every `example` beside a
+        // same-indent `format: uri` is a well-formed absolute URI (the invariant the
+        // contract test asserts), and the corpus actually declares many such pairs (the
+        // callback/notification URLs) — so the URI comparison path runs on real data
+        // and a broken (always-empty) extractor can't hide behind a corpus that never
+        // pairs an example with a uri format. Count pairs with a same-indent detector
+        // independent of the extractor's shape comparison.
+        let mut uri_examples = 0usize;
+        for api in APIS {
+            assert!(
+                uri_format_examples_malformed(api.body).is_empty(),
+                "{}: every example beside a same-indent `format: uri` must be a \
+                 well-formed absolute URI",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            let is_key = |l: &str, name: &str, val: Option<&str>| {
+                l.trim_start().split_once(':').is_some_and(|(k, v)| {
+                    k.trim() == name
+                        && val.is_none_or(|want| {
+                            v.split('#').next().unwrap_or(v).trim().trim_matches('"').trim_matches('\'')
+                                == want
+                        })
+                })
+            };
+            for (i, l) in lines.iter().enumerate() {
+                if !is_key(l, "example", None) {
+                    continue;
+                }
+                let v = l
+                    .trim_start()
+                    .split_once(':')
+                    .map(|(_, v)| v.split('#').next().unwrap_or(v).trim())
+                    .unwrap_or("");
+                // Inline scalar only (skip empty + block-scalar openers), mirroring the
+                // extractor so the floor counts exactly the pairs it inspects.
+                if v.is_empty() || v.starts_with('>') || v.starts_with('|') {
+                    continue;
+                }
+                let c = indent(l);
+                let lo = i.saturating_sub(6);
+                let hi = (i + 6).min(lines.len());
+                let has_uri_format = (lo..hi).any(|j| {
+                    j != i && indent(lines[j]) == c && is_key(lines[j], "format", Some("uri"))
+                });
+                if has_uri_format {
+                    uri_examples += 1;
+                }
+            }
+        }
+        assert!(
+            uri_examples >= 8,
+            "expected many example + same-indent `format: uri` pairs across specs, got {uri_examples}"
+        );
+    }
+
     /// The 1-based line numbers, in document order, of every `properties:` mapping
     /// opener whose sibling `type:` scalar names a JSON type other than `object` —
     /// without a YAML dep.

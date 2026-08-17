@@ -5061,6 +5061,41 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-17 — Contract-test harness: added a **uri format-example** contract test
+  (`src/registry.rs` `every_uri_format_example_is_a_well_formed_uri`) — every inline
+  `example` a mounted spec declares beside a **same-indent** `format: uri` sibling must
+  be a well-formed **absolute** URI. The third format in the strict format-example family
+  after `every_uuid_format_example_is_a_well_formed_uuid` and last-cluster's
+  `every_date_time_format_example_is_a_well_formed_datetime`, over the corpus's other
+  heavily-used string format: the callback/notification `sink`/`webhookUrl` URLs. A
+  sub-case of Spectral's `oas3-valid-schema-example` (validate an example against its
+  schema, format included). An `example` is a sample *instance*, so a `format: uri`
+  field's example that isn't an absolute URI (a scheme dropped in a copy-paste, a
+  placeholder, a value with stray whitespace) advertises a sample the format's own
+  validator rejects — a live hazard where webhook URLs are hand-authored per API and
+  copied between siblings. New pure `uri_format_examples_malformed` extractor (no YAML
+  dep) mirrors `datetime_format_examples_malformed`'s inline-scalar read + dedent-bounded
+  same-indent sibling scan + `example:`/`examples:`-payload ancestor guard, and adds a
+  **block-scalar skip** (`example: >-` / `|`, whose value continues on following lines —
+  a folded multi-line sink URL — opens no inline value, so it is not mis-read as the
+  literal `>-`); the `format: uri` sibling is matched **exactly** so `uri-reference`
+  (relative URIs permitted) never pairs. New `is_well_formed_absolute_uri`
+  (RFC 3986 §3: a `scheme` of `ALPHA *( ALPHA / DIGIT / "+" / "-" / "." )` then `:`;
+  no ASCII whitespace/controls; shape-only + scheme check, lenient on authority/path
+  so a legitimately-shaped sample is never a false positive). **Surveyed the corpus
+  first (14 genuine same-object `example`+`format:uri` pairs across the mounted specs —
+  12 inline, all valid absolute URIs; the other 2 are `>-` folded block scalars the
+  extractor skips) → no drift to fix.** Unit-covered (`uri_format_example_extraction_rules`:
+  the shape check over https/http/urn/mailto passes and scheme-less/scheme-relative/
+  bare-path/placeholder/empty/whitespace/non-alpha-scheme fails; a valid quoted example
+  passes, a no-scheme and a format-declared-below example flagged in document order
+  `[21,24]`, and no-format/`uri-reference`-sibling/cross-property/block-scalar/inside-
+  `example`-payload/property-literally-named-`example` cases skipped; a ≥8
+  example+`format:uri`-pair floor via an independent same-indent window detector, matching
+  the extractor's inline-only + block-scalar-skip counting). `cargo test` 2673 green
+  (was 2671; +2); `cargo build --release` succeeds, no warnings. No new dependency; the
+  extractor, the shape helper, and both tests live in the `#[cfg(test)]` module, so
+  nothing ships in the binary. — binary (release): 5.1M (5,314,968 B; unchanged)
 - 2026-08-17 — Contract-test harness: added a **server-not-example.com** contract test
   (`src/registry.rs` `every_server_url_avoids_the_example_domain`) — no Server Object `url`
   a mounted spec declares may use the IANA-reserved documentation domain `example.com`
