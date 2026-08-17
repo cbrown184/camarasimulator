@@ -17944,6 +17944,358 @@ components:
         );
     }
 
+    /// Whether `s` is a well-formed signed 32-bit integer instance — the value an
+    /// OpenAPI `format: int32` field advertises. True iff `s` parses as an `i32`:
+    /// an optional leading `-`/`+` sign then ASCII digits, the whole magnitude
+    /// within `[-2_147_483_648, 2_147_483_647]`. A fractional value (`3.5`), a
+    /// non-numeric placeholder (`TODO`), a value carrying whitespace (`  5`), and a
+    /// magnitude that overflows i32 (`2147483648`, `9999999999`) all fail — exactly
+    /// the samples the `int32` format's own validator would reject. Shape + range
+    /// only (`str::parse::<i32>`, which trims nothing and rejects a fraction or an
+    /// out-of-range magnitude); no dep.
+    fn is_well_formed_int32(s: &str) -> bool {
+        s.parse::<i32>().is_ok()
+    }
+
+    /// The 1-based line numbers, in document order, of every `example:` keyword whose
+    /// inline scalar value sits in a Schema Object declaring a *same-indent*
+    /// `format: int32` sibling yet is not a well-formed 32-bit integer, without a YAML
+    /// dep. The **numeric-format** analogue of `uuid_format_examples_malformed` /
+    /// `datetime_format_examples_malformed` / `uri_format_examples_malformed` (all
+    /// three string formats), over the corpus's most heavily-used *numeric* format —
+    /// the durations / counts / ports / accuracy-radii `format: int32` fields.
+    ///
+    /// In OpenAPI 3.0.x (JSON Schema) an `example` is a sample *instance* of the
+    /// schema, so a `format: int32` field's example MUST be a value the `int32`
+    /// format admits: an integer within the signed 32-bit range (the well-known
+    /// Spectral `oas3-valid-schema-example` validates an example against its schema,
+    /// format included). A malformed one — a fraction pasted where an integer is meant,
+    /// a placeholder beside the format, or a magnitude that overflows i32 (a large
+    /// timestamp/id mistyped into an int32 slot) — advertises a sample the format's own
+    /// validator rejects, so a Redoc/Swagger "try it" prefill and a codegen client that
+    /// maps `int32` onto a 32-bit integer carry a value no `int32`-typed field can hold.
+    ///
+    /// Only an `example` carrying an **inline scalar** (an integer literal; a stray
+    /// surrounding quote is tolerated so a quoted `"60"` still reads as `60`, mirroring
+    /// the string-format siblings' `trim_matches`) with a same-indent `format: int32`
+    /// sibling in the same Schema Object is inspected. A block-scalar example
+    /// (`example: >-` / `example: |`) opens no inline value and is skipped (an integer
+    /// example never takes that form, but the guard mirrors the siblings). The
+    /// `format: int32` sibling is matched **exactly** (`int64`, whose range is wider, is
+    /// a different format and never pairs), scanned at the example's own indent down
+    /// through the object's block then up, dedent-bounded exactly like
+    /// `uri_format_examples_malformed`, so a *following* property's `format: int32` past
+    /// a dedent never pairs with this property's example. An `example:` nested inside an
+    /// outer `example:`/`examples:` payload (sample data, not a schema keyword) is
+    /// skipped. Integer shape + range is judged by `is_well_formed_int32`.
+    fn int32_format_examples_malformed(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let raw_inline = |l: &str, name: &str| -> Option<String> {
+            let (k, v) = l.trim_start().split_once(':')?;
+            if k.trim() != name {
+                return None;
+            }
+            let v = v.split('#').next().unwrap_or(v).trim();
+            if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            }
+        };
+        // Whether a same-indent `format:` sibling of line `i` (indent `c`) in the same
+        // Schema Object names `int32` (exactly — not `int64`): scan down through the
+        // object's block then up, dedent-bounded so a nested or following object's
+        // `format` never pairs.
+        let sibling_is_int32_format = |i: usize, c: usize| -> bool {
+            let is_int32_format = |l: &str| -> bool {
+                raw_inline(l, "format")
+                    .map(|v| v.trim_matches('"').trim_matches('\'') == "int32")
+                    .unwrap_or(false)
+            };
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_int32_format(l) {
+                    return true;
+                }
+                j += 1;
+            }
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_int32_format(l) {
+                    return true;
+                }
+            }
+            false
+        };
+        // True when line `i` (indent `c`) sits inside an outer `example:`/`examples:`
+        // payload — some enclosing container key up the indent ladder is
+        // `example`/`examples`, so an inner `example` key there is sample data.
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some(raw) = raw_inline(line, "example") else {
+                continue;
+            };
+            // A block-scalar opener (`>`/`|`, optionally with a `+`/`-`/digit chomping
+            // indicator) carries its value on the following lines, not inline — skip it.
+            if raw.starts_with('>') || raw.starts_with('|') {
+                continue;
+            }
+            let c = indent(line);
+            if inside_example(i, c) {
+                continue;
+            }
+            if !sibling_is_int32_format(i, c) {
+                continue;
+            }
+            let value = raw.trim_matches('"').trim_matches('\'');
+            if !is_well_formed_int32(value) {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_int32_format_example_is_a_well_formed_int32() {
+        // Contract-harness invariant (OpenAPI 3.0.x / JSON-Schema structural rule):
+        // where a Schema Object declares an inline `example` beside a same-indent
+        // `format: int32`, the example MUST be an integer within the signed 32-bit
+        // range. An `example` is a sample *instance* of the schema, so a value that is
+        // not a valid int32 — a fraction pasted where an integer is meant, a placeholder
+        // beside the format, or a magnitude that overflows i32 — is a self-contradictory
+        // schema whose own validator rejects the sample it advertises, so a Redoc/Swagger
+        // "try it" prefill and a codegen client that maps `int32` onto a 32-bit integer
+        // carry a value no `int32`-typed field (a `duration`/`radius`/`port`/count) can
+        // legally hold.
+        //
+        // The **numeric-format** sibling of the string-format-example trio
+        // (`every_uuid_format_example_is_a_well_formed_uuid` /
+        // `every_date_time_format_example_is_a_well_formed_datetime` /
+        // `every_uri_format_example_is_a_well_formed_uri`), over the corpus's
+        // most-used numeric format; together they extend the example-value family
+        // (`…matches_its_schema_type` reads only the JSON *type*,
+        // `…is_within_its_numeric_bounds` only the declared `minimum`/`maximum`, neither
+        // the `int32` range the format itself fixes) to numeric-format conformance.
+        // Verified true across all mounted specs before asserting.
+        for api in APIS {
+            let offenders = int32_format_examples_malformed(api.body);
+            assert!(
+                offenders.is_empty(),
+                "{} spec declares an `example` beside a same-indent `format: int32` that \
+                 is not a well-formed 32-bit integer (a sample the format's own validator \
+                 would reject) at `example:` line(s): {:?}",
+                api.name,
+                offenders
+            );
+        }
+    }
+
+    #[test]
+    fn int32_format_example_extraction_rules() {
+        // Unit-cover `is_well_formed_int32` and `int32_format_examples_malformed` so the
+        // contract test above can't pass vacuously and its detection is pinned.
+        //
+        // Shape check: the small non-negative integers the specs use plus the signed
+        // 32-bit extrema all pass; a fraction, an out-of-range magnitude on either end,
+        // a non-numeric placeholder, an empty value, and a value carrying whitespace all
+        // fail.
+        assert!(is_well_formed_int32("0"));
+        assert!(is_well_formed_int32("3600"));
+        assert!(is_well_formed_int32("-5"));
+        assert!(is_well_formed_int32("2147483647")); // i32::MAX
+        assert!(is_well_formed_int32("-2147483648")); // i32::MIN
+        assert!(!is_well_formed_int32("3.5")); // fraction
+        assert!(!is_well_formed_int32("2147483648")); // i32::MAX + 1, overflow
+        assert!(!is_well_formed_int32("-2147483649")); // i32::MIN - 1, underflow
+        assert!(!is_well_formed_int32("9999999999")); // far overflow
+        assert!(!is_well_formed_int32("TODO")); // placeholder
+        assert!(!is_well_formed_int32("")); // empty
+        assert!(!is_well_formed_int32("  5")); // leading whitespace
+
+        // Extractor: a valid integer beside a same-indent `format: int32` passes; a
+        // fraction and an overflowing magnitude beside `format: int32` are flagged; a
+        // bad value with the format *below* it (down-scan) is flagged; a value with no
+        // `format` sibling and one whose sibling is a *different* format (`int64`) are
+        // skipped; an example in one property never pairs with a *following* property's
+        // `format: int32` across the dedent; a block-scalar example is skipped; an inner
+        // `example` inside an outer `example:` payload is skipped; and a property
+        // literally named `example` (opening a block) is skipped.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    GoodInt:
+      type: integer
+      format: int32
+      example: 3600
+    BadFraction:
+      type: integer
+      format: int32
+      example: 3.5
+    BadOverflow:
+      type: integer
+      format: int32
+      example: 2147483648
+    FormatBelow:
+      type: integer
+      example: nope
+      format: int32
+    NoFormat:
+      type: integer
+      example: 42
+    Int64Fmt:
+      type: integer
+      format: int64
+      example: 9999999999
+    Split:
+      type: object
+      properties:
+        a:
+          type: string
+          enum: [DAY, NIGHT]
+          example: DAY
+        b:
+          type: integer
+          format: int32
+          example: 60
+    Folded:
+      type: integer
+      format: int32
+      example: >-
+        12345
+    InExample:
+      type: object
+      example:
+        format: int32
+        example: 999999999999
+    NamedExample:
+      type: object
+      properties:
+        example:
+          type: integer
+          format: int32
+";
+        // Flagged, in document order: BadFraction.example (line 21, `3.5` is not an
+        // integer), BadOverflow.example (line 25, `2147483648` overflows i32), and
+        // FormatBelow.example (line 28, value `nope` with its `format: int32` a line
+        // below — down-scan pairs it). Not flagged: GoodInt (valid `3600`); NoFormat
+        // (no `format` sibling); Int64Fmt (sibling is `int64`, not `int32` — so its
+        // overflowing `9999999999` is out of scope); Split.a.example `DAY` (its only
+        // `format: int32` is the *following* property Split.b, past a dedent);
+        // Split.b.example (valid `60`); Folded (block-scalar opener `>-`, no inline
+        // value); InExample's inner `example: 999999999999` (inside the outer `example:`
+        // payload); NamedExample's `example:` property (opens a block, no inline value).
+        assert_eq!(int32_format_examples_malformed(body), vec![21, 25, 28]);
+
+        // Non-vacuous floor: across every registered spec every `example` beside a
+        // same-indent `format: int32` is a well-formed 32-bit integer (the invariant the
+        // contract test asserts), and the corpus actually declares many such pairs (the
+        // duration/count/port/radius fields) — so the integer comparison path runs on
+        // real data and a broken (always-empty) extractor can't hide behind a corpus
+        // that never pairs an example with an int32 format. Count pairs with a
+        // same-indent detector independent of the extractor's shape comparison.
+        let mut int32_examples = 0usize;
+        for api in APIS {
+            assert!(
+                int32_format_examples_malformed(api.body).is_empty(),
+                "{}: every example beside a same-indent `format: int32` must be a \
+                 well-formed 32-bit integer",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            let is_key = |l: &str, name: &str, val: Option<&str>| {
+                l.trim_start().split_once(':').is_some_and(|(k, v)| {
+                    k.trim() == name
+                        && val.is_none_or(|want| {
+                            v.split('#').next().unwrap_or(v).trim().trim_matches('"').trim_matches('\'')
+                                == want
+                        })
+                })
+            };
+            for (i, l) in lines.iter().enumerate() {
+                if !is_key(l, "example", None) {
+                    continue;
+                }
+                let v = l
+                    .trim_start()
+                    .split_once(':')
+                    .map(|(_, v)| v.split('#').next().unwrap_or(v).trim())
+                    .unwrap_or("");
+                // Inline scalar only (skip empty + block-scalar openers), mirroring the
+                // extractor so the floor counts exactly the pairs it inspects.
+                if v.is_empty() || v.starts_with('>') || v.starts_with('|') {
+                    continue;
+                }
+                let c = indent(l);
+                let lo = i.saturating_sub(6);
+                let hi = (i + 6).min(lines.len());
+                let has_int32_format = (lo..hi).any(|j| {
+                    j != i && indent(lines[j]) == c && is_key(lines[j], "format", Some("int32"))
+                });
+                if has_int32_format {
+                    int32_examples += 1;
+                }
+            }
+        }
+        assert!(
+            int32_examples >= 20,
+            "expected many example + same-indent `format: int32` pairs across specs, got {int32_examples}"
+        );
+    }
+
     /// The 1-based line numbers, in document order, of every `properties:` mapping
     /// opener whose sibling `type:` scalar names a JSON type other than `object` —
     /// without a YAML dep.

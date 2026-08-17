@@ -3323,6 +3323,29 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - an int32 format-example contract test (`src/registry.rs`
+    `every_int32_format_example_is_a_well_formed_int32`) asserts every inline `example` a
+    mounted spec declares beside a **same-indent** `format: int32` sibling is a well-formed
+    signed 32-bit integer (a sub-case of Spectral's `oas3-valid-schema-example`, which
+    validates an example against its schema, format included). The **numeric-format**
+    sibling of the string-format-example trio (`…uuid…`/`…date_time…`/`…uri…`), over the
+    corpus's most-used numeric format; together they extend the example-value family
+    (`every_example_matches_its_schema_type` reads only the JSON *type*,
+    `every_example_is_within_its_numeric_bounds` only the declared `minimum`/`maximum`,
+    neither the int32 range the format itself fixes) to numeric-format conformance. Pure
+    `int32_format_examples_malformed` extractor (no YAML dep) reuses
+    `uri_format_examples_malformed`'s inline-scalar read + dedent-bounded same-indent
+    `format` sibling scan (matched **exactly**, so `int64` — a wider range — never pairs) +
+    block-scalar skip + `example:`/`examples:`-payload ancestor guard; new
+    `is_well_formed_int32` (shape + range via `str::parse::<i32>`, so a fraction, an
+    out-of-range magnitude, or a non-numeric placeholder all fail). Unit-covered
+    (`int32_format_example_extraction_rules`: i32 extrema pass, fraction/overflow/underflow/
+    placeholder/empty/whitespace fail; a valid example passes, a fraction, an overflowing
+    magnitude, and a format-declared-below value flagged in order `[21,25,28]`, no-format/
+    `int64`-sibling/following-property/block-scalar/inside-`example`-payload/property-named-
+    `example` skipped; a ≥20 example+`format:int32`-pair floor). Surveyed the corpus first
+    (60 same-indent example+`format:int32` pairs across the mounted specs, 0 malformed —
+    every value in `[0, 59765]`) → no drift.
   - a server-not-example.com contract test (`src/registry.rs`
     `every_server_url_avoids_the_example_domain`) asserts no Server Object `url` a mounted
     spec declares uses the IANA-reserved documentation domain `example.com` (RFC 2606; the
@@ -5061,6 +5084,40 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-17 — Contract-test harness: added an **int32 format-example** contract test
+  (`src/registry.rs` `every_int32_format_example_is_a_well_formed_int32`) — every inline
+  `example` a mounted spec declares beside a **same-indent** `format: int32` sibling must
+  be a well-formed signed 32-bit integer. The **numeric-format** sibling of the
+  string-format-example trio (`…uuid…` / `…date_time…` / `…uri…`), over the corpus's
+  most heavily-used *numeric* format (durations / counts / ports / accuracy-radii). A
+  sub-case of Spectral's `oas3-valid-schema-example` (validate an example against its
+  schema, format included): an `example` is a sample *instance*, so a `format: int32`
+  field's example that isn't an integer inside the signed 32-bit range — a fraction
+  pasted where an integer is meant, a placeholder, or a magnitude that overflows i32 (a
+  large timestamp/id mistyped into an int32 slot) — advertises a sample the format's own
+  validator rejects, and codegen that maps `int32` onto a 32-bit integer would overflow.
+  Extends the example-value family (`every_example_matches_its_schema_type` reads only the
+  JSON *type*, `every_example_is_within_its_numeric_bounds` only the declared
+  `minimum`/`maximum`, neither the int32 range the format itself fixes) to numeric-format
+  conformance. New pure `int32_format_examples_malformed` extractor (no YAML dep) reuses
+  `uri_format_examples_malformed`'s inline-scalar read + dedent-bounded same-indent
+  `format` sibling scan (matched **exactly**, so `int64` — a wider range — never pairs) +
+  block-scalar skip (an integer example never takes that form, but the guard mirrors the
+  string siblings) + `example:`/`examples:`-payload ancestor guard; new `is_well_formed_int32`
+  (shape + range via `str::parse::<i32>`, which trims nothing and rejects a fraction or an
+  out-of-range magnitude — no dep). **Surveyed the corpus first (60 same-indent
+  example+`format:int32` pairs across the mounted specs, every value in `[0, 59765]`, 0
+  malformed) → no drift to fix.** Unit-covered (`int32_format_example_extraction_rules`:
+  the i32 extrema (`±2147483648`/`2147483647`) and small ints pass, a fraction, an
+  overflow/underflow by one, a far overflow, a placeholder, empty, and leading-whitespace
+  all fail; a valid example passes, a fraction, an overflowing magnitude, and a
+  format-declared-below value flagged in document order `[21,25,28]`, and no-format/
+  `int64`-sibling/following-property/block-scalar/inside-`example`-payload/property-literally-
+  named-`example` cases skipped; a ≥20 example+`format:int32`-pair floor via an independent
+  same-indent window detector). `cargo test` 2675 green (was 2673; +2); `cargo build
+  --release` succeeds, no warnings. No new dependency; the extractor, the shape helper, and
+  both tests live in the `#[cfg(test)]` module, so nothing ships in the binary. — binary
+  (release): 5.1M (5,314,968 B; unchanged)
 - 2026-08-17 — Contract-test harness: added a **uri format-example** contract test
   (`src/registry.rs` `every_uri_format_example_is_a_well_formed_uri`) — every inline
   `example` a mounted spec declares beside a **same-indent** `format: uri` sibling must
