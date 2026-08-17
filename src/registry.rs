@@ -19373,6 +19373,366 @@ components:
         );
     }
 
+    /// Whether `s` is a well-formed IPv6 address instance — the sample an OpenAPI
+    /// `format: ipv6` field advertises. True iff `s` parses as an RFC 4291 IPv6
+    /// address: eight `:`-separated groups of 1–4 hex digits, with at most one `::`
+    /// compressing consecutive zero groups, optionally with an IPv4-mapped tail
+    /// (`::ffff:192.0.2.1`) — `2001:db8::11`, `::1`, `::`, and a full
+    /// `2001:db8:85a3:8d3:1319:8a2e:370:7344` all pass. Too few groups without `::`
+    /// (`2001:db8`), a group over four hex digits (`12345::1`), two `::` compressions
+    /// (`2001:db8::1::2`), a non-hex group (`gggg::1`), a bare IPv4 literal (`1.2.3.4`),
+    /// a placeholder, surrounding whitespace, or an empty string all fail — exactly the
+    /// samples the `ipv6` format's own validator would reject.
+    ///
+    /// Judged by `std::net::Ipv6Addr::from_str` (the standard library, no dependency).
+    /// Unlike `is_well_formed_ipv4` — hand-rolled to *tolerate* leading zeros the std
+    /// IPv4 parser rejects, matching the common ajv/Spectral `ipv4` validator — IPv6 has
+    /// no such leniency gap, and its `::` zero-compression plus embedded-IPv4 tail make a
+    /// hand-rolled shape check error-prone; the std parser follows the same RFC 4291
+    /// grammar the `ipv6` format validator enforces, so it is both correct and dep-free.
+    fn is_well_formed_ipv6(s: &str) -> bool {
+        s.parse::<std::net::Ipv6Addr>().is_ok()
+    }
+
+    /// The 1-based line numbers, in document order, of every `example:` keyword whose
+    /// inline scalar value sits in a Schema Object declaring a *same-indent*
+    /// `format: ipv6` sibling yet is not a well-formed IPv6 address, without a YAML dep.
+    /// The **IPv6 address-family** companion of `ipv4_format_examples_malformed`, over the
+    /// corpus's device/endpoint `format: ipv6` fields (an `ipv6Address` on the device
+    /// object, an app-instance's exposed IPv6 address, an endpoint's IPv6 address).
+    ///
+    /// In OpenAPI 3.0.x (JSON Schema) an `example` is a sample *instance* of the schema,
+    /// so a `format: ipv6` field's example MUST be a value the `ipv6` format admits: an
+    /// RFC 4291 IPv6 address (the well-known Spectral `oas3-valid-schema-example`
+    /// validates an example against its schema, format included). A malformed one — a
+    /// placeholder beside the format, a group typo overshooting four hex digits, a
+    /// dropped-group spelling that isn't `::`-compressed, or an IPv4 literal pasted into
+    /// an IPv6 slot — advertises a sample the format's own validator rejects, so a
+    /// Redoc/Swagger "try it" prefill and a codegen client that maps `ipv6` onto a
+    /// 16-byte address carry a value no `ipv6`-typed field can hold.
+    ///
+    /// Only an `example` carrying an **inline scalar** (an address literal; a stray
+    /// surrounding quote is tolerated so a quoted `"2001:db8::11"` still reads as the
+    /// address, mirroring the sibling format-example extractors' `trim_matches`) with a
+    /// same-indent `format: ipv6` sibling in the same Schema Object is inspected. A
+    /// block-scalar example (`example: >-` / `example: |`) opens no inline value and is
+    /// skipped. The `format: ipv6` sibling is matched **exactly** (`ipv4`, a different
+    /// address family, never pairs — the analogue of the `int32`/`int64` and
+    /// `double`/`float` mutual exclusions), scanned at the example's own indent down
+    /// through the object's block then up, dedent-bounded exactly like
+    /// `ipv4_format_examples_malformed`, so a *following* property's `format: ipv6` past a
+    /// dedent never pairs with this property's example. An `example:` nested inside an
+    /// outer `example:`/`examples:` payload (sample data, not a schema keyword) is
+    /// skipped. IPv6 shape is judged by `is_well_formed_ipv6`.
+    fn ipv6_format_examples_malformed(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let raw_inline = |l: &str, name: &str| -> Option<String> {
+            let (k, v) = l.trim_start().split_once(':')?;
+            if k.trim() != name {
+                return None;
+            }
+            let v = v.split('#').next().unwrap_or(v).trim();
+            if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            }
+        };
+        // Whether a same-indent `format:` sibling of line `i` (indent `c`) in the same
+        // Schema Object names `ipv6` (exactly — not `ipv4`): scan down through the
+        // object's block then up, dedent-bounded so a nested or following object's
+        // `format` never pairs.
+        let sibling_is_ipv6_format = |i: usize, c: usize| -> bool {
+            let is_ipv6_format = |l: &str| -> bool {
+                raw_inline(l, "format")
+                    .map(|v| v.trim_matches('"').trim_matches('\'') == "ipv6")
+                    .unwrap_or(false)
+            };
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_ipv6_format(l) {
+                    return true;
+                }
+                j += 1;
+            }
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_ipv6_format(l) {
+                    return true;
+                }
+            }
+            false
+        };
+        // True when line `i` (indent `c`) sits inside an outer `example:`/`examples:`
+        // payload — some enclosing container key up the indent ladder is
+        // `example`/`examples`, so an inner `example` key there is sample data.
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some(raw) = raw_inline(line, "example") else {
+                continue;
+            };
+            // A block-scalar opener (`>`/`|`, optionally with a `+`/`-`/digit chomping
+            // indicator) carries its value on the following lines, not inline — skip it.
+            if raw.starts_with('>') || raw.starts_with('|') {
+                continue;
+            }
+            let c = indent(line);
+            if inside_example(i, c) {
+                continue;
+            }
+            if !sibling_is_ipv6_format(i, c) {
+                continue;
+            }
+            let value = raw.trim_matches('"').trim_matches('\'');
+            if !is_well_formed_ipv6(value) {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_ipv6_format_example_is_a_well_formed_ipv6() {
+        // Contract-harness invariant (OpenAPI 3.0.x / JSON-Schema structural rule):
+        // where a Schema Object declares an inline `example` beside a same-indent
+        // `format: ipv6`, the example MUST be an RFC 4291 IPv6 address. An `example` is a
+        // sample *instance* of the schema, so a value that is not a valid IPv6 address —
+        // a placeholder beside the format, a group typo overshooting four hex digits, a
+        // dropped-group spelling that isn't `::`-compressed, or an IPv4 literal pasted
+        // into an IPv6 slot — is a self-contradictory schema whose own validator rejects
+        // the sample it advertises, so a Redoc/Swagger "try it" prefill and a codegen
+        // client that maps `ipv6` onto a 16-byte address carry a value no `ipv6`-typed
+        // field (an `ipv6Address`) can hold.
+        //
+        // The **IPv6 address-family** sibling of `every_ipv4_format_example_is_a_well_formed_ipv4`;
+        // together the two close the network-address corner of the format-example family
+        // (`…uuid…` / `…date_time…` / `…uri…` / `…int32…` / `…int64…` / `…double…` /
+        // `…ipv4…`) — each reads the format's own grammar, which the JSON-*type* and
+        // length/bounds example checks do not. Verified true across all mounted specs
+        // before asserting.
+        for api in APIS {
+            let offenders = ipv6_format_examples_malformed(api.body);
+            assert!(
+                offenders.is_empty(),
+                "{} spec declares an `example` beside a same-indent `format: ipv6` that \
+                 is not a well-formed IPv6 address (a sample the format's own validator \
+                 would reject) at `example:` line(s): {:?}",
+                api.name,
+                offenders
+            );
+        }
+    }
+
+    #[test]
+    fn ipv6_format_example_extraction_rules() {
+        // Unit-cover `is_well_formed_ipv6` and `ipv6_format_examples_malformed` so the
+        // contract test above can't pass vacuously and its detection is pinned.
+        //
+        // Shape check: the addresses the specs use pass (compressed `::`, full 8-group,
+        // and an IPv4-mapped tail); too few groups without `::`, a group over four hex
+        // digits, two `::` compressions, a non-hex group, a bare IPv4 literal, a
+        // placeholder, surrounding whitespace, and empty all fail.
+        assert!(is_well_formed_ipv6("2001:db8::11"));
+        assert!(is_well_formed_ipv6("::1"));
+        assert!(is_well_formed_ipv6("::"));
+        assert!(is_well_formed_ipv6("2001:0db8:0000:0000:0000:0000:0000:0001"));
+        assert!(is_well_formed_ipv6("2001:db8:85a3:8d3:1319:8a2e:370:7344"));
+        assert!(is_well_formed_ipv6("fe80::1"));
+        assert!(is_well_formed_ipv6("::ffff:192.0.2.1")); // IPv4-mapped tail
+        assert!(!is_well_formed_ipv6("2001:db8")); // too few groups, no ::
+        assert!(!is_well_formed_ipv6("2001:db8::1::2")); // two :: compressions
+        assert!(!is_well_formed_ipv6("12345::1")); // group over four hex digits
+        assert!(!is_well_formed_ipv6("gggg::1")); // non-hex group
+        assert!(!is_well_formed_ipv6("1.2.3.4")); // an IPv4 literal, not IPv6
+        assert!(!is_well_formed_ipv6("2001:db8::11 ")); // trailing whitespace
+        assert!(!is_well_formed_ipv6("TODO")); // placeholder
+        assert!(!is_well_formed_ipv6("")); // empty
+
+        // Extractor: a valid address beside a same-indent `format: ipv6` passes; a
+        // group-too-long address, a wrong-shape (dropped-group) address, and a value with
+        // the format *below* it (down-scan) are flagged; a value with no `format` sibling
+        // and one whose sibling is a *different* format (`ipv4`) are skipped; an example
+        // in one property never pairs with a *following* property's `format: ipv6` across
+        // the dedent; a block-scalar example is skipped; an inner `example` inside an
+        // outer `example:` payload is skipped; and a property literally named `example`
+        // (opening a block) is skipped.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    GoodIpv6:
+      type: string
+      format: ipv6
+      example: \"2001:db8::11\"
+    BadGroup:
+      type: string
+      format: ipv6
+      example: \"12345::1\"
+    BadShape:
+      type: string
+      format: ipv6
+      example: \"2001:db8\"
+    FormatBelow:
+      type: string
+      example: nope
+      format: ipv6
+    NoFormat:
+      type: string
+      example: \"1.2.3.4\"
+    Ipv4Fmt:
+      type: string
+      format: ipv4
+      example: notanip
+    Split:
+      type: object
+      properties:
+        a:
+          type: string
+          enum: [DAY, NIGHT]
+          example: DAY
+        b:
+          type: string
+          format: ipv6
+          example: \"::1\"
+    Folded:
+      type: string
+      format: ipv6
+      example: >-
+        2001:db8::1
+    InExample:
+      type: object
+      example:
+        format: ipv6
+        example: notanip
+    NamedExample:
+      type: object
+      properties:
+        example:
+          type: string
+          format: ipv6
+";
+        // Flagged, in document order: BadGroup.example (line 21, `12345::1`'s first group
+        // has five hex digits), BadShape.example (line 25, `2001:db8` is only two groups
+        // with no `::` compression), and FormatBelow.example (line 28, value `nope` with
+        // its `format: ipv6` a line below — down-scan pairs it). Not flagged: GoodIpv6
+        // (valid `2001:db8::11`); NoFormat (no `format` sibling); Ipv4Fmt (sibling is
+        // `ipv4`, not `ipv6` — so its `notanip` is out of scope, the analogue of the
+        // int32/int64 and double/float mutual exclusions); Split.a.example `DAY` (its only
+        // `format: ipv6` is the *following* property Split.b, past a dedent);
+        // Split.b.example (valid `::1`); Folded (block-scalar opener `>-`, no inline
+        // value); InExample's inner `example: notanip` (inside the outer `example:`
+        // payload); NamedExample's `example:` property (opens a block, no inline value).
+        assert_eq!(ipv6_format_examples_malformed(body), vec![21, 25, 28]);
+
+        // Non-vacuous floor: across every registered spec every `example` beside a
+        // same-indent `format: ipv6` is a well-formed IPv6 address (the invariant the
+        // contract test asserts), and the corpus actually declares such pairs (the
+        // device/endpoint `ipv6Address` fields) — so the address parse path runs on real
+        // data and a broken (always-empty) extractor can't hide behind a corpus that
+        // never pairs an example with an ipv6 format. Count pairs with a same-indent
+        // detector independent of the extractor's shape comparison.
+        let mut ipv6_examples = 0usize;
+        for api in APIS {
+            assert!(
+                ipv6_format_examples_malformed(api.body).is_empty(),
+                "{}: every example beside a same-indent `format: ipv6` must be a \
+                 well-formed IPv6 address",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            let is_key = |l: &str, name: &str, val: Option<&str>| {
+                l.trim_start().split_once(':').is_some_and(|(k, v)| {
+                    k.trim() == name
+                        && val.is_none_or(|want| {
+                            v.split('#').next().unwrap_or(v).trim().trim_matches('"').trim_matches('\'')
+                                == want
+                        })
+                })
+            };
+            for (i, l) in lines.iter().enumerate() {
+                if !is_key(l, "example", None) {
+                    continue;
+                }
+                let v = l
+                    .trim_start()
+                    .split_once(':')
+                    .map(|(_, v)| v.split('#').next().unwrap_or(v).trim())
+                    .unwrap_or("");
+                // Inline scalar only (skip empty + block-scalar openers), mirroring the
+                // extractor so the floor counts exactly the pairs it inspects.
+                if v.is_empty() || v.starts_with('>') || v.starts_with('|') {
+                    continue;
+                }
+                let c = indent(l);
+                let lo = i.saturating_sub(6);
+                let hi = (i + 6).min(lines.len());
+                let has_ipv6_format = (lo..hi).any(|j| {
+                    j != i && indent(lines[j]) == c && is_key(lines[j], "format", Some("ipv6"))
+                });
+                if has_ipv6_format {
+                    ipv6_examples += 1;
+                }
+            }
+        }
+        assert!(
+            ipv6_examples >= 4,
+            "expected several example + same-indent `format: ipv6` pairs across specs, got {ipv6_examples}"
+        );
+    }
+
     /// The 1-based line numbers, in document order, of every `properties:` mapping
     /// opener whose sibling `type:` scalar names a JSON type other than `object` —
     /// without a YAML dep.

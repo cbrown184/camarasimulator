@@ -5088,6 +5088,51 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-17 — Contract-test harness: added an **ipv6 format-example** contract test
+  (`src/registry.rs` `every_ipv6_format_example_is_a_well_formed_ipv6`) — every inline
+  `example` a mounted spec declares beside a **same-indent** `format: ipv6` sibling must
+  be a well-formed RFC 4291 IPv6 address. The **IPv6 address-family** companion of last
+  pass's `every_ipv4_format_example_is_a_well_formed_ipv4`; together they close the
+  network-address corner of the format-example family (`…uuid…`/`…date_time…`/`…uri…`/
+  `…int32…`/`…int64…`/`…double…`/`…ipv4…`), over the corpus's device/endpoint
+  `format: ipv6` fields (device `ipv6Address`, an app-instance's exposed IPv6 address, an
+  endpoint's IPv6 address). A sub-case of Spectral's `oas3-valid-schema-example` (validate
+  an example against its schema, format included): an `example` is a sample *instance*, so
+  a `format: ipv6` field's example that isn't a valid IPv6 address — a placeholder beside
+  the format, a group overshooting four hex digits, a dropped-group spelling that isn't
+  `::`-compressed, or an IPv4 literal pasted into an IPv6 slot — advertises a sample the
+  format's own validator rejects, and codegen that maps `ipv6` onto a 16-byte address
+  carries a value no `ipv6`-typed field can hold. Extends the example-value family
+  (`every_example_matches_its_schema_type` reads only the JSON *type*,
+  `every_example_respects_its_string_length_bounds` only the declared length, neither the
+  address grammar the format itself fixes) to the `ipv6` format. New pure
+  `ipv6_format_examples_malformed` extractor (no YAML dep) is `ipv4_format_examples_malformed`
+  with the sibling-format probe swapped to match `ipv6` **exactly** (so `ipv4`, the other
+  address family, never pairs — the analogue of the int32/int64 and double/float mutual
+  exclusions): same inline-scalar read + dedent-bounded same-indent `format` sibling scan +
+  block-scalar skip + `example:`/`examples:`-payload ancestor guard; new
+  `is_well_formed_ipv6` judged by `std::net::Ipv6Addr::from_str`. **Deliberately used the
+  std parser here, unlike ipv4's hand-rolled shape check** — ipv4 was hand-rolled only to
+  *tolerate* leading zeros the std IPv4 parser rejects (matching ajv/Spectral); IPv6 has no
+  such leniency gap, and its `::` zero-compression plus embedded-IPv4 tail make a hand-rolled
+  check error-prone, so the std parser (standard library, no dep) that follows the same RFC
+  4291 grammar the `ipv6` validator enforces is both correct and cheaper. **Surveyed the
+  corpus first (7 same-indent inline example+`format:ipv6` pairs across the mounted specs —
+  location-verification ×2, location-retrieval, geofencing, iot-sim-fraud-prevention,
+  application-endpoint-discovery/-registration device/endpoint `ipv6Address` fields; every
+  value a valid IPv6 address — `2001:db8::11`, `::1`, a full 8-group
+  `2001:db8:85a3:8d3:1319:8a2e:370:7344` — 0 malformed; session-insights' `format:ipv6` has
+  no example sibling, correctly skipped) → no drift to fix.** Unit-covered
+  (`ipv6_format_example_extraction_rules`: compressed `::`, full 8-group, and an
+  IPv4-mapped-tail addresses pass; too-few-groups-without-`::`, group-over-four-hex-digits,
+  two-`::`, non-hex-group, a bare IPv4 literal, trailing whitespace, and empty all fail; a
+  valid example passes, a group-too-long, a wrong-shape, and a format-declared-below value
+  flagged in document order `[21,25,28]`, and no-format/`ipv4`-sibling/following-property/
+  block-scalar/inside-`example`-payload/property-literally-named-`example` cases skipped; a
+  ≥4 example+`format:ipv6`-pair floor via an independent same-indent window detector).
+  `cargo test` 2683 green (was 2681; +2); `cargo build --release` succeeds, no warnings. No
+  new dependency; the extractor, the shape helper, and both tests live in the `#[cfg(test)]`
+  module, so nothing ships in the binary. — binary (release): 5.1M (5,314,968 B; unchanged)
 - 2026-08-17 — Contract-test harness: added an **ipv4 format-example** contract test
   (`src/registry.rs` `every_ipv4_format_example_is_a_well_formed_ipv4`) — every inline
   `example` a mounted spec declares beside a **same-indent** `format: ipv4` sibling must
