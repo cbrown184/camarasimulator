@@ -5235,6 +5235,33 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-18 — Contract-test harness: added a **Callback Object runtime-expression** contract
+  test (`src/registry.rs` `every_callback_key_is_a_runtime_expression`) — every Callback Object
+  expression key a mounted spec declares MUST be an OpenAPI runtime expression (the canonical
+  `{$request.body#/sink}` form the CAMARA notification APIs use to resolve the caller-supplied
+  callback URL). A key that lost its `{$…}` substitution — a static URL, or a paste that dropped
+  the braces/`$` — leaves the provider with no URL to POST the CloudEvent to and a
+  Redoc/Swagger/codegen client with an unwireable callback. Chosen as the first test to inspect
+  the `callbacks:` subtree itself: six mounted specs declare callbacks (QoD, geofencing,
+  carrier-billing ×5, qos-provisioning, sponsored-data, click-to-dial) yet no contract test read
+  their expression keys — the component-name test (`every_component_key_is_a_valid_name`) checks
+  the callback's *name* against `^[a-zA-Z0-9._-]+$` (a pattern the expression key, full of
+  `{`/`$`/`#`/`/`, is exempt from and out of scope for), and the response/`x-correlator` tests only
+  *exclude* the `callbacks:` subtree from their scans. New pure
+  `callback_keys_that_are_not_runtime_expressions` extractor (no YAML dep): scoped to `callbacks:`
+  blocks under the document-root `paths:` section (a schema property named `callbacks` elsewhere is
+  never a Callback Object), it faults each grandchild (`callbacks:` → name at +2 → expression key
+  at +4) that opens a Path Item block but whose unquoted key embeds no `{$…}` substitution; a
+  `$ref`-form Callback Object (inline value, not a block opener) is skipped. **Surveyed the corpus
+  first: 10 expression keys across the 6 specs, every one the canonical `{$request.body#/…}` → 0
+  drift.** Non-vacuity from the unit test (`callback_runtime_expression_extraction_rules`: canonical
+  key passes; a static-URL key and a lost-`$` `{request.body#/sink}` flagged in document order; a
+  `$ref` Callback Object and a `components:` schema property named `callbacks` both skipped;
+  no-callbacks spec clean; ≥6 expression-key corpus floor via an independent `{$`-embedding
+  detector). Test-side only — no request/response/behaviour change, so no vendored-spec edits.
+  `cargo test` 2735 green (was 2733; +2); `cargo build --release` succeeds. No new dependency;
+  the extractor and both tests live in the `#[cfg(test)]` module, so nothing ships in the binary.
+  — binary (release): 5.1M (5,323,160 B; unchanged)
 - 2026-08-18 — Contract-test harness: added a **scenarios-block description** contract test
   (`src/registry.rs` `every_scenario_block_declares_a_non_empty_description`) — every
   `x-camarasim-scenarios` block MUST carry a non-empty **block-level** `description:`, the

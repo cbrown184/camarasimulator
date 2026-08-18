@@ -32278,4 +32278,220 @@ paths:
             "expected root Tag Objects across specs, got {tag_items}"
         );
     }
+
+    /// The 1-based line numbers of every **Callback Object expression key** a spec
+    /// declares whose key is **not** an OpenAPI runtime expression.
+    ///
+    /// In OpenAPI 3.0.x a Callback Object maps a *runtime expression* — which the
+    /// provider evaluates against the originating request to obtain the callback
+    /// URL — to a Path Item. The CAMARA notification APIs all use the canonical
+    /// form `{$request.body#/sink}` (the `sink` URL the caller supplied in the
+    /// request body). A key that lost its `{$…}` substitution — a paste that
+    /// dropped the braces or the `$`, or a hard-coded static URL — is not a runtime
+    /// expression: the provider has no URL to POST the CloudEvent to, and a
+    /// Redoc/Swagger/codegen client can neither render nor wire the callback.
+    ///
+    /// Scoped to `callbacks:` blocks under the document-root `paths:` section
+    /// (a schema property literally named `callbacks` elsewhere is not a Callback
+    /// Object). Within such a block the direct children (indent + 2) are Callback
+    /// *names* and each name's own block-opening children (indent + 4) are its
+    /// expression keys — the keys that open a Path Item. A `$ref` form of a
+    /// Callback Object (a name whose child is an inline `$ref:`) carries no
+    /// expression key and is skipped. Each expression key is unquoted and required
+    /// to embed a `{$…}` substitution (a `{$` followed by a later `}`).
+    ///
+    /// No sibling test inspects this: `every_component_key_is_a_valid_name` checks
+    /// the *component-level* callback map keys (`components.callbacks.*`) against
+    /// `^[a-zA-Z0-9._-]+$` — the callback's *name*, never the inner expression key
+    /// (which contains `{`, `$`, `#`, `/` and would fail that pattern, so it is
+    /// deliberately out of that test's scope) — and the response/`x-correlator`
+    /// tests only *exclude* the `callbacks:` subtree from their scans.
+    fn callback_keys_that_are_not_runtime_expressions(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        // The key of a block-opening mapping line (`foo:` / `"a:b":` with no inline
+        // value) — the whole line, trailing whitespace stripped, ends in `:`. A `#`
+        // inside the key (as in `{$request.body#/sink}`) is preserved: the comment
+        // strip a value-bearing line needs never applies to a block opener.
+        fn block_opener_key(l: &str) -> Option<&str> {
+            l.trim_start().trim_end().strip_suffix(':')
+        }
+        // An OpenAPI runtime expression embeds a `{$…}` substitution.
+        let is_runtime_expression = |key: &str| -> bool {
+            match key.find("{$") {
+                Some(p) => key[p + 2..].contains('}'),
+                None => false,
+            }
+        };
+        let mut out = Vec::new();
+        let mut in_paths = false;
+        for (i, line) in lines.iter().enumerate() {
+            let is_top = !line.is_empty() && !line.starts_with(char::is_whitespace);
+            if is_top {
+                in_paths = line.trim_end() == "paths:";
+                continue;
+            }
+            if !in_paths || line.trim_start() != "callbacks:" {
+                continue;
+            }
+            let cb_indent = indent(line);
+            // Expression keys are the grandchildren of `callbacks:` (Callback name at
+            // +2, its expression keys at +4) that open a Path Item block.
+            let mut j = i + 1;
+            while j < lines.len() {
+                let cur = lines[j];
+                if cur.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(cur) <= cb_indent {
+                    break; // dedented out of this `callbacks:` block
+                }
+                if indent(cur) == cb_indent + 4 {
+                    if let Some(raw) = block_opener_key(cur) {
+                        let key = raw.trim().trim_matches('"').trim_matches('\'');
+                        if !is_runtime_expression(key) {
+                            out.push(j + 1);
+                        }
+                    }
+                }
+                j += 1;
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_callback_key_is_a_runtime_expression() {
+        // Contract-harness invariant (OpenAPI 3.0.x Callback Object rule): every
+        // Callback Object expression key a mounted spec declares MUST be a runtime
+        // expression — the `{$request.body#/sink}` form the CAMARA notification APIs
+        // use to resolve the caller-supplied callback URL. A key that lost its
+        // `{$…}` substitution (a static URL, or a paste that dropped the braces/`$`)
+        // leaves the provider with no URL to deliver the CloudEvent to and a
+        // codegen/Redoc/Swagger client with an unwireable callback. Invisible to
+        // every existing test (the component-name test checks the callback's *name*
+        // against a token pattern the expression key is exempt from; the
+        // response/`x-correlator` tests only *exclude* the `callbacks:` subtree).
+        // Verified true across all mounted specs before asserting.
+        for api in APIS {
+            let bad = callback_keys_that_are_not_runtime_expressions(api.body);
+            assert!(
+                bad.is_empty(),
+                "{} spec declares a Callback Object expression key that is not an \
+                 OpenAPI runtime expression (it must embed a `{{$…}}` substitution, \
+                 e.g. `{{$request.body#/sink}}`) at line(s): {:?}",
+                api.name,
+                bad
+            );
+        }
+    }
+
+    #[test]
+    fn callback_runtime_expression_extraction_rules() {
+        // Unit-cover `callback_keys_that_are_not_runtime_expressions` so the contract
+        // test above can't pass vacuously and its detection is pinned: a canonical
+        // `{$request.body#/sink}` key passes; a static URL key (`https://…`, colons
+        // and all) and a key that lost its `$` (`{request.body#/sink}`) are each
+        // flagged in document order; a `$ref` Callback Object (an inline value, not a
+        // block opener) is skipped; and a schema property literally named `callbacks`
+        // under `components:` (not a Callback Object under `paths:`) is never scanned.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    post:
+      operationId: createA
+      responses:
+        '201':
+          description: created
+      callbacks:
+        good:
+          \"{$request.body#/sink}\":
+            post:
+              responses:
+                '204':
+                  description: ok
+        static:
+          \"https://example.com/cb\":
+            post:
+              responses:
+                '204':
+                  description: ok
+        lostDollar:
+          \"{request.body#/sink}\":
+            post:
+              responses:
+                '204':
+                  description: ok
+        byRef:
+          $ref: '#/components/callbacks/Shared'
+components:
+  schemas:
+    Widget:
+      type: object
+      properties:
+        callbacks:
+          type: object
+          properties:
+            items:
+              type: string
+";
+        // Flagged, in document order: line 20 (`static`'s `https://example.com/cb`
+        // key — a static URL, no `{$…}`) and line 26 (`lostDollar`'s
+        // `{request.body#/sink}` — braces but no `$`). Not flagged: line 14 (the
+        // canonical `{$request.body#/sink}`), line 32 (`byRef`'s inline `$ref:`, not
+        // a block-opening expression key), and the `callbacks:` schema property under
+        // `components:` (never a Callback Object under `paths:`).
+        assert_eq!(
+            callback_keys_that_are_not_runtime_expressions(body),
+            vec![20, 26]
+        );
+
+        // A spec that declares no callbacks has no expression keys to fault.
+        let no_callbacks = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+";
+        assert!(callback_keys_that_are_not_runtime_expressions(no_callbacks).is_empty());
+
+        // Non-vacuous floor: across every registered spec every Callback Object
+        // expression key is a runtime expression (the invariant the contract test
+        // asserts), and the corpus actually declares such keys — so the
+        // runtime-expression check runs on real data and a broken (always-empty)
+        // extractor can't hide behind a corpus with no callbacks. Count real
+        // expression keys with a detector independent of the extractor: a `{$…}`
+        // substitution never appears in these specs outside a callback key, so a
+        // block-opening line embedding `{$` is one.
+        let mut expr_keys = 0usize;
+        for api in APIS {
+            assert!(
+                callback_keys_that_are_not_runtime_expressions(api.body).is_empty(),
+                "{}: every Callback Object expression key must be a runtime expression",
+                api.name
+            );
+            for line in api.body.lines() {
+                let t = line.trim();
+                if t.contains("{$") && t.trim_end().ends_with(':') {
+                    expr_keys += 1;
+                }
+            }
+        }
+        assert!(
+            expr_keys >= 6,
+            "expected many Callback Object runtime-expression keys across specs, got {expr_keys}"
+        );
+    }
 }
