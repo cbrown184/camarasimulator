@@ -8142,6 +8142,220 @@ components:
         );
     }
 
+    /// Returns whether a mounted spec declares an `x-correlator` **request header
+    /// parameter** — a Parameter Object whose `name` is `x-correlator` sitting
+    /// `in: header`.
+    ///
+    /// CAMARA Commonalities defines `x-correlator` as an optional request header a
+    /// caller sends and the server echoes back on the response. CamaraSim honours
+    /// this at runtime (every handler reads the request's `x-correlator` and echoes
+    /// it), so the vendored spec MUST declare the header as a request parameter —
+    /// typically a reusable `#/components/parameters/XCorrelator` the operations
+    /// `$ref` — or a Redoc/Swagger/codegen client has no way to send the header the
+    /// server always round-trips. This is the **request-side counterpart** of
+    /// `served_success_responses_missing_x_correlator` (which pins the *response*
+    /// header): together they cover both legs of the single most pervasive CAMARA
+    /// convention. Every existing parameter test reads a different facet — a
+    /// parameter's `in:` location validity, its `name` presence, its schema/content,
+    /// its description — none checks that the x-correlator request header is declared
+    /// at all.
+    ///
+    /// A Parameter Object is a mapping, so its `name:` and `in:` are sibling keys at
+    /// one indent. For each `name: x-correlator` line the scan confirms an
+    /// `in: header` sibling (same indent, bounded by the enclosing dedent, looked for
+    /// both below and above since key order is free). Requiring the `in: header`
+    /// sibling both proves the line is a real Parameter Object (a schema property
+    /// literally named `x-correlator` has no `in:` sibling) and pins the placement
+    /// (`in: query`/`path` would not count). A response header — an `x-correlator:`
+    /// *key* under a `headers:` block, carrying no `name:`/`in:` fields — is never a
+    /// `name: x-correlator` line, so it is out of scope. Pure and YAML-dep-free.
+    fn declares_x_correlator_header_parameter(body: &str) -> bool {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let field_is = |l: &str, key: &str, val: &str| -> bool {
+            l.trim().split_once(':').is_some_and(|(k, v)| {
+                k.trim() == key
+                    && v.split('#').next().unwrap_or(v).trim().trim_matches(|c| c == '"' || c == '\'')
+                        == val
+            })
+        };
+        for (i, line) in lines.iter().enumerate() {
+            if !field_is(line, "name", "x-correlator") {
+                continue;
+            }
+            let c = indent(line);
+            // Scan the Parameter Object's siblings (same indent `c`) below the
+            // `name:` line, stopping at the enclosing dedent, for `in: header`.
+            let mut found = false;
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                let li = indent(l);
+                if li < c {
+                    break;
+                }
+                if li == c && field_is(l, "in", "header") {
+                    found = true;
+                    break;
+                }
+                j += 1;
+            }
+            // …and above (YAML key order is free, so `in:` may precede `name:`).
+            if !found {
+                let mut k = i;
+                while k > 0 {
+                    k -= 1;
+                    let l = lines[k];
+                    if l.trim().is_empty() {
+                        continue;
+                    }
+                    let li = indent(l);
+                    if li < c {
+                        break;
+                    }
+                    if li == c && field_is(l, "in", "header") {
+                        found = true;
+                        break;
+                    }
+                }
+            }
+            if found {
+                return true;
+            }
+        }
+        false
+    }
+
+    #[test]
+    fn every_business_spec_declares_an_x_correlator_request_parameter() {
+        // Contract-harness invariant (CAMARA Commonalities): every mounted business
+        // spec MUST declare `x-correlator` as a request header parameter (a Parameter
+        // Object `name: x-correlator`, `in: header`). CamaraSim reads the caller's
+        // `x-correlator` off every request and echoes it on every response, so a spec
+        // that never declares the request parameter hands a codegen/Swagger/Redoc
+        // client no way to send the header the server round-trips — the request-side
+        // gap the response-header test (`every_served_success_response_declares_an_
+        // x_correlator_header`) cannot see.
+        //
+        // `auth/openapi.yaml` is excluded (scope is `APIS`): its OAuth server
+        // endpoints follow RFC 6749/8414, not the CAMARA x-correlator convention — the
+        // same carve-out `every_operation_declares_a_security_requirement` and the
+        // response-header test make. Verified true across all mounted business specs
+        // before asserting.
+        for api in APIS {
+            assert!(
+                declares_x_correlator_header_parameter(api.body),
+                "{} spec declares no `x-correlator` request header parameter \
+                 (name: x-correlator, in: header)",
+                api.name
+            );
+        }
+    }
+
+    #[test]
+    fn x_correlator_request_parameter_extraction_rules() {
+        // Unit-cover the `declares_x_correlator_header_parameter` extractor so the
+        // contract test above can't pass vacuously and its detection is pinned: a
+        // component Parameter Object `name: x-correlator` + `in: header` (either key
+        // order) is detected; an `x-correlator` parameter mis-placed `in: query` does
+        // not count (placement is pinned); a response *header* (an `x-correlator:` key
+        // under `headers:`, no `name:`/`in:` fields) is not a request parameter; and a
+        // spec with no x-correlator at all is flagged.
+        let with_param = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      parameters:
+        - $ref: \"#/components/parameters/XCorrelator\"
+      responses:
+        '200':
+          description: ok
+components:
+  parameters:
+    XCorrelator:
+      name: x-correlator
+      in: header
+      required: false
+      schema:
+        type: string
+";
+        assert!(declares_x_correlator_header_parameter(with_param));
+
+        // Key order reversed (`in:` before `name:`) — still detected via the upward scan.
+        let reversed = "\
+components:
+  parameters:
+    XCorrelator:
+      in: header
+      name: x-correlator
+      required: false
+";
+        assert!(declares_x_correlator_header_parameter(reversed));
+
+        // Mis-placed `in: query` — not a valid x-correlator header parameter.
+        let wrong_location = "\
+components:
+  parameters:
+    XCorrelator:
+      name: x-correlator
+      in: query
+";
+        assert!(!declares_x_correlator_header_parameter(wrong_location));
+
+        // A response *header* named x-correlator (no `name:`/`in:` fields) is not a
+        // request parameter.
+        let response_header_only = "\
+components:
+  headers:
+    XCorrelator:
+      schema:
+        type: string
+paths:
+  /a:
+    get:
+      responses:
+        '200':
+          headers:
+            x-correlator:
+              $ref: \"#/components/headers/XCorrelator\"
+";
+        assert!(!declares_x_correlator_header_parameter(response_header_only));
+
+        // No x-correlator anywhere.
+        assert!(!declares_x_correlator_header_parameter(
+            "openapi: 3.0.3\ninfo:\n  title: t\n"
+        ));
+
+        // Non-vacuous floor: across every registered business spec the request header
+        // parameter is declared (the invariant the contract test asserts), and the
+        // corpus declares many `name: x-correlator` parameters, so a broken (always-
+        // false) extractor can't hide. Count declaring specs independently.
+        let mut declaring = 0usize;
+        for api in APIS {
+            assert!(
+                declares_x_correlator_header_parameter(api.body),
+                "{}: every business spec must declare the x-correlator request parameter",
+                api.name
+            );
+            if api.body.lines().any(|l| l.trim() == "name: x-correlator") {
+                declaring += 1;
+            }
+        }
+        assert!(
+            declaring >= 40,
+            "expected many specs declaring a name: x-correlator parameter, got {declaring}"
+        );
+    }
+
     #[test]
     fn every_request_body_declares_content() {
         // Contract-harness invariant (OpenAPI structural rule): every operation a

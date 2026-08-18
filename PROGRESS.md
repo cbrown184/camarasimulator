@@ -5201,6 +5201,36 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-18 — Contract-test harness: added an **x-correlator request-parameter presence**
+  contract test (`src/registry.rs`
+  `every_business_spec_declares_an_x_correlator_request_parameter`) — every mounted **business**
+  spec MUST declare `x-correlator` as a request header parameter (a Parameter Object
+  `name: x-correlator` sitting `in: header`). This is the **request-side counterpart** of the
+  existing `every_served_success_response_declares_an_x_correlator_header` (which pins the
+  *response* header): CamaraSim reads the caller's `x-correlator` off every request and echoes it
+  on every response, so a spec that never declares the request parameter hands a Redoc/Swagger/
+  codegen client no way to send the header the server always round-trips — the request-side gap the
+  response-header test cannot see. Every existing parameter test reads a different facet (a
+  parameter's `in:` location validity, `name` presence, schema/content, description) — none checks
+  the x-correlator request header is declared at all. New pure `declares_x_correlator_header_
+  parameter` extractor (no YAML dep): a Parameter Object is a mapping, so for each
+  `name: x-correlator` line it confirms an `in: header` **sibling** (same indent, bounded by the
+  enclosing dedent, scanned both below and above since YAML key order is free); requiring that
+  sibling both proves the line is a real Parameter Object (a schema property literally named
+  `x-correlator` has no `in:` sibling) and pins the placement (a mis-declared `in: query`/`path`
+  x-correlator does not count). A response *header* (an `x-correlator:` key under `headers:`, no
+  `name:`/`in:` fields) is never a `name: x-correlator` line, so it is out of scope. Scope is
+  `APIS`; `auth/openapi.yaml` excluded — its OAuth endpoints follow RFC 6749/8414, the same
+  carve-out the response-header and operation-security tests make. **Surveyed the corpus first: all
+  60 mounted business specs declare the `x-correlator` header parameter (one shared
+  `components.parameters.XCorrelator` each, `name: x-correlator`/`in: header`); auth correctly omits
+  it → 0 drift.** Unit-covered (`x_correlator_request_parameter_extraction_rules`: a component param
+  in either key order detected; a mis-placed `in: query` x-correlator, a response-header-only
+  x-correlator, and a spec with none each not detected; a ≥40 declaring-spec floor via an
+  independent `name: x-correlator` counter). Test-side only — no request/response/behaviour change,
+  so no vendored-spec edits. `cargo test` 2723 green (was 2721; +2); `cargo build --release`
+  succeeds. No new dependency; the extractor and both tests live in the `#[cfg(test)]` module, so
+  nothing ships in the binary. — binary (release): 5.1M (5,314,968 B; unchanged)
 - 2026-08-18 — Contract-test harness: added a **root-tag `name` presence** contract test
   (`src/registry.rs` `every_root_tag_declares_a_non_empty_name`) — every Tag Object a
   mounted spec declares in its document-root `tags:` list MUST carry a non-empty `name`.
