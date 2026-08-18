@@ -5241,6 +5241,19 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     `properties: '400'` not flagged, an out-of-`paths:` `'400'` property never a response, a
     no-`responses:` op skipped; ≥100-operation floor). Surveyed the corpus first (168 operations,
     940 explicit `4XX` response keys, every operation carries ≥1) → 0 drift.
+  - an exact-OpenAPI-version contract test (`src/registry.rs`
+    `every_spec_pins_the_camara_openapi_3_0_3_version`) asserts every mounted spec's root
+    `openapi:` version is exactly `3.0.3` — the single patch CAMARA Commonalities pins its
+    ecosystem to. The **value-side complement** of `every_spec_declares_a_valid_openapi_3_version`,
+    which accepts any `3.MINOR.PATCH` of the OpenAPI 3 family (`is_openapi_3_version`) but never
+    reads *which* — so a template-drifted `3.1.0` (a different `nullable`/`type` + JSON-Schema
+    dialect regime a Redoc/Swagger/codegen client reads under other rules) or a stale `3.0.1`
+    patch sails past it — exactly as `every_info_license_name_is_the_camara_apache_identifier`
+    pins the licence value the presence-only license test never reads. Reuses the already-
+    unit-covered `openapi_version` extractor (no new extractor); scope mirrors the family test
+    it complements (`APIS`). Unit-covered (`camara_openapi_version_pin_rules`: `3.0.3` accepted,
+    `3.1.0`/`3.0.1` rejected though both pass the looser family check; ≥40-spec floor). Surveyed
+    the corpus first (all 60 mounted specs already declare `openapi: 3.0.3`) → 0 drift.
   Full response-vs-schema validation still TODO (would need a YAML/JSON-Schema
   validator — a dependency trade-off, deferred).
 
@@ -5248,6 +5261,20 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-18 — Contract-test harness: added an **exact-OpenAPI-version** contract test
+  (`src/registry.rs` `every_spec_pins_the_camara_openapi_3_0_3_version`) — every mounted spec's
+  root `openapi:` version must be exactly `3.0.3`, the single patch CAMARA Commonalities pins its
+  ecosystem to. The **value-side complement** of `every_spec_declares_a_valid_openapi_3_version`,
+  which accepts any `3.MINOR.PATCH` of the OpenAPI 3 family (`is_openapi_3_version`) but never
+  reads *which* — so a template-drifted `3.1.0` (a different `nullable`/`type` + JSON-Schema
+  dialect regime read under other rules than it was vendored as) or a stale `3.0.1` sails past it,
+  mirroring how `every_info_license_name_is_the_camara_apache_identifier` pins the licence value
+  the presence-only license test never reads. Reuses the already-unit-covered `openapi_version`
+  extractor (no new extractor); scope mirrors the family test (`APIS`). Unit-covered
+  (`camara_openapi_version_pin_rules`: `3.0.3` accepted, `3.1.0`/`3.0.1` rejected though both pass
+  the looser family check; ≥40-spec floor). Surveyed the corpus first (all 60 mounted specs already
+  declare `openapi: 3.0.3`) → 0 drift. `cargo test` green (2738 pass); release binary 5.1M
+  (5,323,160 bytes), unchanged; no new dep.
 - 2026-08-18 — Contract-test harness: added an **info.title distinctness** contract test
   (`src/registry.rs` `every_spec_declares_a_distinct_info_title`) — no two mounted specs may
   declare the same `info.title`. `title` is the heading Redoc/Swagger renders and the label the

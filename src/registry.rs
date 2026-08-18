@@ -4480,6 +4480,90 @@ mod tests {
         }
     }
 
+    /// The exact OpenAPI Specification version CAMARA Commonalities pins every API
+    /// definition to — `3.0.3`, the last 3.0.x patch. CAMARA fixes the whole
+    /// ecosystem to 3.0.3 (not merely "some 3.x") because 3.0 and 3.1 diverge on
+    /// `nullable`/`type` handling and JSON-Schema dialect, so a Redoc/Swagger/codegen
+    /// client that assumes 3.0.3 misreads a 3.1 document.
+    const CAMARA_OPENAPI_VERSION: &str = "3.0.3";
+
+    #[test]
+    fn every_spec_pins_the_camara_openapi_3_0_3_version() {
+        // Contract-harness invariant (the CAMARA Commonalities OpenAPI-version rule):
+        // every mounted vendored spec's root `openapi:` version MUST be exactly
+        // `3.0.3`. CAMARA pins its whole API ecosystem to that single patch — 3.0 and
+        // 3.1 differ in `nullable`/`type` handling and JSON-Schema dialect, so a
+        // Redoc/Swagger/codegen client that reads `3.1.0` interprets the rest of the
+        // document under different rules than the one CamaraSim vendored it as.
+        //
+        // The **value-side complement** of `every_spec_declares_a_valid_openapi_3_version`,
+        // which accepts any `3.MINOR.PATCH` of the OpenAPI 3 family (via
+        // `is_openapi_3_version`) but never reads *which* one — so a template-drifted
+        // `3.1.0` or a stale `3.0.1` sails past it, exactly as
+        // `every_info_license_name_is_the_camara_apache_identifier` pins the licence
+        // *value* the presence-only `every_spec_declares_a_valid_info_license` never
+        // reads. Scope mirrors the family test it complements (the mounted business
+        // specs in `APIS`); reuses the already-unit-covered `openapi_version` extractor.
+        //
+        // Surveyed the corpus first: all 60 mounted specs already declare
+        // `openapi: 3.0.3`, so 0 drift.
+        let mut checked = 0usize;
+        for api in APIS {
+            let v = openapi_version(api.body).unwrap_or_else(|| {
+                panic!(
+                    "{} spec declares no root `openapi:` version — not a valid \
+                     OpenAPI document (the `openapi` field is REQUIRED at the root)",
+                    api.name
+                )
+            });
+            assert_eq!(
+                v, CAMARA_OPENAPI_VERSION,
+                "{} spec declares root `openapi: {}`, not the CAMARA-mandated \
+                 `openapi: {}` — 3.0 and 3.1 differ in `nullable`/`type` handling, so \
+                 a non-3.0.3 version is read under different rules than it was vendored as",
+                api.name, v, CAMARA_OPENAPI_VERSION
+            );
+            checked += 1;
+        }
+        // Non-vacuous floor: `every_spec_declares_a_valid_openapi_3_version` guarantees
+        // every mounted spec supplies a version, so this must have inspected all of them.
+        assert!(
+            checked >= 40,
+            "expected a root `openapi:` version in every mounted spec, only checked {checked}"
+        );
+    }
+
+    #[test]
+    fn camara_openapi_version_pin_rules() {
+        // Pin the accept/reject boundary of the exact-version check so the contract
+        // test above can't pass vacuously: the CAMARA-mandated `3.0.3` is accepted,
+        // while the two realistic drifts — the next minor `3.1.0` (a different
+        // `nullable`/dialect regime) and an earlier `3.0.1` patch — are both caught at
+        // the value `openapi_version` extracts, even though each passes the looser
+        // `is_openapi_3_version` family check.
+        let with_version = |v: &str| format!("openapi: {v}\npaths: {{}}\n");
+        let version_of = |b: &str| openapi_version(b).expect("expected a root openapi version");
+
+        assert_eq!(version_of(&with_version("3.0.3")), CAMARA_OPENAPI_VERSION);
+        assert_ne!(version_of(&with_version("3.1.0")), CAMARA_OPENAPI_VERSION);
+        assert_ne!(version_of(&with_version("3.0.1")), CAMARA_OPENAPI_VERSION);
+        // Both drifts are nonetheless valid *members* of the OpenAPI 3 family, so the
+        // looser sibling check would not catch them — this is why the exact pin exists.
+        assert!(is_openapi_3_version("3.1.0") && is_openapi_3_version("3.0.1"));
+
+        // Non-vacuous corpus floor: across every mounted spec no `openapi:` version
+        // deviates from `3.0.3` (the invariant the contract test asserts).
+        let deviating: Vec<&str> = APIS
+            .iter()
+            .filter(|a| openapi_version(a.body).as_deref() != Some(CAMARA_OPENAPI_VERSION))
+            .map(|a| a.name)
+            .collect();
+        assert!(
+            deviating.is_empty(),
+            "these mounted specs declare a non-3.0.3 `openapi:` version: {deviating:?}"
+        );
+    }
+
     #[test]
     fn spec_server_url_matches_mounted_base_path() {
         // Contract-harness invariant (DESIGN §9): every vendored CAMARA spec
