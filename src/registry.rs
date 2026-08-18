@@ -1818,6 +1818,50 @@ mod tests {
         }
     }
 
+    /// Is `v` a well-formed CAMARA API version string?
+    ///
+    /// CAMARA Commonalities requires every API to carry a semantic version in
+    /// `info.version` (DESIGN §9): the literal `wip` for a work-in-progress spec,
+    /// or a three-part `MAJOR.MINOR.PATCH` — each part a non-empty run of ASCII
+    /// digits — optionally followed by a `-<pre-release>` suffix whose
+    /// dot-separated identifiers are each a non-empty run of `[0-9A-Za-z-]`
+    /// (`0.8.0-rc.1`, `1.0.0-alpha.1`). This is a pure *shape* check on the scalar;
+    /// it deliberately says nothing about which version a spec should carry — that
+    /// URL-agreement question is `url_version_agrees`'s.
+    fn is_camara_api_version(v: &str) -> bool {
+        if v == "wip" {
+            return true;
+        }
+        // Split off an optional pre-release: `X.Y.Z-<pre>`.
+        let (core, pre) = match v.split_once('-') {
+            Some((c, p)) => (c, Some(p)),
+            None => (v, None),
+        };
+        // The core MUST be exactly three dot-separated numeric identifiers.
+        let mut parts = 0usize;
+        for part in core.split('.') {
+            parts += 1;
+            if part.is_empty() || !part.bytes().all(|b| b.is_ascii_digit()) {
+                return false;
+            }
+        }
+        if parts != 3 {
+            return false;
+        }
+        // A pre-release, if present, is one or more non-empty dot-separated
+        // identifiers drawn from `[0-9A-Za-z-]`.
+        if let Some(pre) = pre {
+            for id in pre.split('.') {
+                if id.is_empty()
+                    || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+                {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
     /// Extract every path-template parameter name a spec declares in its `paths:`
     /// keys — the `{name}` tokens of a templated path like `/sessions/{sessionId}`
     /// — without a YAML dep.
@@ -3717,6 +3761,68 @@ mod tests {
                 iv
             );
         }
+    }
+
+    #[test]
+    fn every_info_version_is_a_well_formed_semver() {
+        // Contract-harness invariant (CAMARA Commonalities / DESIGN §9): every
+        // mounted spec's `info.version` MUST be a well-formed CAMARA API version —
+        // a three-part semantic version `MAJOR.MINOR.PATCH` (optionally with a
+        // `-<pre-release>` suffix), or the literal `wip` for a work-in-progress
+        // spec. CAMARA pins semantic versioning as the contract for how a caller
+        // reads an API's maturity and compatibility, and codegen/tooling parses the
+        // three-part form to derive package versions.
+        //
+        // This is the **shape-side complement** of
+        // `spec_info_version_matches_mounted_url_version`: that test proves the
+        // declared version *agrees* with the URL mount segment, but its agreement
+        // logic only asks whether the version `starts_with` the mount's major/minor
+        // prefix (or `contains` `alpha`/`rc`) — so a truncated `1.0`, an over-long
+        // `1.0.0.0`, or a non-numeric `0.4.x` would satisfy agreement for a `v1`
+        // /`v0.4` mount yet is not a valid semantic version a tool can parse. The
+        // presence test (`spec_info_version_matches_mounted_url_version` panics on a
+        // missing version) proves the field *exists*; neither reads whether its
+        // value is *shaped* like a semver. Verified true across all mounted specs
+        // before asserting.
+        for api in APIS {
+            let iv = info_version(api.body).unwrap_or_else(|| {
+                panic!("{} spec has no info.version", api.name)
+            });
+            assert!(
+                is_camara_api_version(&iv),
+                "{} spec declares info.version `{}` which is not a well-formed \
+                 CAMARA API version (semver MAJOR.MINOR.PATCH[-prerelease], or \
+                 `wip`)",
+                api.name,
+                iv
+            );
+        }
+    }
+
+    #[test]
+    fn camara_api_version_wellformedness_rules() {
+        // Unit-cover the `is_camara_api_version` helper so the contract test above
+        // can't pass vacuously and its shape rule is pinned.
+        // Valid: `wip`, plain three-part semvers, and pre-release forms.
+        for v in ["wip", "0.0.1", "1.0.0", "3.2.10", "0.8.0-rc.1", "1.0.0-alpha.1"] {
+            assert!(is_camara_api_version(v), "expected `{v}` to be well-formed");
+        }
+        // Invalid: two-part, four-part, non-numeric part, empty part, a leading
+        // `v`, an empty or malformed pre-release, wrong-case `wip`, and the empty
+        // string.
+        for v in [
+            "1.0", "1.0.0.0", "0.4.x", "1..0", "v1.0.0", "1.0.0-", "1.0.0-rc!1",
+            "WIP", "",
+        ] {
+            assert!(!is_camara_api_version(v), "expected `{v}` to be rejected");
+        }
+        // Corpus floor: many mounted specs each declare a well-formed version, so
+        // the contract test iterates a real, non-trivial set.
+        let n = APIS
+            .iter()
+            .filter(|a| info_version(a.body).is_some_and(|v| is_camara_api_version(&v)))
+            .count();
+        assert!(n >= 20, "expected many mounted specs with a well-formed info.version, got {n}");
     }
 
     #[test]

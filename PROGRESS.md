@@ -5160,6 +5160,28 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-18 — Contract-test harness: added an **info.version semver well-formedness** contract
+  test (`src/registry.rs` `every_info_version_is_a_well_formed_semver`) — every mounted spec's
+  `info.version` MUST be a well-formed CAMARA API version: a three-part `MAJOR.MINOR.PATCH`
+  (each part a non-empty digit run, optional `-<pre-release>` of dot-separated `[0-9A-Za-z-]`
+  identifiers), or the literal `wip`. The **shape-side complement** of
+  `spec_info_version_matches_mounted_url_version`, whose `url_version_agrees` only asks whether
+  the version `starts_with` the mount's major/minor prefix (or `contains` `alpha`/`rc`) — so a
+  truncated `1.0`, an over-long `1.0.0.0`, or a non-numeric `0.4.x` would satisfy agreement for a
+  `v1`/`v0.4` mount yet is not a semantic version any codegen/SBOM tool can parse; and the
+  presence check (that test panics on a missing version) proves the field *exists* but never
+  reads whether its value is *shaped* like a semver. New pure `is_camara_api_version` helper (no
+  YAML dep) reuses the existing `info_version` extractor for the scalar. **Scope is the mounted
+  business specs (`APIS`), matching the sibling version-agreement test.** **Surveyed the corpus
+  first: every mounted spec's info.version is either `wip` or a full three-part `X.Y.Z`
+  (`3.0.0`/`2.0.1`/`0.0.1`/…); no pre-release or truncated forms → 0 drift to fix.** Unit-covered
+  (`camara_api_version_wellformedness_rules`: `wip` + plain and pre-release semvers pass; two-part
+  `1.0`, four-part `1.0.0.0`, non-numeric `0.4.x`, empty part `1..0`, leading-`v`, empty/`!`-bearing
+  pre-release, wrong-case `WIP`, and `""` rejected; a ≥20 corpus floor). Test-side only — no
+  request/response/behaviour change, so no vendored-spec edits. `cargo test` 2707 green (was 2705;
+  +2); `cargo build --release` succeeds, no warnings. No new dependency; the helper and both tests
+  live in the `#[cfg(test)]` module, so nothing ships in the binary. — binary (release): 5.1M
+  (5,314,968 B; unchanged)
 - 2026-08-18 — Contract-test harness: added an **externalDocs-url well-formedness** contract
   test (`src/registry.rs` `every_external_docs_url_is_a_well_formed_uri`) — every `url` an
   `externalDocs` object declares MUST be a well-formed absolute URI. The **value-side
