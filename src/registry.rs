@@ -26165,6 +26165,258 @@ components:
         );
     }
 
+    /// Every **present, non-empty `url`** an External Documentation Object declares,
+    /// in document order, without a YAML dep — the value-extracting companion of
+    /// [`external_docs_objects_missing_url`] (which reports the *missing* ones by
+    /// line). An object whose `url` is absent or blank contributes nothing here (that
+    /// gap is the presence lint's concern), so the strings this yields are exactly the
+    /// url values the well-formedness contract test judges.
+    ///
+    /// Structural scan mirroring `external_docs_objects_missing_url`: the `externalDocs`
+    /// field's block child indent is scanned for a `url:` key, or its inline-flow
+    /// mapping (`externalDocs: { url: … }`) split on commas (a url's own `https:` colon
+    /// sits after the first `split_once(':')`, so it is read intact). An `externalDocs`
+    /// nested inside an outer `example:`/`examples:` payload is sample data and skipped.
+    fn external_docs_urls_present(body: &str) -> Vec<String> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let key_of = |l: &str| -> Option<(String, String)> {
+            let (k, v) = l.trim_start().split_once(':')?;
+            let v = v.split('#').next().unwrap_or(v).trim();
+            Some((k.trim().to_string(), v.to_string()))
+        };
+        // Strip one layer of matching surrounding quotes from a scalar url value.
+        let unquote = |v: &str| -> String {
+            let v = v.trim();
+            let b = v.as_bytes();
+            if b.len() >= 2 && (b[0] == b'"' || b[0] == b'\'') && b[b.len() - 1] == b[0] {
+                v[1..v.len() - 1].to_string()
+            } else {
+                v.to_string()
+            }
+        };
+        // True when `externalDocs:` at line `i` (indent `c`) sits inside an outer
+        // `example:`/`examples:` payload — sample data, not the OpenAPI field.
+        let inside_example_payload = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = key_of(l) {
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some((k, v)) = key_of(line) else {
+                continue;
+            };
+            if k != "externalDocs" {
+                continue;
+            }
+            let c = indent(line);
+            if inside_example_payload(i, c) {
+                continue;
+            }
+            let url = if !v.is_empty() {
+                // Inline-flow mapping: read the `url` member's value, if any.
+                let inner = v.trim_start_matches('{').trim_end_matches('}');
+                inner.split(',').find_map(|pair| {
+                    pair.split_once(':').and_then(|(pk, pv)| {
+                        (pk.trim() == "url").then(|| unquote(pv))
+                    })
+                })
+            } else {
+                // Block form: the object's own child indent's `url:` value.
+                let mut obj_child = None;
+                let mut found = None;
+                let mut m = i + 1;
+                while m < lines.len() {
+                    let ll = lines[m];
+                    if ll.trim().is_empty() {
+                        m += 1;
+                        continue;
+                    }
+                    let mi = indent(ll);
+                    if mi <= c {
+                        break; // dedented out of the externalDocs object
+                    }
+                    if obj_child.is_none() {
+                        obj_child = Some(mi);
+                    }
+                    if Some(mi) == obj_child {
+                        if let Some((kk, vv)) = key_of(ll) {
+                            if kk == "url" {
+                                found = Some(unquote(&vv));
+                                break;
+                            }
+                        }
+                    }
+                    m += 1;
+                }
+                found
+            };
+            if let Some(u) = url {
+                if !u.is_empty() {
+                    out.push(u);
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_external_docs_url_is_a_well_formed_uri() {
+        // Contract-harness invariant (the value-side complement of the OpenAPI
+        // External Documentation Object's `url` rule, §4.8.11.1): every `url` an
+        // `externalDocs` object declares MUST be a well-formed absolute URI.
+        // `every_external_docs_object_declares_a_url` already pins that the field is
+        // present and non-empty, but it never reads the value — so a "read more" link
+        // fat-fingered into a bare path (scheme dropped in a paste) or a placeholder
+        // (`TODO`) still passes it, yet renders a reference link a Redoc/Swagger
+        // `/docs` page (and a codegen client) binds as an href that points nowhere.
+        //
+        // The externalDocs analogue of `every_info_license_url_is_a_well_formed_uri`
+        // (the same complement over `info.license.url`) and of the `format: uri`
+        // example family: all assert a URI-typed string is a syntactically valid
+        // absolute URI, reusing the same shape-only `is_well_formed_absolute_uri`
+        // helper (RFC 3986: a scheme followed by `:`, no ASCII whitespace/controls).
+        // Scope mirrors the sibling presence lint exactly — the mounted business specs
+        // (`APIS`). Verified true across every mounted spec before asserting (all three
+        // externalDocs objects in the corpus point at the API's `github.com` project
+        // repository).
+        let mut checked = 0usize;
+        for api in APIS {
+            for url in external_docs_urls_present(api.body) {
+                assert!(
+                    is_well_formed_absolute_uri(&url),
+                    "{} spec declares an `externalDocs` url ({:?}) that is not a \
+                     well-formed absolute URI — the reference link its /docs page \
+                     renders points nowhere",
+                    api.name,
+                    url
+                );
+                checked += 1;
+            }
+        }
+        // Non-vacuous floor: the corpus declares External Documentation Objects (the
+        // presence lint pins each carries a url), so a value must have been inspected
+        // for all of them — a broken (always-empty) extractor can't hide behind it.
+        assert!(
+            checked >= 3,
+            "expected an externalDocs url in every declaring spec, only checked {checked}"
+        );
+    }
+
+    #[test]
+    fn external_docs_url_wellformedness_rules() {
+        // Pin the accept/reject boundary of `external_docs_urls_present` (feeding the
+        // well-formedness check) so the contract test above can't pass vacuously: a
+        // block `url` and an inline-flow `url` are both lifted; a scheme-dropped bare
+        // path and a placeholder — the two realistic drifts a fat-fingered `url:` line
+        // produces — are caught by `is_well_formed_absolute_uri`; an object with only a
+        // `description` (no url) and one whose `url` is blank contribute nothing (the
+        // presence lint's concern, never mis-read as an empty value here); and an
+        // `externalDocs` inside an `example:` payload (sample data) is skipped.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+externalDocs:
+  description: root docs
+  url: https://example.com/root
+paths:
+  /a:
+    get:
+      operationId: getA
+      externalDocs:
+        description: op docs, scheme dropped
+        url: www.example.com/a
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              example:
+                externalDocs:
+                  url: not a real field
+  /b:
+    get:
+      operationId: getB
+      externalDocs: { url: https://example.com/b }
+      responses:
+        '204':
+          description: no content
+components:
+  schemas:
+    S:
+      type: object
+      externalDocs:
+        url: TODO
+    T:
+      type: object
+      externalDocs: { description: flow, no url }
+    U:
+      type: object
+      externalDocs:
+        url: ''
+";
+        // Lifted, in document order: the root url, the scheme-dropped `/a` url, the
+        // inline-flow `/b` url, and the `S` placeholder. NOT lifted: the externalDocs
+        // inside the `example:` payload (sample data), the inline-flow `T` (names no
+        // url), and `U`'s blank `url: ''`.
+        assert_eq!(
+            external_docs_urls_present(body),
+            vec![
+                "https://example.com/root".to_string(),
+                "www.example.com/a".to_string(),
+                "https://example.com/b".to_string(),
+                "TODO".to_string(),
+            ]
+        );
+        // The shape helper judges each: schemed urls pass, the drifts fail.
+        assert!(is_well_formed_absolute_uri("https://example.com/root"));
+        assert!(is_well_formed_absolute_uri("https://example.com/b"));
+        assert!(!is_well_formed_absolute_uri("www.example.com/a")); // no scheme
+        assert!(!is_well_formed_absolute_uri("TODO")); // not a URI
+
+        // Non-vacuous corpus floor: across every registered spec no externalDocs url
+        // is malformed (the invariant the contract test asserts), and the corpus does
+        // declare such urls — so the well-formedness path runs on real data.
+        let mut corpus_urls = 0usize;
+        for api in APIS {
+            for url in external_docs_urls_present(api.body) {
+                assert!(
+                    is_well_formed_absolute_uri(&url),
+                    "{}: externalDocs url {:?} is malformed",
+                    api.name,
+                    url
+                );
+                corpus_urls += 1;
+            }
+        }
+        assert!(
+            corpus_urls >= 3,
+            "expected externalDocs urls across specs, got {corpus_urls}"
+        );
+    }
+
     /// The `METHOD /path -> <tag>` label of every **operation tag reference** a
     /// mounted spec declares that is not declared in the document's top-level
     /// `tags` list — without a YAML dep.

@@ -5136,6 +5136,23 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     floor). Verified true across all mounted specs (3 root-level externalDocs —
     sponsored-data, iot-sim-fraud-prevention, network-traffic-analysis — all with a
     url; no drift to fix).
+  - an externalDocs-url well-formedness contract test (`src/registry.rs`
+    `every_external_docs_url_is_a_well_formed_uri`) asserts every `url` an
+    `externalDocs` object declares is a well-formed absolute URI — the **value-side
+    complement** of `every_external_docs_object_declares_a_url`, which pins the url's
+    presence/non-emptiness but never reads the value, so a "read more" link
+    fat-fingered into a bare path (scheme dropped) or a placeholder (`TODO`) sails past
+    it yet renders a reference link that points nowhere. The externalDocs analogue of
+    `every_info_license_url_is_a_well_formed_uri`, reusing the same shape-only
+    `is_well_formed_absolute_uri` helper (RFC 3986). New pure `external_docs_urls_present`
+    extractor (no YAML dep) mirrors `external_docs_objects_missing_url`'s block/inline-flow
+    scan + `example:`-payload skip, but *lifts* each present url value (a blank/absent url
+    contributes nothing — the presence lint's concern). Scope mirrors the presence lint
+    (mounted business specs, `APIS`), ≥3 non-vacuous floor. Unit-covered
+    (`external_docs_url_wellformedness_rules`: block + inline-flow urls lifted, scheme-dropped
+    + placeholder caught, no-url/blank-url/example-payload contributing nothing; corpus floor).
+    Surveyed the corpus first (all 3 externalDocs urls are `https://github.com/camaraproject/…`
+    project-repo links) → 0 drift.
   Full response-vs-schema validation still TODO (would need a YAML/JSON-Schema
   validator — a dependency trade-off, deferred).
 
@@ -5143,6 +5160,34 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-18 — Contract-test harness: added an **externalDocs-url well-formedness** contract
+  test (`src/registry.rs` `every_external_docs_url_is_a_well_formed_uri`) — every `url` an
+  `externalDocs` object declares MUST be a well-formed absolute URI. The **value-side
+  complement** of `every_external_docs_object_declares_a_url`, which pins the External
+  Documentation Object's one REQUIRED field is present and non-empty but never reads the
+  value — so a "read more" reference link fat-fingered into a bare path (scheme dropped in a
+  paste) or a placeholder (`TODO`) sails past it, yet the Redoc/Swagger `/docs` page the
+  simulator serves renders an href pointing nowhere, exactly where a caller looks for the
+  API's upstream docs. The externalDocs analogue of
+  `every_info_license_url_is_a_well_formed_uri` (the same complement over `info.license.url`)
+  and of the `format: uri` example family — all reuse the shape-only
+  `is_well_formed_absolute_uri` helper (RFC 3986: a scheme then `:`, no ASCII whitespace/
+  controls). New pure `external_docs_urls_present` extractor (no YAML dep) mirrors
+  `external_docs_objects_missing_url`'s block-child-indent / inline-flow (`{ url: … }`) scan
+  and `example:`/`examples:`-payload ancestor skip, but *lifts* each present, non-empty url
+  string (a blank/absent url contributes nothing — that gap is the presence lint's concern,
+  never mis-read as an empty value here). **Scope mirrors the sibling presence lint — the
+  mounted business specs (`APIS`).** Unit-covered (`external_docs_url_wellformedness_rules`:
+  a block url and an inline-flow url lifted; a scheme-dropped bare path and a `TODO`
+  placeholder caught by the shape helper; a description-only object, a blank `url: ''`, and an
+  `externalDocs` inside an `example:` payload each contribute nothing; a ≥3 corpus floor).
+  **Surveyed the corpus first: all 3 externalDocs objects (sponsored-data /
+  iot-sim-fraud-prevention / network-traffic-analysis) point at their
+  `https://github.com/camaraproject/…` project repository → 0 drift to fix.** Test-side only
+  — no request/response/behaviour change, so no vendored-spec edits. `cargo test` 2705 green
+  (was 2703; +2); `cargo build --release` succeeds, no warnings. No new dependency; the
+  extractor and both tests live in the `#[cfg(test)]` module, so nothing ships in the binary.
+  — binary (release): 5.1M (5,314,968 B; unchanged)
 - 2026-08-18 — Contract-test harness: added an **operation-security-presence** contract test
   (`src/registry.rs` `every_operation_declares_a_security_requirement`) — every operation a
   mounted **business** spec declares MUST be authenticated: it carries its own non-empty
