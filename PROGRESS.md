@@ -5261,6 +5261,31 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-18 — Contract-test harness: added a **per-operation functional-cases** contract
+  test (`src/registry.rs` `every_operation_declares_an_x_camarasim_scenarios_block`) — every
+  operation a mounted spec declares MUST carry its **own** `x-camarasim-scenarios` block, the
+  structured record of how that operation's input drives its output (DESIGN §7/§9). The
+  per-operation complement of `every_spec_documents_functional_cases`, which asserts only that a
+  spec declares *at least one* block *anywhere* — a spec with N operations passes it with a single
+  block, leaving the other N−1 operations' behaviour undocumented in the served spec; and the
+  block-shape trio (`every_scenario_block_is_well_formed` / `…case_documents_a_non_empty_value` /
+  `…block_declares_a_non_empty_description`) only inspects blocks that *are* present, never whether
+  an operation has one at all. So an operation drafted from a sibling whose scenarios block was
+  dropped/dedented serves with no functional-case record yet passes every existing
+  scenarios/identity/wiring test. New pure `operations_without_scenarios_block` extractor (no YAML
+  dep) clones `operations_without_summary`/`operations_without_description`'s path-item/method
+  scoping (a 4-space HTTP-verb key under a 2-space `/…` path item beneath `paths:`) and scans the
+  operation's 6-space block for an `x-camarasim-scenarios:` key at exactly that child indent — a
+  block nested deeper (a Response Object's 10-space key) never counts, and an HTTP verb used as a
+  schema property under `components` is not an operation. **Surveyed the corpus first: 168
+  operations, 168 scenarios blocks, 1:1 across every mounted spec → 0 drift.** Non-vacuity from the
+  unit test (`operations_without_scenarios_block_extraction_rules`: an operation-level block passes;
+  an operation with none, and one whose only block sits at 10-space inside a Response Object, are
+  each flagged in document order; the `get`/`x-camarasim-scenarios` schema properties are skipped;
+  ≥100-operation floor via `operation_ids`). Test-side only — no request/response/behaviour change,
+  so no vendored-spec edits. `cargo test` 2740 green (was 2738; +2); `cargo build --release`
+  succeeds. No new dependency; the extractor and both tests live in the `#[cfg(test)]` module, so
+  nothing ships in the binary. — binary (release): 5.1M (5,323,160 B; unchanged)
 - 2026-08-18 — Contract-test harness: added an **exact-OpenAPI-version** contract test
   (`src/registry.rs` `every_spec_pins_the_camara_openapi_3_0_3_version`) — every mounted spec's
   root `openapi:` version must be exactly `3.0.3`, the single patch CAMARA Commonalities pins its

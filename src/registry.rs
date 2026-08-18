@@ -3270,6 +3270,86 @@ mod tests {
         out
     }
 
+    /// The `METHOD /path` label of every operation a spec declares that carries
+    /// no `x-camarasim-scenarios` block — without a YAML dep.
+    ///
+    /// DESIGN §7/§9: every CamaraSim operation is driven by its input (the
+    /// reserved-identifier convention + per-parameter control planes), and that
+    /// behaviour is documented in the spec as a structured `x-camarasim-scenarios`
+    /// block on the operation itself — the machine-readable record of what the
+    /// server does per input. `every_spec_documents_functional_cases` only proves a
+    /// spec declares *at least one* such block anywhere; a multi-operation spec can
+    /// satisfy it while a second, third, … operation carries none — exactly the
+    /// drift a sibling-operation copy-paste introduces when the pasted block is
+    /// dropped or dedented. This is the per-operation presence complement, mirroring
+    /// [`operations_without_summary`]/[`operations_without_description`]'s
+    /// path-item/method scoping: a 4-space HTTP-verb key under a 2-space `/…` path
+    /// item beneath the top-level `paths:` block, whose 6-space block is scanned for
+    /// an `x-camarasim-scenarios:` key at exactly the operation's own child indent
+    /// (6). Matching at 6 means an `x-camarasim-scenarios` nested deeper (inside a
+    /// Response Object, say) never satisfies the operation, and an HTTP verb used as
+    /// a schema property name under `components` is not an operation (its block never
+    /// sits under `paths:`).
+    fn operations_without_scenarios_block(body: &str) -> Vec<String> {
+        const METHODS: [&str; 8] =
+            ["get", "put", "post", "delete", "patch", "options", "head", "trace"];
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let mut out = Vec::new();
+        let mut in_paths = false;
+        let mut path: Option<String> = None;
+        for (i, line) in lines.iter().enumerate() {
+            let is_top_level_key =
+                !line.is_empty() && !line.starts_with(char::is_whitespace);
+            if is_top_level_key {
+                in_paths = line.trim_end() == "paths:";
+                path = None;
+                continue;
+            }
+            if !in_paths {
+                continue;
+            }
+            if let Some(rest) = line.strip_prefix("  ") {
+                if !rest.starts_with(char::is_whitespace) && rest.starts_with('/') {
+                    let key = rest.trim_end().strip_suffix(':').unwrap_or(rest.trim_end());
+                    path = Some(key.to_string());
+                    continue;
+                }
+            }
+            let Some(current_path) = path.as_deref() else { continue };
+            if indent(line) != 4 {
+                continue;
+            }
+            let key = line.trim_start();
+            let Some(name) = key.strip_suffix(':') else { continue };
+            if name.contains(char::is_whitespace) || !METHODS.contains(&name) {
+                continue;
+            }
+            // Scan the operation's block for a 6-space `x-camarasim-scenarios:` key
+            // (a block-opening mapping key, so match on the key name before the colon).
+            let mut has_scenarios = false;
+            for l in &lines[i + 1..] {
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) <= 4 {
+                    break; // dedented out of this operation
+                }
+                if indent(l) == 6
+                    && l.trim_start().split_once(':').map(|(k, _)| k)
+                        == Some("x-camarasim-scenarios")
+                {
+                    has_scenarios = true;
+                    break;
+                }
+            }
+            if !has_scenarios {
+                out.push(format!("{} {}", name.to_uppercase(), current_path));
+            }
+        }
+        out
+    }
+
     /// The `METHOD /path <status>` label of every **response entry** a spec
     /// declares whose Response Object carries neither a `description` nor a
     /// `$ref` — without a YAML dep.
@@ -8122,6 +8202,113 @@ components:
             assert!(
                 operations_without_description(api.body).is_empty(),
                 "{}: every operation must declare a `description`",
+                api.name
+            );
+            total_ops += operation_ids(api.body).len();
+        }
+        assert!(total_ops >= 100, "expected many operations across specs, got {total_ops}");
+    }
+
+    #[test]
+    fn every_operation_declares_an_x_camarasim_scenarios_block() {
+        // Contract-harness invariant (DESIGN §7, §9): every operation a mounted spec
+        // declares documents its parameter-driven functional cases in its *own*
+        // `x-camarasim-scenarios` block — the structured, machine-readable record of
+        // how that operation's input drives its output (the reserved-identifier
+        // convention + per-parameter control planes the simulator implements).
+        //
+        // This is the per-operation complement of `every_spec_documents_functional_cases`,
+        // which asserts only that a spec declares *at least one* scenarios block
+        // anywhere: a spec with N operations passes it with a single block, leaving
+        // the other N-1 operations' behaviour undocumented in the served spec. The
+        // block-shape trio (`every_scenario_block_is_well_formed`,
+        // `every_scenario_case_documents_a_non_empty_value`,
+        // `every_scenario_block_declares_a_non_empty_description`) then inspects the
+        // blocks that *are* present but never asks whether an operation has one at
+        // all. So an operation drafted from a sibling whose scenarios block was
+        // dropped or dedented serves with no functional-case record yet passes every
+        // existing scenarios/identity/wiring test. Mirrors the operation-presence
+        // twins for `summary`/`description`. Verified true across all mounted specs
+        // (every operation carries a block) before asserting.
+        for api in APIS {
+            let missing = operations_without_scenarios_block(api.body);
+            assert!(
+                missing.is_empty(),
+                "{} spec has operation(s) with no `x-camarasim-scenarios` block \
+                 (every CamaraSim operation documents its parameter-driven functional \
+                 cases on the operation itself — DESIGN §7, §9): {:?}",
+                api.name,
+                missing
+            );
+        }
+    }
+
+    #[test]
+    fn operations_without_scenarios_block_extraction_rules() {
+        // Unit-cover the `operations_without_scenarios_block` extractor so the
+        // contract test above can't pass vacuously and its scoping/indentation rules
+        // are pinned: a `x-camarasim-scenarios:` block is credited only to the
+        // operation whose 6-space block it sits in; a block nested deeper (a Response
+        // Object's 10-space key) does not count; and an HTTP verb used as a schema
+        // property name is not an operation.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+      x-camarasim-scenarios:
+        description: keyed on the identifier
+        cases:
+          - input: happy path
+            result: \"200\"
+    post:
+      operationId: postA
+      responses:
+        '201':
+          description: created
+  /b/{id}:
+    delete:
+      operationId: deleteB
+      responses:
+        '204':
+          description: gone
+          x-camarasim-scenarios: not-an-operation-block
+components:
+  schemas:
+    Widget:
+      type: object
+      properties:
+        get:
+          type: string
+        x-camarasim-scenarios:
+          type: string
+";
+        // `GET /a` declares an operation-level (6-space) scenarios block → present.
+        // `POST /a` has none → flagged. `DELETE /b/{id}`'s only `x-camarasim-scenarios`
+        // sits at 10-space inside a Response Object, not the operation's 6-space child
+        // level, so it does not count → flagged. The `get` and `x-camarasim-scenarios`
+        // schema *properties* under `components` are not operations.
+        assert_eq!(
+            operations_without_scenarios_block(body),
+            vec!["POST /a".to_string(), "DELETE /b/{id}".to_string()]
+        );
+
+        // Non-vacuous floor: across every registered spec, no operation is missing its
+        // `x-camarasim-scenarios` block (the invariant the contract test asserts), and
+        // the extractor sees a non-trivial number of operations overall, so a broken
+        // extractor can't hide behind an empty scan.
+        let mut total_ops = 0usize;
+        for api in APIS {
+            assert!(
+                operations_without_scenarios_block(api.body).is_empty(),
+                "{}: every operation must declare an `x-camarasim-scenarios` block",
                 api.name
             );
             total_ops += operation_ids(api.body).len();
