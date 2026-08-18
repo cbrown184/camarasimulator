@@ -86,11 +86,21 @@ components:
           type: string
           description: Human-readable explanation.
 
+  headers:
+    XCorrelator:
+      description: The `x-correlator` from the request, echoed if one was sent.
+      required: false
+      schema:
+        type: string
+
   responses:
     # Reusable responses for the standard CAMARA statuses. Each is selectable via
     # the reserved-identifier convention above.
     InvalidArgument:
       description: 400 — invalid argument, request body, or query parameter.
+      headers:
+        x-correlator:
+          $ref: "#/components/headers/XCorrelator"
       content:
         application/json:
           schema:
@@ -101,6 +111,9 @@ components:
             message: Client specified an invalid argument, request body or query param.
     Unauthenticated:
       description: 401 — missing, invalid, or expired credentials.
+      headers:
+        x-correlator:
+          $ref: "#/components/headers/XCorrelator"
       content:
         application/json:
           schema:
@@ -111,6 +124,9 @@ components:
             message: Request not authenticated due to missing, invalid, or expired credentials.
     PermissionDenied:
       description: 403 — insufficient permissions for this action.
+      headers:
+        x-correlator:
+          $ref: "#/components/headers/XCorrelator"
       content:
         application/json:
           schema:
@@ -121,6 +137,9 @@ components:
             message: Client does not have sufficient permissions to perform this action.
     NotFound:
       description: 404 — the specified resource is not found.
+      headers:
+        x-correlator:
+          $ref: "#/components/headers/XCorrelator"
       content:
         application/json:
           schema:
@@ -131,6 +150,9 @@ components:
             message: The specified resource is not found.
     Conflict:
       description: 409 — conflict with the current state of the target resource.
+      headers:
+        x-correlator:
+          $ref: "#/components/headers/XCorrelator"
       content:
         application/json:
           schema:
@@ -141,6 +163,9 @@ components:
             message: A specified resource duplicate entry found.
     ServiceNotApplicable:
       description: 422 — the service is not available for the provided identifier.
+      headers:
+        x-correlator:
+          $ref: "#/components/headers/XCorrelator"
       content:
         application/json:
           schema:
@@ -151,6 +176,9 @@ components:
             message: The service is not available for the provided identifier.
     TooManyRequests:
       description: 429 — rate limit reached.
+      headers:
+        x-correlator:
+          $ref: "#/components/headers/XCorrelator"
       content:
         application/json:
           schema:
@@ -161,6 +189,9 @@ components:
             message: Rate limit reached.
     Internal:
       description: 500 — unknown server error.
+      headers:
+        x-correlator:
+          $ref: "#/components/headers/XCorrelator"
       content:
         application/json:
           schema:
@@ -171,6 +202,9 @@ components:
             message: Unknown server error. Typically a server bug.
     Unavailable:
       description: 503 — service unavailable.
+      headers:
+        x-correlator:
+          $ref: "#/components/headers/XCorrelator"
       content:
         application/json:
           schema:

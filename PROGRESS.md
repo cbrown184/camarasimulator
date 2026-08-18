@@ -5215,6 +5215,32 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-18 — Spec accuracy + contract test: **documented the `x-correlator` response header on
+  the shared CAMARA error responses** (`specs/shared/errors.yaml`). CamaraSim echoes `x-correlator`
+  on **every** response it serves — success *and* error alike — but the shared error model, which
+  the overwhelming majority of each business spec's `4XX`/`5XX` responses reach via a
+  `$ref` into `#/components/responses/*`, declared the header on *none* of its 9 canonical responses.
+  This was real spec↔behaviour drift, and it silently undercut the success-response test's own
+  documented exemption: `served_success_responses_missing_x_correlator` skips a `$ref`'d response
+  *because* it "inherits the header from the referenced shared component (the `4XX`/`5XX`
+  `errors.yaml` responses declare it once)" — a premise that was false until now. Fix: added a
+  reusable `components.headers.XCorrelator` header (mirroring every per-spec `headers.XCorrelator`)
+  and a `headers: { x-correlator: $ref … }` block to all 9 responses (InvalidArgument /
+  Unauthenticated / PermissionDenied / NotFound / Conflict / ServiceNotApplicable / TooManyRequests
+  / Internal / Unavailable). New contract test `every_shared_error_response_declares_an_x_correlator_header`
+  (+ pure, YAML-dep-free `shared_error_responses_missing_x_correlator` extractor that scans
+  `components.responses` and counts a header only when its enclosing key is `headers:`, so an
+  `x-correlator` inside an `example:` payload never miscounts; + unit test
+  `shared_error_x_correlator_extraction_rules` pinning pass/flag/`$ref`-exempt cases and a ≥9-response
+  corpus floor). Updated `component_pointer_extraction_rules` (shared components 10 → 11 for the new
+  header). Spec: `specs/shared/errors.yaml` (request/response contract change — the served
+  `/shared/errors.yaml` now documents the header). Tests: +2 (`cargo test` 2729 green, was 2727).
+  `cargo build --release` succeeds. No new dependency. **Follow-up (documented gap):** ~79 *inline*
+  `4XX`/`5XX` error responses across the business specs (those not `$ref`'d to the shared model, e.g.
+  kyc-tenure's inline `400`/`422`) still omit the header — a future per-spec remediation pass, after
+  which a corpus-wide `every_error_response_declares_an_x_correlator_header` twin of the success test
+  can land green. — binary (release): 5.1M (5,314,968 B; unchanged — the added `include_str!` rodata
+  is absorbed within existing section padding)
 - 2026-08-18 — Contract-test harness: added a **string-length default-bound** contract test
   (`src/registry.rs` `every_default_respects_its_string_length_bounds`) — where a Schema Object
   declares a quoted-string `default` beside a `minLength`/`maxLength`, the default's character

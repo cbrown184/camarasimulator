@@ -5628,6 +5628,204 @@ paths: {}
         }
     }
 
+    /// The names of the reusable error responses in the shared error model
+    /// (`shared/errors.yaml#/components/responses/*`) that do **not** document an
+    /// `x-correlator` response header — pure and YAML-dep-free.
+    ///
+    /// Scans the top-level `components:` block for its `responses:` map (indent 2),
+    /// then each response-object name key (indent 4, a block opener), and reports a
+    /// response whose block carries neither an `x-correlator:` header key nor a
+    /// whole-response `$ref` (which would inherit the header from elsewhere). A
+    /// response name is returned once, by name, in document order.
+    fn shared_error_responses_missing_x_correlator(body: &str) -> Vec<String> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let mut out = Vec::new();
+        // Top-level `components:` block bounds.
+        let Some(cs) = lines
+            .iter()
+            .position(|l| l.trim_end() == "components:" && !l.starts_with(char::is_whitespace))
+        else {
+            return out;
+        };
+        let ce = (cs + 1..lines.len())
+            .find(|&i| !lines[i].trim().is_empty() && !lines[i].starts_with(char::is_whitespace))
+            .unwrap_or(lines.len());
+        // The `responses:` key at indent 2 inside components.
+        let Some(rs) = (cs + 1..ce).find(|&i| indent(lines[i]) == 2 && lines[i].trim() == "responses:")
+        else {
+            return out;
+        };
+        // Its block ends at the next non-blank line indented back to <= 2.
+        let re = (rs + 1..ce)
+            .find(|&i| !lines[i].trim().is_empty() && indent(lines[i]) <= 2)
+            .unwrap_or(ce);
+        let mut i = rs + 1;
+        while i < re {
+            let l = lines[i];
+            // Each response name is a `Name:` block opener at indent 4.
+            if l.trim().is_empty() || indent(l) != 4 || l.trim_start().starts_with('#') {
+                i += 1;
+                continue;
+            }
+            let Some(name) = l.trim().strip_suffix(':') else {
+                i += 1;
+                continue;
+            };
+            let name = name.trim_matches(|c| c == '"' || c == '\'');
+            // Response block: lines after the key with indent > 4, until a dedent to <= 4.
+            let mut has_correlator = false;
+            let mut direct_ref = false;
+            let mut child_indent = None;
+            let mut j = i + 1;
+            while j < re {
+                let m = lines[j];
+                if m.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(m) <= 4 {
+                    break;
+                }
+                let child = *child_indent.get_or_insert(indent(m));
+                let t = m.trim_start();
+                if indent(m) == child && t.starts_with("$ref:") {
+                    direct_ref = true;
+                }
+                // An `x-correlator:` counts only as a response header — its nearest
+                // enclosing key (the first line above it at a strictly smaller indent)
+                // must be `headers:`. This rejects an `x-correlator` appearing as data
+                // inside an `example:`/`examples:` payload.
+                if t.starts_with("x-correlator:") {
+                    let mut k = j;
+                    while k > i + 1 {
+                        k -= 1;
+                        if lines[k].trim().is_empty() {
+                            continue;
+                        }
+                        if indent(lines[k]) < indent(m) {
+                            if lines[k].trim() == "headers:" {
+                                has_correlator = true;
+                            }
+                            break;
+                        }
+                    }
+                }
+                j += 1;
+            }
+            if !has_correlator && !direct_ref {
+                out.push(name.to_string());
+            }
+            i = j; // advance past this response's block
+        }
+        out
+    }
+
+    #[test]
+    fn every_shared_error_response_declares_an_x_correlator_header() {
+        // Contract-harness invariant (CAMARA Commonalities): every reusable error
+        // response the shared error model defines
+        // (`shared/errors.yaml#/components/responses/*`) MUST document the
+        // `x-correlator` response header. CamaraSim echoes `x-correlator` on every
+        // response it serves — success AND error alike — so a shared error response
+        // that omits the header under-states the wire contract for the whole corpus at
+        // once: the overwhelming majority of each business spec's `4XX`/`5XX`
+        // responses are a `$ref` into this fragment, and
+        // `served_success_responses_missing_x_correlator` exempts a `$ref`'d response
+        // precisely *because* it inherits the header "from the referenced shared
+        // component (the `4XX`/`5XX` `errors.yaml` responses declare it once)". This
+        // test is what makes that exemption's premise true and keeps it true: without
+        // it, every `$ref`'d error response silently drops a header the server always
+        // sends, and no existing test looks inside the shared fragment's responses for
+        // the header (`shared_error_refs_resolve_to_defined_components` only checks the
+        // pointers *into* the fragment resolve, never what those responses declare).
+        const SHARED_ERRORS: &str = include_str!("../specs/shared/errors.yaml");
+        let missing = shared_error_responses_missing_x_correlator(SHARED_ERRORS);
+        assert!(
+            missing.is_empty(),
+            "shared/errors.yaml defines error response(s) with no `x-correlator` \
+             response header: {missing:?}"
+        );
+        // Non-vacuous floor: the fragment defines the full canonical CAMARA response
+        // set, so the extractor's per-response header scan runs on real data and a
+        // broken (always-empty) extractor can't hide behind a fragment that declares
+        // none. Count response-name keys at indent 4 under `responses:` independently.
+        let lines: Vec<&str> = SHARED_ERRORS.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let rs = lines
+            .iter()
+            .position(|l| indent(l) == 2 && l.trim() == "responses:")
+            .expect("shared/errors.yaml declares a components.responses map");
+        let re = (rs + 1..lines.len())
+            .find(|&i| !lines[i].trim().is_empty() && indent(lines[i]) <= 2)
+            .unwrap_or(lines.len());
+        let responses = (rs + 1..re)
+            .filter(|&i| {
+                let l = lines[i];
+                indent(l) == 4
+                    && !l.trim_start().starts_with('#')
+                    && l.trim().strip_suffix(':').is_some()
+            })
+            .count();
+        assert!(
+            responses >= 9,
+            "expected the shared error model to define the ≥9 canonical CAMARA error \
+             responses, got {responses}"
+        );
+    }
+
+    #[test]
+    fn shared_error_x_correlator_extraction_rules() {
+        // Unit-cover `shared_error_responses_missing_x_correlator` so the contract
+        // test above can't pass vacuously: a response documenting the header passes, a
+        // response omitting it is flagged by name, and a whole-response `$ref` (which
+        // inherits the header) is exempt. A comment line and a deeper-nested
+        // `x-correlator` mention inside an example payload are handled correctly.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths: {}
+components:
+  headers:
+    XCorrelator:
+      schema:
+        type: string
+  responses:
+    # a comment line, not a response
+    HasHeader:
+      description: ok
+      headers:
+        x-correlator:
+          $ref: \"#/components/headers/XCorrelator\"
+      content:
+        application/json:
+          schema:
+            type: object
+    NoHeader:
+      description: missing
+      content:
+        application/json:
+          schema:
+            type: object
+          example:
+            x-correlator: not-a-header-here
+    RefResponse:
+      $ref: \"#/components/responses/HasHeader\"
+";
+        assert_eq!(
+            shared_error_responses_missing_x_correlator(body),
+            vec!["NoHeader".to_string()]
+        );
+
+        // Non-vacuity floor against the real fragment: it declares the header on
+        // every response, so the extractor returns nothing but the corpus scan in the
+        // contract test is exercised on genuine content.
+        const SHARED_ERRORS: &str = include_str!("../specs/shared/errors.yaml");
+        assert!(shared_error_responses_missing_x_correlator(SHARED_ERRORS).is_empty());
+    }
+
     #[test]
     fn shared_auth_refs_resolve_to_defined_components() {
         // Contract-harness invariant (DESIGN §8/§9 + `apis::openapi` serving): a
@@ -5876,9 +6074,10 @@ paths: {}
         assert_eq!(ptrs.len(), 2, "extracted {ptrs:?}");
         // A body with no `components:` block yields nothing.
         assert!(component_pointers("openapi: 3.0.3\npaths: {}\n").is_empty());
-        // The real shared fragment defines the CamaraError schema + 9 responses.
+        // The real shared fragment defines the CamaraError schema, the XCorrelator
+        // response header, and 9 error responses.
         let shared = component_pointers(include_str!("../specs/shared/errors.yaml"));
-        assert_eq!(shared.len(), 10, "shared components: {shared:?}");
+        assert_eq!(shared.len(), 11, "shared components: {shared:?}");
     }
 
     #[test]
