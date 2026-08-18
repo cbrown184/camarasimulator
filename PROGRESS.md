@@ -3332,6 +3332,22 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - a served-success-response x-correlator contract test (`src/registry.rs`
+    `every_served_success_response_declares_an_x_correlator_header`) asserts every **served**
+    inline success (`2XX`) response a mounted business spec declares documents the `x-correlator`
+    response header — the CAMARA Commonalities convention CamaraSim honours at runtime (every
+    handler echoes `x-correlator`), so a success response omitting it under-states the wire
+    contract. The single most pervasive CAMARA response convention, left unread by every existing
+    responses test (`operations_without_success_response` proves a `2XX` exists,
+    `responses_missing_description` its description, `response_status_keys_invalid` a valid status).
+    New pure `served_success_responses_missing_x_correlator` extractor (no YAML dep): a `2XX`
+    block-opener whose ancestor chain includes `responses:` but **not** `callbacks:` — a callback's
+    `204` `Notification received.` ack is the *sink's* response, not one the simulator serves, so
+    CAMARA puts no x-correlator on it (the substantive scoping); `example:`/`examples:` payloads
+    and whole-response `$ref`s (inherit the header) excluded. Scope is `APIS`; `auth/openapi.yaml`
+    excluded (OAuth endpoints follow RFC 6749/8414). Surveyed the corpus first: all 169 served
+    inline `2XX` responses carry the header; only the 10 callback-ack `204`s omit it (correctly) →
+    0 drift. Unit-covered (`x_correlator_response_header_extraction_rules`), ≥100 header-key floor.
   - an operation-security-presence contract test (`src/registry.rs`
     `every_operation_declares_a_security_requirement`) asserts every operation a mounted
     **business** spec declares is authenticated — its own non-empty `security` requirement, or
@@ -5160,6 +5176,37 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-18 — Contract-test harness: added a **served-success-response x-correlator** contract
+  test (`src/registry.rs` `every_served_success_response_declares_an_x_correlator_header`) — every
+  **served** inline success (`2XX`) response a mounted business spec declares MUST document the
+  `x-correlator` response header. CamaraSim echoes `x-correlator` on every response it serves, so a
+  `2XX` omitting it from its `headers:` block under-states the wire contract (a codegen/Redoc client
+  models a response missing a header the server always sends). The single most pervasive CAMARA
+  Commonalities response convention, yet unread by every existing responses test:
+  `operations_without_success_response` proves a `2XX` *exists*, `responses_missing_description` its
+  *description*, `response_status_keys_invalid` a *valid status* — none inspects the `headers:`
+  block. New pure `served_success_responses_missing_x_correlator` extractor (no YAML dep): isolates
+  the top-level `paths:` block, then for each `2XX` block-opener key walks the ancestor chain (the
+  nearest key at each strictly-smaller indent) — a `responses:` ancestor confirms a real Response
+  Object (not a schema property named `'200'`), while a `callbacks:` ancestor takes it out of scope.
+  **The substantive scoping**: a callback's `204` (its `Notification received.` acknowledgement) is
+  the *sink's* response to the simulator, not one the simulator serves, so CAMARA puts no
+  x-correlator on it — the `callbacks:` subtree is excluded, as are `example:`/`examples:` payloads
+  and whole-response `$ref`s (which inherit the header from the shared component). Presence requires
+  an `x-correlator:` *key* line, so a prose mention of `` `x-correlator` `` in a `description:`
+  never counts. Scope is the mounted business specs (`APIS`); `auth/openapi.yaml` excluded — its
+  OAuth server endpoints follow RFC 6749/8414, not the x-correlator convention (the same carve-out
+  as `every_operation_declares_a_security_requirement`). **Surveyed the corpus first: all 169 served
+  inline `2XX` responses carry the header; the only 10 inline `2XX` without it are callback-ack
+  `204`s across 6 specs (carrier-billing ×5, click-to-dial, geofencing-subscriptions,
+  qos-provisioning, quality-on-demand, sponsored-data), correctly excluded → 0 drift to fix.**
+  Unit-covered (`x_correlator_response_header_extraction_rules`: a header-bearing `200` passes; a
+  bare `204` flagged; a whole-response `$ref` `201`, an `examples:`-payload `204`, and a callback
+  `204` each skipped; a ≥100 header-key corpus floor via an independent counter). Test-side only —
+  no request/response/behaviour change, so no vendored-spec edits. `cargo test` 2711 green (was
+  2709; +2); `cargo build --release` succeeds, no warnings. No new dependency; the extractor and
+  both tests live in the `#[cfg(test)]` module, so nothing ships in the binary. — binary (release):
+  5.1M (5,314,968 B; unchanged)
 - 2026-08-18 — Contract-test harness: added an **unreferenced server-variable** contract test
   (`src/registry.rs` `every_declared_server_variable_is_referenced_by_the_url`) — every Server
   Variable a mounted spec declares under `servers[].variables:` MUST be referenced by a `{name}`

@@ -3230,6 +3230,139 @@ mod tests {
         out
     }
 
+    /// The 1-based line numbers of every **served** inline success (`2XX`) response a
+    /// mounted spec declares under `paths:` that does not document an `x-correlator`
+    /// response header.
+    ///
+    /// CAMARA Commonalities requires every response a CAMARA API returns to echo the
+    /// caller's `x-correlator` — CamaraSim honours this at runtime (every handler sets
+    /// `x-correlator` on its response, success and error alike), so the vendored spec
+    /// MUST document the header on each success response, or a Redoc/Swagger/codegen
+    /// client models a response that silently drops a header the server always sends.
+    /// The x-correlator header is the single most pervasive CAMARA response
+    /// convention, yet every existing responses test leaves it unread: they prove a
+    /// success response *exists* (`operations_without_success_response`), carries a
+    /// *description* (`responses_missing_description`), keys a *valid status*
+    /// (`response_status_keys_invalid`), or declares *content* — none inspects the
+    /// `headers:` block the whole API family is built around.
+    ///
+    /// Scope is a **served** response: a concrete-or-`X`-wildcard `2XX` response-object
+    /// key (a block opener — nothing but the key on the line; an inline `{…}` mapping
+    /// is not the CAMARA style) whose ancestor chain includes a `responses:` key — so
+    /// it is a real Response Object, not a schema property literally named `'200'` —
+    /// but **not** a `callbacks:` key. A callback's `2XX` (its `Notification received.`
+    /// acknowledgement) is the *sink's* response to the simulator, not a response the
+    /// simulator serves, so CAMARA does not put `x-correlator` on it; excluding the
+    /// `callbacks:` subtree is the substantive scoping this test turns on. A `2XX`
+    /// nested in an `example:`/`examples:` payload is likewise skipped (it is example
+    /// data, not a Response Object), mirroring the ancestor-skip in
+    /// [`numeric_keyword_non_numeric_values`].
+    ///
+    /// A response supplied purely as a `$ref` (a `$ref:` as its *direct* child, no
+    /// inline `headers:`) is exempt — it inherits the header from the referenced
+    /// shared component (the `4XX`/`5XX` `errors.yaml` responses declare it once); in
+    /// practice every `2XX` in the corpus is inline. Pure and YAML-dep-free. The
+    /// presence check requires an `x-correlator:` *key* (a line whose trimmed text
+    /// starts with `x-correlator:`) inside the response block, so a prose mention of
+    /// `` `x-correlator` `` in a `description:` never counts as documenting the header.
+    fn served_success_responses_missing_x_correlator(body: &str) -> Vec<usize> {
+        let is_success_key = |key: &str| -> bool {
+            key.len() == 3
+                && key.as_bytes()[0] == b'2'
+                && key.as_bytes()[1..].iter().all(|&c| c.is_ascii_digit() || c == b'X')
+        };
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+
+        // Bound the top-level `paths:` block: [ps+1, pe) line indices.
+        let Some(ps) = lines
+            .iter()
+            .position(|l| l.trim_end() == "paths:" && !l.starts_with(char::is_whitespace))
+        else {
+            return Vec::new();
+        };
+        let pe = (ps + 1..lines.len())
+            .find(|&i| !lines[i].trim().is_empty() && !lines[i].starts_with(char::is_whitespace))
+            .unwrap_or(lines.len());
+
+        let mut out = Vec::new();
+        for i in (ps + 1)..pe {
+            let line = lines[i];
+            // A response-object key: `2XX`-shaped, `:`-terminated, no inline value
+            // (a block opener). `trim()` collapses trailing space; an inline `{…}`
+            // mapping keeps content past the colon so `strip_suffix(':')` fails.
+            let Some(key) = line.trim().strip_suffix(':') else { continue };
+            let status = key.trim_matches(|c| c == '"' || c == '\'');
+            if !is_success_key(status) {
+                continue;
+            }
+            let c = indent(line);
+
+            // Walk the ancestor chain (the nearest key at each strictly-smaller
+            // indent). A `responses:` ancestor confirms it is a Response Object; a
+            // `callbacks:`/`example:`/`examples:` ancestor takes it out of scope.
+            let mut level = c;
+            let mut has_responses = false;
+            let mut excluded = false;
+            let mut k = i;
+            while k > ps && level > 0 {
+                k -= 1;
+                let a = lines[k];
+                if a.trim().is_empty() {
+                    continue;
+                }
+                let ai = indent(a);
+                if ai < level {
+                    level = ai;
+                    let akey = a.trim().strip_suffix(':').unwrap_or("");
+                    match akey {
+                        "responses" => has_responses = true,
+                        "callbacks" | "example" | "examples" => {
+                            excluded = true;
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            if excluded || !has_responses {
+                continue;
+            }
+
+            // Response block: lines after the key with indent > c, until a dedent to
+            // <= c. Document an `x-correlator:` header key, or (a whole-response
+            // `$ref` as the direct child) inherit it from the referenced component.
+            let mut child_indent = None;
+            let mut direct_ref = false;
+            let mut has_correlator = false;
+            let mut j = i + 1;
+            while j < pe {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                let li = indent(l);
+                if li <= c {
+                    break;
+                }
+                let child = *child_indent.get_or_insert(li);
+                let t = l.trim_start();
+                if li == child && t.starts_with("$ref:") {
+                    direct_ref = true;
+                }
+                if t.starts_with("x-correlator:") {
+                    has_correlator = true;
+                }
+                j += 1;
+            }
+            if !has_correlator && !direct_ref {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+
     /// The `METHOD /path` label of every operation a spec declares whose
     /// `requestBody` object carries neither a `content` field nor a `$ref` —
     /// without a YAML dep.
@@ -7173,6 +7306,128 @@ paths:
             total_ops += operation_ids(api.body).len();
         }
         assert!(total_ops >= 100, "expected many operations across specs, got {total_ops}");
+    }
+
+    #[test]
+    fn every_served_success_response_declares_an_x_correlator_header() {
+        // Contract-harness invariant (CAMARA Commonalities): every **served** success
+        // (`2XX`) response a mounted business spec declares MUST document the
+        // `x-correlator` response header. CamaraSim echoes `x-correlator` on every
+        // response it serves (success and error alike), so a success response that
+        // omits the header from its `headers:` block is a spec that under-states the
+        // wire contract — a Redoc/Swagger/codegen client models a response missing a
+        // header the server always sends. This is the single most pervasive CAMARA
+        // response convention, and no existing responses test reads it:
+        // `operations_without_success_response` only proves a `2XX` *exists*,
+        // `responses_missing_description` only its *description*,
+        // `response_status_keys_invalid` only that its key is a valid status.
+        //
+        // A callback's `2XX` (the `Notification received.` acknowledgement the *sink*
+        // returns to the simulator) is out of scope — the simulator is the client
+        // there, not the server, so CAMARA does not put `x-correlator` on it; the
+        // extractor excludes the `callbacks:` subtree. `auth/openapi.yaml` is excluded
+        // (scope is `APIS`): its OAuth server endpoints follow RFC 6749/8414, not the
+        // CAMARA x-correlator convention — the same carve-out
+        // `every_operation_declares_a_security_requirement` makes. Verified true across
+        // all mounted business specs before asserting.
+        for api in APIS {
+            let missing = served_success_responses_missing_x_correlator(api.body);
+            assert!(
+                missing.is_empty(),
+                "{} spec declares served success (2XX) response(s) with no \
+                 `x-correlator` response header at line(s): {:?}",
+                api.name,
+                missing
+            );
+        }
+    }
+
+    #[test]
+    fn x_correlator_response_header_extraction_rules() {
+        // Unit-cover the `served_success_responses_missing_x_correlator` extractor so
+        // the contract test above can't pass vacuously and its scoping is pinned: a
+        // served `2XX` documenting the header passes; a served `2XX` (here a `204`)
+        // with no header is flagged; a whole-response `$ref` (the `201`) inherits the
+        // header and is exempt; a `2XX` inside an `examples:` payload is not a Response
+        // Object; and a callback's `204` acknowledgement (under `callbacks:`) is the
+        // sink's response, not a served one — neither is flagged.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+          headers:
+            x-correlator:
+              $ref: \"#/components/headers/XCorrelator\"
+          content:
+            application/json:
+              schema:
+                type: object
+              examples:
+                sample:
+                  value:
+                    '204':
+                      inner: true
+    delete:
+      operationId: deleteA
+      responses:
+        '204':
+          description: gone
+    post:
+      operationId: postA
+      responses:
+        '201':
+          $ref: \"#/components/responses/Created\"
+      callbacks:
+        onEvent:
+          '{$request.body#/sink}':
+            post:
+              responses:
+                '204':
+                  description: Notification received.
+components:
+  headers:
+    XCorrelator:
+      schema:
+        type: string
+";
+        // Flagged: only `DELETE /a`'s `'204'` at line 27 (no `x-correlator` header,
+        // no whole-response `$ref`). Not flagged: `GET /a`'s `'200'` (documents the
+        // header at line 13), the `'204'` inside the `examples:` payload (line 22 —
+        // example data, not a Response Object), `POST /a`'s `'201'` (a whole-response
+        // `$ref`, line 32), and the callback's `'204'` acknowledgement (line 39 —
+        // under `callbacks:`, the sink's response).
+        assert_eq!(served_success_responses_missing_x_correlator(body), vec![27]);
+
+        // Non-vacuous floor: across every registered spec every served `2XX` response
+        // documents the `x-correlator` header (the invariant the contract test
+        // asserts), and the corpus declares many such header keys, so a broken
+        // extractor can't hide behind an empty scan. Count `x-correlator:` header-key
+        // lines with a detection independent of the extractor.
+        let mut header_keys = 0usize;
+        for api in APIS {
+            assert!(
+                served_success_responses_missing_x_correlator(api.body).is_empty(),
+                "{}: every served success response must document the x-correlator header",
+                api.name
+            );
+            header_keys += api
+                .body
+                .lines()
+                .filter(|l| l.trim() == "x-correlator:")
+                .count();
+        }
+        assert!(
+            header_keys >= 100,
+            "expected many x-correlator header keys across specs, got {header_keys}"
+        );
     }
 
     #[test]
