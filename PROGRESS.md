@@ -3332,6 +3332,20 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - a scenario-case non-empty-value contract test (`src/registry.rs`
+    `every_scenario_case_documents_a_non_empty_value`) asserts every
+    `x-camarasim-scenarios` case's `input:` **and** `result:` carry a non-empty
+    value — the **value-side complement** of `every_scenario_block_is_well_formed`,
+    which proves each case declares both *keys* but never reads what they hold, so a
+    blank `input:`/`result:` (empty scalar, `~`/`null`, `""`/`''`, or a block-scalar
+    indicator with no continuation) documents no stimulus/outcome yet passes the
+    key-presence check. New pure `scenario_cases_with_empty_value` extractor (no YAML
+    dep) with `value_opens_block_scalar`/`block_scalar_end` helpers: a folded
+    `result: >-` with ≥1 continuation line counts as non-empty, and any block
+    scalar's continuation lines are skipped whole so folded prose can't be misread as
+    a nested case key. Surveyed the corpus first (1053 input + 1053 result case
+    values, 45 folded block scalars, 0 empty) → 0 drift. Unit-covered
+    (`scenario_case_value_extraction_rules`), ≥400-case floor.
   - a served-success-response x-correlator contract test (`src/registry.rs`
     `every_served_success_response_declares_an_x_correlator_header`) asserts every **served**
     inline success (`2XX`) response a mounted business spec declares documents the `x-correlator`
@@ -5201,6 +5215,32 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-18 — Contract-test harness: added a **scenario-case non-empty-value** contract test
+  (`src/registry.rs` `every_scenario_case_documents_a_non_empty_value`) — every
+  `x-camarasim-scenarios` case's `input:` **and** `result:` MUST carry a non-empty value. The
+  **value-side complement** of `every_scenario_block_is_well_formed`, which proves each case
+  declares both `input:`/`result:` *keys* but never reads what they hold: a blank value (empty
+  scalar, `~`/`null`, empty `""`/`''`, or a block-scalar indicator with no continuation) satisfies
+  that key-presence check yet documents no stimulus and no outcome — the same empty-shell drift the
+  block-level test guards against, one level down. The scenario-family twin of the "presence vs
+  value" split the corpus already draws for the license url, the server-variable default, and the
+  info fields; invisible to every existing scenario test (`scenario_blocks` counts blocks,
+  `malformed_scenario_blocks` checks a `cases:` sequence + per-case key presence — never a value).
+  New pure `scenario_cases_with_empty_value` extractor (no YAML dep) + `value_opens_block_scalar` /
+  `block_scalar_end` helpers: a case value that *opens* a YAML block scalar (`>-`, `|`) with ≥1
+  continuation line is honoured as non-empty (its text is folded below), while a bare indicator with
+  no continuation is itself empty and flagged; any block scalar's continuation lines are skipped
+  whole so folded prose (e.g. a `description: >-` mentioning "result:") can never be misread as a
+  nested case key. **Surveyed the corpus first: 1053 `input:` + 1053 `result:` case values across the
+  mounted specs, 45 of them folded block scalars, every one non-empty → 0 drift.** Unit-covered
+  (`scenario_case_value_extraction_rules`: inline / quoted / folded-with-continuation values pass; an
+  empty `input:`, an empty-quoted `result: ""`, a `~` input, and a `result: >-` with no continuation
+  each flagged in document order; a case key outside any scenarios block ignored; the block-scalar
+  predicate pinned; a ≥400-case floor via an independent `- input:` counter). Test-side only — no
+  request/response/behaviour change, so no vendored-spec edits. `cargo test` 2725 green (was 2723;
+  +2); `cargo build --release` succeeds. No new dependency; the extractor and both tests live in the
+  `#[cfg(test)]` module, so nothing ships in the binary. — binary (release): 5.1M (5,314,968 B;
+  unchanged)
 - 2026-08-18 — Contract-test harness: added an **x-correlator request-parameter presence**
   contract test (`src/registry.rs`
   `every_business_spec_declares_an_x_correlator_request_parameter`) — every mounted **business**

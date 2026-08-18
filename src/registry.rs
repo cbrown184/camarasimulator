@@ -1352,6 +1352,104 @@ mod tests {
         out
     }
 
+    /// True when a scalar value string (the text after a `key:`, already trimmed)
+    /// *opens* a YAML block scalar — a `>` (folded) or `|` (literal) indicator,
+    /// optionally carrying chomping (`+`/`-`) and/or a single indent digit
+    /// (`>-`, `|+`, `>2`). The value's real content then lives on the following
+    /// more-indented continuation lines, so an empty inline value here is NOT an
+    /// empty value. Judged on the first whitespace-delimited token so a trailing
+    /// `# comment` after the indicator is tolerated.
+    fn value_opens_block_scalar(v: &str) -> bool {
+        let head = v.split_whitespace().next().unwrap_or("");
+        let mut cs = head.chars();
+        match cs.next() {
+            Some('>') | Some('|') => cs.all(|c| c == '+' || c == '-' || ('1'..='9').contains(&c)),
+            _ => false,
+        }
+    }
+
+    /// The index of the first line at or after `i + 1` whose indent is `<= open`
+    /// (a blank line is continuation), i.e. the line that closes the block scalar
+    /// opened on line `i` at indent `open`. Returns `lines.len()` if none.
+    fn block_scalar_end(lines: &[&str], i: usize, open: usize) -> usize {
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let mut j = i + 1;
+        while j < lines.len() {
+            let x = lines[j];
+            if x.trim().is_empty() || indent(x) > open {
+                j += 1;
+                continue;
+            }
+            break;
+        }
+        j
+    }
+
+    /// Line numbers (1-based), in document order, of every `x-camarasim-scenarios`
+    /// case whose `input:` **or** `result:` carries an *empty* value — the
+    /// documented functional case names an input or an outcome that is blank.
+    ///
+    /// The value-side complement of `malformed_scenario_blocks`, which proves a
+    /// case declares both keys but never reads what they hold: a `- input:` /
+    /// `result:` whose value is the empty string, `~`, `null`, or an empty quote
+    /// (`""`/`''`) documents nothing, exactly the empty shell the block-level test
+    /// guards against, one level down. A value that *opens* a YAML block scalar
+    /// (`>-`, `|`) with ≥1 continuation line is non-empty (its content is folded
+    /// below); a block-scalar indicator with no continuation is itself empty and
+    /// flagged. Any block scalar's continuation lines are skipped whole, so prose
+    /// inside a `description: >-` (or a case value) can never be misread as a
+    /// nested `input:`/`result:` case key. No YAML dep.
+    fn scenario_cases_with_empty_value(body: &str) -> Vec<usize> {
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let lines: Vec<&str> = body.lines().collect();
+        let n = lines.len();
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < n {
+            if !lines[i].trim_start().starts_with("x-camarasim-scenarios:") {
+                i += 1;
+                continue;
+            }
+            let block_indent = indent(lines[i]);
+            i += 1;
+            while i < n {
+                let l = lines[i];
+                if l.trim().is_empty() {
+                    i += 1;
+                    continue;
+                }
+                let ind = indent(l);
+                if ind <= block_indent {
+                    break; // dedented out of the block
+                }
+                let after_dash = l.trim_start().strip_prefix("- ").unwrap_or(l.trim_start());
+                let value_after_colon = after_dash.split_once(':').map(|(_, v)| v.trim());
+                if let Some((k, v)) = after_dash.split_once(':') {
+                    let key = k.trim();
+                    if key == "input" || key == "result" {
+                        let v = v.trim();
+                        let empty = if value_opens_block_scalar(v) {
+                            block_scalar_end(&lines, i, ind) == i + 1 // no continuation line
+                        } else {
+                            matches!(v, "" | "~" | "null" | "\"\"" | "''")
+                        };
+                        if empty {
+                            out.push(i + 1);
+                        }
+                    }
+                }
+                // Skip a block scalar's continuation lines whole (any key), so
+                // folded prose can't be mistaken for a case key.
+                if value_after_colon.is_some_and(value_opens_block_scalar) {
+                    i = block_scalar_end(&lines, i, ind);
+                } else {
+                    i += 1;
+                }
+            }
+        }
+        out
+    }
+
     /// Extract the set of component pointers a `components:` fragment *defines*,
     /// as `#/components/<section>/<Name>` strings, without a YAML dep.
     ///
@@ -5380,6 +5478,36 @@ paths: {}
     }
 
     #[test]
+    fn every_scenario_case_documents_a_non_empty_value() {
+        // Contract-harness invariant (DESIGN §7, §9): the sibling
+        // `every_scenario_block_is_well_formed` proves each `x-camarasim-scenarios`
+        // case declares both an `input:` and a `result:` key, but never reads their
+        // values — a case whose `input:` or `result:` is blank (an empty scalar, a
+        // `~`/`null`, an empty `""`/`''`, or a block-scalar indicator with no
+        // continuation) satisfies that key-presence check yet documents no input and
+        // no outcome. That is the same empty-shell drift the block test guards
+        // against, one level down: the vendored spec's machine-readable record of the
+        // server's parameter-driven behaviour must actually name a stimulus and its
+        // response, not a colon with nothing after it. The **value-side complement**
+        // of the presence-only well-formedness test — the same "presence vs value"
+        // split the corpus already draws for the license url, the server-variable
+        // default, and the info fields. A folded value (`result: >-` with the text on
+        // the following indented lines) is honoured as non-empty. Verified true
+        // across all mounted specs before asserting.
+        for api in APIS {
+            let empty = scenario_cases_with_empty_value(api.body);
+            assert!(
+                empty.is_empty(),
+                "{} spec has an x-camarasim-scenarios case whose `input:`/`result:` \
+                 value is empty (each case names a stimulus and its outcome — \
+                 DESIGN §7, §9) at line(s): {:?}",
+                api.name,
+                empty
+            );
+        }
+    }
+
+    #[test]
     fn shared_fragment_refs_use_the_canonical_relative_path() {
         // Contract-harness invariant (DESIGN §8/§9 + `apis::openapi` serving): a
         // spec's cross-file `$ref`s to the two shared fragments — the error model
@@ -6265,6 +6393,78 @@ components:
                 api.name
             );
         }
+    }
+
+    #[test]
+    fn scenario_case_value_extraction_rules() {
+        // Unit-cover `scenario_cases_with_empty_value` so the contract test above
+        // can't pass vacuously (an extractor that always returned `[]` would make
+        // `empty.is_empty()` trivially true) and so each emptiness verdict is pinned.
+
+        // A block whose every case carries an inline or folded value is never
+        // flagged: an unquoted value, a quoted value, and a `result: >-` whose text
+        // folds onto the following indented line all count as documented.
+        let ok = "      x-camarasim-scenarios:\n\
+                  \x20       description: >-\n\
+                  \x20         prose that mentions a result: here but is folded away\n\
+                  \x20       cases:\n\
+                  \x20         - input: a plain input\n\
+                  \x20           result: \"200 ok\"\n\
+                  \x20         - input: another\n\
+                  \x20           result: >-\n\
+                  \x20             a folded multi-line\n\
+                  \x20             outcome description\n";
+        assert!(scenario_cases_with_empty_value(ok).is_empty());
+
+        // An empty `input:` (line 3), an empty-quoted `result: \"\"` (line 5), a
+        // `~` input (line 6), and a `result: >-` with NO continuation (line 8 — the
+        // next non-blank line dedents out) are each flagged in document order.
+        let bad = "      x-camarasim-scenarios:\n\
+                   \x20       cases:\n\
+                   \x20         - input:\n\
+                   \x20           result: \"200 ok\"\n\
+                   \x20         - input: has one\n\
+                   \x20           result: \"\"\n\
+                   \x20         - input: ~\n\
+                   \x20           result: real\n\
+                   \x20         - input: last\n\
+                   \x20           result: >-\n\
+                   \x20       next: dedented\n";
+        assert_eq!(scenario_cases_with_empty_value(bad), vec![3, 6, 7, 10]);
+
+        // A case key outside any scenarios block is ignored (only cases inside an
+        // `x-camarasim-scenarios:` block are read).
+        let outside = "    responses:\n      '200':\n        result:\n";
+        assert!(scenario_cases_with_empty_value(outside).is_empty());
+
+        // The block-scalar predicate accepts the indicator forms and rejects a
+        // value that merely starts with `>`/`|` amid other text.
+        assert!(value_opens_block_scalar(">-"));
+        assert!(value_opens_block_scalar("|"));
+        assert!(value_opens_block_scalar(">2"));
+        assert!(value_opens_block_scalar(">- # trailing comment"));
+        assert!(!value_opens_block_scalar("200 ok"));
+        assert!(!value_opens_block_scalar("\"quoted\""));
+
+        // Non-vacuous floor: every mounted spec's cases carry a value (the invariant
+        // the contract test asserts), and the corpus actually declares many cases —
+        // so the value-reading path runs on real data and a broken (always-empty)
+        // extractor can't hide behind a corpus with no cases. Count `- input:` case
+        // keys with an independent detector.
+        let mut cases = 0usize;
+        for api in APIS {
+            assert!(
+                scenario_cases_with_empty_value(api.body).is_empty(),
+                "{}: every scenario case must document a non-empty input and result",
+                api.name
+            );
+            for l in api.body.lines() {
+                if l.trim_start().starts_with("- input:") {
+                    cases += 1;
+                }
+            }
+        }
+        assert!(cases >= 400, "expected many scenario cases, got {cases}");
     }
 
     #[test]
