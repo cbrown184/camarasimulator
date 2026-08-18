@@ -5201,6 +5201,34 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-18 — Contract-test harness: added a **root-tag `name` presence** contract test
+  (`src/registry.rs` `every_root_tag_declares_a_non_empty_name`) — every Tag Object a
+  mounted spec declares in its document-root `tags:` list MUST carry a non-empty `name`.
+  The `name` is core-OAS **required**: it is the key an operation's `tags` reference
+  resolves against and the label each served `/{api}/v{n}/docs` navigation section renders,
+  so a nameless tag is a Tag Object no operation can reference and no section can title. The
+  **presence-side twin** of `every_root_tag_declares_a_non_empty_description` and the
+  counterpart of `every_root_tags_list_names_distinct_tags`, which dedups the names that
+  *are* present but passes vacuously over a tag that declares none — the live hazard is a
+  copy-pasted `- ` tag item whose `name:` line was dropped or dedented. Invisible to every
+  existing tag test: `every_operation_tag_is_defined`/`operation_tags_not_defined` read
+  operation references against the *declared* names, `every_root_tag_is_referenced_by_an_
+  operation` and the distinctness guard both start from the names that exist, and the
+  description test reads a tag's `description`. New pure `tags_missing_name` extractor (no
+  YAML dep) mirrors `tags_missing_description`'s scoping exactly — within the column-0
+  `tags:` block, each `- ` item's direct fields are its inline dash-line field plus the
+  child-indent continuation lines, and a `name:` with a non-empty value satisfies the rule
+  (a bare `name:` null, an empty-quoted `""`/`''`, or an empty block scalar count as empty;
+  a `name` nested under the tag's own `externalDocs` is not a direct field). **Surveyed the
+  corpus first: all 3 root Tag Objects across the mounted specs declare a non-empty name →
+  0 drift to fix.** Unit-covered (`root_tag_name_extraction_rules`: an inline name passes; a
+  tag with only a `description` (its sole `name` nested under `externalDocs`), an empty
+  quoted `name: ""`, and a bare `name:` null each flagged in document order; a `name:` on a
+  continuation line passes; a no-root-`tags:` spec skipped; a ≥3 root-tag-item floor via an
+  independent counter). Test-side only — no request/response/behaviour change, so no
+  vendored-spec edits. `cargo test` 2721 green (was 2719; +2); `cargo build --release`
+  succeeds. No new dependency; the extractor and both tests live in the `#[cfg(test)]`
+  module, so nothing ships in the binary. — binary (release): 5.1M (5,314,968 B; unchanged)
 - 2026-08-18 — Contract-test harness: added an **operation-4xx-response** contract test
   (`src/registry.rs` `every_operation_declares_a_client_error_response`) — every operation
   whose `responses:` object is present must document ≥1 client-error (`4XX`) outcome (the
