@@ -3332,6 +3332,19 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - an **exactly-one-server** contract test (`src/registry.rs`
+    `every_spec_declares_exactly_one_server`) asserts every mounted spec declares
+    **exactly one** Server Object — the single templated `{apiRoot}/{api}/{version}`
+    base URL CAMARA Commonalities pins the `servers` array to. The **upper-bound
+    complement** of `every_spec_declares_a_non_empty_servers_array`, which pins the
+    array holds *at least* one entry but never caps it, so a paste that appends a
+    second server passes it (mirroring how the distinct-title / SPDX-license tests
+    cap what their presence-only siblings leave open). New pure `server_entry_count`
+    extractor (no YAML dep) reuses `servers_array_state`'s document-root / block /
+    inline-flow detection, counting `- ` block items (or `url:` keys in the flow
+    form, robust against the `{` in a `{apiRoot}` template). Surveyed the corpus
+    first (all 61 mounted specs declare exactly one server) → 0 drift. Unit-covered
+    (`server_entry_count_extraction_rules`), ≥40-server floor.
   - an info.title distinctness contract test (`src/registry.rs`
     `every_spec_declares_a_distinct_info_title`) asserts no two mounted specs share
     the same `info.title` — the **human-identity twin** of `each_api_is_listed_once`
@@ -5279,6 +5292,28 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-18 — Contract-test harness: added an **exactly-one-server** contract test
+  (`src/registry.rs` `every_spec_declares_exactly_one_server`) — every mounted spec MUST
+  declare **exactly one** Server Object, the single templated `{apiRoot}/{api}/{version}`
+  base URL CAMARA Commonalities pins the `servers` array to. The **upper-bound complement**
+  of `every_spec_declares_a_non_empty_servers_array`, whose `servers_array_state` proves the
+  array holds *at least* one entry (Missing/Empty/Present) but never caps it — so a paste
+  that appends a second, ambiguous base URL passes it; a Redoc/Swagger "try it" panel and a
+  codegen client would then have two servers to target and the extra one resolves to no route
+  the simulator serves. Mirrors how `every_spec_declares_a_distinct_info_title` /
+  `every_info_license_name_is_the_camara_apache_identifier` cap what their presence-only
+  siblings leave open. New pure `server_entry_count` extractor (no YAML dep) reuses
+  `servers_array_state`'s document-root (`servers` at indent 0) / block (`- ` dash items
+  until the next indent-0 key) / inline-flow (`servers: [ … ]`) detection, counting entries;
+  the flow branch counts `url:` keys (one per Server Object) rather than `{` to avoid
+  miscounting the brace in a `{apiRoot}` url template. **Surveyed the corpus first: all 61
+  mounted specs declare exactly one server → 0 drift.** Non-vacuity from the unit test
+  (`server_entry_count_extraction_rules`: one/two block entries → 1/2, a two-object inline
+  flow → 2, an absent array and an empty `[]` → 0, a nested schema property named `servers`
+  → 0; plus a ≥40-server corpus floor). Test-side only — no request/response/behaviour change,
+  so no vendored-spec edits. `cargo test` 2744 green (was 2742; +2); `cargo build --release`
+  succeeds. No new dependency; the extractor and both tests live in the `#[cfg(test)]` module,
+  so nothing ships in the binary. — binary (release): 5.1M (5,323,160 B; unchanged)
 - 2026-08-18 — Contract-test harness: added a **request-body explicit-`required`** contract test
   (`src/registry.rs` `every_request_body_declares_an_explicit_required_flag`) — every operation
   whose `requestBody` is spelled out inline MUST state an explicit boolean `required:` flag

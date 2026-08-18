@@ -33114,4 +33114,168 @@ paths:
             "expected many Callback Object runtime-expression keys across specs, got {expr_keys}"
         );
     }
+
+    /// The number of Server Objects a mounted spec's document-root `servers` array
+    /// declares. `0` when the array is absent, empty, or a non-array scalar.
+    ///
+    /// Mirrors [`servers_array_state`]'s document-root detection (an indent-0 key
+    /// whose text is exactly `servers`) and its block/inline-flow handling, but
+    /// counts the entries instead of collapsing to a tri-state:
+    ///   * Block form (`servers:` alone) — the `- ` dash items between the key and
+    ///     the next indent-0 key.
+    ///   * Inline-flow form (`servers: [ … ]`) — the `url:` keys in the bracketed
+    ///     inner text (each Server Object declares exactly one `url`; counting the
+    ///     key avoids miscounting the `{` inside a `{apiRoot}` url template). The
+    ///     corpus uses only the block form; the flow branch keeps the count total
+    ///     for hand-authored unit inputs.
+    /// A `servers:` key nested inside a Path Item / Operation is never read — only
+    /// the document-root array counts.
+    fn server_entry_count(body: &str) -> usize {
+        let lines: Vec<&str> = body.lines().collect();
+        let is_root_servers = |l: &str| -> bool {
+            !l.is_empty()
+                && !l.starts_with(char::is_whitespace)
+                && matches!(l.split_once(':'), Some((k, _)) if k == "servers")
+        };
+        let Some(start) = lines.iter().position(|l| is_root_servers(l)) else {
+            return 0;
+        };
+        let val = lines[start]
+            .split_once(':')
+            .map(|(_, v)| v.trim())
+            .unwrap_or("");
+        // Inline-flow form: count the `url:` keys inside the brackets (one per
+        // Server Object; robust against the `{` in a `{apiRoot}` url template).
+        if let Some(rest) = val.strip_prefix('[') {
+            let inner = match rest.rfind(']') {
+                Some(end) => &rest[..end],
+                None => rest, // unterminated flow (corpus has none) — count what's here
+            };
+            return inner.matches("url:").count();
+        }
+        // A non-empty, non-flow scalar value names no server array.
+        if !val.is_empty() {
+            return 0;
+        }
+        // Block form: `- ` dash items until the next document-root (indent-0) key.
+        let end = lines[start + 1..]
+            .iter()
+            .position(|l| !l.is_empty() && !l.starts_with(char::is_whitespace))
+            .map(|off| start + 1 + off)
+            .unwrap_or(lines.len());
+        (start + 1..end)
+            .filter(|&i| lines[i].trim_start().starts_with("- "))
+            .count()
+    }
+
+    #[test]
+    fn every_spec_declares_exactly_one_server() {
+        // Contract-harness invariant (CAMARA Commonalities "Servers" rule): every
+        // mounted vendored spec declares EXACTLY ONE Server Object — the single
+        // templated `{apiRoot}/{api}/{version}` base URL that resolves to the
+        // endpoint's mount path. CAMARA pins the array to one server (the client
+        // fills in `apiRoot`); a second entry hands a Redoc/Swagger "try it" panel
+        // and a codegen client an ambiguous choice of base URL, and the extra one
+        // never resolves to a route the simulator serves.
+        //
+        // The *upper-bound* complement of `every_spec_declares_a_non_empty_servers_array`,
+        // which pins the array holds AT LEAST one entry but never caps it — so a
+        // paste that appends a second server passes it — exactly as
+        // `every_spec_declares_a_distinct_info_title` caps what the presence-only
+        // title test leaves open, and `every_info_license_name_is_the_camara_apache_identifier`
+        // pins the value the presence-only license test leaves open. Reuses the
+        // document-root / block / inline-flow detection of `servers_array_state` via
+        // `server_entry_count`. Verified every mounted spec declares exactly one
+        // server before asserting.
+        for api in APIS {
+            let n = server_entry_count(api.body);
+            assert_eq!(
+                n, 1,
+                "{} spec declares {n} server(s), not the single CAMARA \
+                 `{{apiRoot}}/{{api}}/{{version}}` base URL",
+                api.name
+            );
+        }
+    }
+
+    #[test]
+    fn server_entry_count_extraction_rules() {
+        // Pin the counter's block / inline-flow / absent boundaries so the contract
+        // test above can't pass vacuously and its arity detection is exercised.
+
+        // Block form, one entry → 1.
+        let one_block = "\
+openapi: 3.0.3
+servers:
+  - url: \"{apiRoot}/x/v1\"
+paths: {}
+";
+        assert_eq!(server_entry_count(one_block), 1);
+
+        // Block form, two entries → 2 (the drift the contract test catches).
+        let two_block = "\
+openapi: 3.0.3
+servers:
+  - url: \"{apiRoot}/x/v1\"
+  - url: \"https://backup.example/x/v1\"
+paths: {}
+";
+        assert_eq!(server_entry_count(two_block), 2);
+
+        // Inline-flow form, two object entries → 2.
+        let two_flow = "\
+openapi: 3.0.3
+servers: [ { url: \"{apiRoot}/x/v1\" }, { url: \"https://b.example/x\" } ]
+paths: {}
+";
+        assert_eq!(server_entry_count(two_flow), 2);
+
+        // No `servers` key → 0; an empty inline flow → 0.
+        let missing = "\
+openapi: 3.0.3
+info:
+  title: t
+paths: {}
+";
+        assert_eq!(server_entry_count(missing), 0);
+        let empty_flow = "\
+openapi: 3.0.3
+servers: []
+paths: {}
+";
+        assert_eq!(server_entry_count(empty_flow), 0);
+
+        // A schema property literally named `servers` (indented, not document-root)
+        // is never read — only the indent-0 array counts.
+        let nested_only = "\
+openapi: 3.0.3
+components:
+  schemas:
+    Cfg:
+      type: object
+      properties:
+        servers:
+          type: array
+paths: {}
+";
+        assert_eq!(server_entry_count(nested_only), 0);
+
+        // Non-vacuous corpus floor: every mounted spec declares exactly one server
+        // (the invariant the contract test asserts), so the total across the corpus
+        // equals the spec count — proving the counter runs on real data.
+        let mut total = 0usize;
+        for api in APIS {
+            assert_eq!(
+                server_entry_count(api.body),
+                1,
+                "{}: exactly one server expected",
+                api.name
+            );
+            total += server_entry_count(api.body);
+        }
+        assert!(
+            total >= 40,
+            "expected ~one server per spec across the corpus, got {total}"
+        );
+    }
 }
