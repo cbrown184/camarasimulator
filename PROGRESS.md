@@ -5176,6 +5176,31 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-18 — Contract-test harness: added an **operation-description presence** contract test
+  (`src/registry.rs` `every_operation_declares_a_description`) — every operation a mounted spec
+  declares MUST carry a `description` key. The **presence-side twin** of
+  `every_operation_description_is_non_empty`, whose `operations_with_empty_description` only inspects
+  a description that is *already present* (flagging a blank value) and passes vacuously over an
+  operation with no `description:` key at all — exactly as that test's own note records ("no operation
+  `description` presence test exists (unlike `summary`)"). Mirrors the summary pair
+  (`every_operation_declares_a_summary` presence + `every_operation_summary_is_non_empty` value):
+  the live copy-paste hazard is a sibling operation block pasted with its `description:` line dropped
+  or dedented, leaving an operation whose served `/docs` page states no functional cases — and for
+  CamaraSim the operation description is load-bearing (DESIGN §7/§9: it spells out the auth model and
+  the parameter-driven functional cases the simulator implements). New pure
+  `operations_without_description` extractor (no YAML dep) mirrors `operations_without_summary`'s
+  scoping exactly (a 6-space `description:` scalar key credited only to the operation whose 4-space
+  verb block it sits in; a Path Item Object's 4-space `description` and a Response Object's 10-space
+  `description` excluded). **Surveyed the corpus first: all 168 operations across the mounted specs
+  declare a `description` → 0 drift to fix.** Unit-covered
+  (`operations_without_description_extraction_rules`: an operation-level description passes; an
+  operation with only a Response Object's 10-space description and one with only its Path Item's
+  4-space description both flagged in document order; `get`/`description` schema *properties* under
+  `components` are not operations; a ≥100 operation floor via an independent counter). Test-side only
+  — no request/response/behaviour change, so no vendored-spec edits. `cargo test` 2713 green (was
+  2711; +2); `cargo build --release` succeeds, no warnings. No new dependency; the extractor and both
+  tests live in the `#[cfg(test)]` module, so nothing ships in the binary. — binary (release): 5.1M
+  (5,314,968 B; unchanged)
 - 2026-08-18 — Contract-test harness: added a **served-success-response x-correlator** contract
   test (`src/registry.rs` `every_served_success_response_declares_an_x_correlator_header`) — every
   **served** inline success (`2XX`) response a mounted business spec declares MUST document the
