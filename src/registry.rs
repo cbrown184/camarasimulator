@@ -1450,6 +1450,91 @@ mod tests {
         out
     }
 
+    /// Line numbers (1-based), in document order, of every `x-camarasim-scenarios`
+    /// block that carries no non-empty `description:` — a block whose own prose
+    /// naming *why* its cases exist (which parameter is the control plane —
+    /// DESIGN §7) is missing or blank.
+    ///
+    /// The presence-and-value complement of `malformed_scenario_blocks` (which
+    /// pins the block's `cases:` sequence) and `scenario_cases_with_empty_value`
+    /// (which pins each case's `input:`/`result:` value): those read the case list,
+    /// this reads the block's own introductory prose — the one line a
+    /// Redoc/Swagger `/docs` page renders above the case table.
+    ///
+    /// A `description:` sitting as a direct child of the block (indent =
+    /// block + 2) satisfies the check when its inline scalar is non-empty, or
+    /// when it opens a YAML block scalar (`>-`, `|`) with ≥1 continuation line. A
+    /// block with no direct-child `description:`, an inline empty scalar
+    /// (blank, `~`, `null`, `""`, `''`), or a block-scalar indicator with no
+    /// continuation is flagged. A `description:` nested inside `cases:` (a
+    /// case's own note) does NOT satisfy the check — only the block-level one
+    /// counts. Any block scalar's continuation lines are skipped whole, so folded
+    /// prose can never be misread as a nested `description:` key. No YAML dep.
+    fn scenario_blocks_missing_description(body: &str) -> Vec<usize> {
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let lines: Vec<&str> = body.lines().collect();
+        let n = lines.len();
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < n {
+            if !lines[i].trim_start().starts_with("x-camarasim-scenarios:") {
+                i += 1;
+                continue;
+            }
+            let block_indent = indent(lines[i]);
+            let block_head = i + 1; // 1-based
+            let desc_indent = block_indent + 2;
+            let mut has_non_empty_desc = false;
+            let mut j = i + 1;
+            while j < n {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                let ind = indent(l);
+                if ind <= block_indent {
+                    break; // dedented out of the block
+                }
+                let t = l.trim_start();
+                // Only a direct child of the block (indent = block + 2). A
+                // `description:` nested deeper (under `cases:`, under a case)
+                // is not the block's own description.
+                if ind == desc_indent {
+                    if let Some((k, v)) = t.split_once(':') {
+                        if k.trim() == "description" {
+                            let v_trimmed = v.trim();
+                            let empty = if value_opens_block_scalar(v_trimmed) {
+                                // A block-scalar indicator with no continuation
+                                // line is itself an empty value.
+                                block_scalar_end(&lines, j, ind) == j + 1
+                            } else {
+                                matches!(v_trimmed, "" | "~" | "null" | "\"\"" | "''")
+                            };
+                            if !empty {
+                                has_non_empty_desc = true;
+                            }
+                        }
+                    }
+                }
+                // Skip a block scalar's continuation lines whole (any key), so
+                // folded prose (a `description: >-` body, a `result: >-` body)
+                // can't be mistaken for a nested `description:` key.
+                let value_after_colon = t.split_once(':').map(|(_, v)| v.trim());
+                if value_after_colon.is_some_and(value_opens_block_scalar) {
+                    j = block_scalar_end(&lines, j, ind);
+                } else {
+                    j += 1;
+                }
+            }
+            if !has_non_empty_desc {
+                out.push(block_head);
+            }
+            i = j; // advance past this block
+        }
+        out
+    }
+
     /// Extract the set of component pointers a `components:` fragment *defines*,
     /// as `#/components/<section>/<Name>` strings, without a YAML dep.
     ///
@@ -5533,6 +5618,47 @@ paths: {}
     }
 
     #[test]
+    fn every_scenario_block_declares_a_non_empty_description() {
+        // Contract-harness invariant (DESIGN §7, §9): every `x-camarasim-scenarios`
+        // block MUST carry a non-empty **block-level** `description:` — the one
+        // line of prose that names *why* its cases exist (which parameter is the
+        // control plane — DESIGN §7) and how a caller reaches them. It is what a
+        // Redoc/Swagger `/docs` page renders above the case table, so a missing
+        // or blank one leaves the scenarios panel unlabelled at exactly the point
+        // a caller most needs the "why".
+        //
+        // The **prose-side complement** of the case-shape trio the corpus already
+        // draws — `every_spec_documents_functional_cases` proves each spec
+        // declares ≥1 block, `every_scenario_block_is_well_formed` proves the
+        // block's `cases:` sequence holds ≥1 `{ input, result }` case, and
+        // `every_scenario_case_documents_a_non_empty_value` proves each case names
+        // both a stimulus and an outcome. None of them reads the block's OWN
+        // `description:`, so a block that lists valid cases but omits or blanks
+        // its introductory prose satisfies the whole trio yet documents no
+        // context for the case list it carries. Mirrors the suite's other
+        // presence-and-value pairs (the info-title/description tests, the
+        // license-url/name pair, the parameter-description test).
+        //
+        // A folded value (`description: >-` with the text on the following
+        // indented lines) is honoured as non-empty; an empty inline scalar, a
+        // bare `description:` null, a `~`, or a block-scalar indicator with no
+        // continuation is flagged. A `description:` nested inside `cases:` (a
+        // case's own note) is not the block's own description. Verified true
+        // across all mounted specs (168 blocks) before asserting.
+        for api in APIS {
+            let missing = scenario_blocks_missing_description(api.body);
+            assert!(
+                missing.is_empty(),
+                "{} spec has x-camarasim-scenarios block(s) with no non-empty \
+                 `description:` (each block names why its cases exist — \
+                 DESIGN §7, §9) at line(s): {:?}",
+                api.name,
+                missing
+            );
+        }
+    }
+
+    #[test]
     fn shared_fragment_refs_use_the_canonical_relative_path() {
         // Contract-harness invariant (DESIGN §8/§9 + `apis::openapi` serving): a
         // spec's cross-file `$ref`s to the two shared fragments — the error model
@@ -6689,6 +6815,138 @@ components:
             }
         }
         assert!(cases >= 400, "expected many scenario cases, got {cases}");
+    }
+
+    #[test]
+    fn scenario_block_description_extraction_rules() {
+        // Unit-cover `scenario_blocks_missing_description` so the contract test
+        // above can't pass vacuously (an extractor that always returned `[]`
+        // would make `missing.is_empty()` trivially true) and so its
+        // presence/emptiness discrimination is pinned.
+
+        // A block whose direct-child `description:` carries an inline non-empty
+        // value is never flagged.
+        let inline_ok = "      x-camarasim-scenarios:\n\
+                         \x20       description: text\n\
+                         \x20       cases:\n\
+                         \x20         - input: a\n\
+                         \x20           result: ok\n";
+        assert!(scenario_blocks_missing_description(inline_ok).is_empty());
+
+        // A folded (`>-`) description whose text folds onto the following
+        // indented lines counts as non-empty (same folded-scalar honouring the
+        // case-value extractor applies).
+        let folded_ok = "      x-camarasim-scenarios:\n\
+                         \x20       description: >-\n\
+                         \x20         a folded multi-line explanation\n\
+                         \x20         of why the cases exist\n\
+                         \x20       cases:\n\
+                         \x20         - input: a\n\
+                         \x20           result: ok\n";
+        assert!(scenario_blocks_missing_description(folded_ok).is_empty());
+
+        // A `description:` placed *after* `cases:` at the direct-child indent
+        // still satisfies the check (declaration order is not required).
+        let after_cases_ok = "      x-camarasim-scenarios:\n\
+                              \x20       cases:\n\
+                              \x20         - input: a\n\
+                              \x20           result: ok\n\
+                              \x20       description: named after the cases\n";
+        assert!(scenario_blocks_missing_description(after_cases_ok).is_empty());
+
+        // A block with no `description:` at all → flagged, by block-head line.
+        let no_desc = "      x-camarasim-scenarios:\n\
+                       \x20       cases:\n\
+                       \x20         - input: a\n\
+                       \x20           result: ok\n";
+        assert_eq!(scenario_blocks_missing_description(no_desc), vec![1]);
+
+        // An inline `description:` with an empty scalar is flagged; the
+        // emptiness set (blank, `~`, `null`, `""`, `''`) mirrors the case-value
+        // extractor.
+        for empty in [
+            "      x-camarasim-scenarios:\n\
+             \x20       description:\n\
+             \x20       cases:\n\
+             \x20         - input: a\n\
+             \x20           result: ok\n",
+            "      x-camarasim-scenarios:\n\
+             \x20       description: ~\n\
+             \x20       cases:\n\
+             \x20         - input: a\n\
+             \x20           result: ok\n",
+            "      x-camarasim-scenarios:\n\
+             \x20       description: null\n\
+             \x20       cases:\n\
+             \x20         - input: a\n\
+             \x20           result: ok\n",
+            "      x-camarasim-scenarios:\n\
+             \x20       description: \"\"\n\
+             \x20       cases:\n\
+             \x20         - input: a\n\
+             \x20           result: ok\n",
+            "      x-camarasim-scenarios:\n\
+             \x20       description: ''\n\
+             \x20       cases:\n\
+             \x20         - input: a\n\
+             \x20           result: ok\n",
+        ] {
+            assert_eq!(scenario_blocks_missing_description(empty), vec![1]);
+        }
+
+        // A `>-`/`|` block-scalar indicator with NO continuation (the next
+        // non-blank line dedents out of the description's indent) is itself
+        // empty and flagged.
+        let empty_folded = "      x-camarasim-scenarios:\n\
+                            \x20       description: >-\n\
+                            \x20       cases:\n\
+                            \x20         - input: a\n\
+                            \x20           result: ok\n";
+        assert_eq!(scenario_blocks_missing_description(empty_folded), vec![1]);
+
+        // A `description:` nested inside a `cases:` case (not a direct child of
+        // the block) does NOT satisfy the check — only the block's own
+        // description counts.
+        let nested = "      x-camarasim-scenarios:\n\
+                      \x20       cases:\n\
+                      \x20         - input: a\n\
+                      \x20           result: ok\n\
+                      \x20           description: a case-level note (not the block's)\n";
+        assert_eq!(scenario_blocks_missing_description(nested), vec![1]);
+
+        // Multiple blocks report in document order; a well-formed first block
+        // and a description-less second block report only the second's
+        // block-head line number.
+        let two = format!("{inline_ok}{no_desc}");
+        let inline_lines = inline_ok.lines().count();
+        assert_eq!(
+            scenario_blocks_missing_description(&two),
+            vec![inline_lines + 1]
+        );
+
+        // A description key outside any scenarios block is ignored (only the
+        // block's own direct child counts).
+        let outside = "    responses:\n      '200':\n        description: ok\n";
+        assert!(scenario_blocks_missing_description(outside).is_empty());
+
+        // Non-vacuous floor: every mounted spec's blocks carry a non-empty
+        // description (the invariant the contract test asserts), and the corpus
+        // actually declares many blocks — so the presence path runs on real
+        // data and a broken (always-empty) extractor can't hide behind a corpus
+        // with no blocks.
+        let mut blocks = 0usize;
+        for api in APIS {
+            assert!(
+                scenario_blocks_missing_description(api.body).is_empty(),
+                "{}: every x-camarasim-scenarios block must declare a non-empty description",
+                api.name
+            );
+            blocks += scenario_blocks(api.body);
+        }
+        assert!(
+            blocks >= 100,
+            "expected many scenarios blocks across specs, got {blocks}"
+        );
     }
 
     #[test]

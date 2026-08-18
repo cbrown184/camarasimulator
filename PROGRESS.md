@@ -3332,6 +3332,26 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - a scenarios-block description contract test (`src/registry.rs`
+    `every_scenario_block_declares_a_non_empty_description`) asserts every
+    `x-camarasim-scenarios` block carries a non-empty **block-level** `description:` — the
+    prose that names *why* its cases exist (which parameter is the control plane —
+    DESIGN §7). The **prose-side complement** of the case-shape trio
+    (`every_spec_documents_functional_cases` → blocks exist,
+    `every_scenario_block_is_well_formed` → `cases:` sequence + per-case keys,
+    `every_scenario_case_documents_a_non_empty_value` → per-case values). None of
+    them reads the block's *own* description, so a block that lists valid cases
+    yet omits/blanks its introductory prose satisfies the whole trio but leaves
+    the /docs scenarios panel unlabelled at the point a caller most needs the
+    "why". Pure `scenario_blocks_missing_description` extractor (no YAML dep)
+    reuses the `value_opens_block_scalar`/`block_scalar_end` helpers: only a
+    direct child (indent = block + 2) `description:` satisfies the check (a
+    nested case-level description does not), honouring folded (`>-`/`|`)
+    values with ≥1 continuation and flagging empty inline scalars
+    (blank/`~`/`null`/`""`/`''`) or indicators with no continuation. Surveyed
+    the corpus first (168 blocks, all with non-empty descriptions) → 0 drift.
+    Unit-covered (`scenario_block_description_extraction_rules`), ≥100-block
+    floor.
   - a scenario-case non-empty-value contract test (`src/registry.rs`
     `every_scenario_case_documents_a_non_empty_value`) asserts every
     `x-camarasim-scenarios` case's `input:` **and** `result:` carry a non-empty
@@ -5215,6 +5235,44 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-18 — Contract-test harness: added a **scenarios-block description** contract test
+  (`src/registry.rs` `every_scenario_block_declares_a_non_empty_description`) — every
+  `x-camarasim-scenarios` block MUST carry a non-empty **block-level** `description:`, the
+  one line of prose that names *why* its cases exist (which parameter is the control plane —
+  DESIGN §7). Chosen as the natural continuation of the prior pass's
+  `every_scenario_case_documents_a_non_empty_value` (case-value coverage): the case-shape
+  trio (`every_spec_documents_functional_cases` → blocks exist,
+  `every_scenario_block_is_well_formed` → `cases:` sequence + per-case key presence,
+  `every_scenario_case_documents_a_non_empty_value` → per-case values non-empty) now had
+  every leaf of the case list pinned but read the block's *own* description on none of
+  them, so a block that lists valid cases yet omits or blanks its introductory prose
+  satisfied the whole trio and left the /docs scenarios panel unlabelled at exactly the
+  point a caller most needs the "why". The **prose-side complement** of the trio —
+  mirroring the suite's other presence-and-value pairs (info title/description, license
+  url/name, parameter description). Feature-API backlog stays exhausted (remaining `[ ]`
+  leaves are the `https://` sink-TLS cases needing a multi-MB rustls client that conflicts
+  with the "keep the binary small" guardrail, plus spatial/campaign/background-worker
+  functional cuts), and the simpler non-spatial new-API space is exhausted; a fresh
+  cross-cutting harness test remains the smallest safe increment. New pure
+  `scenario_blocks_missing_description` extractor (no YAML dep) reuses the existing
+  `value_opens_block_scalar` / `block_scalar_end` helpers: only a direct child of the
+  block (indent = block + 2) `description:` satisfies the check (a `description:` nested
+  under `cases:` — a case-level note — does NOT), honouring folded (`>-`/`|`) values
+  whose text folds onto ≥1 continuation line as non-empty, flagging empty inline
+  scalars (blank / `~` / `null` / `""` / `''`) or a block-scalar indicator with no
+  continuation. Any block scalar's continuation lines are skipped whole so folded prose
+  can never be misread as a nested `description:` key. **Surveyed the corpus first (168
+  scenarios blocks across the mounted specs, every one with a non-empty description) →
+  0 drift.** Non-vacuity comes from the unit test
+  (`scenario_block_description_extraction_rules`: inline / folded-with-continuation /
+  after-cases descriptions pass; a no-description block, each empty inline scalar
+  (blank/`~`/`null`/`""`/`''`), an empty block-scalar indicator, and a nested case-level
+  description each flagged; multi-block ordering pinned; a description outside any
+  scenarios block ignored; ≥100-block floor via `scenario_blocks`). Test-side only — no
+  request/response/behaviour change, so no vendored-spec edits. `cargo test` 2733 green
+  (was 2731; +2); `cargo build --release` succeeds. No new dependency; the extractor and
+  both tests live in the `#[cfg(test)]` module, so nothing ships in the binary. —
+  binary (release): 5.1M (5,323,160 B; unchanged)
 - 2026-08-18 — Spec accuracy + contract test: **documented the `x-correlator` response header on
   every remaining *inline* `4XX`/`5XX` error response across the business specs**, closing the
   documented gap the previous pass teed up. CamaraSim echoes `x-correlator` on every response it
