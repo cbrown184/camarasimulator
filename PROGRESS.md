@@ -5216,6 +5216,34 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 ## Scan journal
 
 - 2026-08-18 — Spec accuracy + contract test: **documented the `x-correlator` response header on
+  every remaining *inline* `4XX`/`5XX` error response across the business specs**, closing the
+  documented gap the previous pass teed up. CamaraSim echoes `x-correlator` on every response it
+  serves — errors included (the shared error `IntoResponse` re-attaches it). Most error responses
+  reach the shared `errors.yaml` model via a whole-response `$ref` and inherit the header (declared
+  there last pass), but 79 responses across 28 specs are spelled out inline with a bespoke error
+  schema (e.g. an API-specific `400`/`422`) and declared no header — real spec↔behaviour drift a
+  Redoc/Swagger/codegen client would model as "no `x-correlator` on errors". Surveyed the corpus
+  first with the extractor's own scan logic: exactly 79 inline error responses, all uniform (first
+  child `description` at +2, none already carrying a `headers:` block, every spec already defining a
+  `#/components/headers/XCorrelator` component its success responses `$ref`). Fix: inserted a
+  `headers: { x-correlator: $ref "#/components/headers/XCorrelator" }` block (matching each file's
+  own success-response `$ref` style) as the first child of each — 79 insertions in 28 files (spec
+  request/response contract change; the served specs now document the header). New corpus-wide
+  contract test `every_served_error_response_declares_an_x_correlator_header` (`src/registry.rs`),
+  the error-side twin of `every_served_success_response_declares_an_x_correlator_header`; both now
+  delegate to a shared `served_responses_missing_x_correlator(body, in_class)` scanner (refactored
+  the success extractor into a status-class-parameterised helper — one source of truth for the
+  `responses:`-ancestor / `callbacks:`/`example:` scoping + direct-`$ref` inheritance exemption; the
+  existing success unit test guards the refactor). New `served_error_responses_missing_x_correlator`
+  wrapper (`4XX`/`5XX` class) + unit test `error_x_correlator_response_header_extraction_rules`
+  (synthetic body: an inline `400` missing the header flagged; an inline `422` with it passes; a
+  `404` whole-response `$ref` inherits/exempt; an error key inside an `examples:` payload and a
+  callback error response both out of scope; plus a ≥100 error-status-key corpus floor for
+  non-vacuity). This makes the error twin the exact counterpart of the success test — both legs of
+  the most pervasive CAMARA response convention now guarded. `cargo test` 2731 green (was 2729; +2);
+  `cargo build --release` succeeds. No new dependency. — binary (release): 5.1M (5,323,160 B; +8,192 B
+  — the added `include_str!` rodata for the 79 header blocks)
+- 2026-08-18 — Spec accuracy + contract test: **documented the `x-correlator` response header on
   the shared CAMARA error responses** (`specs/shared/errors.yaml`). CamaraSim echoes `x-correlator`
   on **every** response it serves — success *and* error alike — but the shared error model, which
   the overwhelming majority of each business spec's `4XX`/`5XX` responses reach via a

@@ -167,6 +167,9 @@ paths:
                           phoneNumber: "+123456789404"
                         status: DENIED
         "400":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
           description: |
             400 — invalid request. CamaraSim returns `INVALID_ARGUMENT` for a
             malformed body/field (bad JSON, a missing/non-UUID `networkId`, a
@@ -274,6 +277,9 @@ paths:
                             phoneNumber: "+123456789012"
                           status: GRANTED
         "400":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
           description: |
             400 — invalid request. CamaraSim returns `INVALID_ARGUMENT` when the
             `networkId` query parameter is present but not UUID-shaped.
@@ -476,6 +482,9 @@ paths:
                       totalCount: 2
                       totalPages: 1
         "400":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
           description: |
             400 — invalid request. CamaraSim returns `INVALID_ARGUMENT` for a
             non-integer `page`/`perPage` or an unknown `deviceStatus`, and
@@ -582,6 +591,9 @@ paths:
                         phoneNumber: "+123456789404"
                       status: DENIED
         "400":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
           description: |
             400 — invalid request. CamaraSim returns `INVALID_ARGUMENT` for a body
             that is not a JSON array, an array outside 1..=100 items, a device
@@ -672,6 +684,9 @@ paths:
             x-correlator:
               $ref: "#/components/headers/XCorrelator"
         "400":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
           description: |
             400 — invalid request. CamaraSim returns `INVALID_ARGUMENT` for a body
             that is not a JSON array, an array outside 1..=100 items, a device

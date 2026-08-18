@@ -124,6 +124,9 @@ paths:
             x-correlator:
               $ref: "#/components/headers/XCorrelator"
         "400":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
           description: |
             400 — invalid request. CamaraSim returns `INVALID_ARGUMENT` for a
             malformed body, a participant not in E.164 form, an unknown

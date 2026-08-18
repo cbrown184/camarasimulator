@@ -107,6 +107,9 @@ paths:
                     msgId: 3fa85f64-5717-4562-b3fc-2c963f66afa6
                     timestamp: "2024-01-01T14:27:08Z"
         "400":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
           description: |
             400 — invalid request. CamaraSim returns `INVALID_ARGUMENT` for a
             malformed body, an empty `to`, a `from`/recipient not in E.164 form,

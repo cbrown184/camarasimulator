@@ -269,6 +269,9 @@ paths:
                     paymentCreationDate: "2024-01-01T14:27:08Z"
                     paymentDate: "2024-01-01T14:27:08Z"
         "400":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
           description: |
             400 — invalid request. CamaraSim returns `INVALID_ARGUMENT` for a
             malformed body, a malformed `phoneNumber`, or an `amount` below the
@@ -290,6 +293,9 @@ paths:
         "409":
           $ref: "../../shared/errors.yaml#/components/responses/Conflict"
         "422":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
           description: |
             422 — unprocessable. CamaraSim returns `MISSING_IDENTIFIER` when the
             account cannot be identified, `CARRIER_BILLING.UNAUTHORIZED_AMOUNT`
@@ -537,6 +543,9 @@ paths:
                     paymentStatus: reserved
                     paymentCreationDate: "2024-01-01T14:27:08Z"
         "400":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
           description: |
             400 — invalid request. CamaraSim returns `INVALID_ARGUMENT` for a
             malformed body, a malformed `phoneNumber`, or an `amount` below the
@@ -558,6 +567,9 @@ paths:
         "409":
           $ref: "../../shared/errors.yaml#/components/responses/Conflict"
         "422":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
           description: |
             422 — unprocessable. CamaraSim returns `MISSING_IDENTIFIER` when the
             account cannot be identified, `CARRIER_BILLING.UNAUTHORIZED_AMOUNT`
@@ -710,6 +722,9 @@ paths:
             x-correlator:
               $ref: "#/components/headers/XCorrelator"
         "400":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
           description: |
             400 — invalid request. Beyond a malformed body (`INVALID_ARGUMENT`),
             CamaraSim returns the Carrier-Billing-specific validation codes:
@@ -747,6 +762,9 @@ paths:
         "404":
           $ref: "../../shared/errors.yaml#/components/responses/NotFound"
         "409":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
           description: |
             409 — the payment is not awaiting validation (already `reserved`,
             `succeeded`, or `denied`). CamaraSim returns `ALREADY_EXISTS`.
@@ -879,6 +897,9 @@ paths:
         "404":
           $ref: "../../shared/errors.yaml#/components/responses/NotFound"
         "409":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
           description: |
             409 — the payment cannot be confirmed in its current state.
             CamaraSim returns `CARRIER_BILLING.PAYMENT_CONFIRMED` when the payment
@@ -1019,6 +1040,9 @@ paths:
         "404":
           $ref: "../../shared/errors.yaml#/components/responses/NotFound"
         "409":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
           description: |
             409 — the payment cannot be cancelled in its current state.
             CamaraSim returns `CARRIER_BILLING.PAYMENT_CANCELLED` when the payment

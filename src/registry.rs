@@ -3673,12 +3673,7 @@ mod tests {
     /// presence check requires an `x-correlator:` *key* (a line whose trimmed text
     /// starts with `x-correlator:`) inside the response block, so a prose mention of
     /// `` `x-correlator` `` in a `description:` never counts as documenting the header.
-    fn served_success_responses_missing_x_correlator(body: &str) -> Vec<usize> {
-        let is_success_key = |key: &str| -> bool {
-            key.len() == 3
-                && key.as_bytes()[0] == b'2'
-                && key.as_bytes()[1..].iter().all(|&c| c.is_ascii_digit() || c == b'X')
-        };
+    fn served_responses_missing_x_correlator(body: &str, in_class: fn(&str) -> bool) -> Vec<usize> {
         let lines: Vec<&str> = body.lines().collect();
         let indent = |l: &str| l.len() - l.trim_start().len();
 
@@ -3701,7 +3696,7 @@ mod tests {
             // mapping keeps content past the colon so `strip_suffix(':')` fails.
             let Some(key) = line.trim().strip_suffix(':') else { continue };
             let status = key.trim_matches(|c| c == '"' || c == '\'');
-            if !is_success_key(status) {
+            if !in_class(status) {
                 continue;
             }
             let c = indent(line);
@@ -3769,6 +3764,36 @@ mod tests {
             }
         }
         out
+    }
+
+    /// 1-based line numbers of the served **success** (`2XX`) responses a spec
+    /// declares with neither an `x-correlator` response header nor a
+    /// whole-response `$ref`. The `2XX`-class specialisation of
+    /// [`served_responses_missing_x_correlator`].
+    fn served_success_responses_missing_x_correlator(body: &str) -> Vec<usize> {
+        served_responses_missing_x_correlator(body, |key| {
+            key.len() == 3
+                && key.as_bytes()[0] == b'2'
+                && key.as_bytes()[1..].iter().all(|&c| c.is_ascii_digit() || c == b'X')
+        })
+    }
+
+    /// 1-based line numbers of the served **client/server-error** (`4XX`/`5XX`)
+    /// responses a spec declares with neither an `x-correlator` response header
+    /// nor a whole-response `$ref`. The error-class twin of
+    /// [`served_success_responses_missing_x_correlator`], reusing the shared
+    /// [`served_responses_missing_x_correlator`] scanner: the same
+    /// `responses:`-ancestor / `callbacks:`/`example:`/`examples:`-exclusion
+    /// scoping and the same direct-`$ref` inheritance exemption apply. A `4XX`/
+    /// `5XX` response `$ref`'d to the shared `errors.yaml` model inherits the
+    /// header (that shared model declares it on every canonical response), so
+    /// only an *inline* error response that omits the header is flagged.
+    fn served_error_responses_missing_x_correlator(body: &str) -> Vec<usize> {
+        served_responses_missing_x_correlator(body, |key| {
+            key.len() == 3
+                && (key.as_bytes()[0] == b'4' || key.as_bytes()[0] == b'5')
+                && key.as_bytes()[1..].iter().all(|&c| c.is_ascii_digit() || c == b'X')
+        })
     }
 
     /// The `METHOD /path` label of every operation a spec declares whose
@@ -8538,6 +8563,133 @@ components:
         assert!(
             header_keys >= 100,
             "expected many x-correlator header keys across specs, got {header_keys}"
+        );
+    }
+
+    #[test]
+    fn every_served_error_response_declares_an_x_correlator_header() {
+        // Contract-harness invariant (CAMARA Commonalities): every **served**
+        // client/server-error (`4XX`/`5XX`) response a mounted business spec declares
+        // MUST document the `x-correlator` response header — the error-side twin of
+        // `every_served_success_response_declares_an_x_correlator_header`. CamaraSim
+        // echoes `x-correlator` on every response it serves, error responses included
+        // (the shared error `IntoResponse` re-attaches it), so an error response that
+        // omits the header under-states the wire contract exactly as a success one
+        // would. Most error responses reach the shared `errors.yaml` model via a
+        // whole-response `$ref` and inherit the header from it (that shared model now
+        // declares it on all 9 canonical responses); only the *inline* `4XX`/`5XX`
+        // responses a spec spells out itself (e.g. an API-specific `400`/`422` with a
+        // bespoke error schema) can drift — and those are what this test pins.
+        //
+        // Same scoping as the success twin: a callback's error response (the sink's,
+        // under `callbacks:`) is out of scope, and `auth/openapi.yaml` is excluded
+        // (its OAuth endpoints follow RFC 6749/8414's error model, not the CAMARA
+        // x-correlator convention). Verified true across all mounted business specs
+        // before asserting.
+        for api in APIS {
+            let missing = served_error_responses_missing_x_correlator(api.body);
+            assert!(
+                missing.is_empty(),
+                "{} spec declares served error (4XX/5XX) response(s) with no \
+                 `x-correlator` response header at line(s): {:?}",
+                api.name,
+                missing
+            );
+        }
+    }
+
+    #[test]
+    fn error_x_correlator_response_header_extraction_rules() {
+        // Unit-cover the `served_error_responses_missing_x_correlator` extractor so
+        // the contract test above can't pass vacuously and its scoping is pinned: an
+        // inline served `4XX` (`'400'`) with no header is flagged; an inline `4XX`
+        // (`'422'`) documenting the header passes; a whole-response `$ref` (`'404'`)
+        // inherits the header from the shared model and is exempt; an error-shaped key
+        // inside an `examples:` payload is not a Response Object; and a callback's
+        // error response (under `callbacks:`, the sink's) is not a served one — none
+        // of those three is flagged.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '400':
+          description: bad
+          content:
+            application/json:
+              schema:
+                type: object
+              examples:
+                sample:
+                  value:
+                    '500':
+                      inner: true
+        '422':
+          description: nope
+          headers:
+            x-correlator:
+              $ref: \"#/components/headers/XCorrelator\"
+          content:
+            application/json:
+              schema:
+                type: object
+    delete:
+      operationId: deleteA
+      responses:
+        '404':
+          $ref: \"#/components/responses/NotFound\"
+      callbacks:
+        onEvent:
+          '{$request.body#/sink}':
+            post:
+              responses:
+                '500':
+                  description: err
+components:
+  headers:
+    XCorrelator:
+      schema:
+        type: string
+";
+        // Flagged: only `GET /a`'s inline `'400'` at line 10 (no `x-correlator`
+        // header, no whole-response `$ref`). Not flagged: the `'422'` (documents the
+        // header), the `'500'` inside the `examples:` payload (example data, not a
+        // Response Object), `DELETE /a`'s `'404'` (a whole-response `$ref`), and the
+        // callback's `'500'` acknowledgement (under `callbacks:`, the sink's response).
+        assert_eq!(served_error_responses_missing_x_correlator(body), vec![10]);
+
+        // Non-vacuous floor: across every registered spec every served `4XX`/`5XX`
+        // response documents (or inherits) the `x-correlator` header, and the corpus
+        // declares many error responses, so a broken extractor can't hide behind an
+        // empty scan. Count error-status response keys with a detection independent of
+        // the extractor.
+        let is_error_key = |s: &str| -> bool {
+            s.len() == 3
+                && (s.as_bytes()[0] == b'4' || s.as_bytes()[0] == b'5')
+                && s.as_bytes()[1..].iter().all(|&c| c.is_ascii_digit() || c == b'X')
+        };
+        let mut error_status_keys = 0usize;
+        for api in APIS {
+            assert!(
+                served_error_responses_missing_x_correlator(api.body).is_empty(),
+                "{}: every served error response must document the x-correlator header",
+                api.name
+            );
+            error_status_keys += api
+                .body
+                .lines()
+                .filter_map(|l| l.trim().strip_suffix(':'))
+                .filter(|k| is_error_key(k.trim_matches(|c| c == '"' || c == '\'')))
+                .count();
+        }
+        assert!(
+            error_status_keys >= 100,
+            "expected many error-status response keys across specs, got {error_status_keys}"
         );
     }
 

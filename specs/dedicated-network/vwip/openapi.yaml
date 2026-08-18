@@ -127,6 +127,9 @@ paths:
                       end: "2024-12-31T23:59:59Z"
                     serviceAreaId: "00000000-0000-4000-8000-000000000001"
         "400":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
           description: |
             400 — invalid request. CamaraSim returns `INVALID_ARGUMENT` for a
             malformed body/field (bad JSON, `name` length, the profile `oneOf`, a
@@ -245,6 +248,9 @@ paths:
                   summary: No matching networks
                   value: []
         "400":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
           description: |
             400 — invalid request. CamaraSim returns `INVALID_ARGUMENT` when the
             `name` query parameter exceeds its 1024-character `maxLength`.

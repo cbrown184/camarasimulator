@@ -208,6 +208,9 @@ paths:
                     createdAt: "2024-01-01T14:27:08Z"
                     recordingEnabled: false
         "400":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
           description: |
             400 — invalid request. CamaraSim returns `INVALID_ARGUMENT` for a
             malformed body, an unknown field, or a missing

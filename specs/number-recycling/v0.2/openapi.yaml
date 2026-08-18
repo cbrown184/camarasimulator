@@ -124,6 +124,9 @@ paths:
                   value:
                     phoneNumberRecycled: false
         "400":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
           description: |
             400 — invalid request. CamaraSim returns `INVALID_ARGUMENT` for a
             malformed body or an unparseable/impossible `specifiedDate`, and
@@ -154,6 +157,9 @@ paths:
         "409":
           $ref: "../../shared/errors.yaml#/components/responses/Conflict"
         "422":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
           description: |
             422 — unprocessable. CamaraSim returns `MISSING_IDENTIFIER` when the
             line cannot be identified (no `phoneNumber` and a non-line subject),

@@ -143,6 +143,9 @@ paths:
         "409":
           $ref: "../../shared/errors.yaml#/components/responses/Conflict"
         "422":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
           description: |
             422 — unprocessable. CamaraSim returns `MISSING_IDENTIFIER` when the
             line cannot be identified (no `phoneNumber` and a non-line subject),
@@ -252,6 +255,9 @@ paths:
         "409":
           $ref: "../../shared/errors.yaml#/components/responses/Conflict"
         "422":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
           description: |
             422 — unprocessable. CamaraSim returns `MISSING_IDENTIFIER` when the
             line cannot be identified (no `phoneNumber` and a non-line subject),

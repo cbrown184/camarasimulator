@@ -147,6 +147,9 @@ paths:
                       totalCount: 4
                       totalPages: 1
         "400":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
           description: |
             400 — invalid request. CamaraSim returns `INVALID_ARGUMENT` for a
             non-integer `page`/`perPage` (or a `name` over 1024 chars), and
@@ -237,6 +240,9 @@ paths:
                       - low-latency
                     defaultQosProfile: standard
         "400":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
           description: |
             400 — invalid request. CamaraSim returns `INVALID_ARGUMENT` for a
             `profileId` that is not UUID-shaped.

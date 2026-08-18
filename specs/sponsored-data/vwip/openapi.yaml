@@ -173,6 +173,9 @@ paths:
                     endTime: "2024-06-01T00:10:00Z"
                     sponsoredDataVolume: 50
         "400":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
           description: |
             400 — invalid request. CamaraSim returns `INVALID_ARGUMENT` for a
             missing/malformed `sponsorId`, `campaignId`, `phoneNumber`,

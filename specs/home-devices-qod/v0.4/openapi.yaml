@@ -102,6 +102,9 @@ paths:
             x-correlator:
               $ref: "#/components/headers/XCorrelator"
         "400":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
           description: |
             400 — invalid request. CamaraSim returns `INVALID_ARGUMENT` for a
             malformed/unknown body, a `serviceClass` outside the enum, or an
@@ -122,6 +125,9 @@ paths:
         "403":
           $ref: "../../shared/errors.yaml#/components/responses/PermissionDenied"
         "404":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
           description: |
             404 — the device was not found on the home network. CamaraSim returns
             `DEVICE_NOT_FOUND` for the reserved `…240` address and the generic
@@ -138,6 +144,9 @@ paths:
                     code: DEVICE_NOT_FOUND
                     message: No device with the given ipAddress was found on the home network.
         "409":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
           description: |
             409 — a home-network condition prevents applying the QoS. CamaraSim
             returns one of the `HOME_DEVICES_QOD.*` conflict codes for the
@@ -168,6 +177,9 @@ paths:
         "500":
           $ref: "../../shared/errors.yaml#/components/responses/Internal"
         "503":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
           description: |
             503 — the home router could not be reached. CamaraSim returns
             `HOME_DEVICES_QOD.ROUTER_OFFLINE` for the reserved `…248` address and
@@ -184,6 +196,9 @@ paths:
                     code: HOME_DEVICES_QOD.ROUTER_OFFLINE
                     message: The home router is offline and cannot apply the QoS.
         "504":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
           description: |
             504 — the home router did not respond in time. CamaraSim returns
             `TIMEOUT` for the reserved `…249` address.

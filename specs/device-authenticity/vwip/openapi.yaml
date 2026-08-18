@@ -115,6 +115,9 @@ paths:
                     lastChecked: "2026-08-05T10:41:38Z"
                     reportedDate: "2026-08-05T08:41:38Z"
         "400":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
           description: |
             400 — invalid request. CamaraSim returns `INVALID_ARGUMENT` for a
             malformed body, or an `imei` that is missing or not a 15-digit string.
@@ -138,6 +141,9 @@ paths:
         "409":
           $ref: "../../shared/errors.yaml#/components/responses/Conflict"
         "422":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
           description: |
             422 — unprocessable. CamaraSim returns the reserved shared
             `SERVICE_NOT_APPLICABLE` for an IMEI ending in the `…422` suffix (the

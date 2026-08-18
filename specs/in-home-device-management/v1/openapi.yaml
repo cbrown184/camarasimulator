@@ -164,6 +164,9 @@ paths:
                         infraDevice: modem
                         interfaceType: ethernet
         "400":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
           description: |
             400 — invalid request. CamaraSim returns `INVALID_ARGUMENT` for a
             missing or empty `ssid`, or an unknown `connectionStatus` value.
@@ -276,6 +279,9 @@ paths:
                     paused: false
                     interfaceType: wifi
         "400":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
           description: |
             400 — invalid request. CamaraSim returns `INVALID_ARGUMENT` for a
             missing or empty `ssid`.
@@ -380,6 +386,9 @@ paths:
                 deviceId: dev-0f1e2d3c4b5a6978
                 status: deleted
         "400":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
           description: |
             400 — invalid request. CamaraSim returns `INVALID_ARGUMENT` for a
             missing or empty `ssid`.
@@ -517,6 +526,9 @@ paths:
                 paused: false
                 interfaceType: wifi
         "400":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
           description: |
             400 — invalid request. CamaraSim returns `INVALID_ARGUMENT` for a
             missing or empty `ssid`, an unknown body field, an empty `deviceName`,
@@ -655,6 +667,9 @@ paths:
                     networkCongestion: green
                     measuredAt: "2024-01-01T14:27:08Z"
         "400":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
           description: |
             400 — invalid request. CamaraSim returns `INVALID_ARGUMENT` for a
             missing or empty `ssid`.
@@ -798,6 +813,9 @@ paths:
                     actionType: schedule-access
                     status: accepted
         "400":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
           description: |
             400 — invalid request. CamaraSim returns `INVALID_ARGUMENT` for a
             missing/empty `ssid`, an unknown field, an unsupported `actionId`, or a

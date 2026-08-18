@@ -162,6 +162,9 @@ paths:
                     startsAt: "2026-08-05T10:41:38Z"
                     status: ACTIVE
         "400":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
           description: |
             400 — invalid request. CamaraSim returns `INVALID_ARGUMENT` for a
             malformed body; a missing `applicationProfileId`, `applicationServer`
@@ -188,6 +191,9 @@ paths:
         "409":
           $ref: "../../shared/errors.yaml#/components/responses/Conflict"
         "422":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
           description: |
             422 — unprocessable. CamaraSim returns `MISSING_IDENTIFIER` when neither
             a `device` nor a usable token subject is present, or the reserved shared
@@ -432,6 +438,9 @@ paths:
         "404":
           $ref: "../../shared/errors.yaml#/components/responses/NotFound"
         "422":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
           description: |
             422 — unprocessable. CamaraSim returns `MISSING_IDENTIFIER` when neither
             a `device` nor a usable token subject is present, or the reserved shared
@@ -544,6 +553,9 @@ paths:
             x-correlator:
               $ref: "#/components/headers/XCorrelator"
         "400":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
           description: |
             400 — invalid `MetricsPayload`. CamaraSim returns `INVALID_ARGUMENT`
             for a malformed body, a missing required figure

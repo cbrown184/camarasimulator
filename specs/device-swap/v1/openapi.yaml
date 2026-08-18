@@ -120,6 +120,9 @@ paths:
                   value:
                     swapped: false
         "400":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
           description: |
             400 — invalid request. CamaraSim returns `INVALID_ARGUMENT` for a
             malformed body or a `phoneNumber` that is not valid E.164, and
@@ -150,6 +153,9 @@ paths:
         "409":
           $ref: "../../shared/errors.yaml#/components/responses/Conflict"
         "422":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
           description: |
             422 — unprocessable. CamaraSim returns `MISSING_IDENTIFIER` when the
             line cannot be identified (no `phoneNumber` and a non-line subject),
@@ -268,6 +274,9 @@ paths:
                     latestDeviceChange: null
                     monitoredPeriod: 10
         "400":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
           description: |
             400 — invalid request. CamaraSim returns `INVALID_ARGUMENT` for a
             malformed body or a `phoneNumber` that is not valid E.164.
@@ -291,6 +300,9 @@ paths:
         "409":
           $ref: "../../shared/errors.yaml#/components/responses/Conflict"
         "422":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
           description: |
             422 — unprocessable. CamaraSim returns `MISSING_IDENTIFIER` when the
             line cannot be identified (no `phoneNumber` and a non-line subject),

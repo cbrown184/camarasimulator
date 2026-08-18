@@ -156,6 +156,9 @@ paths:
                         statusReason: EXPIRED
                         expirationDate: "2026-07-01T12:00:00Z"
         "400":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
           description: |
             400 — invalid request. CamaraSim returns `INVALID_ARGUMENT` for a
             malformed body, a missing required field (`scopes` / `purpose` /
@@ -176,6 +179,9 @@ paths:
         "401":
           $ref: "../../shared/errors.yaml#/components/responses/Unauthenticated"
         "403":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
           description: |
             403 — forbidden. CamaraSim returns the generic `PERMISSION_DENIED`
             when the token lacks the `consent-info:retrieve` scope,
@@ -211,6 +217,9 @@ paths:
         "409":
           $ref: "../../shared/errors.yaml#/components/responses/Conflict"
         "422":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
           description: |
             422 — unprocessable. CamaraSim returns `MISSING_IDENTIFIER` when the
             line cannot be identified (no `phoneNumber` and a non-line subject),

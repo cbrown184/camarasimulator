@@ -132,6 +132,9 @@ paths:
                     scoringType: veritasIndex
                     scoringValue: 0
         "400":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
           description: |
             400 — invalid request. CamaraSim returns `INVALID_ARGUMENT` for a
             malformed body, a missing/unknown `scoringType`, a malformed
@@ -156,6 +159,9 @@ paths:
         "409":
           $ref: "../../shared/errors.yaml#/components/responses/Conflict"
         "422":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
           description: |
             422 — unprocessable. CamaraSim returns `MISSING_IDENTIFIER` when the
             line cannot be identified (no `phoneNumber` and a non-line subject),

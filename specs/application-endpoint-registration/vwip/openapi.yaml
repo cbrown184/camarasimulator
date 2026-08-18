@@ -125,6 +125,9 @@ paths:
                   summary: Registered — minted list id
                   value: "98765432-e89b-12d3-a456-426614174999"
         "400":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
           description: |
             400 — invalid request. CamaraSim returns `INVALID_ARGUMENT` for a
             malformed body, an unknown field, an empty/over-long
@@ -159,6 +162,9 @@ paths:
         "409":
           $ref: "../../shared/errors.yaml#/components/responses/Conflict"
         "422":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
           description: |
             422 — unprocessable. CamaraSim returns
             `UNIDENTIFIABLE_APPLICATION_PROFILE` when `applicationProfileId` is the
@@ -296,6 +302,9 @@ paths:
               schema:
                 $ref: "#/components/schemas/ApplicationEndpointList"
         "400":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
           description: |
             400 — invalid request. CamaraSim returns `INVALID_ARGUMENT` when the
             `applicationEndpointListId` path value is not a UUID.
@@ -360,6 +369,9 @@ paths:
             x-correlator:
               $ref: "#/components/headers/XCorrelator"
         "400":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
           description: |
             400 — invalid request. CamaraSim returns `INVALID_ARGUMENT` when the
             `applicationEndpointListId` path value is not a UUID.
@@ -439,6 +451,9 @@ paths:
             x-correlator:
               $ref: "#/components/headers/XCorrelator"
         "400":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
           description: |
             400 — invalid request. CamaraSim returns `INVALID_ARGUMENT` for a
             malformed body/field or a non-UUID `applicationEndpointListId` path
@@ -467,6 +482,9 @@ paths:
         "404":
           $ref: "../../shared/errors.yaml#/components/responses/NotFound"
         "422":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
           description: |
             422 — unprocessable. CamaraSim returns
             `UNIDENTIFIABLE_APPLICATION_PROFILE` when `applicationProfileId` is the

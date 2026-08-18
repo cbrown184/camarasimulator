@@ -140,6 +140,9 @@ paths:
                                   - target: "$.components.schemas['Device'].properties['ipv4Address']"
                                     remove: true
         "400":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
           description: |
             400 — invalid request. CamaraSim returns `INVALID_ARGUMENT` for a
             malformed body, an empty/absent `overlayExtends`, a non-URI

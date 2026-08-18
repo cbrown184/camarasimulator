@@ -209,6 +209,9 @@ paths:
                       totalCount: 0
                       totalPages: 0
         "400":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
           description: |
             400 — invalid request. CamaraSim returns `INVALID_ARGUMENT` for a
             missing/non-UUID `networkId`, a missing/unknown `frequency`, a

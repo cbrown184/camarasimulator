@@ -152,6 +152,9 @@ paths:
                       - QOS_L
                       - QOS_M
         "400":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
           description: |
             400 — invalid request. CamaraSim returns `INVALID_ARGUMENT` for an
             `areaId` that is not UUID-shaped.
@@ -278,6 +281,9 @@ paths:
                         - "00000000-0000-4000-8000-000000000000"
                         - "00000000-0000-4000-8000-000000000001"
         "400":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
           description: |
             400 — invalid request. CamaraSim returns `INVALID_ARGUMENT` for a
             malformed body, a non-`CIRCLE` query area, or a filter value violating

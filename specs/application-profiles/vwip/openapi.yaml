@@ -118,6 +118,9 @@ paths:
                         unit: Milliseconds
                       packetLossErrorRate: 3
         "400":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
           description: |
             400 — invalid request. CamaraSim returns `INVALID_ARGUMENT` for a
             malformed body, a missing `anyOf` threshold, an empty threshold
@@ -196,6 +199,9 @@ paths:
               schema:
                 $ref: "#/components/schemas/ApplicationProfile"
         "400":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
           description: 400 — `applicationProfileId` is not a valid UUID.
           content:
             application/json:
@@ -271,6 +277,9 @@ paths:
               schema:
                 $ref: "#/components/schemas/ApplicationProfile"
         "400":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
           description: |
             400 — invalid request. `INVALID_ARGUMENT` for a malformed body, a
             missing `anyOf` threshold, an empty threshold object
@@ -348,6 +357,9 @@ paths:
             x-correlator:
               $ref: "#/components/headers/XCorrelator"
         "400":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
           description: 400 — `applicationProfileId` is not a valid UUID.
           content:
             application/json:

@@ -140,6 +140,9 @@ paths:
                     score: null
                     scoringTime: null
         "400":
+          headers:
+            x-correlator:
+              $ref: "#/components/headers/XCorrelator"
           description: |
             400 — invalid request. CamaraSim returns `INVALID_ARGUMENT` for a
             missing or non-UUID `networkId`, or a missing or unknown `netType`.
