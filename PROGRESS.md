@@ -5215,6 +5215,34 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-18 — Contract-test harness: added a **string-length default-bound** contract test
+  (`src/registry.rs` `every_default_respects_its_string_length_bounds`) — where a Schema Object
+  declares a quoted-string `default` beside a `minLength`/`maxLength`, the default's character
+  length MUST lie within those bounds. The **`default`-side twin** of
+  `every_example_respects_its_string_length_bounds`, completing the **last remaining example/default
+  symmetry** in the harness: the numeric-bound family already pairs `every_default_is_within_its_
+  numeric_bounds` with its example twin, and the enum-membership and schema-type families each guard
+  both an example and a default; only string-length had the example side alone. A `default` is a
+  fall-back *instance*, so a string below a raised `minLength` floor or above a tightened `maxLength`
+  cap is a self-contradictory schema whose own validator rejects the value it pre-supplies —
+  invisible to `every_default_matches_its_schema_type` (type only), `every_default_is_a_member_of_
+  its_enum` (enum only), and the size-bound tests (bounds' own domain/ordering, never a default). New
+  pure `defaults_outside_their_length_bounds` extractor (no YAML dep) mirrors `examples_outside_
+  their_length_bounds` exactly, keyed on `default`: only an inline *quoted* default with a
+  same-indent non-negative-integer `minLength`/`maxLength` sibling (down- then up-scan, dedent-bounded)
+  is measured in Unicode scalars (`chars().count()`); unquoted/blocked defaults and a `default:`
+  inside an `example:` payload are skipped; comparison inclusive. **Surveyed the corpus first: it
+  pairs no quoted-string default with a length bound (string defaults are enum-valued or unbounded)
+  → the contract test asserts clean and guards future drift, the same posture as
+  `no_property_declares_both_read_only_and_write_only`.** Non-vacuity comes from the unit test
+  (`default_length_bound_extraction_rules`: within-bounds passes; below-`minLength` and above-`maxLength`
+  flagged in document order; equal-to-bound inclusive; a `minLength` declared below still pairs;
+  unquoted / no-sibling / inside-`example` / cross-property-dedent / named-`default` block / block-scalar
+  all skipped; plus a `bounded_defaults == 0` corpus floor documenting the future-drift posture).
+  Test-side only — no request/response/behaviour change, so no vendored-spec edits. `cargo test` 2727
+  green (was 2725; +2); `cargo build --release` succeeds. No new dependency; the extractor and both
+  tests live in the `#[cfg(test)]` module, so nothing ships in the binary. — binary (release): 5.1M
+  (5,314,968 B; unchanged)
 - 2026-08-18 — Contract-test harness: added a **scenario-case non-empty-value** contract test
   (`src/registry.rs` `every_scenario_case_documents_a_non_empty_value`) — every
   `x-camarasim-scenarios` case's `input:` **and** `result:` MUST carry a non-empty value. The
