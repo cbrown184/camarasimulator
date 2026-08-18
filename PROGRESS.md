@@ -3332,6 +3332,15 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - an unused root-tag contract test (`src/registry.rs`
+    `every_root_tag_is_referenced_by_an_operation`) asserts every document-root `tags:` Tag
+    Object is referenced by ≥1 operation `tags` array — the declaration-side reverse of the
+    core-OAS Spectral `operation-tag-defined` pair (`every_operation_tag_is_defined` flags a
+    reference with no declaration; this flags a declaration with no reference, the direction that
+    pair never looks). New pure `unused_root_tags` extractor (no YAML dep) reuses
+    `operation_tags_not_defined`'s exact defined/referenced scanning. Surveyed the corpus first
+    (2 of 61 specs carry a root `tags:` list, 3 names total, all operation-referenced) → 0 drift.
+    Unit-covered (`unused_root_tag_extraction_rules`), ≥3 root-tag-name floor.
   - an info.license.name canonical-identifier contract test (`src/registry.rs`
     `every_info_license_name_is_the_camara_apache_identifier`) asserts every served
     spec's `info.license.name` is exactly the SPDX short identifier `Apache-2.0` (the
@@ -5121,6 +5130,31 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-18 — Contract-test harness: added an **unused root-tag** contract test
+  (`src/registry.rs` `every_root_tag_is_referenced_by_an_operation`) — every Tag Object a
+  mounted spec declares in its document-root `tags:` list must be referenced by at least one
+  operation's `tags` array. The **declaration-side reverse** of the core-OAS Spectral
+  `operation-tag-defined` pair (`operation_tags_not_defined` / `every_operation_tag_is_defined`),
+  which reads the same two sets — root-declared names + operation-referenced names — but only ever
+  flags a *reference* with no declaration; neither direction flags a *declaration* with no
+  reference, so a root tag no operation carries (dead documentation left by a half-finished
+  rename, or a tag added to the root and never wired to an operation) renders an empty nav section
+  invisibly. New pure `unused_root_tags` extractor (no YAML dep) reuses that pair's exact
+  scanning: referenced names from the 8-space `- <scalar>` items under a 6-space operation `tags:`
+  key in the `paths:` tree (a markdown `- ` bullet in an operation `description:` block scalar is
+  past the dedent out of `tags:`, never a reference), declared names + their `name:` line from the
+  column-0 `tags:` block; both unquoted so a quoted `"Alpha"` matches a bare `Alpha`. **Surveyed
+  the corpus first: only 2 of 61 served specs carry a root `tags:` list (iot-sim-fraud-prevention →
+  `Bind card fraud prevention` + `Query card fraud prevention`; edge-application-management →
+  `Cluster`); all 3 names are operation-referenced → 0 drift to fix.** Unit-covered
+  (`unused_root_tag_extraction_rules`: an `Orphan` root tag flagged by its `name:` line while a
+  `Used` + a quoted `"Quoted"` pass, the same-indent `- Orphan` markdown bullet under
+  `description:` not counted as a reference, a no-root-tags spec flags nothing; a ≥3
+  root-tag-name floor via an independent name counter). Test-side only — no request/response/
+  behaviour change, so no vendored-spec edits. `cargo test` 2701 green (was 2699; +2);
+  `cargo build --release` succeeds, no warnings. No new dependency; the extractor and both tests
+  live in the `#[cfg(test)]` module, so nothing ships in the binary. — binary (release): 5.1M
+  (5,314,968 B; unchanged)
 - 2026-08-17 — Contract-test harness: added a **distinct root tag names** contract test
   (`src/registry.rs` `every_root_tags_list_names_distinct_tags`) — a mounted spec's
   document-root `tags:` list must not declare the same tag name twice (the core-OAS MUST

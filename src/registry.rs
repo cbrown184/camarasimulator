@@ -27344,6 +27344,233 @@ paths:
     }
 
     /// The 1-based line numbers, in document order, of every root Tag Object (an item of
+    /// the document-root `tags:` list) whose `name` no Operation Object's `tags` array
+    /// references — a declared-but-unused tag — without a YAML dep.
+    ///
+    /// The **declaration-side reverse** of [`operation_tags_not_defined`] /
+    /// `every_operation_tag_is_defined` (the core-OAS Spectral `operation-tag-defined`
+    /// rule, which flags an operation tag the root never declares): this reads the same
+    /// two sets — the root-declared names and the operation-referenced names — but flags
+    /// a root *declaration* no reference names, the direction the definedness pair never
+    /// looks. A UI renders one navigation section per root Tag Object (its label +
+    /// description); a root tag no operation carries renders an empty, operation-less
+    /// section — dead documentation left when a rename updates the operation references
+    /// but not the root list, or a tag is added to the root and never wired to an
+    /// operation.
+    ///
+    /// Both sets are collected exactly as [`operation_tags_not_defined`] collects them:
+    /// referenced names from the 8-space `- <scalar>` items under a 6-space operation
+    /// `tags:` key inside the `paths:` tree (so a markdown `- ` bullet in an operation
+    /// `description:` block scalar — same indent but under `description:`, past the
+    /// dedent out of `tags:` — is never a reference), declared names from the `name:` of
+    /// each Tag Object under the column-0 `tags:` block (dash line or continuation); both
+    /// unquoted before comparison so a quoted `"Alpha"` matches a bare `Alpha`. A root
+    /// entry whose `name` is empty is skipped (its own domain is the tag-name presence
+    /// rule). Returns the `name:` line of each unreferenced root tag.
+    fn unused_root_tags(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let unquote = |s: &str| -> String {
+            let s = s.trim();
+            let s = s
+                .strip_prefix('"')
+                .and_then(|x| x.strip_suffix('"'))
+                .or_else(|| s.strip_prefix('\'').and_then(|x| x.strip_suffix('\'')))
+                .unwrap_or(s);
+            s.to_string()
+        };
+        // Referenced tags: 8-space `- <scalar>` items under a 6-space operation
+        // `tags:` key, scoped to the `paths:` tree (mirrors `operation_tags_not_defined`).
+        let mut referenced: HashSet<String> = HashSet::new();
+        let mut in_paths = false;
+        let mut in_path_item = false;
+        for (i, line) in lines.iter().enumerate() {
+            let is_top = !line.is_empty() && !line.starts_with(char::is_whitespace);
+            if is_top {
+                in_paths = line.trim_end() == "paths:";
+                in_path_item = false;
+                continue;
+            }
+            if !in_paths {
+                continue;
+            }
+            if let Some(rest) = line.strip_prefix("  ") {
+                if !rest.starts_with(char::is_whitespace) && rest.starts_with('/') {
+                    in_path_item = true;
+                    continue;
+                }
+            }
+            if !in_path_item || indent(line) != 6 || line.trim_start() != "tags:" {
+                continue;
+            }
+            for l in &lines[i + 1..] {
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) <= 6 {
+                    break; // dedented out of the `tags:` block
+                }
+                if indent(l) == 8 {
+                    if let Some(item) = l.trim_start().strip_prefix('-') {
+                        let name = unquote(item.split('#').next().unwrap_or(item));
+                        if !name.is_empty() {
+                            referenced.insert(name);
+                        }
+                    }
+                }
+            }
+        }
+        // Root Tag Object names (the `name:` of each item under the column-0 `tags:`
+        // block); flag each whose name no operation referenced.
+        let mut out = Vec::new();
+        let mut in_root_tags = false;
+        for (i, line) in lines.iter().enumerate() {
+            let is_top = !line.is_empty() && !line.starts_with(char::is_whitespace);
+            if is_top {
+                in_root_tags = line.trim_end() == "tags:";
+                continue;
+            }
+            if !in_root_tags {
+                continue;
+            }
+            let t = line.trim_start();
+            let t = t.strip_prefix("- ").unwrap_or(t);
+            if let Some((k, v)) = t.split_once(':') {
+                if k.trim() == "name" {
+                    let v = v.split('#').next().unwrap_or(v);
+                    let name = unquote(v);
+                    if !name.is_empty() && !referenced.contains(&name) {
+                        out.push(i + 1);
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_root_tag_is_referenced_by_an_operation() {
+        // Contract-harness invariant (documentation-quality lint, the declaration-side
+        // reverse of the core-OAS Spectral `operation-tag-defined` rule): every Tag
+        // Object a mounted spec declares in its document-root `tags:` list MUST be
+        // referenced by at least one Operation Object's `tags` array. A UI renders one
+        // navigation section per root Tag Object; a root tag no operation carries renders
+        // an empty, operation-less section — dead documentation left when a rename
+        // updates the operation references but not the root list, or a tag is added to
+        // the root and never wired to an operation.
+        //
+        // The complement of `every_operation_tag_is_defined`, which reads the same two
+        // sets (root-declared names, operation-referenced names) yet only ever flags a
+        // *reference* with no declaration; neither it nor any other test flags a
+        // *declaration* with no reference. Verified true across all mounted specs before
+        // asserting.
+        for api in APIS {
+            let unused = unused_root_tags(api.body);
+            assert!(
+                unused.is_empty(),
+                "{} spec declares a root `tags:` entry no operation references \
+                 (an empty documentation section) at `name:` line(s): {:?}",
+                api.name,
+                unused
+            );
+        }
+    }
+
+    #[test]
+    fn unused_root_tag_extraction_rules() {
+        // Unit-cover `unused_root_tags` so the contract test above can't pass vacuously
+        // and its accept/reject boundary is pinned: a root tag an operation references
+        // passes; a root tag no operation names is flagged (by its `name:` line); a
+        // quoted root name matches a bare operation reference; and a markdown `- ` bullet
+        // inside an operation `description:` block scalar is not a tag reference, so a
+        // root tag "used" only by such a bullet is still flagged.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+tags:
+  - name: Used
+    description: a
+  - name: \"Quoted\"
+    description: b
+  - name: Orphan
+    description: c
+paths:
+  /a:
+    get:
+      operationId: getA
+      tags:
+        - Used
+        - \"Quoted\"
+      description: |
+        Body text.
+        - Orphan
+      responses:
+        '200':
+          description: ok
+";
+        // Flagged: line 10 (`- name: Orphan`) — no operation `tags` array names it (the
+        // `- Orphan` on line 21 is a markdown bullet under `description:`, past the
+        // dedent out of `tags:` on line 19, so it is not collected as a reference). Not
+        // flagged: line 6 (`Used`, referenced on line 17) and line 8 (`\"Quoted\"`, whose
+        // unquoted `Quoted` matches the bare `- \"Quoted\"` reference on line 18).
+        assert_eq!(unused_root_tags(body), vec![10]);
+
+        // A spec with no root `tags:` list has no root tag to be unused → empty.
+        let no_root = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+";
+        assert!(unused_root_tags(no_root).is_empty());
+
+        // Non-vacuous floor: across the corpus every root tag is operation-referenced
+        // (the invariant the contract test asserts), and the corpus actually declares
+        // root Tag Objects — so the reference comparison runs on real data and a broken
+        // (always-empty) extractor can't hide behind a corpus with no root tags. Count
+        // root Tag Object `name:`s with a detector independent of the reference check.
+        let mut root_tag_names = 0usize;
+        for api in APIS {
+            assert!(
+                unused_root_tags(api.body).is_empty(),
+                "{}: every root tag must be referenced by an operation",
+                api.name
+            );
+            let mut in_root_tags = false;
+            for line in api.body.lines() {
+                let is_top = !line.is_empty() && !line.starts_with(char::is_whitespace);
+                if is_top {
+                    in_root_tags = line.trim_end() == "tags:";
+                    continue;
+                }
+                if !in_root_tags {
+                    continue;
+                }
+                let t = line.trim_start();
+                let t = t.strip_prefix("- ").unwrap_or(t);
+                if let Some((k, _)) = t.split_once(':') {
+                    if k.trim() == "name" {
+                        root_tag_names += 1;
+                    }
+                }
+            }
+        }
+        assert!(
+            root_tag_names >= 3,
+            "expected root Tag Object names across specs, got {root_tag_names}"
+        );
+    }
+
+    /// The 1-based line numbers, in document order, of every root Tag Object (an item of
     /// the document-root `tags:` list) that declares no non-empty `description`, without
     /// a YAML dep. Implements the well-known Spectral `tag-description` lint.
     ///
