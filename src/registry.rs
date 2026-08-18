@@ -854,6 +854,135 @@ mod tests {
         unreferenced
     }
 
+    /// The 1-based line numbers, in document order, of every server `variables:`
+    /// entry whose `default:` value — for a variable substituted at the **head**
+    /// of a server `url:` template (`url: "{name}/…"`) — is not a well-formed
+    /// absolute URI, without a YAML dep.
+    ///
+    /// In OpenAPI a Server Variable substituted at the *start* of a server `url`
+    /// template supplies the scheme+authority of every request URL the served
+    /// `/{api}/v{n}/docs` "try it" panel and every codegen client assemble.
+    /// CamaraSim templates its every base path as `{apiRoot}/…`, so `apiRoot`'s
+    /// `default` MUST be an absolute URI (a scheme then `:`). A default carrying a
+    /// placeholder, a value with stray whitespace, or a bare scheme-less token
+    /// assembles a request URL that is not absolute — a "try it" call that
+    /// resolves against the docs origin, or a codegen client that cannot build a
+    /// base URL — exactly where a caller issues the request.
+    ///
+    /// The **value-side complement** of
+    /// `every_server_url_variable_is_defined_with_a_default`, whose
+    /// `server_url_undefined_variables` proves only that a leading variable *has*
+    /// a non-empty `default`, never that the default is a usable base URL — the
+    /// Server-Variable analogue of how `every_info_license_url_is_a_well_formed_uri`
+    /// complements the presence-only `license-url` lint. A **non-leading** variable
+    /// (a `{port}`/`{region}` appearing mid-template, whose default is legitimately
+    /// not a URI) is out of scope: only a variable that opens the template is
+    /// required to resolve to an absolute URI.
+    ///
+    /// Scoping mirrors `server_url_undefined_variables`: only the top-level
+    /// `servers:` block is scanned; a leading variable is the `{name}` that opens
+    /// a server `url:` value (after an optional `- ` dash and surrounding quotes);
+    /// a variable is a direct-child key of a `variables:` mapping, and its
+    /// `default:` is read from its own sub-block (an inline `#` comment and
+    /// surrounding quotes stripped). An empty `default` is skipped — its absence is
+    /// `server_url_undefined_variables`'s concern. URI shape is judged by
+    /// `is_well_formed_absolute_uri`.
+    fn server_variable_defaults_not_absolute_uri(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+
+        // Isolate the top-level `servers:` block (identical to the siblings).
+        let start = match lines.iter().position(|l| *l == "servers:") {
+            Some(s) => s,
+            None => return Vec::new(),
+        };
+        let end = lines[start + 1..]
+            .iter()
+            .position(|l| !l.is_empty() && !l.starts_with(char::is_whitespace))
+            .map(|off| start + 1 + off)
+            .unwrap_or(lines.len());
+        let block_start = start + 1;
+        let block = &lines[block_start..end];
+
+        // Leading variable names: the `{name}` that opens a server `url:` value
+        // (after an optional `- ` sequence dash and surrounding quotes).
+        let mut leading: Vec<String> = Vec::new();
+        for l in block {
+            let t = l.trim_start();
+            let t = t.strip_prefix("- ").unwrap_or(t);
+            if let Some(url) = t.strip_prefix("url:") {
+                let url = url.trim().trim_matches('"').trim_matches('\'');
+                if let Some(rest) = url.strip_prefix('{') {
+                    if let Some(close) = rest.find('}') {
+                        let name = &rest[..close];
+                        if !name.is_empty() {
+                            leading.push(name.to_string());
+                        }
+                    }
+                }
+            }
+        }
+
+        // Walk each `variables:` mapping; for a direct-child variable that opens a
+        // url template, flag its `default:` when the value is not an absolute URI.
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let mut out = Vec::new();
+        let mut k = 0;
+        while k < block.len() {
+            if block[k].trim() != "variables:" {
+                k += 1;
+                continue;
+            }
+            let v_indent = indent(block[k]);
+            let mut child_indent: Option<usize> = None;
+            let mut m = k + 1;
+            while m < block.len() {
+                let l = block[m];
+                if l.trim().is_empty() {
+                    m += 1;
+                    continue;
+                }
+                let ind = indent(l);
+                if ind <= v_indent {
+                    break; // end of the `variables:` mapping
+                }
+                let ci = *child_indent.get_or_insert(ind);
+                if ind == ci {
+                    let name = l.trim().split_once(':').map(|(k, _)| k.trim()).unwrap_or("");
+                    if !name.is_empty() && leading.iter().any(|n| n == name) {
+                        // Scan this variable's own sub-block for a `default:`.
+                        let mut n = m + 1;
+                        while n < block.len() {
+                            let ll = block[n];
+                            if ll.trim().is_empty() {
+                                n += 1;
+                                continue;
+                            }
+                            if indent(ll) <= ci {
+                                break;
+                            }
+                            if let Some(rest) = ll.trim().strip_prefix("default:") {
+                                let val = rest
+                                    .split('#')
+                                    .next()
+                                    .unwrap_or(rest)
+                                    .trim()
+                                    .trim_matches('"')
+                                    .trim_matches('\'');
+                                if !val.is_empty() && !is_well_formed_absolute_uri(val) {
+                                    out.push(block_start + n + 1);
+                                }
+                            }
+                            n += 1;
+                        }
+                    }
+                }
+                m += 1;
+            }
+            k = m;
+        }
+        out
+    }
+
     /// Extract the root `openapi:` version string from an embedded OpenAPI body,
     /// without a YAML dep.
     ///
@@ -4707,6 +4836,157 @@ servers:
         assert!(
             declared_variables >= 20,
             "expected many declared server variables across specs, got {declared_variables}"
+        );
+    }
+
+    #[test]
+    fn every_leading_server_variable_default_is_a_well_formed_absolute_uri() {
+        // Contract-harness invariant (OpenAPI Server Variable Object rule): where a
+        // server `url:` template opens with a `{name}` variable, that variable's
+        // `default:` MUST be a well-formed absolute URI. CamaraSim templates every
+        // base path as `{apiRoot}/…`, so `apiRoot`'s default supplies the
+        // scheme+authority of every request URL the served `/{api}/v{n}/docs` "try
+        // it" panel and every codegen client assemble — a placeholder, a value with
+        // stray whitespace, or a bare scheme-less token assembles a non-absolute
+        // request URL that resolves against the wrong origin exactly where a caller
+        // issues the request.
+        //
+        // The value-side complement of
+        // `every_server_url_variable_is_defined_with_a_default`, whose
+        // `server_url_undefined_variables` proves only that a leading variable
+        // *has* a non-empty `default`, never that the default is a usable base URL
+        // — the Server-Variable analogue of how
+        // `every_info_license_url_is_a_well_formed_uri` complements the
+        // presence-only `license-url` lint. Invisible to every existing server
+        // test: `spec_server_url_matches_mounted_base_path` reads the url *text*,
+        // the reference/definition pair reads which variables are named/declared,
+        // and `every_server_url_has_no_trailing_slash` inspects the *template* —
+        // none reads a variable default's *value*. A non-leading variable (one
+        // appearing mid-template, whose default need not be a URI) is out of scope.
+        // Verified true across all mounted specs before asserting.
+        for api in APIS {
+            let bad = server_variable_defaults_not_absolute_uri(api.body);
+            assert!(
+                bad.is_empty(),
+                "{} spec declares a leading server-url variable whose `default:` is \
+                 not a well-formed absolute URI (an unusable request base URL) at \
+                 line(s): {:?}",
+                api.name,
+                bad
+            );
+        }
+    }
+
+    #[test]
+    fn server_variable_default_uri_extraction_rules() {
+        // Unit-cover `server_variable_defaults_not_absolute_uri` so the contract
+        // test above can't pass vacuously and its accept/flag boundary is pinned: a
+        // leading variable (`apiRoot`, opening the `{apiRoot}/…` url) whose default
+        // is a well-formed absolute URI passes; a leading default that is a bare
+        // scheme-less token, and one carrying whitespace, are each flagged; a
+        // non-leading variable (`region`, mid-template) whose default is a bare
+        // token is NOT flagged (out of scope); an empty `default:` is skipped
+        // (presence is the sibling's concern); and a spec with no `servers:` block
+        // yields nothing.
+        let good = "\
+servers:
+  - url: \"{apiRoot}/x/v1\"
+    variables:
+      apiRoot:
+        default: http://localhost:8080
+";
+        assert!(server_variable_defaults_not_absolute_uri(good).is_empty());
+
+        // `apiRoot` opens the template, and `localhost` (line 5) has no scheme
+        // colon → not an absolute URI → flagged.
+        let scheme_less = "\
+servers:
+  - url: \"{apiRoot}/x/v1\"
+    variables:
+      apiRoot:
+        default: localhost
+";
+        assert_eq!(server_variable_defaults_not_absolute_uri(scheme_less), vec![5]);
+
+        // A whitespace-bearing default (line 5) is not a URI → flagged.
+        let spaced = "\
+servers:
+  - url: \"{apiRoot}/x/v1\"
+    variables:
+      apiRoot:
+        default: not a url
+";
+        assert_eq!(server_variable_defaults_not_absolute_uri(spaced), vec![5]);
+
+        // `region` is mid-template (not leading — `apiRoot` opens the url), so its
+        // bare `us` default is out of scope; `apiRoot`'s default is a valid URI →
+        // nothing flagged.
+        let non_leading = "\
+servers:
+  - url: \"{apiRoot}/{region}/v1\"
+    variables:
+      apiRoot:
+        default: http://localhost:8080
+      region:
+        default: us
+";
+        assert!(server_variable_defaults_not_absolute_uri(non_leading).is_empty());
+
+        // An empty `default:` is the presence test's concern, skipped here.
+        let empty_default = "\
+servers:
+  - url: \"{apiRoot}/x/v1\"
+    variables:
+      apiRoot:
+        default:
+";
+        assert!(server_variable_defaults_not_absolute_uri(empty_default).is_empty());
+
+        // No `servers:` block → nothing to inspect.
+        let no_servers = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths: {}
+";
+        assert!(server_variable_defaults_not_absolute_uri(no_servers).is_empty());
+
+        // Non-vacuous floor: across every registered spec every leading
+        // server-variable default is a well-formed absolute URI (the invariant the
+        // contract test asserts), and the corpus actually declares many
+        // server-block defaults (each business spec's `{apiRoot}` base URL) — so
+        // the `is_well_formed_absolute_uri` path runs on real data and a broken
+        // (always-empty) extractor can't hide behind a corpus that never declares a
+        // default. Count server-block defaults with a detector independent of the
+        // extractor's URI check.
+        let mut server_defaults = 0usize;
+        for api in APIS {
+            assert!(
+                server_variable_defaults_not_absolute_uri(api.body).is_empty(),
+                "{}: every leading server-variable default must be a well-formed \
+                 absolute URI",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            if let Some(start) = lines.iter().position(|l| *l == "servers:") {
+                let end = lines[start + 1..]
+                    .iter()
+                    .position(|l| !l.is_empty() && !l.starts_with(char::is_whitespace))
+                    .map(|off| start + 1 + off)
+                    .unwrap_or(lines.len());
+                for l in &lines[start + 1..end] {
+                    if let Some(rest) = l.trim().strip_prefix("default:") {
+                        if !rest.split('#').next().unwrap_or(rest).trim().is_empty() {
+                            server_defaults += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            server_defaults >= 28,
+            "expected many server-block defaults across specs, got {server_defaults}"
         );
     }
 

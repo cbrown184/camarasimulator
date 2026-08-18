@@ -5176,6 +5176,40 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-18 — Contract-test harness: added a **leading server-variable default URI
+  well-formedness** contract test (`src/registry.rs`
+  `every_leading_server_variable_default_is_a_well_formed_absolute_uri`) — where a server
+  `url:` template opens with a `{name}` variable, that variable's `default:` MUST be a
+  well-formed absolute URI. CamaraSim templates every base path as `{apiRoot}/…`, so
+  `apiRoot`'s default supplies the scheme+authority of every request URL the served
+  `/{api}/v{n}/docs` "try it" panel and every codegen client assemble; a placeholder, a
+  whitespace-bearing value, or a bare scheme-less token assembles a **non-absolute** request
+  URL that resolves against the wrong origin. The **value-side complement** of
+  `every_server_url_variable_is_defined_with_a_default`, whose `server_url_undefined_variables`
+  proves only that a leading variable *has* a non-empty `default`, never that the default is a
+  usable base URL — the Server-Variable analogue of how
+  `every_info_license_url_is_a_well_formed_uri` complements the presence-only `license-url`
+  lint. The last presence-checked-but-value-unchecked field in the corpus: every other
+  presence lint (info title/description/version, license name/url, operation summary/
+  description, response/parameter/tag description, externalDocs url) already has a value check;
+  the server-variable default's *value* had none. Invisible to every existing server test —
+  `spec_server_url_matches_mounted_base_path` reads the url *text*, the reference/definition
+  pair reads which variables are named/declared, `every_server_url_has_no_trailing_slash`
+  inspects the *template* — none reads a default's value. New pure
+  `server_variable_defaults_not_absolute_uri` extractor (no YAML dep) reuses the sibling's
+  `servers:`-block isolation + `variables:`-mapping walk, adds head-of-template `{name}`
+  detection so only a variable that *opens* the url is required to resolve (a non-leading
+  `{port}`/`{region}`, whose default need not be a URI, is out of scope), and judges shape with
+  the existing `is_well_formed_absolute_uri`. **Surveyed the corpus first: all 60 leading
+  `apiRoot` defaults are the absolute URI `http://localhost:8080` → 0 drift to fix.**
+  Unit-covered (`server_variable_default_uri_extraction_rules`: a valid `apiRoot` URI passes; a
+  scheme-less `localhost` and a whitespace `not a url` are each flagged; a mid-template
+  `region: us` is out of scope; an empty `default:` and a no-`servers:` doc are skipped; a ≥28
+  server-block-default floor via an independent counter). Test-side only — no request/response/
+  behaviour change, so no vendored-spec edits. `cargo test` 2717 green (was 2715; +2);
+  `cargo build --release` succeeds, no warnings. No new dependency; the extractor and both
+  tests live in the `#[cfg(test)]` module, so nothing ships in the binary. — binary (release):
+  5.1M (5,314,968 B; unchanged)
 - 2026-08-18 — Contract-test harness: added an **`items` array-element keyword placement**
   contract test (`src/registry.rs` `every_items_keyword_sits_on_an_array_type`) — where a
   mounted spec declares an `items:` keyword as a sibling of a `type:` scalar, that type MUST
