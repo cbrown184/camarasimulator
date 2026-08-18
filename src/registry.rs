@@ -24283,6 +24283,335 @@ components:
         );
     }
 
+    /// Line numbers (1-based), in document order, of every `items:` array-element
+    /// keyword that sits on a Schema Object whose sibling `type:` scalar is **not**
+    /// `array`, without a YAML dep.
+    ///
+    /// In OpenAPI 3.0.x `items` is the keyword that describes the schema of an
+    /// array's *elements*; it is meaningful only on `type: array`. An `items:` left
+    /// on a schema declared `type: object` (or `string`/`integer`/…) — a field
+    /// retyped from an array to an object without dropping its old `items`, or an
+    /// `items` block pasted onto the wrong schema — is a self-contradictory schema:
+    /// a validator ignores the element constraint and a Redoc/Swagger/codegen client
+    /// silently drops it exactly where a caller reads or builds the payload.
+    ///
+    /// This is the placement analogue, for the array-*element* keyword, of
+    /// `every_facet_keyword_sits_on_its_required_type` / `every_numeric_facet_sits_on_a_
+    /// numeric_type` (which pin the string/array/object and numeric *validation
+    /// facets* to their type but never inspect `items`). It is the type-placement
+    /// complement of the two existing `items` tests, which read `items` from the other
+    /// side: `every_array_schema_declares_items` proves a `type: array` *has* an
+    /// `items` (array ⇒ items) and `every_items_declares_a_single_schema` proves an
+    /// `items` value is a single schema object (not a list) — neither ever checks the
+    /// reverse direction, that an `items` *sits on* an array (items ⇒ array), so an
+    /// `items` stranded on a non-array type sails through both.
+    ///
+    /// Unlike a validation facet (an inline scalar), `items` always *opens a block*
+    /// (its value is a schema), so the inline-value keyword filter the facet
+    /// extractors use cannot apply here; instead the same dedent-bounded down-then-up
+    /// same-indent sibling scan finds the type context, and only an `items` with a
+    /// `type:` scalar sibling in its own object is judged. That equal-indent scan is
+    /// also what keeps a schema property (or component) literally *named* `items` from
+    /// being mistaken for the keyword: such a name's own `type:` sits one level deeper
+    /// (a child), never at its own indent, so it has no sibling type and is skipped —
+    /// as is an `items` whose array type is inherited/absent (an `allOf`/`$ref`
+    /// composition) or one inside an `example:`/`examples:` payload (sample data).
+    fn items_keywords_on_a_non_array_type(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        // The inline scalar of a `type:` key (inline comment + surrounding quotes
+        // stripped), or `None` for any other key / a block opener.
+        let type_scalar = |l: &str| -> Option<String> {
+            let (k, v) = l.trim_start().split_once(':')?;
+            if k.trim() != "type" {
+                return None;
+            }
+            let v = v
+                .split('#')
+                .next()
+                .unwrap_or(v)
+                .trim()
+                .trim_matches('"')
+                .trim_matches('\'');
+            if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            }
+        };
+        // True when line `i` (indent `c`) sits inside an `example:`/`examples:` payload.
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        // The sibling `type:` scalar in the same object as line `i` (indent `c`):
+        // scan down through the object's block for a same-indent `type`, then up,
+        // dedent-bounded so a nested/following object's `type` never pairs.
+        let sibling_type = |i: usize, c: usize| -> Option<String> {
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c {
+                    if let Some(v) = type_scalar(l) {
+                        return Some(v);
+                    }
+                }
+                j += 1;
+            }
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c {
+                    if let Some(v) = type_scalar(l) {
+                        return Some(v);
+                    }
+                }
+            }
+            None
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some((k, _v)) = line.trim_start().split_once(':') else {
+                continue;
+            };
+            if k.trim() != "items" {
+                continue;
+            }
+            let c = indent(line);
+            if inside_example(i, c) {
+                continue;
+            }
+            if let Some(ty) = sibling_type(i, c) {
+                if ty != "array" {
+                    out.push(i + 1);
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_items_keyword_sits_on_an_array_type() {
+        // Contract-harness invariant (OpenAPI 3.0.x / JSON-Schema structural rule):
+        // where a Schema Object declares an `items:` array-element keyword as a sibling
+        // of a `type:` scalar, that type MUST be `array`. `items` describes the schema
+        // of an array's elements, so it is meaningful only on `type: array`; an `items`
+        // stranded on a `type: object` (or `string`/`integer`/…) — a field retyped away
+        // from an array without dropping its old `items`, or an `items` block pasted onto
+        // the wrong schema — is self-contradictory: a validator ignores the element
+        // constraint and a Redoc/Swagger/codegen client silently drops it exactly where a
+        // caller reads or builds the payload.
+        //
+        // The array-element-keyword placement sibling of `every_facet_keyword_sits_on_its_
+        // required_type` / `every_numeric_facet_sits_on_a_numeric_type` (which pin the
+        // string/array/object and numeric validation facets to their type but never inspect
+        // `items`), and the reverse-direction complement of the two existing `items` tests:
+        // `every_array_schema_declares_items` reads array ⇒ items and
+        // `every_items_declares_a_single_schema` reads items ⇒ single-schema value; neither
+        // reads items ⇒ array, so an `items` on a non-array type passes both. Only an
+        // `items` with a `type:` scalar sibling in the same object is inspected (an
+        // inherited/absent array type — an `allOf`/`$ref` composition — or a property/
+        // component literally *named* `items`, whose own type is a deeper child, is
+        // skipped). Verified true across all mounted specs before asserting.
+        for api in APIS {
+            let bad = items_keywords_on_a_non_array_type(api.body);
+            assert!(
+                bad.is_empty(),
+                "{} spec declares an `items:` array-element keyword on a `type:` that is \
+                 not `array` (the element constraint can never apply, so it is silently \
+                 dropped) at line(s): {:?}",
+                api.name,
+                bad
+            );
+        }
+    }
+
+    #[test]
+    fn items_keyword_array_type_extraction_rules() {
+        // Unit-cover `items_keywords_on_a_non_array_type` so the contract test above can't
+        // pass vacuously and its detection is pinned: an `items` beside `type: array`
+        // passes (whether `type` is declared before or after the `items`); an `items`
+        // beside a non-array type is flagged in document order (`items` on object, on
+        // string); an `items` with no sibling `type` scalar (type inherited/absent) is
+        // skipped; a schema property literally *named* `items` (whose own `type:` is a
+        // deeper child, not an equal-indent sibling) is skipped; and an `items` inside an
+        // `example:` payload is skipped.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    GoodArr:
+      type: array
+      items:
+        type: string
+    GoodArrTypeAfter:
+      items:
+        $ref: '#/components/schemas/GoodArr'
+      type: array
+    BadItemsOnObj:
+      type: object
+      items:
+        type: string
+    BadItemsOnStr:
+      items:
+        type: integer
+      type: string
+    NoType:
+      items:
+        type: string
+    NamedItems:
+      type: object
+      properties:
+        items:
+          type: string
+    InExample:
+      type: object
+      example:
+        items:
+          type: integer
+";
+        // Flagged, in document order: line 24 (`BadItemsOnObj.items` beside `type: object`
+        // declared above) and line 27 (`BadItemsOnStr.items` beside `type: string` declared
+        // below — found by the down-scan). Not flagged: `GoodArr`/`GoodArrTypeAfter` (each
+        // beside `type: array`, before and after); `NoType`'s `items` (no sibling `type`
+        // scalar); the property literally *named* `items` (line 36, whose `type: string` is
+        // a deeper child, not an equal-indent sibling); and the `items` inside the
+        // `example:` payload (line 41).
+        assert_eq!(items_keywords_on_a_non_array_type(body), vec![24, 27]);
+
+        // Non-vacuous floor: across every registered spec every `items` keyword that has a
+        // sibling `type` sits on `type: array` (the invariant the contract test asserts),
+        // and the corpus declares many array schemas — so the type-comparison path runs on
+        // real data and a broken (always-empty) extractor can't hide behind a corpus that
+        // never pairs an `items` with a type. Count agreeing `items`+`type: array` pairs
+        // with a presence detector that pairs the same way but confirms the sibling type is
+        // `array`.
+        let mut agree = 0usize;
+        for api in APIS {
+            assert!(
+                items_keywords_on_a_non_array_type(api.body).is_empty(),
+                "{}: every `items` keyword must sit on `type: array`",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            let type_of = |l: &str| -> Option<String> {
+                let (k, v) = l.trim_start().split_once(':')?;
+                if k.trim() != "type" {
+                    return None;
+                }
+                let v = v
+                    .split('#')
+                    .next()
+                    .unwrap_or(v)
+                    .trim()
+                    .trim_matches('"')
+                    .trim_matches('\'');
+                (!v.is_empty()).then(|| v.to_string())
+            };
+            for (i, l) in lines.iter().enumerate() {
+                let Some((k, _v)) = l.trim_start().split_once(':') else {
+                    continue;
+                };
+                if k.trim() != "items" {
+                    continue;
+                }
+                let c = indent(l);
+                // sibling type: down then up, dedent-bounded (mirrors the extractor)
+                let mut ty = None;
+                let mut j = i + 1;
+                while j < lines.len() {
+                    let x = lines[j];
+                    if x.trim().is_empty() {
+                        j += 1;
+                        continue;
+                    }
+                    if indent(x) < c {
+                        break;
+                    }
+                    if indent(x) == c {
+                        if let Some(t) = type_of(x) {
+                            ty = Some(t);
+                            break;
+                        }
+                    }
+                    j += 1;
+                }
+                if ty.is_none() {
+                    let mut m = i;
+                    while m > 0 {
+                        m -= 1;
+                        let x = lines[m];
+                        if x.trim().is_empty() {
+                            continue;
+                        }
+                        if indent(x) < c {
+                            break;
+                        }
+                        if indent(x) == c {
+                            if let Some(t) = type_of(x) {
+                                ty = Some(t);
+                                break;
+                            }
+                        }
+                    }
+                }
+                if ty.as_deref() == Some("array") {
+                    agree += 1;
+                }
+            }
+        }
+        assert!(
+            agree >= 30,
+            "expected many `items`+`type: array` pairs that agree across specs, got {agree}"
+        );
+    }
+
     /// Line numbers (1-based), in document order, of every `nullable:` modifier that
     /// sits on a Schema Object carrying **no type context** — neither a sibling
     /// `type:` scalar nor a sibling composition keyword (`allOf`/`anyOf`/`oneOf`/

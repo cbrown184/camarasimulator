@@ -5176,6 +5176,38 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-18 — Contract-test harness: added an **`items` array-element keyword placement**
+  contract test (`src/registry.rs` `every_items_keyword_sits_on_an_array_type`) — where a
+  mounted spec declares an `items:` keyword as a sibling of a `type:` scalar, that type MUST
+  be `array`. `items` describes an array's *element* schema, so it is meaningful only on
+  `type: array`; an `items` stranded on `type: object` (or `string`/`integer`/…) — a field
+  retyped away from an array without dropping its old `items`, or an `items` block pasted onto
+  the wrong schema — is self-contradictory: a validator ignores the element constraint and a
+  Redoc/Swagger/codegen client silently drops it exactly where a caller reads/builds the
+  payload. The **reverse-direction** complement of the two existing `items` tests, which read
+  `items` from the other side: `every_array_schema_declares_items` proves array ⇒ items and
+  `every_items_declares_a_single_schema` proves the items value is a single schema — neither
+  ever checks items ⇒ array, so an `items` on a non-array type passes both; and the
+  array-element-keyword sibling of `every_facet_keyword_sits_on_its_required_type` /
+  `every_numeric_facet_sits_on_a_numeric_type` (which pin the string/array/object and numeric
+  *validation facets* to their type but never inspect `items`). New pure
+  `items_keywords_on_a_non_array_type` extractor (no YAML dep): unlike a validation facet (an
+  inline scalar), `items` always opens a block, so the inline-value keyword filter can't apply
+  — instead the same dedent-bounded down-then-up equal-indent sibling scan the facet extractors
+  use finds the type context, judging only an `items` with a `type:` scalar sibling in its own
+  object. That equal-indent scan is exactly what keeps a schema property (or component) literally
+  *named* `items` out of scope — its own `type:` sits one level deeper (a child), never at its
+  own indent — as are an `items` with an inherited/absent array type (`allOf`/`$ref`) and one
+  inside an `example:`/`examples:` payload. **Surveyed the corpus first: all 105 `items` keywords
+  with a sibling `type` sit on `type: array` (2 more have no sibling type, skipped) → 0 drift to
+  fix.** Unit-covered (`items_keyword_array_type_extraction_rules`: `items` beside `type: array`
+  before/after passes; `items` on object and on string flagged in document order; an `items` with
+  no sibling type, a property *named* `items`, and an `items` inside `example:` each skipped; a
+  ≥30 agreeing-pair corpus floor via an independent counter). Test-side only — no request/
+  response/behaviour change, so no vendored-spec edits. `cargo test` 2715 green (was 2713; +2);
+  `cargo build --release` succeeds, no warnings. No new dependency; the extractor and both tests
+  live in the `#[cfg(test)]` module, so nothing ships in the binary. — binary (release): 5.1M
+  (5,314,968 B; unchanged)
 - 2026-08-18 — Contract-test harness: added an **operation-description presence** contract test
   (`src/registry.rs` `every_operation_declares_a_description`) — every operation a mounted spec
   declares MUST carry a `description` key. The **presence-side twin** of
