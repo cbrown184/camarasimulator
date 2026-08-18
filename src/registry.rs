@@ -983,6 +983,93 @@ mod tests {
         out
     }
 
+    /// The names, in document order, of every server variable a spec declares
+    /// under `servers[].variables:` whose key is **not** the canonical CAMARA
+    /// name `apiRoot` — without a YAML dep.
+    ///
+    /// CAMARA Commonalities pins every API's Server Object to the single
+    /// templated form `url: "{apiRoot}/<basePath>"` backed by one Server
+    /// Variable named exactly `apiRoot` (the scheme+authority a caller
+    /// substitutes to reach a concrete deployment). The name is part of the
+    /// contract: the served `/{api}/v{n}/docs` "try it" panel labels its base-URL
+    /// selector `apiRoot`, and a codegen client generates a URL-builder parameter
+    /// of that name, so a variable renamed to `basePath`/`host`/`server` — while
+    /// still declared, referenced, and defaulting to a valid URI — presents the
+    /// caller a differently-named knob than every sibling API and than the CAMARA
+    /// template documents.
+    ///
+    /// The **name-side complement** of the server-variable trio
+    /// (`every_server_url_variable_is_defined_with_a_default` → a referenced
+    /// variable is declared with a `default`,
+    /// `every_declared_server_variable_is_referenced_by_the_url` → a declared
+    /// variable is referenced, `every_leading_server_variable_default_is_a_well_formed_absolute_uri`
+    /// → the leading variable's default is an absolute URI): all three read the
+    /// declared-variable set but none reads *what it is named*, so a consistent
+    /// rename passes every one of them (declared, referenced, absolute default —
+    /// just under the wrong key). Mirrors how
+    /// `every_spec_pins_the_camara_openapi_3_0_3_version` pins the exact value its
+    /// looser family sibling leaves open, and
+    /// `every_info_license_name_is_the_camara_apache_identifier` pins the licence
+    /// identifier the presence-only licence test never reads.
+    ///
+    /// Scoping mirrors `server_variables_unreferenced` exactly: only the
+    /// top-level `servers:` block is scanned (a line == `servers:` at column
+    /// zero, through the next column-zero key), and a declared variable is a
+    /// direct-child key of a `variables:` mapping (its own child-indent level);
+    /// a nested key deeper inside a variable's sub-block (`default:`,
+    /// `description:`, an `enum:` item) is never a variable name. Names are
+    /// returned in document order, deduped preserving first appearance.
+    fn server_variables_not_named_apiroot(body: &str) -> Vec<String> {
+        let lines: Vec<&str> = body.lines().collect();
+
+        // Isolate the top-level `servers:` block (identical to the siblings).
+        let start = match lines.iter().position(|l| *l == "servers:") {
+            Some(s) => s,
+            None => return Vec::new(),
+        };
+        let end = lines[start + 1..]
+            .iter()
+            .position(|l| !l.is_empty() && !l.starts_with(char::is_whitespace))
+            .map(|off| start + 1 + off)
+            .unwrap_or(lines.len());
+        let block = &lines[start + 1..end];
+
+        // Variable names declared as direct children of a `variables:` mapping
+        // anywhere in the block (mirrors `server_variables_unreferenced`).
+        let mut out: Vec<String> = Vec::new();
+        let mut k = 0;
+        while k < block.len() {
+            if block[k].trim() != "variables:" {
+                k += 1;
+                continue;
+            }
+            let v_indent = block[k].len() - block[k].trim_start().len();
+            let mut child_indent: Option<usize> = None;
+            let mut m = k + 1;
+            while m < block.len() {
+                let l = block[m];
+                if l.trim().is_empty() {
+                    m += 1;
+                    continue;
+                }
+                let indent = l.len() - l.trim_start().len();
+                if indent <= v_indent {
+                    break; // end of the `variables:` mapping
+                }
+                let ci = *child_indent.get_or_insert(indent);
+                if indent == ci {
+                    let name = l.trim().split_once(':').map(|(k, _)| k.trim()).unwrap_or("");
+                    if !name.is_empty() && name != "apiRoot" && !out.iter().any(|n| n == name) {
+                        out.push(name.to_string());
+                    }
+                }
+                m += 1;
+            }
+            k = m;
+        }
+        out
+    }
+
     /// Extract the root `openapi:` version string from an embedded OpenAPI body,
     /// without a YAML dep.
     ///
@@ -5394,6 +5481,117 @@ paths: {}
                 unreferenced
             );
         }
+    }
+
+    #[test]
+    fn every_server_variable_is_named_apiroot() {
+        // Contract-harness invariant (CAMARA Commonalities canonical Server
+        // Object): every CAMARA API templates its base path as
+        // `url: "{apiRoot}/<basePath>"` backed by a single Server Variable named
+        // exactly `apiRoot` — the scheme+authority a caller substitutes to reach
+        // a concrete deployment. The name is contract, not cosmetic: the served
+        // `/{api}/v{n}/docs` "try it" panel labels its base-URL selector
+        // `apiRoot` and a codegen client generates a URL-builder parameter of
+        // that name, so a spec whose variable was renamed (`basePath`/`host`/…)
+        // hands the caller a differently-named knob than every sibling API and
+        // than the CAMARA template documents.
+        //
+        // The name-side complement of the server-variable trio
+        // (`every_server_url_variable_is_defined_with_a_default`,
+        // `every_declared_server_variable_is_referenced_by_the_url`,
+        // `every_leading_server_variable_default_is_a_well_formed_absolute_uri`):
+        // all three read the declared-variable set but none reads what it is
+        // *named*, so a consistent rename — declared, referenced, and defaulting
+        // to a valid URI, just under the wrong key — passes every one of them.
+        // Mirrors how `every_spec_pins_the_camara_openapi_3_0_3_version` pins the
+        // exact value its looser family sibling leaves open. Verified true across
+        // every mounted spec before asserting.
+        for api in APIS {
+            let misnamed = server_variables_not_named_apiroot(api.body);
+            assert!(
+                misnamed.is_empty(),
+                "{} spec declares server variable(s) {:?} not named the canonical \
+                 CAMARA `apiRoot`; every CAMARA Server Object templates its base URL \
+                 as `{{apiRoot}}/<basePath>`, so the base-URL variable must be `apiRoot`",
+                api.name,
+                misnamed
+            );
+        }
+    }
+
+    #[test]
+    fn server_variable_apiroot_name_extraction_rules() {
+        // Unit-cover `server_variables_not_named_apiroot` so the contract test
+        // above can't pass vacuously and its accept/flag boundary is pinned: the
+        // canonical `apiRoot` passes; any other declared variable name is flagged;
+        // a mix reports only the non-`apiRoot` name(s); a key nested deeper inside
+        // a variable's own sub-block (`default:`/`description:`/an `enum:` item) is
+        // not a variable name and is never flagged; and a spec with no `servers:`
+        // block yields nothing.
+        let canonical = "\
+servers:
+  - url: \"{apiRoot}/x/v1\"
+    variables:
+      apiRoot:
+        default: http://localhost:8080
+        description: API root.
+paths: {}
+";
+        assert!(server_variables_not_named_apiroot(canonical).is_empty());
+
+        // A renamed base-URL variable — declared, referenced, default a URI — is
+        // flagged purely on its name.
+        let renamed = "\
+servers:
+  - url: \"{basePath}/x/v1\"
+    variables:
+      basePath:
+        default: http://localhost:8080
+paths: {}
+";
+        assert_eq!(server_variables_not_named_apiroot(renamed), vec!["basePath"]);
+
+        // A mix: only the non-canonical name is reported; the deeper `default:` /
+        // `description:` / `enum:` keys under each variable are never mistaken for
+        // variable names.
+        let mixed = "\
+servers:
+  - url: \"{apiRoot}/x/v1/{region}\"
+    variables:
+      apiRoot:
+        default: http://localhost:8080
+        description: API root.
+      region:
+        default: eu
+        enum:
+          - eu
+          - us
+paths: {}
+";
+        assert_eq!(server_variables_not_named_apiroot(mixed), vec!["region"]);
+
+        // No servers block → nothing to name.
+        let no_servers = "openapi: 3.0.3\ninfo:\n  title: t\npaths: {}\n";
+        assert!(server_variables_not_named_apiroot(no_servers).is_empty());
+
+        // Non-vacuity floor over the corpus: every mounted spec declares a
+        // canonical `apiRoot` server variable (0 misnamed) — so the contract test
+        // asserts over a real, non-empty population, not vacuously.
+        let mut with_apiroot = 0usize;
+        for api in APIS {
+            assert!(
+                server_variables_not_named_apiroot(api.body).is_empty(),
+                "{} declares a non-`apiRoot` server variable",
+                api.name
+            );
+            if api.body.contains("      apiRoot:") {
+                with_apiroot += 1;
+            }
+        }
+        assert!(
+            with_apiroot >= 40,
+            "expected a healthy server-variable corpus, counted {with_apiroot} apiRoot declarations"
+        );
     }
 
     #[test]

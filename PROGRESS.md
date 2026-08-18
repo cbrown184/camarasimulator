@@ -3332,6 +3332,26 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - a **canonical-`apiRoot`-server-variable** contract test (`src/registry.rs`
+    `every_server_variable_is_named_apiroot`) asserts every mounted spec's server
+    variable is named exactly `apiRoot` — the single Server Variable CAMARA
+    Commonalities pins the `url: "{apiRoot}/<basePath>"` template to. The
+    **name-side complement** of the server-variable trio
+    (`every_server_url_variable_is_defined_with_a_default`,
+    `every_declared_server_variable_is_referenced_by_the_url`,
+    `every_leading_server_variable_default_is_a_well_formed_absolute_uri`): all
+    three read the declared-variable set but none reads what it is *named*, so a
+    consistent rename (`basePath`/`host`/…) — declared, referenced, absolute
+    default, just under the wrong key — passes every one of them yet hands the
+    `/docs` "try it" panel and a codegen client a differently-named base-URL knob
+    than the CAMARA template documents. Mirrors how
+    `every_spec_pins_the_camara_openapi_3_0_3_version` pins the exact value its
+    looser family sibling leaves open. New pure `server_variables_not_named_apiroot`
+    extractor (no YAML dep) reuses `server_variables_unreferenced`'s `servers:`
+    block isolation + `variables:` direct-child gathering, filtering out `apiRoot`.
+    Surveyed the corpus first (all 60 mounted specs declare exactly one server
+    variable, every one `apiRoot`) → 0 drift. Unit-covered
+    (`server_variable_apiroot_name_extraction_rules`), ≥40-declaration floor.
   - an **exactly-one-server** contract test (`src/registry.rs`
     `every_spec_declares_exactly_one_server`) asserts every mounted spec declares
     **exactly one** Server Object — the single templated `{apiRoot}/{api}/{version}`
@@ -5292,6 +5312,35 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-18 — Contract-test harness: added a **canonical-`apiRoot`-server-variable** contract
+  test (`src/registry.rs` `every_server_variable_is_named_apiroot`) — every mounted spec's server
+  variable MUST be named exactly `apiRoot`, the single Server Variable CAMARA Commonalities pins
+  the `url: "{apiRoot}/<basePath>"` base-URL template to. The **name-side complement** of the
+  server-variable trio (`every_server_url_variable_is_defined_with_a_default` → a referenced
+  variable is declared with a `default`; `every_declared_server_variable_is_referenced_by_the_url`
+  → a declared variable is referenced; `every_leading_server_variable_default_is_a_well_formed_absolute_uri`
+  → the leading default is an absolute URI): all three read the declared-variable set but none
+  reads *what it is named*, so a consistent rename (`basePath`/`host`/`server`) — declared,
+  referenced, and defaulting to a valid URI, just under the wrong key — passes every one of them,
+  yet the served `/{api}/v{n}/docs` "try it" panel labels its base-URL selector by that wrong name
+  and a codegen client generates a URL-builder parameter of it, differing from every sibling API
+  and from what the CAMARA template documents. Mirrors how
+  `every_spec_pins_the_camara_openapi_3_0_3_version` pins the exact value its looser family sibling
+  leaves open, and `every_info_license_name_is_the_camara_apache_identifier` pins the licence
+  identifier the presence-only licence test never reads. New pure `server_variables_not_named_apiroot`
+  extractor (no YAML dep) reuses `server_variables_unreferenced`'s `servers:` block isolation
+  (column-0 `servers:` through the next column-0 key) and `variables:` direct-child gathering,
+  returning declared names ≠ `apiRoot` in document order (deduped); a key nested deeper inside a
+  variable's own sub-block (`default:`/`description:`/an `enum:` item) is never a variable name.
+  **Surveyed the corpus first: all 60 mounted specs declare exactly one server variable, every one
+  `apiRoot` → 0 drift.** Non-vacuity from the unit test
+  (`server_variable_apiroot_name_extraction_rules`: canonical `apiRoot` passes; a renamed `basePath`
+  flagged; a mixed `apiRoot`+`region` reports only `region`; deeper `default:`/`description:`/`enum:`
+  keys never mistaken for names; a no-`servers` doc yields nothing; ≥40-`apiRoot`-declaration corpus
+  floor). Test-side only — no request/response/behaviour change, so no vendored-spec edits.
+  `cargo test` 2746 green (was 2744; +2); `cargo build --release` succeeds. No new dependency; the
+  extractor and both tests live in the `#[cfg(test)]` module, so nothing ships in the binary.
+  — binary (release): 5.1M (5,323,160 B; unchanged)
 - 2026-08-18 — Contract-test harness: added an **exactly-one-server** contract test
   (`src/registry.rs` `every_spec_declares_exactly_one_server`) — every mounted spec MUST
   declare **exactly one** Server Object, the single templated `{apiRoot}/{api}/{version}`
