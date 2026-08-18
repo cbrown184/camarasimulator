@@ -5254,6 +5254,24 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     it complements (`APIS`). Unit-covered (`camara_openapi_version_pin_rules`: `3.0.3` accepted,
     `3.1.0`/`3.0.1` rejected though both pass the looser family check; ≥40-spec floor). Surveyed
     the corpus first (all 60 mounted specs already declare `openapi: 3.0.3`) → 0 drift.
+  - a request-body explicit-`required` contract test (`src/registry.rs`
+    `every_request_body_declares_an_explicit_required_flag`) asserts every operation whose
+    `requestBody` is spelled out inline states an explicit boolean `required:` flag (a `$ref`
+    body is exempt — it inherits from the target). OpenAPI 3.0.x defaults a Request Body Object's
+    `required` to **false** when omitted, so a body a CAMARA operation actually mandates but leaves
+    unflagged silently advertises an *optional* body — a client generates the parameter as optional
+    and a validator accepts a bodyless call the simulator rejects (400 INVALID_ARGUMENT). The
+    **required-side twin** of `every_request_body_declares_content` (which proves the body states
+    *what* it carries, never *whether* it is mandatory); the schema `required`-*array* tests
+    (`every_required_array_*`) read a Schema Object's list of required *property names* (a different
+    `required`), and the boolean-keyword test omits `required` because as a schema keyword it is an
+    array — so this boolean is read by neither. New pure `request_bodies_missing_required_flag`
+    extractor (no YAML dep) clones `request_bodies_missing_content`'s path-item/method scoping and
+    6-space `requestBody:` → 8-space child scan, matching a boolean `required:` (or `$ref`) at the
+    request body object's own child indent (8); a schema `required:` array nested deeper never
+    satisfies it. Unit-covered (`request_bodies_missing_required_flag_extraction_rules`) with a ≥50
+    request-body floor. Surveyed the corpus first (106 request bodies, all with an explicit boolean
+    `required`) → 0 drift.
   Full response-vs-schema validation still TODO (would need a YAML/JSON-Schema
   validator — a dependency trade-off, deferred).
 
@@ -5261,6 +5279,34 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-18 — Contract-test harness: added a **request-body explicit-`required`** contract test
+  (`src/registry.rs` `every_request_body_declares_an_explicit_required_flag`) — every operation
+  whose `requestBody` is spelled out inline MUST state an explicit boolean `required:` flag
+  (`true`/`false`); a `$ref` request body is exempt (inherits from the target). OpenAPI 3.0.x
+  defaults a Request Body Object's `required` to **false** when omitted, so a body a CAMARA
+  operation actually mandates (`POST /verify`, `createSession`, …) but leaves unflagged silently
+  advertises an *optional* body — a Redoc/Swagger/codegen client generates the parameter as
+  optional and a validator accepts a bodyless call the simulator rejects with 400 INVALID_ARGUMENT.
+  The **required-side twin** of `every_request_body_declares_content` (which proves the body states
+  *what* it carries, never *whether* it is mandatory); no other test sees it — the schema
+  `required`-*array* tests (`every_required_array_*`) inspect a Schema Object's list of required
+  *property names* (an entirely different `required`), and the boolean-keyword test's vocabulary
+  (nullable/readOnly/writeOnly/deprecated/uniqueItems/exclusive*) omits `required` precisely because
+  as a schema keyword it is an array — so this boolean is read by neither. New pure
+  `request_bodies_missing_required_flag` extractor (no YAML dep) clones
+  `request_bodies_missing_content`'s path-item/method scoping and 6-space `requestBody:` → 8-space
+  child scan, matching a boolean `required:` (or `$ref`) at exactly the request body object's own
+  child indent (8) — a Schema Object's `required:` array nested deeper (indent 14) never satisfies
+  it, and a non-boolean value is not an explicit flag. **Surveyed the corpus first: 106 request
+  bodies across the mounted specs, all with an explicit boolean `required` → 0 drift.** Non-vacuity
+  from the unit test (`request_bodies_missing_required_flag_extraction_rules`: a `PUT` whose only
+  `required` is a nested schema array and a `POST` with `required: notabool` are each flagged in
+  document order; an indent-8 `required: true`, a `$ref` body, and a bodyless `GET` are not; a
+  `components.requestBodies` entry is never an operation's), plus a ≥50 request-body floor over the
+  corpus. Test-side only — no request/response/behaviour change, so no vendored-spec edits.
+  `cargo test` 2742 green (was 2740; +2); `cargo build --release` succeeds. No new dependency; the
+  extractor and both tests live in the `#[cfg(test)]` module, so nothing ships in the binary.
+  — binary (release): 5.1M (5,323,160 B; unchanged)
 - 2026-08-18 — Contract-test harness: added a **per-operation functional-cases** contract
   test (`src/registry.rs` `every_operation_declares_an_x_camarasim_scenarios_block`) — every
   operation a mounted spec declares MUST carry its **own** `x-camarasim-scenarios` block, the

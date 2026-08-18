@@ -4079,6 +4079,143 @@ mod tests {
         out
     }
 
+    /// The `METHOD /path` label of every operation a spec declares whose
+    /// `requestBody` object states neither an explicit boolean `required:` flag
+    /// nor a `$ref` — without a YAML dep.
+    ///
+    /// A Request Body Object's `required` field defaults to `false` when omitted
+    /// (OpenAPI 3.0.x), so a body a CAMARA operation actually mandates — the
+    /// `POST /verify` payload, a `createSession` body — that omits the flag
+    /// silently advertises an *optional* body: a Redoc/Swagger/codegen client
+    /// generates the parameter as optional and a schema validator accepts a
+    /// bodyless call the simulator rejects (400 INVALID_ARGUMENT). Stating the
+    /// flag explicitly is the CAMARA Commonalities convention; it is the one bit
+    /// that says whether the body may be omitted. A `requestBody` supplied as a
+    /// `$ref` is exempt — it inherits `required` from the referenced component.
+    ///
+    /// The required-side twin of [`request_bodies_missing_content`] (which proves
+    /// a declared body states *what* it carries, never *whether* it is mandatory),
+    /// and its exact scoping mirror: [`operations_without_responses`]'s path-item/
+    /// method scoping (a 4-space HTTP-verb key under a 2-space `/…` path item
+    /// beneath the top-level `paths:` block), then within an operation the 6-space
+    /// `requestBody:` key whose object is scanned (lines indented past 6, until a
+    /// dedent to ≤6) for an 8-space `required:` field carrying a JSON boolean
+    /// (`true`/`false`) or an 8-space `$ref:`. Matching at exactly the request body
+    /// object's own child indent (8) means a `required` nested deeper — a Schema
+    /// Object's `required:` *array* under a media type's `schema`, an entirely
+    /// different `required` — never satisfies it, and a non-boolean value (a stray
+    /// word) is not an explicit flag. A `requestBody:` given inline as a `$ref`
+    /// mapping (`{$ref: …}`) or a flow `$ref` on the key line is treated as
+    /// satisfied.
+    fn request_bodies_missing_required_flag(body: &str) -> Vec<String> {
+        const METHODS: [&str; 8] =
+            ["get", "put", "post", "delete", "patch", "options", "head", "trace"];
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let mut out = Vec::new();
+        let mut in_paths = false;
+        let mut path: Option<String> = None;
+        for (i, line) in lines.iter().enumerate() {
+            let is_top_level_key =
+                !line.is_empty() && !line.starts_with(char::is_whitespace);
+            if is_top_level_key {
+                in_paths = line.trim_end() == "paths:";
+                path = None;
+                continue;
+            }
+            if !in_paths {
+                continue;
+            }
+            if let Some(rest) = line.strip_prefix("  ") {
+                if !rest.starts_with(char::is_whitespace) && rest.starts_with('/') {
+                    let key = rest.trim_end().strip_suffix(':').unwrap_or(rest.trim_end());
+                    path = Some(key.to_string());
+                    continue;
+                }
+            }
+            let Some(current_path) = path.as_deref() else { continue };
+            if indent(line) != 4 {
+                continue;
+            }
+            let key = line.trim_start();
+            let Some(name) = key.strip_suffix(':') else { continue };
+            if name.contains(char::is_whitespace) || !METHODS.contains(&name) {
+                continue;
+            }
+            // Within this operation's block, find the 6-space `requestBody:` key,
+            // then inspect its object for an 8-space boolean `required:` or `$ref:`.
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                let li = indent(l);
+                if li <= 4 {
+                    break; // dedented out of this operation
+                }
+                if li == 6 {
+                    if let Some((k, v)) = l.trim_start().split_once(':') {
+                        if k == "requestBody" {
+                            // An inline `$ref` value on the key line satisfies it.
+                            let inline = v.trim();
+                            if inline.starts_with("$ref") || inline.starts_with('{') {
+                                j += 1;
+                                continue;
+                            }
+                            // Otherwise scan the request body object's block for an
+                            // 8-space boolean `required:` or a `$ref:` field.
+                            let mut satisfied = false;
+                            let mut m = j + 1;
+                            while m < lines.len() {
+                                let e = lines[m];
+                                if e.trim().is_empty() {
+                                    m += 1;
+                                    continue;
+                                }
+                                if indent(e) <= 6 {
+                                    break; // dedented out of this request body
+                                }
+                                if indent(e) == 8 {
+                                    if let Some((field, val)) =
+                                        e.trim_start().split_once(':')
+                                    {
+                                        if field == "$ref" {
+                                            satisfied = true;
+                                            break;
+                                        }
+                                        if field == "required" {
+                                            let val = val
+                                                .split('#')
+                                                .next()
+                                                .unwrap_or(val)
+                                                .trim();
+                                            if val == "true" || val == "false" {
+                                                satisfied = true;
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+                                m += 1;
+                            }
+                            if !satisfied {
+                                out.push(format!(
+                                    "{} {}",
+                                    name.to_uppercase(),
+                                    current_path
+                                ));
+                            }
+                        }
+                    }
+                }
+                j += 1;
+            }
+        }
+        out
+    }
+
     /// The `METHOD /path` label of every body-less-method operation
     /// (`GET`/`DELETE`/`HEAD`) a spec declares that nonetheless carries a
     /// `requestBody` — without a YAML dep.
@@ -9619,6 +9756,160 @@ components:
             total_ops += operation_ids(api.body).len();
         }
         assert!(total_ops >= 100, "expected many operations across specs, got {total_ops}");
+    }
+
+    #[test]
+    fn every_request_body_declares_an_explicit_required_flag() {
+        // Contract-harness invariant (OpenAPI 3.0.x Request Body Object + CAMARA
+        // Commonalities): every operation a mounted spec declares whose
+        // `requestBody` is spelled out inline MUST state an explicit boolean
+        // `required:` flag (`true`/`false`). The field defaults to `false` when
+        // omitted, so a body the operation actually mandates but leaves unflagged
+        // silently advertises an *optional* body: a Redoc/Swagger/codegen client
+        // generates the parameter as optional, and a schema validator accepts a
+        // bodyless call the simulator rejects with 400 INVALID_ARGUMENT — the wire
+        // contract under-states exactly the bit a caller reads to decide whether
+        // the body may be omitted. A `requestBody` given as a `$ref` is exempt (it
+        // inherits `required` from the referenced component).
+        //
+        // The required-side twin of `every_request_body_declares_content`, which
+        // proves a declared body states *what* it carries (its `content`) but never
+        // *whether* it is mandatory. No other test sees the gap: the schema
+        // `required`-*array* tests (`every_required_array_lists_distinct_entries`,
+        // `every_required_array_sits_on_an_object_type`,
+        // `every_required_entry_names_a_declared_property`) all inspect a Schema
+        // Object's list of required *property names* — an entirely different
+        // `required` from a Request Body Object's boolean flag — and the
+        // boolean-keyword test's vocabulary (nullable/readOnly/writeOnly/deprecated/
+        // uniqueItems/exclusive*) omits `required` precisely because as a schema
+        // keyword it is an array, so it never reads this boolean either. Verified
+        // true across all mounted specs (all 106 request bodies declare an explicit
+        // boolean `required`) before asserting.
+        for api in APIS {
+            let missing = request_bodies_missing_required_flag(api.body);
+            assert!(
+                missing.is_empty(),
+                "{} spec has operation(s) whose `requestBody` states no explicit \
+                 boolean `required:` flag (it defaults to false, silently marking a \
+                 mandatory body optional) and is not a `$ref`: {:?}",
+                api.name,
+                missing
+            );
+        }
+    }
+
+    #[test]
+    fn request_bodies_missing_required_flag_extraction_rules() {
+        // Unit-cover the `request_bodies_missing_required_flag` extractor so the
+        // contract test above can't pass vacuously (an extractor returning an empty
+        // Vec for every body would make its assertion meaningless) and its scoping
+        // is pinned: a boolean `required:` counts only at the Request Body Object's
+        // own child indent (8), so a Schema Object's `required:` *array* nested
+        // deeper never satisfies it; a non-boolean `required:` value is not an
+        // explicit flag; a `$ref` request body is exempt; an operation with no
+        // `requestBody` is not flagged; and a `requestBody:` outside `paths:` is not
+        // an operation's.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    post:
+      operationId: postA
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        '200':
+          description: ok
+    put:
+      operationId: putA
+      requestBody:
+        description: a body whose only `required` is a schema array nested below
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - id
+      responses:
+        '200':
+          description: ok
+  /b:
+    post:
+      operationId: postB
+      requestBody:
+        $ref: \"#/components/requestBodies/Shared\"
+      responses:
+        '200':
+          description: ok
+    get:
+      operationId: getB
+      responses:
+        '200':
+          description: ok
+  /c:
+    post:
+      operationId: postC
+      requestBody:
+        required: notabool
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        '200':
+          description: ok
+components:
+  requestBodies:
+    Shared:
+      required: true
+      content:
+        application/json:
+          schema:
+            type: object
+";
+        // Flagged, in document order: `PUT /a` (its only `required:` is the schema
+        // property array at indent 14, not the request body object's own indent 8)
+        // and `POST /c` (an indent-8 `required: notabool`, not a boolean, so not an
+        // explicit flag). Not flagged: `POST /a` (an 8-space `required: true`),
+        // `POST /b` (a `$ref` request body, exempt), `GET /b` (no `requestBody`).
+        // The `Shared` request body under `components.requestBodies` is not under
+        // `paths:`, so it is never an operation's request body.
+        assert_eq!(
+            request_bodies_missing_required_flag(body),
+            vec!["PUT /a".to_string(), "POST /c".to_string()]
+        );
+
+        // Non-vacuous floor: across every registered spec, no declared request body
+        // is missing its explicit boolean `required` (the invariant the contract
+        // test asserts), and the corpus declares many request bodies — so the
+        // satisfy path runs on real data and a broken extractor can't hide behind an
+        // empty scan. Count `requestBody:` keys with a detector independent of the
+        // extractor.
+        let mut request_bodies = 0usize;
+        for api in APIS {
+            assert!(
+                request_bodies_missing_required_flag(api.body).is_empty(),
+                "{}: every declared request body must state an explicit boolean \
+                 `required` or be a `$ref`",
+                api.name
+            );
+            for line in api.body.lines() {
+                if line.trim_start().split_once(':').map(|(k, _)| k) == Some("requestBody") {
+                    request_bodies += 1;
+                }
+            }
+        }
+        assert!(
+            request_bodies >= 50,
+            "expected many request bodies across specs, got {request_bodies}"
+        );
     }
 
     #[test]
