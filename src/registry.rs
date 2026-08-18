@@ -3427,6 +3427,119 @@ mod tests {
         out
     }
 
+    /// The `METHOD /path` label of every operation a spec declares whose
+    /// `responses:` object is present but documents no **client-error** (`4XX`)
+    /// outcome — without a YAML dep.
+    ///
+    /// The well-known Spectral OAS `operation-4xx-response` rule: an operation MUST
+    /// document at least one `4XX` response. In CAMARA the client-error branch is
+    /// the API's error contract — the canonical `errors.yaml` `400`/`401`/`403`/
+    /// `404`/`422`/`429` `$ref`s an operation lists tell a caller which failures to
+    /// expect and how CamaraSim shapes them (the `CamaraError` body). An operation
+    /// declaring only its `2XX` (and perhaps a `5XX`) advertises a happy-path-only
+    /// contract a Redoc/Swagger/codegen client reads as "cannot fail with a 4xx",
+    /// so a caller writes no handler for the `404`/`422`/`429` the simulator does in
+    /// fact return — the functional cases DESIGN §7 keys these APIs on.
+    ///
+    /// The **error-branch complement** of [`operations_without_success_response`]:
+    /// that flags an operation with no `2XX` (its happy path), this one an operation
+    /// with no `4XX` (its error contract); together they pin that every operation
+    /// documents *both* outcome families. No sibling responses test sees the loss —
+    /// `operations_without_responses` pins the `responses:` object's *presence*,
+    /// `responses_with_invalid_status_key` that each key is a *well-formed* status,
+    /// `responses_missing_description` that each inline response *describes itself*,
+    /// and the success test only the `2XX` — none requires a `4XX` among them.
+    ///
+    /// Mirrors [`operations_without_success_response`]'s scoping exactly (a 4-space
+    /// HTTP-verb key under a 2-space `/…` path item beneath the top-level `paths:`
+    /// block, then the 8-space keys under that operation's 6-space `responses:`),
+    /// but asks, per operation, whether *any* key is a client error: a 3-char token
+    /// beginning `4` whose other two chars are each a digit or the `X` wildcard —
+    /// i.e. an explicit `4XX`-range code (`400`..`499`) or the `4XX` range itself.
+    /// Only an operation that *declares* a `responses:` block is judged (one missing
+    /// the object entirely is [`operations_without_responses`]' concern), so the two
+    /// never double-flag the same operation.
+    fn operations_without_client_error_response(body: &str) -> Vec<String> {
+        const METHODS: [&str; 8] =
+            ["get", "put", "post", "delete", "patch", "options", "head", "trace"];
+        let is_client_error_key = |key: &str| -> bool {
+            key.len() == 3
+                && key.as_bytes()[0] == b'4'
+                && key.as_bytes()[1..].iter().all(|&c| c.is_ascii_digit() || c == b'X')
+        };
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let mut out = Vec::new();
+        let mut in_paths = false;
+        let mut path: Option<String> = None;
+        for (i, line) in lines.iter().enumerate() {
+            let is_top_level_key =
+                !line.is_empty() && !line.starts_with(char::is_whitespace);
+            if is_top_level_key {
+                in_paths = line.trim_end() == "paths:";
+                path = None;
+                continue;
+            }
+            if !in_paths {
+                continue;
+            }
+            if let Some(rest) = line.strip_prefix("  ") {
+                if !rest.starts_with(char::is_whitespace) && rest.starts_with('/') {
+                    let key = rest.trim_end().strip_suffix(':').unwrap_or(rest.trim_end());
+                    path = Some(key.to_string());
+                    continue;
+                }
+            }
+            let Some(current_path) = path.as_deref() else { continue };
+            if indent(line) != 4 {
+                continue;
+            }
+            let key = line.trim_start();
+            let Some(name) = key.strip_suffix(':') else { continue };
+            if name.contains(char::is_whitespace) || !METHODS.contains(&name) {
+                continue;
+            }
+            // Within this operation's block, find the 6-space `responses:` key, then
+            // check each 8-space response-entry key under it for a client-error code.
+            let mut in_responses = false;
+            let mut saw_responses = false;
+            let mut saw_client_error = false;
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                let li = indent(l);
+                if li <= 4 {
+                    break; // dedented out of this operation
+                }
+                if li == 6 {
+                    in_responses = l.trim_start().strip_suffix(':') == Some("responses");
+                    if in_responses {
+                        saw_responses = true;
+                    }
+                    j += 1;
+                    continue;
+                }
+                if in_responses && li == 8 {
+                    if let Some(k) = l.trim_start().strip_suffix(':') {
+                        let status = k.trim_matches(|c| c == '"' || c == '\'');
+                        if is_client_error_key(status) {
+                            saw_client_error = true;
+                        }
+                    }
+                }
+                j += 1;
+            }
+            if saw_responses && !saw_client_error {
+                out.push(format!("{} {}", name.to_uppercase(), current_path));
+            }
+        }
+        out
+    }
+
     /// The 1-based line numbers of every **served** inline success (`2XX`) response a
     /// mounted spec declares under `paths:` that does not document an `x-correlator`
     /// response header.
@@ -7755,6 +7868,151 @@ paths:
             assert!(
                 operations_without_success_response(api.body).is_empty(),
                 "{}: every operation's `responses:` must declare a success (`2XX`) outcome",
+                api.name
+            );
+            total_ops += operation_ids(api.body).len();
+        }
+        assert!(total_ops >= 100, "expected many operations across specs, got {total_ops}");
+    }
+
+    #[test]
+    fn every_operation_declares_a_client_error_response() {
+        // Contract-harness invariant (the Spectral OAS `operation-4xx-response`
+        // rule): every operation a mounted spec declares whose `responses:` object
+        // is present MUST document at least one **client-error** outcome — a `4XX`
+        // status code (or the `4XX` wildcard). In CAMARA the `4XX` branch is the
+        // API's error contract: each operation lists the canonical `errors.yaml`
+        // `400`/`401`/`403`/`404`/`422`/`429` `$ref`s that tell a caller which
+        // failures to expect and how the simulator shapes them (`CamaraError`). An
+        // operation declaring only its `2XX` (perhaps with a `5XX`) advertises a
+        // happy-path-only contract a Redoc/Swagger/codegen client reads as "cannot
+        // fail with a 4xx", so a caller writes no handler for the `404`/`422`/`429`
+        // CamaraSim in fact returns — exactly the functional cases DESIGN §7 keys
+        // these APIs on.
+        //
+        // The error-branch complement of `every_operation_declares_a_success_response`
+        // (`operations_without_success_response`): that requires a `2XX` happy path,
+        // this a `4XX` error branch — together they pin that every operation
+        // documents both outcome families. The gap the sibling responses tests leave
+        // open: a `4XX` block lost or dedented in the paste/edit that drafts a new
+        // operation still passes `every_operation_declares_a_responses_object` (the
+        // object is present, full of `2XX` entries),
+        // `every_responses_object_key_is_a_valid_status` (every remaining key is a
+        // well-formed status), `every_declared_response_has_a_description` (the
+        // `$ref`'d error responses are exempt), and the success test (the `2XX` is
+        // still there) — none requires a client-error outcome to exist. An operation
+        // missing its `responses:` object entirely is
+        // `every_operation_declares_a_responses_object`'s concern, so the two never
+        // double-flag. Verified true across all mounted specs before asserting.
+        for api in APIS {
+            let missing = operations_without_client_error_response(api.body);
+            assert!(
+                missing.is_empty(),
+                "{} spec has operation(s) whose `responses:` declares no client-error \
+                 (`4XX`) outcome — an incomplete error contract (a caller sees no \
+                 documented `400`/`404`/`422`/… branch): {:?}",
+                api.name,
+                missing
+            );
+        }
+    }
+
+    #[test]
+    fn operations_without_client_error_response_extraction_rules() {
+        // Unit-cover the `operations_without_client_error_response` extractor so the
+        // contract test above can't pass vacuously and its scoping is pinned: a
+        // client error is a `4XX`-range code or the `4XX` wildcard among an
+        // operation's 8-space `responses:` keys; an operation declaring only a
+        // success (and a `5XX`) is flagged; a `4XX`-looking key nested under a
+        // `requestBody`'s `content`/`schema` or living outside `paths:` (a schema
+        // property literally named `'400'`) is never a response key; and an
+        // operation with no `responses:` block is left to the responses-object test.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+        '404':
+          $ref: \"../../shared/errors.yaml#/components/responses/NotFound\"
+    post:
+      operationId: postA
+      responses:
+        '200':
+          description: ok
+        '500':
+          description: server error, but no client-error branch
+  /b:
+    put:
+      operationId: putB
+      responses:
+        '201':
+          description: created
+        '4XX':
+          description: a wildcard client-error range
+    delete:
+      operationId: deleteB
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                '400':
+                  type: string
+      responses:
+        '204':
+          description: no content
+        '422':
+          $ref: \"../../shared/errors.yaml#/components/responses/Unprocessable\"
+components:
+  schemas:
+    Widget:
+      type: object
+      properties:
+        '400':
+          type: string
+";
+        // Flagged: only `POST /a` — its `responses:` declares `200`/`500` but no
+        // `4XX`. Not flagged: `GET /a` (`404`), `PUT /b` (`4XX` wildcard),
+        // `DELETE /b` (`422`, past a `requestBody` whose nested `properties: '400'`
+        // is not a response key). The `'400'` *property* under
+        // components.schemas.Widget is not under `paths:`, so it is never a response.
+        assert_eq!(
+            operations_without_client_error_response(body),
+            vec!["POST /a".to_string()]
+        );
+
+        // An operation with no `responses:` block at all is not flagged here (that is
+        // the responses-object test's concern), so the two never double-flag.
+        let no_responses = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /c:
+    get:
+      operationId: getC
+      summary: no responses object at all
+";
+        assert!(operations_without_client_error_response(no_responses).is_empty());
+
+        // Non-vacuous floor: across every registered spec, every operation with a
+        // `responses:` object declares a client-error outcome (the invariant the
+        // contract test asserts), and the corpus carries many operations, so a
+        // broken extractor can't hide behind an empty scan.
+        let mut total_ops = 0usize;
+        for api in APIS {
+            assert!(
+                operations_without_client_error_response(api.body).is_empty(),
+                "{}: every operation's `responses:` must declare a client-error (`4XX`) outcome",
                 api.name
             );
             total_ops += operation_ids(api.body).len();

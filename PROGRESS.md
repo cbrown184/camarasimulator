@@ -5169,6 +5169,31 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     + placeholder caught, no-url/blank-url/example-payload contributing nothing; corpus floor).
     Surveyed the corpus first (all 3 externalDocs urls are `https://github.com/camaraproject/…`
     project-repo links) → 0 drift.
+  - an operation-4xx-response contract test (`src/registry.rs`
+    `every_operation_declares_a_client_error_response`) asserts every operation a mounted
+    spec declares whose `responses:` object is present documents at least one **client-error**
+    (`4XX`) outcome (the well-known Spectral OAS `operation-4xx-response` rule). In CAMARA the
+    `4XX` branch is the API's error contract — the canonical `errors.yaml`
+    `400`/`401`/`403`/`404`/`422`/`429` `$ref`s an operation lists, telling a caller which
+    failures to expect and how the sim shapes them (`CamaraError`); an operation declaring only
+    its `2XX` (± a `5XX`) advertises a happy-path-only contract a client reads as "cannot fail
+    with a 4xx", so no handler is written for the very functional cases DESIGN §7 keys these APIs
+    on. The **error-branch complement** of `every_operation_declares_a_success_response`
+    (`operations_without_success_response`, which requires a `2XX` happy path): together they pin
+    both outcome families. Invisible to the sibling responses tests
+    (`every_operation_declares_a_responses_object` pins the object's *presence*,
+    `every_responses_object_key_is_a_valid_status` each key's *well-formedness*,
+    `every_declared_response_has_a_description` the inline descriptions, the success test the
+    `2XX`) — none requires a `4XX`. New pure `operations_without_client_error_response` extractor
+    (no YAML dep) mirrors `operations_without_success_response`'s exact scoping (4-space verb key
+    under a 2-space `/…` path item under `paths:`, then the 8-space keys under the operation's
+    6-space `responses:`), asking per operation whether any key is a `4XX`-range code or the `4XX`
+    wildcard; an op with no `responses:` block is left to the responses-object test (no
+    double-flag). Unit-covered (`operations_without_client_error_response_extraction_rules`: a
+    `200`/`500`-only op flagged, a `4XX` wildcard + a `422` past a `requestBody`'s nested
+    `properties: '400'` not flagged, an out-of-`paths:` `'400'` property never a response, a
+    no-`responses:` op skipped; ≥100-operation floor). Surveyed the corpus first (168 operations,
+    940 explicit `4XX` response keys, every operation carries ≥1) → 0 drift.
   Full response-vs-schema validation still TODO (would need a YAML/JSON-Schema
   validator — a dependency trade-off, deferred).
 
@@ -5176,6 +5201,31 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-18 — Contract-test harness: added an **operation-4xx-response** contract test
+  (`src/registry.rs` `every_operation_declares_a_client_error_response`) — every operation
+  whose `responses:` object is present must document ≥1 client-error (`4XX`) outcome (the
+  well-known Spectral OAS `operation-4xx-response` rule). In CAMARA the `4XX` branch is the
+  API's error contract (the canonical `errors.yaml` `400`/`401`/`403`/`404`/`422`/`429`
+  `$ref`s); an op declaring only its `2XX` (± a `5XX`) advertises a happy-path-only contract a
+  client reads as "cannot fail with a 4xx", so no handler is written for the `404`/`422`/`429`
+  the sim in fact returns — the functional cases DESIGN §7 keys these APIs on. The **error-branch
+  complement** of `every_operation_declares_a_success_response` (`operations_without_success_
+  response`, which requires a `2XX`): together they pin both outcome families. Invisible to the
+  sibling responses tests (responses-object *presence*, key *well-formedness*, inline
+  *descriptions*, and the `2XX` success test) — none requires a `4XX`. New pure
+  `operations_without_client_error_response` extractor (no YAML dep) mirrors the success
+  extractor's exact scoping (4-space verb under a 2-space `/…` path item under `paths:`, then
+  the 8-space keys under the op's 6-space `responses:`), asking per op whether any key is a
+  `4XX`-range code or the `4XX` wildcard; an op with no `responses:` block is left to the
+  responses-object test (no double-flag). Unit-covered
+  (`operations_without_client_error_response_extraction_rules`: a `200`/`500`-only op flagged, a
+  `4XX` wildcard + a `422` past a `requestBody`'s nested `properties: '400'` not flagged, an
+  out-of-`paths:` `'400'` property never a response, a no-`responses:` op skipped; ≥100-operation
+  floor). **Surveyed the corpus first: 168 operations, 940 explicit `4XX` response keys, every
+  operation carries ≥1 → 0 drift to fix.** Test-side only — no request/response/behaviour change,
+  so no vendored-spec edits. `cargo test` 2719 green (was 2717; +2); `cargo build --release`
+  succeeds. No new dependency; the extractor and both tests live in the `#[cfg(test)]` module, so
+  nothing ships in the binary. — binary (release): 5.1M (5,314,968 B; unchanged)
 - 2026-08-18 — Contract-test harness: added a **leading server-variable default URI
   well-formedness** contract test (`src/registry.rs`
   `every_leading_server_variable_default_is_a_well_formed_absolute_uri`) — where a server
