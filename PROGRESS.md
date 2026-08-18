@@ -3332,6 +3332,19 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - an operation-security-presence contract test (`src/registry.rs`
+    `every_operation_declares_a_security_requirement`) asserts every operation a mounted
+    **business** spec declares is authenticated — its own non-empty `security` requirement, or
+    a document-root `security` that covers it (OpenAPI §4.8). The **presence-side complement** of
+    `every_security_requirement_declares_a_scope`, whose `operations_with_scopeless_security`
+    only inspects operations that already *have* a `security:` block (flagging an empty scope
+    list), so a `security:`-less operation or an explicit `security: []` public override slips
+    past as a silently-open route the resource server gates on a scope. New pure
+    `operations_without_security_requirement` extractor + `document_has_root_security` helper (no
+    YAML dep), reusing `operations_with_scopeless_security`'s scoping. Scope is `APIS` (business
+    specs); `auth/openapi.yaml` excluded — its OAuth server endpoints are public by design.
+    Surveyed the corpus first (every business op carries its own `security:` block; 0 mismatch) →
+    0 drift. Unit-covered (`operation_security_presence_extraction_rules`), ≥100-operation floor.
   - an unused root-tag contract test (`src/registry.rs`
     `every_root_tag_is_referenced_by_an_operation`) asserts every document-root `tags:` Tag
     Object is referenced by ≥1 operation `tags` array — the declaration-side reverse of the
@@ -5130,6 +5143,33 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-18 — Contract-test harness: added an **operation-security-presence** contract test
+  (`src/registry.rs` `every_operation_declares_a_security_requirement`) — every operation a
+  mounted **business** spec declares MUST be authenticated: it carries its own non-empty
+  `security` requirement, or the document declares a root-level `security` that covers it
+  (OpenAPI §4.8). The **presence-side complement** of `every_security_requirement_declares_a_scope`,
+  whose `operations_with_scopeless_security` only inspects operations that already *have* a
+  `security:` block (flagging an empty scope list) — so an operation with no `security:` key at
+  all, or an explicit `security: []` public override, slips past as a silently-open route the
+  resource server (`verify::Claims::require_scope`) actually gates on a scope. New pure
+  `operations_without_security_requirement` extractor (no YAML dep) mirrors
+  `operations_with_scopeless_security`'s scoping exactly (4-space verb under a 2-space `/…` path
+  item under top-level `paths:`), flagging an operation whose block holds no `security:` key or a
+  `security:` with no requirement item; plus a new `document_has_root_security` helper (column-0
+  block/inline `security:` with ≥1 requirement) that exempts a spec securing all its ops at the
+  root. **Scope is the mounted business specs (`APIS`); `auth/openapi.yaml` is intentionally
+  excluded — its OAuth server endpoints (token/jwks/discovery/authorize/bc-authorize) issue and
+  serve tokens and so are public by design.** **Surveyed the corpus first: every business
+  operation declares its own operation-level `security:` block (0 mismatches; traffic-influence
+  additionally carries a root `security:`) → 0 drift to fix.** Unit-covered
+  (`operation_security_presence_extraction_rules`: block- and inline-form secured ops pass; a
+  key-less op and a `security: []` op flagged in document order; a root `security:` exempts a
+  key-less op while a bare `security: []` root does not; a ≥100-operation floor via the
+  independent `operation_ids` extractor). Test-side only — no request/response/behaviour change,
+  so no vendored-spec edits. `cargo test` 2703 green (was 2701; +2); `cargo build --release`
+  succeeds, no warnings. No new dependency; the extractors and both tests live in the
+  `#[cfg(test)]` module, so nothing ships in the binary. — binary (release): 5.1M
+  (5,314,968 B; unchanged)
 - 2026-08-18 — Contract-test harness: added an **unused root-tag** contract test
   (`src/registry.rs` `every_root_tag_is_referenced_by_an_operation`) — every Tag Object a
   mounted spec declares in its document-root `tags:` list must be referenced by at least one

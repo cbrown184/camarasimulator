@@ -1620,6 +1620,180 @@ mod tests {
         out
     }
 
+    /// Does the document declare a **non-empty root-level** `security:` — a
+    /// column-0 `security:` key whose value is a block with at least one `- `
+    /// requirement item, or a non-empty inline flow sequence?
+    ///
+    /// A root `security` requirement applies to every operation that does not
+    /// override it with its own `security` (OpenAPI §4.8 / Security Requirement
+    /// Object), so a document that declares one authenticates its whole API even
+    /// where an operation carries no `security` of its own. Used by
+    /// [`operations_without_security_requirement`] so a spec that secures all its
+    /// operations at the root (e.g. traffic-influence) is not mis-flagged. A bare
+    /// `security: []` at the root (an empty array) secures nothing and is not
+    /// counted. Only a *column-0* `security:` is the root Security Requirement
+    /// array; a deeper `security:` is an operation's own, and `securitySchemes:`
+    /// (a different key) never matches `strip_prefix("security:")`.
+    fn document_has_root_security(body: &str) -> bool {
+        let lines: Vec<&str> = body.lines().collect();
+        for (i, line) in lines.iter().enumerate() {
+            let is_top_level_key =
+                !line.is_empty() && !line.starts_with(char::is_whitespace);
+            if !is_top_level_key {
+                continue;
+            }
+            // Block form: a column-0 `security:` on its own line, its requirement
+            // items following as `- ` sequence entries until the next column-0 key.
+            if line.trim_end() == "security:" {
+                let mut j = i + 1;
+                while j < lines.len() {
+                    let l = lines[j];
+                    if l.trim().is_empty() {
+                        j += 1;
+                        continue;
+                    }
+                    if !l.starts_with(char::is_whitespace) {
+                        break; // next top-level key — root block ended
+                    }
+                    if l.trim_start().starts_with("- ") {
+                        return true;
+                    }
+                    j += 1;
+                }
+                return false; // empty root `security:` block
+            }
+            // Inline form: `security: [ … ]` on one column-0 line.
+            if let Some(rest) = line.strip_prefix("security:") {
+                let after = rest.trim();
+                if !after.is_empty() {
+                    return match after.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+                        Some(inner) => !inner.trim().is_empty(),
+                        None => true, // some other inline scalar — treat as present
+                    };
+                }
+            }
+        }
+        false
+    }
+
+    /// The `METHOD /path` label of every operation a spec declares that carries
+    /// **no** `security` requirement — neither an operation-level `security:`
+    /// block with at least one requirement item, nor coverage by a non-empty
+    /// document-root `security:` — in document order, without a YAML dep.
+    ///
+    /// An OpenAPI operation is authenticated when it declares its own non-empty
+    /// `security`, or when the document declares a root `security` that applies to
+    /// it (OpenAPI §4.8). An operation with neither is **public**: a Redoc/Swagger
+    /// "try it" panel and a codegen client present it as callable with no token,
+    /// and — for a CAMARA business endpoint the resource-server
+    /// `verify::Claims::require_scope` actually gates on a scope — the spec then
+    /// contradicts the server it documents (advertising an open endpoint the
+    /// runtime answers with `401 UNAUTHENTICATED`).
+    ///
+    /// The **presence-side complement** of [`operations_with_scopeless_security`]:
+    /// that helper only inspects operations that already *have* a `security:`
+    /// block (flagging an empty scope list), so an operation with no `security:`
+    /// key at all — or an explicit `security: []` public override — is invisible
+    /// to it. This helper mirrors that one's scoping exactly (a 4-space HTTP-verb
+    /// key under a 2-space `/…` path item beneath the top-level `paths:` block) and
+    /// flags the operation when its block holds no `security:` key, or a
+    /// `security:` whose block/inline value carries no requirement item. When the
+    /// document declares a non-empty root `security:`
+    /// ([`document_has_root_security`]) every operation is covered, so nothing is
+    /// flagged.
+    fn operations_without_security_requirement(body: &str) -> Vec<String> {
+        if document_has_root_security(body) {
+            return Vec::new();
+        }
+        const METHODS: [&str; 8] =
+            ["get", "put", "post", "delete", "patch", "options", "head", "trace"];
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let mut out = Vec::new();
+        let mut in_paths = false;
+        let mut path: Option<String> = None;
+        for (i, line) in lines.iter().enumerate() {
+            let is_top_level_key =
+                !line.is_empty() && !line.starts_with(char::is_whitespace);
+            if is_top_level_key {
+                in_paths = line.trim_end() == "paths:";
+                path = None;
+                continue;
+            }
+            if !in_paths {
+                continue;
+            }
+            if let Some(rest) = line.strip_prefix("  ") {
+                if !rest.starts_with(char::is_whitespace) && rest.starts_with('/') {
+                    let key = rest.trim_end().strip_suffix(':').unwrap_or(rest.trim_end());
+                    path = Some(key.to_string());
+                    continue;
+                }
+            }
+            let Some(current_path) = path.as_deref() else { continue };
+            if indent(line) != 4 {
+                continue;
+            }
+            let key = line.trim_start();
+            let Some(name) = key.strip_suffix(':') else { continue };
+            if name.contains(char::is_whitespace) || !METHODS.contains(&name) {
+                continue;
+            }
+            // Scan the operation's block (indent > 4) for a 6-space `security:`
+            // key that carries at least one requirement item.
+            let mut secured = false;
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) <= 4 {
+                    break; // dedented out of this operation
+                }
+                let is_security_key = indent(l) == 6
+                    && l.trim_start().split_once(':').map(|(k, _)| k) == Some("security");
+                if !is_security_key {
+                    j += 1;
+                    continue;
+                }
+                let after = l.trim_start().split_once(':').map(|(_, v)| v.trim()).unwrap_or("");
+                if after.is_empty() {
+                    // Block form: any `- <requirement>` item indented past the
+                    // 6-space `security:` key, before the block dedents.
+                    let mut k = j + 1;
+                    while k < lines.len() {
+                        let sl = lines[k];
+                        if sl.trim().is_empty() {
+                            k += 1;
+                            continue;
+                        }
+                        if indent(sl) <= 6 {
+                            break;
+                        }
+                        if sl.trim_start().starts_with("- ") {
+                            secured = true;
+                            break;
+                        }
+                        k += 1;
+                    }
+                } else {
+                    // Inline flow sequence: empty only when `[]` (or `[ ]`).
+                    secured = match after.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+                        Some(inner) => !inner.trim().is_empty(),
+                        None => true, // some other inline scalar — treat as present
+                    };
+                }
+                break; // one `security:` block per operation
+            }
+            if !secured {
+                out.push(format!("{} {}", name.to_uppercase(), current_path));
+            }
+        }
+        out
+    }
+
     /// Does the spec's declared `info.version` agree with the version segment the
     /// API is mounted at in the URL (DESIGN §9 canonical URL versioning)?
     ///
@@ -4782,6 +4956,175 @@ components:
             total_requirements >= 100,
             "expected many scoped security requirements across specs, got {total_requirements}"
         );
+    }
+
+    #[test]
+    fn every_operation_declares_a_security_requirement() {
+        // Contract-harness invariant (CAMARA canonical auth + DESIGN §8/§9): every
+        // operation a mounted business spec declares MUST be authenticated — it
+        // carries its own non-empty `security` requirement, or the document
+        // declares a root-level `security` that covers it. Every CamaraSim
+        // business endpoint is gated by the resource-server
+        // `verify::Claims::require_scope`, so the spec must advertise that gate as
+        // a security requirement; an operation with none tells a client (and
+        // codegen, and the served "try it" panel) the endpoint is public.
+        //
+        // The break this catches sits in the blind spot of
+        // `every_security_requirement_declares_a_scope`: that test (via
+        // `operations_with_scopeless_security`) only inspects operations that
+        // already *have* a `security:` block, flagging an empty scope list. An
+        // operation with no `security:` key at all — dropped or dedented out in the
+        // copy-paste that vendors a new spec — declares nothing for it to inspect,
+        // so it slips past as a silently-open route; and an explicit `security: []`
+        // (a deliberate public override) likewise names no requirement. Neither the
+        // scheme-name test (`every_security_requirement_references_a_defined_scheme`)
+        // nor the identity/wiring tests read whether a requirement is *present*.
+        //
+        // Scope is the mounted business specs (`APIS`) — the shared
+        // `auth/openapi.yaml` is intentionally excluded: its OAuth server endpoints
+        // (`/oauth2/token`, `/oauth2/jwks`, discovery, `/oauth2/authorize`,
+        // `/bc-authorize`) issue and serve tokens and so are public by design,
+        // carrying no `security` requirement. Verified true across every mounted
+        // business spec before asserting (each operation is authenticated).
+        for api in APIS {
+            let public = operations_without_security_requirement(api.body);
+            assert!(
+                public.is_empty(),
+                "{} spec declares operation(s) with no `security` requirement — a \
+                 silently-public route the resource server actually gates on a scope \
+                 (a dropped `security:` block, or an explicit `security: []`): {:?}",
+                api.name,
+                public
+            );
+        }
+    }
+
+    #[test]
+    fn operation_security_presence_extraction_rules() {
+        // Unit-cover `operations_without_security_requirement` (and
+        // `document_has_root_security`) so the contract test above can't pass
+        // vacuously and the accept/flag boundary is pinned: an operation with a
+        // block- or inline-form non-empty `security` passes; one with no
+        // `security:` key, or an explicit `security: []`, is flagged in document
+        // order; and a document-root `security` exempts every operation.
+
+        // No root `security:` — so each operation stands on its own requirement.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /secured-block:
+    post:
+      operationId: doSecuredBlock
+      security:
+        - openId:
+            - some-api:read
+      responses:
+        '200':
+          description: ok
+  /secured-inline:
+    get:
+      operationId: doSecuredInline
+      security:
+        - openId: [some-api:read]
+      responses:
+        '200':
+          description: ok
+  /public-missing:
+    get:
+      operationId: doPublicMissing
+      responses:
+        '200':
+          description: ok
+  /public-empty:
+    delete:
+      operationId: doPublicEmpty
+      security: []
+      responses:
+        '204':
+          description: no content
+components:
+  schemas:
+    Widget:
+      type: object
+      properties:
+        note:
+          type: string
+";
+        // `GET /public-missing` (no `security:` at all) and `DELETE /public-empty`
+        // (`security: []`) declare no requirement, so both are flagged, in
+        // document order. `POST /secured-block` and `GET /secured-inline` each
+        // carry a non-empty requirement, and the `components.schemas.Widget`
+        // fields sit outside any operation, so none is flagged.
+        assert_eq!(
+            operations_without_security_requirement(body),
+            vec![
+                "GET /public-missing".to_string(),
+                "DELETE /public-empty".to_string(),
+            ]
+        );
+        assert!(!document_has_root_security(body));
+
+        // A document-root `security:` block covers every operation, so even the
+        // key-less operation is exempt.
+        let rooted = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+security:
+  - openId:
+      - some-api:read
+paths:
+  /covered:
+    get:
+      operationId: getCovered
+      responses:
+        '200':
+          description: ok
+";
+        assert!(document_has_root_security(rooted));
+        assert!(operations_without_security_requirement(rooted).is_empty());
+
+        // A bare root `security: []` secures nothing — it does not exempt the
+        // key-less operation, which is still flagged.
+        let empty_root = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+security: []
+paths:
+  /covered:
+    get:
+      operationId: getCovered
+      responses:
+        '200':
+          description: ok
+";
+        assert!(!document_has_root_security(empty_root));
+        assert_eq!(
+            operations_without_security_requirement(empty_root),
+            vec!["GET /covered".to_string()]
+        );
+
+        // Non-vacuous floor: across every registered business spec every operation
+        // is authenticated (the invariant the contract test asserts), and the
+        // corpus actually declares many operations, so a broken (always-empty)
+        // extractor can't hide behind a corpus with no operations. Count operations
+        // via the independent (unit-covered) `operation_ids` extractor.
+        let mut ops = 0usize;
+        for api in APIS {
+            assert!(
+                operations_without_security_requirement(api.body).is_empty(),
+                "{}: every operation must declare a security requirement",
+                api.name
+            );
+            ops += operation_ids(api.body).len();
+        }
+        assert!(ops >= 100, "expected many operations across specs, got {ops}");
     }
 
     #[test]
