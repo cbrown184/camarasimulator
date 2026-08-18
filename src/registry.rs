@@ -739,6 +739,121 @@ mod tests {
         referenced
     }
 
+    /// The (sorted, de-duplicated) names of every Server Variable a spec *declares*
+    /// under `servers[].variables:` yet **never references** by a `{name}`
+    /// placeholder in any server `url:` template — without a YAML dep.
+    ///
+    /// The *reverse* direction of `server_url_undefined_variables` (which flags a
+    /// url placeholder with no matching declaration): here a `variables:` entry is
+    /// declared but no `url:` template names it. An OpenAPI Server Variable Object
+    /// exists only to be substituted into its server's `url` template, so a declared
+    /// variable no `{…}` ever names is dead — the served `/{api}/v{n}/docs` "try it"
+    /// panel renders a variable selector that substitutes into nothing, and a codegen
+    /// client generates a URL-builder parameter the URL never consumes. A live hazard
+    /// after a base-path edit that drops (or renames) the `{apiRoot}` reference while
+    /// leaving the `variables.apiRoot` block behind, or a variable pasted from a
+    /// sibling spec and never wired into the url. Invisible to
+    /// `every_server_url_variable_is_defined_with_a_default`, which reads the same two
+    /// sets but only ever flags a *reference* with no declaration, never the reverse.
+    /// The Server-Variable analogue of `unused_root_tags` (a root tag no operation
+    /// carries). A well-formed spec returns an empty vec.
+    ///
+    /// Scoping mirrors `server_url_undefined_variables` exactly: only the top-level
+    /// `servers:` block is scanned (a line == `servers:` at column zero, through the
+    /// next column-zero key), references come only from `url:` lines (optionally under
+    /// a `- ` sequence dash), and declarations are the direct-child keys of a
+    /// `variables:` mapping (gathered set-wise across the block; CamaraSim specs each
+    /// declare a single server, so a per-server association is unnecessary). Unlike
+    /// the sibling, a declaration counts whether or not it carries a `default:` — a
+    /// missing `default` is that test's concern, an unreferenced name is this one's.
+    fn server_variables_unreferenced(body: &str) -> Vec<String> {
+        let lines: Vec<&str> = body.lines().collect();
+
+        // Isolate the top-level `servers:` block (identical to the sibling).
+        let start = match lines.iter().position(|l| *l == "servers:") {
+            Some(s) => s,
+            None => return Vec::new(),
+        };
+        let end = lines[start + 1..]
+            .iter()
+            .position(|l| !l.is_empty() && !l.starts_with(char::is_whitespace))
+            .map(|off| start + 1 + off)
+            .unwrap_or(lines.len());
+        let block = &lines[start + 1..end];
+
+        // Template variables named in `{…}` within any server `url:` line.
+        fn brace_vars(s: &str) -> Vec<String> {
+            let mut out = Vec::new();
+            let mut rest = s;
+            while let Some(open) = rest.find('{') {
+                let after = &rest[open + 1..];
+                match after.find('}') {
+                    Some(close) => {
+                        let name = &after[..close];
+                        if !name.is_empty() {
+                            out.push(name.to_string());
+                        }
+                        rest = &after[close + 1..];
+                    }
+                    None => break,
+                }
+            }
+            out
+        }
+        let mut referenced: Vec<String> = Vec::new();
+        for l in block {
+            let t = l.trim_start();
+            let t = t.strip_prefix("- ").unwrap_or(t);
+            if let Some(url) = t.strip_prefix("url:") {
+                referenced.extend(brace_vars(url));
+            }
+        }
+
+        // Variable names declared as direct children of a `variables:` mapping
+        // anywhere in the block (default presence is not required here).
+        let mut declared: Vec<(usize, String)> = Vec::new();
+        let mut k = 0;
+        while k < block.len() {
+            if block[k].trim() != "variables:" {
+                k += 1;
+                continue;
+            }
+            let v_indent = block[k].len() - block[k].trim_start().len();
+            let mut child_indent: Option<usize> = None;
+            let mut m = k + 1;
+            while m < block.len() {
+                let l = block[m];
+                if l.trim().is_empty() {
+                    m += 1;
+                    continue;
+                }
+                let indent = l.len() - l.trim_start().len();
+                if indent <= v_indent {
+                    break; // end of the `variables:` mapping
+                }
+                let ci = *child_indent.get_or_insert(indent);
+                if indent == ci {
+                    let name = l.trim().split_once(':').map(|(k, _)| k.trim()).unwrap_or("");
+                    if !name.is_empty() {
+                        declared.push((m, name.to_string()));
+                    }
+                }
+                m += 1;
+            }
+            k = m;
+        }
+
+        // Declared names never referenced, in document order, then sorted/deduped.
+        let mut unreferenced: Vec<String> = declared
+            .into_iter()
+            .filter(|(_, n)| !referenced.contains(n))
+            .map(|(_, n)| n)
+            .collect();
+        unreferenced.sort();
+        unreferenced.dedup();
+        unreferenced
+    }
+
     /// Extract the root `openapi:` version string from an embedded OpenAPI body,
     /// without a YAML dep.
     ///
@@ -4234,6 +4349,164 @@ paths: {}
                 undefined
             );
         }
+    }
+
+    #[test]
+    fn every_declared_server_variable_is_referenced_by_the_url() {
+        // Contract-harness invariant (OpenAPI Server Object / Server Variable
+        // Object rule): every Server Variable a spec declares under
+        // `servers[].variables:` MUST be referenced by a `{name}` placeholder in
+        // that server's `url` template — a Server Variable exists only to be
+        // substituted into the url, so a declared variable no `{…}` names is dead.
+        // CamaraSim's every vendored spec templates its base path as `{apiRoot}/…`
+        // and declares exactly one variable, `apiRoot`, so the set of declared
+        // variables and the set of referenced ones must coincide.
+        //
+        // The reverse direction of
+        // `every_server_url_variable_is_defined_with_a_default`, which reads the same
+        // two sets (url `{…}` references + `variables:` declarations) but only ever
+        // flags a *reference* with no declaration — never a *declaration* with no
+        // reference. So a base-path edit that dropped or renamed the `{apiRoot}`
+        // reference while leaving the `variables.apiRoot` block behind (or a variable
+        // pasted from a sibling spec and never wired into the url) slips past it and
+        // every structural test, yet the served `/{api}/v{n}/docs` "try it" panel
+        // renders a variable selector that substitutes into nothing. The
+        // Server-Variable analogue of `every_root_tag_is_referenced_by_an_operation`.
+        // Verified true across every mounted spec before asserting.
+        for api in APIS {
+            let unreferenced = server_variables_unreferenced(api.body);
+            assert!(
+                unreferenced.is_empty(),
+                "{} spec declares server variable(s) {:?} under `variables:` that no \
+                 server `url:` template references with a `{{name}}` placeholder — dead \
+                 Server Variable Object(s) the substituted request URL never consumes",
+                api.name,
+                unreferenced
+            );
+        }
+    }
+
+    #[test]
+    fn server_variable_reference_extraction_rules() {
+        // Unit-cover `server_variables_unreferenced` so the contract test above can't
+        // pass vacuously and its accept/flag boundary is pinned: a declared variable
+        // named by a `{…}` in the server url passes; a declared variable no url
+        // references is flagged; a `{…}` referenced but never declared is NOT this
+        // test's concern (the sibling's), so it is not flagged here; a declared
+        // variable with no `default:` is still flagged when unreferenced (default
+        // presence is the sibling's concern); and a `{…}` inside a sibling
+        // `description:` (not a `url:` line) does not count as a reference, so a
+        // variable named only there is flagged.
+        let referenced_and_declared = "\
+servers:
+  - url: \"{apiRoot}/x/v1\"
+    variables:
+      apiRoot:
+        default: http://localhost:8080
+";
+        assert!(server_variables_unreferenced(referenced_and_declared).is_empty());
+
+        // `unused` is declared but no url references it → flagged (its lack of a
+        // `default:` is irrelevant here). `apiRoot` is referenced → not flagged.
+        let has_unused = "\
+servers:
+  - url: \"{apiRoot}/x/v1\"
+    variables:
+      apiRoot:
+        default: http://localhost:8080
+      unused:
+        description: never named by the url template
+";
+        assert_eq!(
+            server_variables_unreferenced(has_unused),
+            vec!["unused".to_string()]
+        );
+
+        // A `{region}` referenced by the url but never declared is the sibling test's
+        // concern (`server_url_undefined_variables`), not this one — so this reverse
+        // extractor flags nothing for it.
+        let referenced_not_declared = "\
+servers:
+  - url: \"{apiRoot}/{region}/v1\"
+    variables:
+      apiRoot:
+        default: http://localhost:8080
+";
+        assert!(server_variables_unreferenced(referenced_not_declared).is_empty());
+
+        // A variable named only inside a `description:` (not a `url:` line) is not
+        // referenced, so it is flagged.
+        let named_in_description = "\
+servers:
+  - url: \"{apiRoot}/x/v1\"
+    description: substitutes {apiHost} in prose only
+    variables:
+      apiRoot:
+        default: http://localhost:8080
+      apiHost:
+        default: example.test
+";
+        assert_eq!(
+            server_variables_unreferenced(named_in_description),
+            vec!["apiHost".to_string()]
+        );
+
+        // Non-vacuous floor: across every registered spec every declared server
+        // variable is referenced by the url (the invariant the contract test
+        // asserts), and the corpus actually declares many variables (each business
+        // spec's `apiRoot`) — so the reference-comparison path runs on real data and a
+        // broken (always-empty) extractor can't hide behind a corpus that never
+        // declares a variable. Count declarations with a detector independent of the
+        // extractor's reference comparison.
+        let mut declared_variables = 0usize;
+        for api in APIS {
+            assert!(
+                server_variables_unreferenced(api.body).is_empty(),
+                "{}: every declared server variable must be referenced by the url",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            if let Some(start) = lines.iter().position(|l| *l == "servers:") {
+                let end = lines[start + 1..]
+                    .iter()
+                    .position(|l| !l.is_empty() && !l.starts_with(char::is_whitespace))
+                    .map(|off| start + 1 + off)
+                    .unwrap_or(lines.len());
+                let block = &lines[start + 1..end];
+                let indent = |l: &str| l.len() - l.trim_start().len();
+                let mut k = 0;
+                while k < block.len() {
+                    if block[k].trim() != "variables:" {
+                        k += 1;
+                        continue;
+                    }
+                    let vi = indent(block[k]);
+                    let mut child: Option<usize> = None;
+                    let mut m = k + 1;
+                    while m < block.len() {
+                        let l = block[m];
+                        if l.trim().is_empty() {
+                            m += 1;
+                            continue;
+                        }
+                        let ind = indent(l);
+                        if ind <= vi {
+                            break;
+                        }
+                        let ci = *child.get_or_insert(ind);
+                        if ind == ci && l.trim().split_once(':').is_some() {
+                            declared_variables += 1;
+                        }
+                        m += 1;
+                    }
+                    k = m;
+                }
+            }
+        }
+        assert!(
+            declared_variables >= 20,
+            "expected many declared server variables across specs, got {declared_variables}"
+        );
     }
 
     #[test]

@@ -5160,6 +5160,31 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-18 — Contract-test harness: added an **unreferenced server-variable** contract test
+  (`src/registry.rs` `every_declared_server_variable_is_referenced_by_the_url`) — every Server
+  Variable a mounted spec declares under `servers[].variables:` MUST be referenced by a `{name}`
+  placeholder in that server's `url` template. The **declaration-side reverse** of
+  `every_server_url_variable_is_defined_with_a_default` (`server_url_undefined_variables`), which
+  reads the same two sets — url `{…}` references + `variables:` declarations — but only ever flags
+  a *reference* with no declaration; it never flags a *declaration* with no reference, so a
+  base-path edit that dropped/renamed the `{apiRoot}` reference while leaving the `variables.apiRoot`
+  block behind (or a variable pasted from a sibling and never wired into the url) slips past it and
+  every structural test, yet the served `/{api}/v{n}/docs` "try it" panel renders a variable
+  selector that substitutes into nothing. The Server-Variable analogue of
+  `every_root_tag_is_referenced_by_an_operation`. New pure `server_variables_unreferenced` extractor
+  (no YAML dep) reuses the sibling's exact `servers:`-block isolation, `brace_vars` url-reference
+  scan, and direct-child `variables:` declaration walk — but returns declared-minus-referenced
+  (default presence irrelevant here — that gap is the sibling's concern). **Surveyed the corpus
+  first: all 60 declared server variables across the mounted specs are `apiRoot`, each referenced by
+  its `{apiRoot}` url template → 0 drift to fix.** Unit-covered
+  (`server_variable_reference_extraction_rules`: a referenced declaration passes; an `unused`
+  declaration with no `default:` flagged; a `{region}` referenced-but-undeclared is the sibling's
+  concern, not flagged here; a variable named only in a `description:` (not a `url:` line) flagged; a
+  ≥20 declared-variable floor via an independent counter). Test-side only — no request/response/
+  behaviour change, so no vendored-spec edits. `cargo test` 2709 green (was 2707; +2);
+  `cargo build --release` succeeds, no warnings. No new dependency; the extractor and both tests
+  live in the `#[cfg(test)]` module, so nothing ships in the binary. — binary (release): 5.1M
+  (5,314,968 B; unchanged)
 - 2026-08-18 — Contract-test harness: added an **info.version semver well-formedness** contract
   test (`src/registry.rs` `every_info_version_is_a_well_formed_semver`) — every mounted spec's
   `info.version` MUST be a well-formed CAMARA API version: a three-part `MAJOR.MINOR.PATCH`
