@@ -4629,6 +4629,64 @@ mod tests {
     }
 
     #[test]
+    fn every_spec_declares_a_distinct_info_title() {
+        // Contract-harness invariant (OpenAPI `info.title` usage + DESIGN §9
+        // catalog identity): no two mounted specs may declare the same
+        // `info.title`. `title` is the human name every Redoc/Swagger client
+        // renders as the document heading, and the label the `/` catalog and each
+        // per-spec docs page show, so two distinct APIs carrying an identical
+        // title render under one indistinguishable name — a caller browsing the
+        // catalog cannot tell which served spec is which. This is the
+        // human-identity twin of `each_api_is_listed_once` (which guards distinct
+        // *base paths* — the route identity): that test proves two APIs never
+        // collide on *where* they mount; this proves they never collide on *what
+        // they are called*.
+        //
+        // The break it catches: a newly vendored spec drafted by copy-pasting a
+        // sibling keeps the sibling's `info.title` while its path, version and
+        // schemas are all updated — both then serve correctly and pass every
+        // identity/wiring test (distinct mount paths, matching versions,
+        // per-spec operationIds), yet the catalog lists two entries under one
+        // name. `every_spec_declares_a_non_empty_info_title` only asserts each
+        // title exists and is non-blank, never that the set is collision-free.
+        // Verified true across every mounted spec before asserting.
+        let titles: Vec<(&str, String)> = APIS
+            .iter()
+            .map(|api| {
+                let title = info_title(api.body).unwrap_or_else(|| {
+                    panic!(
+                        "{} spec declares no `info.title` (the required document \
+                         heading)",
+                        api.name
+                    )
+                });
+                (api.name, title)
+            })
+            .collect();
+        // Non-vacuous floor: the whole registry is titled, so a collision scan
+        // that silently saw no titles can't hide behind an empty corpus.
+        assert!(
+            titles.len() >= 28,
+            "expected the full titled API registry, got {}",
+            titles.len()
+        );
+        // O(n²) over the ~few-dozen-entry registry — pinpoints the colliding pair.
+        for (i, (a_name, a_title)) in titles.iter().enumerate() {
+            for (b_name, b_title) in titles.iter().skip(i + 1) {
+                assert!(
+                    a_title != b_title,
+                    "`{}` and `{}` specs share the same `info.title` \"{}\" — two \
+                     distinct APIs render under one indistinguishable catalog/Redoc \
+                     name (a copy-paste that never renamed the sibling's title)",
+                    a_name,
+                    b_name,
+                    a_title
+                );
+            }
+        }
+    }
+
+    #[test]
     fn every_spec_declares_a_non_empty_info_description() {
         // Contract-harness invariant (OpenAPI structural rule): every mounted
         // vendored spec MUST declare a non-empty `info.description`. Together

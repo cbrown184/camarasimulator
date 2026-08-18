@@ -3332,6 +3332,19 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - an info.title distinctness contract test (`src/registry.rs`
+    `every_spec_declares_a_distinct_info_title`) asserts no two mounted specs share
+    the same `info.title` — the **human-identity twin** of `each_api_is_listed_once`
+    (distinct *base paths* = route identity): that test proves two APIs never collide
+    on *where* they mount; this proves they never collide on *what they are called*.
+    `every_spec_declares_a_non_empty_info_title` only pins that each title exists and
+    is non-blank, never that the set is collision-free, so a spec copy-pasted from a
+    sibling that kept its `info.title` while path/version/schemas were all updated
+    serves correctly, passes every identity/wiring test, yet lists two catalog/Redoc
+    entries under one indistinguishable name. Reuses the unit-covered `info_title`
+    extractor (no new extractor); an O(n²) scan over the ~few-dozen-entry registry
+    pinpoints the colliding pair, with a ≥28-title non-vacuity floor. Surveyed the
+    corpus first (61 specs, 61 distinct titles) → 0 drift.
   - a scenarios-block description contract test (`src/registry.rs`
     `every_scenario_block_declares_a_non_empty_description`) asserts every
     `x-camarasim-scenarios` block carries a non-empty **block-level** `description:` — the
@@ -5235,6 +5248,25 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-18 — Contract-test harness: added an **info.title distinctness** contract test
+  (`src/registry.rs` `every_spec_declares_a_distinct_info_title`) — no two mounted specs may
+  declare the same `info.title`. `title` is the heading Redoc/Swagger renders and the label the
+  `/` catalog and each per-spec docs page show, so two distinct APIs sharing a title render under
+  one indistinguishable name. The **human-identity twin** of `each_api_is_listed_once` (which
+  guards distinct *base paths* — the route identity): that proves two APIs never collide on *where*
+  they mount; this proves they never collide on *what they are called*. No existing test saw it —
+  `every_spec_declares_a_non_empty_info_title` only asserts each title exists and is non-blank,
+  never that the set is collision-free, so a spec copy-pasted from a sibling that kept its
+  `info.title` while path/version/schemas were all updated serves correctly and passes every
+  identity/wiring test (distinct mount paths, matching versions, per-spec operationIds) yet
+  double-lists in the catalog under one name. Reuses the unit-covered `info_title` extractor (no
+  new extractor, so no separate unit test — mirrors `operation_ids_are_unique_within_each_spec`
+  reusing `operation_ids`); an O(n²) scan over the ~few-dozen-entry registry pinpoints the
+  colliding pair, with a ≥28-title non-vacuity floor. **Surveyed the corpus first: 61 specs, 61
+  distinct titles → 0 drift.** Test-side only — no request/response/behaviour change, so no
+  vendored-spec edits. `cargo test` 2736 green (was 2735; +1); `cargo build --release` succeeds.
+  No new dependency; the test lives in the `#[cfg(test)]` module, so nothing ships in the binary.
+  — binary (release): 5.1M (5,323,160 B; unchanged)
 - 2026-08-18 — Contract-test harness: added a **Callback Object runtime-expression** contract
   test (`src/registry.rs` `every_callback_key_is_a_runtime_expression`) — every Callback Object
   expression key a mounted spec declares MUST be an OpenAPI runtime expression (the canonical
