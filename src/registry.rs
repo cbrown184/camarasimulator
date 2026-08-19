@@ -19205,6 +19205,326 @@ components:
         );
     }
 
+    /// The `<name>` (with its `components.<section>` and the section's line) label
+    /// of every component-definition mapping a mounted spec declares under
+    /// top-level `components:` that lists the **same component name twice** —
+    /// without a YAML dep.
+    ///
+    /// `components:` groups reusable objects into per-kind mappings — `schemas:`,
+    /// `parameters:`, `responses:`, `headers:`, `requestBodies:`,
+    /// `securitySchemes:`, `examples:`, `links:`, `callbacks:` — each keyed by the
+    /// component's name, which every `$ref: "#/components/<kind>/<name>"` (local or
+    /// cross-file) resolves by. A mapping that repeats a key is invalid YAML: every
+    /// parser keeps only the **last** occurrence, so the earlier definition — its
+    /// schema/parameter/response shape — is dropped without a trace and every
+    /// `$ref` to that name silently binds to whichever copy came last. The routine
+    /// hazard in these specs: a component grown by pasting a sibling definition and
+    /// forgetting to rename it, so a `$ref` that reads correctly points at a
+    /// different object than intended.
+    ///
+    /// The components-namespace twin of `properties_objects_with_duplicate_names`
+    /// (a `properties:` block repeating a property name): the same silent
+    /// last-wins YAML hazard on a different mapping. No existing components test
+    /// reads for duplicates — `every_component_key_is_a_valid_name` checks each
+    /// key's *syntax*, `every_components_section_is_a_valid_field` the *section*
+    /// names, and `local_component_refs_resolve_within_their_own_spec` that a `$ref`
+    /// finds *some* target — none asks whether one section lists a name twice.
+    ///
+    /// Scoping: only the top-level `components:` block (a line == `components:` at
+    /// column zero, through the next column-zero key) is scanned. Its direct
+    /// children at the first-child indent `S` are the section mappings; each
+    /// section's own direct children at that section's first-child indent `K` are
+    /// the component keys, gathered at exactly `K` and bounded by a dedent to `S`
+    /// or shallower — so a component's own nested content (a schema's
+    /// `properties:`, a parameter's `schema:`) at a deeper indent is never counted
+    /// as a component name. A section opener with an inline value (not a block
+    /// mapping) and a `- ` sequence item (not a mapping key) are skipped. Flags a
+    /// repeated key with its `components.<section>` and the section's line, in
+    /// document order.
+    fn components_objects_with_duplicate_keys(body: &str) -> Vec<String> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let unquote = |name: &str| -> String {
+            name.strip_prefix('"')
+                .and_then(|s| s.strip_suffix('"'))
+                .or_else(|| name.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')))
+                .unwrap_or(name)
+                .to_string()
+        };
+        // Isolate the top-level `components:` block.
+        let Some(start) = lines.iter().position(|l| *l == "components:") else {
+            return Vec::new();
+        };
+        let end = lines[start + 1..]
+            .iter()
+            .position(|l| !l.is_empty() && !l.starts_with(char::is_whitespace))
+            .map(|off| start + 1 + off)
+            .unwrap_or(lines.len());
+        // Section indent S: the first non-blank, non-comment line's indent in the block.
+        let mut s_indent: Option<usize> = None;
+        for l in &lines[start + 1..end] {
+            let tl = l.trim();
+            if tl.is_empty() || tl.starts_with('#') {
+                continue;
+            }
+            s_indent = Some(indent(l));
+            break;
+        }
+        let Some(s) = s_indent else { return Vec::new() };
+        let mut out = Vec::new();
+        let mut i = start + 1;
+        while i < end {
+            let line = lines[i];
+            let tl = line.trim();
+            if tl.is_empty() || tl.starts_with('#') || indent(line) != s {
+                i += 1;
+                continue;
+            }
+            // A section opener: a mapping key whose value is empty or a comment (an
+            // inline value would be a scalar/flow, not a block mapping of components).
+            let Some((k, v)) = tl.split_once(':') else {
+                i += 1;
+                continue;
+            };
+            let v = v.trim();
+            if !(v.is_empty() || v.starts_with('#')) {
+                i += 1;
+                continue;
+            }
+            let section = unquote(k.trim());
+            // First-child indent K of this section (first non-blank line deeper than S).
+            let mut k_indent: Option<usize> = None;
+            let mut j = i + 1;
+            while j < end {
+                let l = lines[j];
+                let t = l.trim();
+                if t.is_empty() || t.starts_with('#') {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) <= s {
+                    break; // empty section
+                }
+                k_indent = Some(indent(l));
+                break;
+            }
+            let Some(k) = k_indent else {
+                i += 1;
+                continue;
+            };
+            // Collect direct component keys (exactly indent K) until the section closes.
+            let mut seen = HashSet::new();
+            let mut m = i + 1;
+            while m < end {
+                let l = lines[m];
+                let t = l.trim();
+                if t.is_empty() || t.starts_with('#') {
+                    m += 1;
+                    continue;
+                }
+                if indent(l) <= s {
+                    break; // dedented out of this section
+                }
+                if indent(l) == k && !t.starts_with('-') {
+                    if let Some((key, _)) = t.split_once(':') {
+                        let name = unquote(key.trim());
+                        if !name.is_empty() && !seen.insert(name.clone()) {
+                            out.push(format!(
+                                "`{name}` (components.{section} at line {})",
+                                i + 1
+                            ));
+                        }
+                    }
+                }
+                m += 1;
+            }
+            i += 1;
+        }
+        out
+    }
+
+    #[test]
+    fn every_components_object_lists_distinct_component_keys() {
+        // Contract-harness invariant (OpenAPI / YAML structural rule): each
+        // `components:` sub-object a mounted spec declares — `schemas:`,
+        // `parameters:`, `responses:`, `headers:`, `requestBodies:`,
+        // `securitySchemes:`, … — is a mapping keyed by component name, so it MUST
+        // NOT list the same name twice. A repeated key is an invalid mapping every
+        // parser resolves by keeping only the last copy, so the earlier definition
+        // is dropped silently and every `$ref: "#/components/<kind>/<name>"` that
+        // resolves to it binds to whichever copy came last.
+        //
+        // The components-namespace twin of
+        // `every_properties_object_lists_distinct_property_names`: no existing
+        // components test reads for duplicates — `every_component_key_is_a_valid_name`
+        // checks each key's syntax, `every_components_section_is_a_valid_field` the
+        // section names, and `local_component_refs_resolve_within_their_own_spec`
+        // that a `$ref` finds some target — never that one section lists a name
+        // twice. A component pasted from a sibling and left unrenamed is a live
+        // copy-paste hazard. Verified true across all mounted specs before asserting.
+        for api in APIS {
+            let bad = components_objects_with_duplicate_keys(api.body);
+            assert!(
+                bad.is_empty(),
+                "{} spec declares a `components:` sub-object that repeats a \
+                 component name (a section's keys must be distinct): {:?}",
+                api.name,
+                bad
+            );
+        }
+    }
+
+    #[test]
+    fn components_object_duplicate_key_extraction_rules() {
+        // Unit-cover `components_objects_with_duplicate_keys` so the contract test
+        // above can't pass vacuously and its detection is pinned: a section that
+        // repeats a component name is flagged (with the name, its section, and the
+        // section's line); a component's own nested content (a schema's
+        // `properties:` keys, deeper than the component indent) is never counted as
+        // a component name — so a property reusing a component name is not a
+        // duplicate; the same name in two *different* sections is legitimate; and a
+        // clean section passes. All in document order.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths: {}
+components:
+  schemas:
+    Payment:
+      type: object
+      properties:
+        Payment:
+          type: string
+        amount:
+          type: number
+    Device:
+      type: object
+    Payment:
+      type: string
+  parameters:
+    Payment:
+      name: payment
+      in: query
+      schema:
+        type: string
+";
+        // Flagged, in document order: `schemas` repeats `Payment` (line 7 is the
+        // `schemas:` section opener). Not flagged: the `Payment` *property* inside
+        // the first schema (indent 8, deeper than the component indent 4 — a
+        // property name, not a component key); `Device`; and `parameters.Payment`
+        // (a different section, so reusing the name is legitimate).
+        assert_eq!(
+            components_objects_with_duplicate_keys(body),
+            vec!["`Payment` (components.schemas at line 7)".to_string()]
+        );
+
+        // A spec with no duplicate component key anywhere → empty.
+        let clean = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths: {}
+components:
+  schemas:
+    A:
+      type: string
+    B:
+      type: string
+";
+        assert!(components_objects_with_duplicate_keys(clean).is_empty());
+
+        // Non-vacuous floor: across every registered spec no `components:` section
+        // repeats a component name (the invariant the contract test asserts), and
+        // the corpus actually declares many component keys, so a broken
+        // (always-empty) extractor can't hide behind a corpus with nothing to scan.
+        // Count direct component keys (a mapping key at a section's first-child
+        // indent under the top-level `components:` block) independently of the
+        // extractor.
+        let mut component_keys = 0usize;
+        for api in APIS {
+            assert!(
+                components_objects_with_duplicate_keys(api.body).is_empty(),
+                "{}: every `components:` sub-object must list distinct component names",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            let Some(start) = lines.iter().position(|l| *l == "components:") else {
+                continue;
+            };
+            let end = lines[start + 1..]
+                .iter()
+                .position(|l| !l.is_empty() && !l.starts_with(char::is_whitespace))
+                .map(|off| start + 1 + off)
+                .unwrap_or(lines.len());
+            let mut s_indent: Option<usize> = None;
+            for l in &lines[start + 1..end] {
+                let tl = l.trim();
+                if tl.is_empty() || tl.starts_with('#') {
+                    continue;
+                }
+                s_indent = Some(indent(l));
+                break;
+            }
+            let Some(s) = s_indent else { continue };
+            let mut i = start + 1;
+            while i < end {
+                let line = lines[i];
+                let tl = line.trim();
+                if tl.is_empty() || tl.starts_with('#') || indent(line) != s {
+                    i += 1;
+                    continue;
+                }
+                let v = tl.split_once(':').map(|(_, v)| v.trim()).unwrap_or("");
+                if !(v.is_empty() || v.starts_with('#')) {
+                    i += 1;
+                    continue;
+                }
+                let mut kk: Option<usize> = None;
+                let mut j = i + 1;
+                while j < end {
+                    let l = lines[j];
+                    let t = l.trim();
+                    if t.is_empty() || t.starts_with('#') {
+                        j += 1;
+                        continue;
+                    }
+                    if indent(l) <= s {
+                        break;
+                    }
+                    kk = Some(indent(l));
+                    break;
+                }
+                if let Some(k) = kk {
+                    let mut m = i + 1;
+                    while m < end {
+                        let l = lines[m];
+                        let t = l.trim();
+                        if t.is_empty() || t.starts_with('#') {
+                            m += 1;
+                            continue;
+                        }
+                        if indent(l) <= s {
+                            break;
+                        }
+                        if indent(l) == k && !t.starts_with('-') && t.contains(':') {
+                            component_keys += 1;
+                        }
+                        m += 1;
+                    }
+                }
+                i += 1;
+            }
+        }
+        assert!(
+            component_keys >= 100,
+            "expected many component keys across specs, got {component_keys}"
+        );
+    }
+
     /// Returns the 1-based line numbers of every `default:` scalar whose schema
     /// object also declares a sibling `enum:` list that does **not** contain the
     /// default's value — a self-contradictory constraint: the schema offers a

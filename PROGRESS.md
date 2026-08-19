@@ -3332,6 +3332,31 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - a **duplicate-component-key** contract test (`src/registry.rs`
+    `every_components_object_lists_distinct_component_keys`) asserts no
+    `components:` sub-object a mounted spec declares — `schemas:`, `parameters:`,
+    `responses:`, `headers:`, `requestBodies:`, `securitySchemes:`, … — lists the
+    same component name twice. A repeated mapping key is invalid YAML every parser
+    resolves by keeping only the **last** copy, silently dropping the earlier
+    definition so every `$ref: "#/components/<kind>/<name>"` that resolves to it
+    binds to whichever copy came last. The **components-namespace twin** of
+    `every_properties_object_lists_distinct_property_names` (a `properties:` block
+    repeating a property name): the same silent last-wins hazard on a different
+    mapping. No existing components test reads for duplicates —
+    `every_component_key_is_a_valid_name` checks each key's *syntax*,
+    `every_components_section_is_a_valid_field` the *section* names, and
+    `local_component_refs_resolve_within_their_own_spec` that a `$ref` finds *some*
+    target — none asks whether one section lists a name twice. New pure
+    `components_objects_with_duplicate_keys` extractor (no YAML dep) scopes to the
+    top-level `components:` block, walks each section at the first-child indent `S`,
+    and flags a repeated component key at each section's own first-child indent `K`
+    (bounded by a dedent to `S`, so a component's nested content — a schema's
+    `properties:`, a parameter's `schema:` — is never counted). Surveyed the corpus
+    first (750 component keys across the 60 mounted specs, 0 duplicates) → 0 drift.
+    Unit-covered (`components_object_duplicate_key_extraction_rules`: a repeated
+    schema name flagged with its `components.<section>`+line, a same-named property
+    inside a schema not counted, the same name reused across two sections not a
+    duplicate; ≥100-component-key floor).
   - a **Parameter Object schema/content mutual-exclusion** contract test
     (`src/registry.rs` `every_parameter_declares_at_most_one_of_schema_or_content`)
     asserts no parameter a mounted spec declares carries **both** a `schema` and a
@@ -5377,6 +5402,33 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-19 — Contract-test harness: added a **duplicate-component-key** contract test
+  (`src/registry.rs` `every_components_object_lists_distinct_component_keys`) — no
+  `components:` sub-object a mounted spec declares (`schemas:`/`parameters:`/`responses:`/
+  `headers:`/`requestBodies:`/`securitySchemes:`/…) may list the same component name twice.
+  A repeated mapping key is invalid YAML every parser resolves by keeping only the **last**
+  copy, silently dropping the earlier definition, so every `$ref: "#/components/<kind>/<name>"`
+  that resolves to it binds to whichever came last. The **components-namespace twin** of
+  `every_properties_object_lists_distinct_property_names` (a `properties:` block repeating a
+  property name): same silent last-wins hazard, different mapping. Left unread by every existing
+  components test — `every_component_key_is_a_valid_name` checks each key's *syntax*,
+  `every_components_section_is_a_valid_field` the *section* names, and
+  `local_component_refs_resolve_within_their_own_spec` that a `$ref` finds *some* target — none
+  asks whether one section lists a name twice. New pure `components_objects_with_duplicate_keys`
+  extractor (no YAML dep): scopes to the top-level `components:` block (a column-zero
+  `components:` through the next column-zero key), takes its direct children at the first-child
+  indent `S` as section mappings, and flags a repeated component key at each section's own
+  first-child indent `K`, bounded by a dedent to `S` — so a component's nested content (a
+  schema's `properties:`, a parameter's `schema:`) at a deeper indent is never miscounted as a
+  component name; inline-value section openers and `- ` sequence items are skipped. **Surveyed
+  the corpus first: 750 component keys across the 60 mounted specs, 0 duplicates → 0 drift.**
+  Unit-covered (`components_object_duplicate_key_extraction_rules`: a repeated schema name
+  flagged with its `components.<section>`+line; a same-named property inside a schema not
+  counted; the same name reused across two sections not a duplicate; a clean section passes;
+  ≥100-component-key floor). Test-side only — no request/response/behaviour change, so no
+  vendored-spec edits. `cargo test` 2758 green (was 2756; +2); `cargo build --release`
+  succeeds. No new dependency; the extractor and both tests live in the `#[cfg(test)]` module,
+  so nothing ships in the binary. — binary (release): 5.1M (5,323,160 B; unchanged)
 - 2026-08-19 — Contract-test harness: added a **Parameter Object schema/content
   mutual-exclusion** contract test (`src/registry.rs`
   `every_parameter_declares_at_most_one_of_schema_or_content`) — no parameter a mounted
