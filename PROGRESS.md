@@ -5669,6 +5669,41 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-19 — Contract-test harness: added an **app-name-`pattern` example-conformance**
+  contract test (`src/registry.rs`
+  `every_app_name_pattern_example_conforms_to_the_app_name_pattern`) — where a mounted spec
+  declares an inline `example` beside a **same-indent** `pattern: '^[A-Za-z][A-Za-z0-9_]{1,63}$'`
+  (the Edge Application Management resource-name pattern used by an application `name`,
+  `AppInstanceName`, and `AppDeploymentName`), the example MUST be a mandatory leading ASCII
+  **letter** followed by 1–63 further ASCII letter/digit/`_` characters (total length 2–64;
+  no leading digit; no `.`/`-`). An `example` is a sample instance of the schema, so a name the
+  pattern rejects (a leading digit, a `.`/`-` or other out-of-alphabet char, a single character
+  below the 2-char floor, a value past the 64-char ceiling, or a placeholder pasted beside the
+  pattern) is a self-contradictory schema whose own validator rejects the sample it advertises.
+  The **tenth member of the `pattern`-conformance family** after
+  E.164/IMEI/ICCID/32-hex/name/MAC/token/result-code/geohash, and the **first over a mandatory
+  leading-letter, underscore-only alphabet with a 2-char floor**: the name member
+  (`^[a-zA-Z0-9_.-]+$`) is unbounded and admits a leading digit and `.`/`-`; the token member
+  (`^[a-zA-Z0-9_\-]{1,64}$`) admits a leading digit and `-` and has no 2-char floor — so neither
+  expresses "start with a letter, then only letters/digits/underscore, 2–64 chars". Carries no
+  `format` sibling, so these examples were previously unchecked. New pure `matches_app_name_pattern`
+  (2–64 bytes; first ASCII-alphabetic; rest ASCII-alphanumeric or `_`; no regex/YAML dep) +
+  `app_name_pattern_examples_malformed` extractor (cloning `geohash_pattern_examples_malformed`'s
+  down-then-up dedent-bounded scoping, keyed on `APP_NAME_PATTERN`, stepping over the intervening
+  `maxLength`/`description` siblings the corpus pairs carry), unit-covered
+  (`app_name_pattern_example_extraction_rules`: the matcher clears `MyEdgeApp`/`prod`/a 2-char/a
+  64-char name and rejects a 1-char, a leading-digit, a hyphen, a dot, a space, an empty, a 65-char,
+  and a non-ASCII-letter value; a leading-digit, a hyphen, a too-short, and a pattern-below example
+  flagged in document order; valid names across an intervening description/maxLength, a no-`pattern`
+  sibling, an ICCID-`pattern` sibling, a nested-`example` payload, a cross-property split, and a
+  property literally named `example` all cleared; ≥3-pair non-vacuous floor). **Surveyed the corpus
+  first: 3 example+app-name-`pattern` pairs (edge-application-management application `name`
+  `MyEdgeApp`, `AppInstanceName` `prod`, `AppDeploymentName` `prod`), all well-formed → 0 drift; a
+  live guard that fires the moment a spec adds a mis-shaped app-name example.** Test-side only — no
+  request/response/behaviour change, so no vendored-spec edits; the matcher, extractor and both
+  tests live in the `#[cfg(test)]` module, so nothing ships in the binary. `cargo test` 2792 green
+  (was 2790; +2), `cargo build --release` green, no new deps. — binary (release): 5.1M
+  (5,323,160 B; unchanged).
 - 2026-08-19 — Contract-test harness: added a **geohash-`pattern` example-conformance**
   contract test (`src/registry.rs` `every_geohash_pattern_example_conforms_to_the_geohash_pattern`)
   — where a mounted spec declares an inline `example` beside a **same-indent**

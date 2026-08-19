@@ -27706,6 +27706,376 @@ components:
         );
     }
 
+    const APP_NAME_PATTERN: &str = r"^[A-Za-z][A-Za-z0-9_]{1,63}$";
+
+    /// True when `s` matches the app-name `pattern` `^[A-Za-z][A-Za-z0-9_]{1,63}$` exactly:
+    /// a mandatory leading ASCII **letter**, then 1–63 further characters each an ASCII
+    /// letter, digit, or underscore — so the total length is 2–64, there is no leading digit,
+    /// and neither `.` nor `-` is admitted. This is the resource-name pattern the Edge
+    /// Application Management API uses for an application `name`, an `AppInstanceName`, and an
+    /// `AppDeploymentName`. Hand-rolled (no regex dep), faithful to the pattern (mandatory
+    /// leading letter, underscore-only extra alphabet, the `{1,63}` after the anchored first
+    /// character giving the 2-char floor / 64-char ceiling), mirroring the
+    /// E.164/IMEI/ICCID/name/token/MAC/result-code/geohash matchers' shape-only,
+    /// pattern-faithful stance so a legitimately shaped app name is never a false positive.
+    fn matches_app_name_pattern(s: &str) -> bool {
+        let b = s.as_bytes();
+        let n = b.len();
+        (2..=64).contains(&n)
+            && b[0].is_ascii_alphabetic()
+            && b[1..].iter().all(|c| c.is_ascii_alphanumeric() || *c == b'_')
+    }
+
+    /// The 1-based line numbers, in document order, of every `example:` keyword whose inline
+    /// scalar value sits in a Schema Object declaring a *same-indent* app-name `pattern`
+    /// sibling yet does not match that pattern, without a YAML dep. The app-name twin of
+    /// `geohash_pattern_examples_malformed`: same scoping, keyed on `APP_NAME_PATTERN`.
+    ///
+    /// In OpenAPI 3.0.x (JSON Schema) an `example` is a sample *instance* of the schema, so a
+    /// field constrained by `pattern` MUST carry an example the pattern accepts. An app-name
+    /// example with a leading digit, a `.`/`-` or any other non-`[A-Za-z0-9_]` character, a
+    /// single character (below the 2-char floor), a value past the 64-char ceiling, or a
+    /// placeholder pasted beside the pattern advertises a sample the schema's own validator
+    /// rejects, so a Redoc/Swagger prefill and a codegen client's generated sample carry a
+    /// value the field can never legally hold. The app-name pattern carries no `format`
+    /// sibling (there is no standard OpenAPI format for it), so these examples are otherwise
+    /// unchecked.
+    ///
+    /// Scoping mirrors `geohash_pattern_examples_malformed` exactly: only an `example` carrying
+    /// an inline scalar (a block/object example opens no inline value and is skipped) with a
+    /// same-indent `pattern` sibling *equal to* `APP_NAME_PATTERN` in the same Schema Object is
+    /// inspected — the sibling is scanned at the example's own indent, down through the object's
+    /// block then up, dedent-bounded, so a nested or following object's `pattern` never pairs (an
+    /// intervening `maxLength`/`description` sibling at the same indent is stepped over, as all
+    /// three corpus pairs have: `maxLength`/`pattern`/`description`/`example`). An `example:`
+    /// nested inside an outer `example:`/`examples:` payload (sample data, not a schema keyword)
+    /// is skipped. Only the app-name pattern is matched; other patterns are out of scope.
+    fn app_name_pattern_examples_malformed(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let raw_inline = |l: &str, name: &str| -> Option<String> {
+            let (k, v) = l.trim_start().split_once(':')?;
+            if k.trim() != name {
+                return None;
+            }
+            let v = v.split('#').next().unwrap_or(v).trim();
+            if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            }
+        };
+        // Whether a same-indent `pattern:` sibling of line `i` (indent `c`) in the same Schema
+        // Object equals the app-name pattern: scan down through the object's block then up,
+        // dedent-bounded so a nested or following object's `pattern` never pairs.
+        let sibling_is_app_name_pattern = |i: usize, c: usize| -> bool {
+            let is_app_name_pattern = |l: &str| -> bool {
+                raw_inline(l, "pattern")
+                    .map(|v| v.trim_matches('"').trim_matches('\'') == APP_NAME_PATTERN)
+                    .unwrap_or(false)
+            };
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_app_name_pattern(l) {
+                    return true;
+                }
+                j += 1;
+            }
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_app_name_pattern(l) {
+                    return true;
+                }
+            }
+            false
+        };
+        // True when line `i` (indent `c`) sits inside an outer `example:`/`examples:` payload —
+        // some enclosing container key up the indent ladder is `example`/`examples` — so an
+        // inner `example` key there is sample data, not a schema keyword.
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some(raw) = raw_inline(line, "example") else {
+                continue;
+            };
+            let c = indent(line);
+            if inside_example(i, c) {
+                continue;
+            }
+            if !sibling_is_app_name_pattern(i, c) {
+                continue;
+            }
+            let value = raw.trim_matches('"').trim_matches('\'');
+            if !matches_app_name_pattern(value) {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_app_name_pattern_example_conforms_to_the_app_name_pattern() {
+        // Contract-harness invariant (OpenAPI 3.0.x / JSON-Schema structural rule): where a
+        // Schema Object declares an inline `example` beside a same-indent app-name `pattern`
+        // (`^[A-Za-z][A-Za-z0-9_]{1,63}$`, the resource-name pattern the Edge Application
+        // Management API uses for an application `name`, `AppInstanceName`, and
+        // `AppDeploymentName`), the example MUST match that pattern. An `example` is a sample
+        // *instance* of the schema, so a value the `pattern` rejects — a name with a leading
+        // digit, a `.`/`-` or any other character outside `[A-Za-z0-9_]`, a single character
+        // (below the 2-char floor), a value past the 64-char ceiling, or a placeholder pasted
+        // beside the pattern — is a self-contradictory schema whose own validator rejects the
+        // sample it advertises, so a Redoc/Swagger prefill and a codegen client's generated
+        // sample carry a value no field constrained by this pattern can legally hold.
+        //
+        // The tenth member of the `pattern`-conformance family after E.164 / IMEI / ICCID /
+        // 32-hex / name / MAC / token / result-code / geohash, and the first over a *mandatory
+        // leading-letter, underscore-only* alphabet: the name member (`^[a-zA-Z0-9_.-]+$`) is
+        // unbounded and admits a leading digit and `.`/`-`; the token member
+        // (`^[a-zA-Z0-9_\-]{1,64}$`) is bounded but admits a leading digit and `-` and has no
+        // 2-char floor; so neither can express "must start with a letter, then only
+        // letters/digits/underscore, 2–64 chars". A leading-digit or dot/hyphen name is the
+        // fault none of them catches. Like the IMEI/ICCID/32-hex/MAC/result-code/geohash
+        // patterns the app-name pattern carries no `format` sibling, so its examples are beyond
+        // the `format`-example family's reach; a general regex-engine test would need a new
+        // dependency (declined on binary-size grounds), so a concrete hand-validated shape is
+        // matched. Verified true across all mounted specs before asserting
+        // (edge-application-management declares three such example+pattern pairs — `MyEdgeApp`,
+        // `prod`, `prod` — all well-formed).
+        for api in APIS {
+            let offenders = app_name_pattern_examples_malformed(api.body);
+            assert!(
+                offenders.is_empty(),
+                "{} spec declares an `example` beside a same-indent app-name \
+                 `pattern: '^[A-Za-z][A-Za-z0-9_]{{1,63}}$'` that does not match that \
+                 pattern (a sample the pattern's own validator would reject) at `example:` \
+                 line(s): {:?}",
+                api.name,
+                offenders
+            );
+        }
+    }
+
+    #[test]
+    fn app_name_pattern_example_extraction_rules() {
+        // Unit-cover `matches_app_name_pattern` and `app_name_pattern_examples_malformed` so the
+        // contract test above can't pass vacuously and its detection is pinned.
+        //
+        // Shape check: the corpus names `MyEdgeApp`/`prod`, a minimal 2-char name, and a 64-char
+        // name (the ceiling) all pass; a single character (below the 2-char floor), a
+        // leading-digit name, a hyphenated name, a dotted name, a name with a space, an empty
+        // string, a 65-char name (past the ceiling), and a name with a non-ASCII letter all fail.
+        assert!(matches_app_name_pattern("MyEdgeApp"));
+        assert!(matches_app_name_pattern("prod"));
+        assert!(matches_app_name_pattern("a1")); // 2 chars — the floor
+        assert!(matches_app_name_pattern("A_b0")); // underscore + digit body
+        assert!(matches_app_name_pattern(&format!("A{}", "b".repeat(63)))); // 64 chars — ceiling
+        assert!(!matches_app_name_pattern("a")); // 1 char — below the floor
+        assert!(!matches_app_name_pattern("1abc")); // leading digit
+        assert!(!matches_app_name_pattern("my-app")); // hyphen not in the alphabet
+        assert!(!matches_app_name_pattern("my.app")); // dot not in the alphabet
+        assert!(!matches_app_name_pattern("my app")); // space not in the alphabet
+        assert!(!matches_app_name_pattern("")); // empty — below the floor
+        assert!(!matches_app_name_pattern(&format!("A{}", "b".repeat(64)))); // 65 chars — too long
+        assert!(!matches_app_name_pattern("naïve")); // non-ASCII letter
+
+        // Extractor: two valid names (each beside a same-indent app-name `pattern`, one with an
+        // intervening `description` block and one with an intervening `maxLength` sibling — the
+        // shapes the corpus actually uses) pass; a leading-digit, a hyphenated, and a single-char
+        // value are flagged; a bad value whose `pattern` is declared *below* it is still paired
+        // (down-scan) and flagged; a value with no `pattern` sibling and one whose sibling is a
+        // *different* pattern (the ICCID `^[0-9]{19,20}$`) are skipped; an inner `example` inside
+        // an outer `example:` payload is skipped; an example in one property never pairs with a
+        // following property's `pattern` across the dedent; and a property literally named
+        // `example` (opening a block) is skipped.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    GoodBlockDesc:
+      type: string
+      pattern: '^[A-Za-z][A-Za-z0-9_]{1,63}$'
+      description: |
+        an app name
+      example: 'MyEdgeApp'
+    GoodMaxLen:
+      type: string
+      pattern: '^[A-Za-z][A-Za-z0-9_]{1,63}$'
+      maxLength: 64
+      example: 'prod'
+    LeadingDigit:
+      type: string
+      pattern: '^[A-Za-z][A-Za-z0-9_]{1,63}$'
+      example: '1abc'
+    HasHyphen:
+      type: string
+      pattern: '^[A-Za-z][A-Za-z0-9_]{1,63}$'
+      example: 'my-app'
+    TooShort:
+      type: string
+      pattern: '^[A-Za-z][A-Za-z0-9_]{1,63}$'
+      example: 'a'
+    PatternBelow:
+      type: string
+      example: 'no!'
+      pattern: '^[A-Za-z][A-Za-z0-9_]{1,63}$'
+    NoPattern:
+      type: string
+      example: '1-no-pattern-here'
+    OtherPattern:
+      type: string
+      pattern: '^[0-9]{19,20}$'
+      example: '8931089011234567890'
+    InExample:
+      type: object
+      example:
+        pattern: '^[A-Za-z][A-Za-z0-9_]{1,63}$'
+        example: 'BAD!'
+    Split:
+      type: object
+      properties:
+        a:
+          example: 'BAD!'
+        b:
+          type: string
+          pattern: '^[A-Za-z][A-Za-z0-9_]{1,63}$'
+    NamedExample:
+      type: object
+      properties:
+        example:
+          type: string
+          pattern: '^[A-Za-z][A-Za-z0-9_]{1,63}$'
+";
+        // Flagged, in document order: LeadingDigit.example (`1abc`), HasHyphen.example
+        // (`my-app`), TooShort.example (`a`), and PatternBelow.example (value `no!`, app-name
+        // `pattern` a line below — down-scan pairs it). Not flagged: GoodBlockDesc/GoodMaxLen
+        // (valid, across an intervening description/maxLength sibling); NoPattern (no `pattern`
+        // sibling); OtherPattern (sibling is the ICCID pattern, not app-name); InExample's inner
+        // `example` (inside the outer `example:` payload); Split.a.example (its only app-name
+        // `pattern` is in the following property past a dedent); and NamedExample's `example:`
+        // property opening a block (no inline value).
+        let flagged = app_name_pattern_examples_malformed(body);
+        let flagged_vals: Vec<&str> = flagged
+            .iter()
+            .map(|&n| body.lines().nth(n - 1).unwrap().trim())
+            .collect();
+        assert_eq!(
+            flagged_vals,
+            vec![
+                "example: '1abc'",
+                "example: 'my-app'",
+                "example: 'a'",
+                "example: 'no!'",
+            ]
+        );
+
+        // Non-vacuous floor: across every registered spec every `example` beside a same-indent
+        // app-name `pattern` matches it (the invariant the contract test asserts), and the corpus
+        // actually declares such pairs — so the pattern-comparison path runs on real data and a
+        // broken (always-empty) extractor can't hide behind a corpus that never pairs. Only Edge
+        // Application Management declares this pattern (three schemas: application `name`,
+        // `AppInstanceName`, `AppDeploymentName`), so the floor is 3 (not the family's usual 4).
+        // Count pairs with a same-indent detector independent of the extractor's shape comparison.
+        let mut app_name_examples = 0usize;
+        for api in APIS {
+            assert!(
+                app_name_pattern_examples_malformed(api.body).is_empty(),
+                "{}: every example beside a same-indent app-name `pattern` must match it",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            let is_key = |l: &str, name: &str, val: Option<&str>| {
+                l.trim_start().split_once(':').is_some_and(|(k, v)| {
+                    k.trim() == name
+                        && val.is_none_or(|want| {
+                            v.split('#')
+                                .next()
+                                .unwrap_or(v)
+                                .trim()
+                                .trim_matches('"')
+                                .trim_matches('\'')
+                                == want
+                        })
+                })
+            };
+            for (i, l) in lines.iter().enumerate() {
+                if !is_key(l, "example", None) {
+                    continue;
+                }
+                if l.trim_start()
+                    .split_once(':')
+                    .map(|(_, v)| v.split('#').next().unwrap_or(v).trim().is_empty())
+                    .unwrap_or(true)
+                {
+                    continue;
+                }
+                let c = indent(l);
+                let lo = i.saturating_sub(6);
+                let hi = (i + 6).min(lines.len());
+                let has_app_name = (lo..hi).any(|j| {
+                    j != i && indent(lines[j]) == c && is_key(lines[j], "pattern", Some(APP_NAME_PATTERN))
+                });
+                if has_app_name {
+                    app_name_examples += 1;
+                }
+            }
+        }
+        assert!(
+            app_name_examples >= 3,
+            "expected the corpus's example + same-indent app-name `pattern` pairs, got {app_name_examples}"
+        );
+    }
+
     /// True when `s` is a well-formed RFC 3339 `date-time` string — the concrete
     /// syntax OpenAPI's `format: date-time` names (JSON Schema's `date-time` is
     /// RFC 3339 §5.6). Shape-only and lenient on the calendar (it range-checks each
