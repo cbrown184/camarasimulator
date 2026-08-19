@@ -23528,6 +23528,357 @@ components:
         );
     }
 
+    /// The E.164 phone-number `pattern` the CAMARA specs use verbatim (single-quoted
+    /// in YAML as `'^\+[1-9][0-9]{4,14}$'`): a leading `+`, then a first digit `1`–`9`,
+    /// then 4–14 more decimal digits — i.e. `+` followed by 5–15 digits, the first
+    /// non-zero. This is the corpus's dominant `pattern` (a `phoneNumber` /
+    /// `devicephoneNumber` field appears in most business APIs), so it is the natural
+    /// `pattern` twin of the single-format example checks (`format: uuid`, `format:
+    /// ipv4`, …): one concrete, hand-validated shape rather than a general regex engine.
+    const E164_PATTERN: &str = r"^\+[1-9][0-9]{4,14}$";
+
+    /// True when `s` matches the E.164 `pattern` `^\+[1-9][0-9]{4,14}$` exactly: a `+`
+    /// followed by 5–15 decimal digits whose first is `1`–`9`. Hand-rolled (no regex
+    /// dep) mirroring `is_well_formed_uuid`'s shape-only stance, so a legitimately
+    /// shaped number is never a false positive.
+    fn matches_e164_pattern(s: &str) -> bool {
+        let Some(rest) = s.strip_prefix('+') else {
+            return false;
+        };
+        let b = rest.as_bytes();
+        // `[1-9][0-9]{4,14}` = 1 + (4..=14) digits = 5..=15 digits total.
+        if !(5..=15).contains(&b.len()) {
+            return false;
+        }
+        if !(b'1'..=b'9').contains(&b[0]) {
+            return false;
+        }
+        b.iter().all(u8::is_ascii_digit)
+    }
+
+    /// The 1-based line numbers, in document order, of every `example:` keyword whose
+    /// inline scalar value sits in a Schema Object declaring a *same-indent*
+    /// `pattern: '^\+[1-9][0-9]{4,14}$'` sibling yet does not match that E.164 pattern,
+    /// without a YAML dep. The `pattern` analogue of `uuid_format_examples_malformed`
+    /// (which guards a `format: uuid` example against the format's shape); this guards
+    /// an E.164-`pattern` example against the pattern's own regex.
+    ///
+    /// In OpenAPI 3.0.x (JSON Schema) an `example` is a sample *instance* of the schema,
+    /// so a field constrained by `pattern` MUST carry an example the pattern accepts
+    /// (the well-known Spectral `oas3-valid-schema-example` validates an example against
+    /// its schema, `pattern` included). A phone-number example that does not match —
+    /// a digit dropped, a missing `+`, a placeholder pasted beside the pattern — advertises
+    /// a sample the schema's own validator rejects, so a Redoc/Swagger "try it" prefill
+    /// and a codegen client's generated sample carry a value the field can never legally
+    /// hold. A live hazard in these scenario-table specs, where a `phoneNumber` example
+    /// is hand-authored per API and copied between siblings.
+    ///
+    /// Scoping mirrors `uuid_format_examples_malformed` exactly: only an `example`
+    /// carrying an inline scalar (a block/object example opens no inline value and is
+    /// skipped) with a same-indent `pattern` sibling *equal to* `E164_PATTERN` in the
+    /// same Schema Object is inspected — the sibling is scanned at the example's own
+    /// indent, down through the object's block then up, dedent-bounded, so a nested or
+    /// following object's `pattern` never pairs and a parameter/media-type example whose
+    /// `pattern` sits deeper in its own `schema` is conservatively exempt rather than
+    /// mispaired. An `example:` nested inside an outer `example:`/`examples:` payload
+    /// (sample data, not a schema keyword) is skipped. Only the E.164 pattern is matched;
+    /// other patterns are out of scope (a different pattern's concern).
+    fn e164_pattern_examples_malformed(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let raw_inline = |l: &str, name: &str| -> Option<String> {
+            let (k, v) = l.trim_start().split_once(':')?;
+            if k.trim() != name {
+                return None;
+            }
+            let v = v.split('#').next().unwrap_or(v).trim();
+            if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            }
+        };
+        // Whether a same-indent `pattern:` sibling of line `i` (indent `c`) in the same
+        // Schema Object equals the E.164 pattern: scan down through the object's block
+        // then up, dedent-bounded so a nested or following object's `pattern` never pairs.
+        let sibling_is_e164_pattern = |i: usize, c: usize| -> bool {
+            let is_e164_pattern = |l: &str| -> bool {
+                raw_inline(l, "pattern")
+                    .map(|v| v.trim_matches('"').trim_matches('\'') == E164_PATTERN)
+                    .unwrap_or(false)
+            };
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_e164_pattern(l) {
+                    return true;
+                }
+                j += 1;
+            }
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_e164_pattern(l) {
+                    return true;
+                }
+            }
+            false
+        };
+        // True when line `i` (indent `c`) sits inside an outer `example:`/`examples:`
+        // payload — some enclosing container key up the indent ladder is
+        // `example`/`examples` — so an inner `example` key there is sample data, not a
+        // schema keyword.
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some(raw) = raw_inline(line, "example") else {
+                continue;
+            };
+            let c = indent(line);
+            if inside_example(i, c) {
+                continue;
+            }
+            if !sibling_is_e164_pattern(i, c) {
+                continue;
+            }
+            let value = raw.trim_matches('"').trim_matches('\'');
+            if !matches_e164_pattern(value) {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_e164_pattern_example_conforms_to_the_e164_pattern() {
+        // Contract-harness invariant (OpenAPI 3.0.x / JSON-Schema structural rule): where
+        // a Schema Object declares an inline `example` beside a same-indent
+        // `pattern: '^\+[1-9][0-9]{4,14}$'` (the E.164 phone-number pattern the CAMARA
+        // specs use verbatim), the example MUST match that pattern. An `example` is a
+        // sample *instance* of the schema, so a value the `pattern` rejects — a digit
+        // dropped, a missing `+`, a placeholder pasted beside the pattern — is a
+        // self-contradictory schema whose own validator rejects the sample it advertises,
+        // so a Redoc/Swagger "try it" prefill and a codegen client's generated sample
+        // carry a value no field constrained by this pattern can legally hold.
+        //
+        // The `pattern`-conformance analogue of the `format`-example family
+        // (`every_uuid_format_example_is_a_well_formed_uuid`, `…ipv4…`, `…ipv6…`, …): those
+        // guard an example against its `format`'s shape; this guards an example against its
+        // `pattern`'s regex. No existing test reads an example against its `pattern` —
+        // `every_pattern_declares_a_non_empty_string` checks the pattern keyword's *own*
+        // value is a non-empty string, and the example-value family checks an example's
+        // JSON type / length / numeric bounds / enum membership, never its pattern. E.164
+        // is the corpus's dominant pattern, so this is the highest-coverage single-pattern
+        // check (a general regex-engine test would need a new dependency). Verified true
+        // across all mounted specs before asserting.
+        for api in APIS {
+            let offenders = e164_pattern_examples_malformed(api.body);
+            assert!(
+                offenders.is_empty(),
+                "{} spec declares an `example` beside a same-indent E.164 \
+                 `pattern: '^\\+[1-9][0-9]{{4,14}}$'` that does not match that pattern (a \
+                 sample the pattern's own validator would reject) at `example:` line(s): {:?}",
+                api.name,
+                offenders
+            );
+        }
+    }
+
+    #[test]
+    fn e164_pattern_example_extraction_rules() {
+        // Unit-cover `matches_e164_pattern` and `e164_pattern_examples_malformed` so the
+        // contract test above can't pass vacuously and its detection is pinned.
+        //
+        // Shape check: a valid E.164 number (min 5 and max 15 digits after `+`) passes;
+        // a missing `+`, a leading `0`, too few / too many digits, and an embedded
+        // non-digit all fail.
+        assert!(matches_e164_pattern("+123456789012"));
+        assert!(matches_e164_pattern("+12345")); // 5 digits — lower bound
+        assert!(matches_e164_pattern("+123456789012345")); // 15 digits — upper bound
+        assert!(!matches_e164_pattern("123456789012")); // no leading '+'
+        assert!(!matches_e164_pattern("+023456789")); // first digit 0
+        assert!(!matches_e164_pattern("+1234")); // 4 digits — too short
+        assert!(!matches_e164_pattern("+1234567890123456")); // 16 digits — too long
+        assert!(!matches_e164_pattern("+1234x67890")); // non-digit
+        assert!(!matches_e164_pattern("+")); // no digits
+
+        // Extractor: a valid quoted number and a valid unquoted number (each beside a
+        // same-indent E.164 `pattern`) pass; a too-short and a `+`-less value are flagged;
+        // a bad value whose `pattern` is declared *below* it is still paired (down-scan)
+        // and flagged; a value with no `pattern` sibling and one whose sibling is a
+        // *different* pattern are skipped; an inner `example` inside an outer `example:`
+        // payload is skipped; an example in one property never pairs with a following
+        // property's `pattern` across the dedent; and a property literally named `example`
+        // (opening a block) is skipped.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    GoodQuoted:
+      type: string
+      pattern: '^\\+[1-9][0-9]{4,14}$'
+      example: \"+123456789012\"
+    GoodUnquoted:
+      type: string
+      pattern: '^\\+[1-9][0-9]{4,14}$'
+      example: +123456789012
+    TooShort:
+      type: string
+      pattern: '^\\+[1-9][0-9]{4,14}$'
+      example: \"+1234\"
+    NoPlus:
+      type: string
+      pattern: '^\\+[1-9][0-9]{4,14}$'
+      example: \"123456789012\"
+    PatternBelow:
+      type: string
+      example: \"nope\"
+      pattern: '^\\+[1-9][0-9]{4,14}$'
+    NoPattern:
+      type: string
+      example: \"not-a-number-but-no-pattern\"
+    OtherPattern:
+      type: string
+      pattern: '^[0-9]{15}$'
+      example: \"123456789012345\"
+    InExample:
+      type: object
+      example:
+        pattern: '^\\+[1-9][0-9]{4,14}$'
+        example: \"bad\"
+    Split:
+      type: object
+      properties:
+        a:
+          example: \"bad\"
+        b:
+          type: string
+          pattern: '^\\+[1-9][0-9]{4,14}$'
+    NamedExample:
+      type: object
+      properties:
+        example:
+          type: string
+          pattern: '^\\+[1-9][0-9]{4,14}$'
+";
+        // Flagged, in document order: TooShort.example (line 25, 4 digits), NoPlus.example
+        // (line 29, no leading `+`), PatternBelow.example (line 32, value `nope` with its
+        // E.164 `pattern` a line below — down-scan pairs it). Not flagged: GoodQuoted/
+        // GoodUnquoted (valid); NoPattern (no `pattern` sibling); OtherPattern (sibling is
+        // `^[0-9]{15}$`, not E.164); InExample's inner `example: \"bad\"` (sits inside the
+        // outer `example:` payload); Split.a.example, whose only E.164 `pattern` is in the
+        // following property Split.b past a dedent; and NamedExample's `example:` property
+        // opening a block (no inline value).
+        assert_eq!(e164_pattern_examples_malformed(body), vec![25, 29, 32]);
+
+        // Non-vacuous floor: across every registered spec every `example` beside a
+        // same-indent E.164 `pattern` matches it (the invariant the contract test
+        // asserts), and the corpus actually declares many such pairs — so the
+        // pattern-comparison path runs on real data and a broken (always-empty) extractor
+        // can't hide behind a corpus that never pairs an example with the E.164 pattern.
+        // Count pairs with a same-indent detector independent of the extractor's shape
+        // comparison.
+        let mut e164_examples = 0usize;
+        for api in APIS {
+            assert!(
+                e164_pattern_examples_malformed(api.body).is_empty(),
+                "{}: every example beside a same-indent E.164 `pattern` must match it",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            let is_key = |l: &str, name: &str, val: Option<&str>| {
+                l.trim_start().split_once(':').is_some_and(|(k, v)| {
+                    k.trim() == name
+                        && val.is_none_or(|want| {
+                            v.split('#')
+                                .next()
+                                .unwrap_or(v)
+                                .trim()
+                                .trim_matches('"')
+                                .trim_matches('\'')
+                                == want
+                        })
+                })
+            };
+            for (i, l) in lines.iter().enumerate() {
+                if !is_key(l, "example", None) {
+                    continue;
+                }
+                if l.trim_start()
+                    .split_once(':')
+                    .map(|(_, v)| v.split('#').next().unwrap_or(v).trim().is_empty())
+                    .unwrap_or(true)
+                {
+                    continue;
+                }
+                let c = indent(l);
+                let lo = i.saturating_sub(6);
+                let hi = (i + 6).min(lines.len());
+                let has_e164_pattern = (lo..hi).any(|j| {
+                    j != i
+                        && indent(lines[j]) == c
+                        && is_key(lines[j], "pattern", Some(E164_PATTERN))
+                });
+                if has_e164_pattern {
+                    e164_examples += 1;
+                }
+            }
+        }
+        assert!(
+            e164_examples >= 40,
+            "expected many example + same-indent E.164 `pattern` pairs across specs, got {e164_examples}"
+        );
+    }
+
     /// True when `s` is a well-formed RFC 3339 `date-time` string — the concrete
     /// syntax OpenAPI's `format: date-time` names (JSON Schema's `date-time` is
     /// RFC 3339 §5.6). Shape-only and lenient on the calendar (it range-checks each

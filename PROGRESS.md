@@ -3332,6 +3332,28 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - an **E.164-`pattern` example-conformance** contract test (`src/registry.rs`
+    `every_e164_pattern_example_conforms_to_the_e164_pattern`) asserts that where a
+    mounted spec declares an `example` beside a same-indent
+    `pattern: '^\+[1-9][0-9]{4,14}$'` (the E.164 phone-number pattern the CAMARA specs
+    use verbatim — the corpus's dominant `pattern`), the example matches it. The
+    **`pattern`-conformance analogue of the `format`-example family**
+    (`every_uuid_format_example_is_a_well_formed_uuid`, `…ipv4…`, `…ipv6…`, …): those
+    guard an example against its `format`'s shape, this against its `pattern`'s regex —
+    a class no existing test read (`every_pattern_declares_a_non_empty_string` checks
+    only the pattern keyword's own value; the example-value family checks an example's
+    type / length / numeric bounds / enum membership, never its pattern). New pure
+    `matches_e164_pattern` (hand-rolled `+` then 5–15 digits, first `1`–`9`; no regex
+    dep) + `e164_pattern_examples_malformed` extractor cloning
+    `uuid_format_examples_malformed`'s scoping (same-indent `pattern`-sibling
+    down-then-up dedent-bounded scan; outer-`example:`-payload / block-opener skipped).
+    Surveyed the corpus first: 58 example+E.164-`pattern` pairs across the mounted
+    specs, all conforming → 0 drift. Unit-covered
+    (`e164_pattern_example_extraction_rules`: a too-short + a `+`-less value + a
+    pattern-below value flagged in document order; valid/quoted+unquoted, no-pattern,
+    other-pattern, nested-`example`, cross-property, block-opener all cleared;
+    ≥40-pair non-vacuous floor). E.164 is the highest-coverage single pattern; a general
+    regex-engine test would need a new dependency (declined on binary-size grounds).
   - a **numeric-`default` `multipleOf`-conformance** contract test (`src/registry.rs`
     `every_numeric_default_conforms_to_its_multiple_of`) asserts that where a mounted spec
     declares a numeric `default` beside a `multipleOf`, the default is an integer multiple of
@@ -5455,6 +5477,40 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-19 — Contract-test harness: added an **E.164-`pattern` example-conformance**
+  contract test (`src/registry.rs` `every_e164_pattern_example_conforms_to_the_e164_pattern`)
+  — where a mounted spec declares an inline `example` beside a **same-indent**
+  `pattern: '^\+[1-9][0-9]{4,14}$'`, the example MUST match that E.164 pattern. An `example`
+  is a sample instance of the schema, so a phone number the pattern rejects (a digit dropped,
+  a missing `+`, a placeholder pasted beside the pattern) is a self-contradictory schema whose
+  own validator rejects the sample it advertises — a Redoc/Swagger prefill and a codegen
+  client's generated sample then carry a value the field can never legally hold. This is the
+  **first `pattern`-conformance check** and the **`pattern` analogue of the `format`-example
+  family** (`every_uuid_format_example_is_a_well_formed_uuid`, `…ipv4…`, `…ipv6…`, …): those
+  guard an example against its `format`'s shape; none read an example against its `pattern`
+  (`every_pattern_declares_a_non_empty_string` checks only the pattern keyword's own value; the
+  example-value family checks an example's type / length / numeric bounds / enum membership,
+  never its pattern). **E.164 is the corpus's dominant `pattern`** (a `phoneNumber` /
+  `devicePhoneNumber` field recurs across most business APIs — 62 pattern occurrences), so it
+  is the highest-coverage single-pattern check; a general regex-engine test would need a new
+  dependency, declined on binary-size grounds (matching `is_well_formed_uuid`'s hand-rolled,
+  shape-only stance). New pure `matches_e164_pattern` (a `+` then 5–15 decimal digits, first
+  `1`–`9`; no regex dep) + `e164_pattern_examples_malformed` extractor cloning
+  `uuid_format_examples_malformed`'s scoping exactly (an inline scalar `example`; a same-indent
+  `pattern` sibling *equal to* the E.164 literal scanned down-then-up, dedent-bounded; an
+  `example` inside an outer `example:`/`examples:` payload or a block-opening `example:`
+  skipped). **Surveyed the corpus first: 58 example+E.164-`pattern` pairs across the mounted
+  specs, all conforming → 0 drift; a guard that goes live the moment a spec adds a
+  non-matching phone example.** Unit-covered (`e164_pattern_example_extraction_rules`: a
+  `+1234` too-short, a `+`-less `123456789012`, and a `nope` value with its `pattern` a line
+  below all flagged in document order; a valid quoted and unquoted number, a no-`pattern`
+  sibling, a different pattern (`^[0-9]{15}$`), a nested `example:` payload, a cross-property
+  split, and a `example:` block-opener all cleared; `matches_e164_pattern` boundary pinned at
+  5 and 15 digits, leading `0` and a non-digit rejected; ≥40-pair non-vacuous floor).
+  Test-side only — no request/response/behaviour change, so no vendored-spec edits.
+  `cargo test` 2766 green (was 2764; +2); `cargo build --release` succeeds. No new
+  dependency; the validator, extractor, and both tests live in the `#[cfg(test)]` module, so
+  nothing ships in the binary. — binary (release): 5.1M (5,323,160 B; unchanged)
 - 2026-08-19 — Contract-test harness: added a **numeric-`default` `multipleOf`-conformance**
   contract test (`src/registry.rs` `every_numeric_default_conforms_to_its_multiple_of`) — where a
   Schema Object declares a numeric `default` beside a `multipleOf`, the default MUST be an integer
