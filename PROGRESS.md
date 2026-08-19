@@ -3332,6 +3332,26 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - a **Parameter Object schema/content mutual-exclusion** contract test
+    (`src/registry.rs` `every_parameter_declares_at_most_one_of_schema_or_content`)
+    asserts no parameter a mounted spec declares carries **both** a `schema` and a
+    `content` — the OpenAPI 3.0.3 rule "a parameter MUST contain either a schema
+    property, or a content property, but not both". The **upper-bound complement** of
+    `every_parameter_declares_a_schema_or_content` (the "at least one" side, which never
+    caps the count): together they pin *exactly one*, mirroring how
+    `every_spec_declares_exactly_one_server` caps
+    `every_spec_declares_a_non_empty_servers_array`. A parameter carrying both declares
+    two conflicting wire types for one input; the `/docs` "try it" panel and a codegen
+    client resolve the ambiguity differently. New pure
+    `parameters_declaring_both_schema_and_content` extractor (no YAML dep) clones the
+    vetted `parameters_missing_schema_or_content` scoping (anchors on a valid `in:` line;
+    mapping / name-first / in-first-opener forms; a `$ref` param is exempt; a `schema:`
+    nested inside a `content:` media type sits deeper and is not the parameter's own),
+    tracking `schema:` and `content:` siblings at the object's own indent independently.
+    Surveyed the corpus first (every parameter across the 60 specs is `schema`-typed, none
+    `content`-typed → 0 drift). Unit-covered
+    (`parameter_schema_content_mutual_exclusion_extraction_rules`), ≥50-located-parameter
+    floor.
   - a **path-template-variable binding** contract test (`src/registry.rs`
     `every_path_template_variable_has_a_declared_path_parameter`) asserts every
     `{name}` a mounted spec interpolates into a `paths:` key is bound by a
@@ -5357,6 +5377,31 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-19 — Contract-test harness: added a **Parameter Object schema/content
+  mutual-exclusion** contract test (`src/registry.rs`
+  `every_parameter_declares_at_most_one_of_schema_or_content`) — no parameter a mounted
+  spec declares may carry BOTH a `schema` and a `content` ("A parameter MUST contain
+  either a schema property, or a content property, but not both", OpenAPI 3.0.3). A
+  parameter with both declares two conflicting wire types for one input, which a
+  Redoc/Swagger "try it" panel and a codegen client each resolve their own way. The
+  **upper-bound complement** of `every_parameter_declares_a_schema_or_content` (the "at
+  least one" side, which never caps the count) — together they pin *exactly one*,
+  mirroring how `every_spec_declares_exactly_one_server` caps
+  `every_spec_declares_a_non_empty_servers_array`. New pure
+  `parameters_declaring_both_schema_and_content` extractor (no YAML dep) clones the vetted
+  `parameters_missing_schema_or_content` scoping exactly (anchors on a valid `in:` line;
+  mapping / name-first / in-first-opener forms; a `$ref` param has no inline `in` and is
+  exempt; a `schema:` nested inside a `content:` media type sits deeper and is not the
+  parameter's own), tracking a `schema:` and a `content:` sibling at the object's own
+  indent independently and flagging only when both are present. **Surveyed the corpus
+  first: every parameter across the 60 mounted specs is typed by a `schema`, none by a
+  `content`, so none carries both → 0 drift.** Unit-covered
+  (`parameter_schema_content_mutual_exclusion_extraction_rules`: a both-keys param flagged,
+  schema-only / content-only / `$ref` / mapping params all cleared; ≥50-located-parameter
+  floor). Test-side only — no request/response/behaviour change, so no vendored-spec edits.
+  `cargo test` 2756 green (was 2754; +2); `cargo build --release` succeeds. No new
+  dependency; the extractor and both tests live in the `#[cfg(test)]` module, so nothing
+  ships in the binary. — binary (release): 5.1M (5,323,160 B; unchanged)
 - 2026-08-19 — Contract-test harness: added a **fleet-wide verbatim-spec-serving** test
   (`src/apis/openapi.rs` `serves_every_spec_body_verbatim`) — for **every** mounted API the
   serving route's response body MUST equal its registered `ApiSpec.body` byte-for-byte (plus 200

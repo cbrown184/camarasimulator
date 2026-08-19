@@ -2991,6 +2991,105 @@ mod tests {
     }
 
     /// The `location@line N` label of every parameter a spec declares whose object
+    /// carries BOTH a `schema:` and a `content:` sibling at its own indent — the
+    /// OpenAPI Parameter Object mutual-exclusion rule ("A parameter MUST contain
+    /// either a schema property, or a content property, but not both").
+    ///
+    /// The upper-bound complement of [`parameters_missing_schema_or_content`], which
+    /// pins that a located parameter declares *at least one* of the two value-type
+    /// keys but never caps it — so a parameter carrying both (a `schema:` left in
+    /// place while a `content:` media-type block is pasted beneath it, or the
+    /// reverse) satisfies that lower-bound test yet declares two conflicting wire
+    /// types for one input, an ambiguity a Redoc/Swagger "try it" panel and a codegen
+    /// client resolve differently. Mirrors the suite's other exactly-one pairings
+    /// (`every_spec_declares_exactly_one_server` capping
+    /// `every_spec_declares_a_non_empty_servers_array`).
+    ///
+    /// Anchors on the same `in:` location line and scans the same parameter-object
+    /// indent as [`parameters_missing_schema_or_content`] (mapping / name-first /
+    /// in-first-opener forms; a `$ref` parameter has no inline `in`, so it is never
+    /// anchored and is exempt), tracking a `schema:` and a `content:` sibling at the
+    /// object's own indent independently. A `schema:` nested inside a `content:`
+    /// media type sits deeper (past the object's indent) and is never the parameter's
+    /// own, so a content-only parameter never trips the check.
+    fn parameters_declaring_both_schema_and_content(body: &str) -> Vec<String> {
+        const LOCATIONS: [&str; 4] = ["query", "header", "path", "cookie"];
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        // Classify a mapping key at the parameter object's own indent, whether a
+        // plain key or (defensively) a `- ` sequence opener: the parameter's own
+        // `schema:` → Some(true), its own `content:` → Some(false), anything else
+        // → None. Mirrors `parameters_missing_schema_or_content`'s `is_type_key`.
+        let key_kind = |trimmed: &str| -> Option<bool> {
+            let t = trimmed.strip_prefix("- ").unwrap_or(trimmed);
+            if t.starts_with("schema:") {
+                Some(true)
+            } else if t.starts_with("content:") {
+                Some(false)
+            } else {
+                None
+            }
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let bare = line.trim_start();
+            let key = bare.strip_prefix("- ").unwrap_or(bare);
+            let Some(rest) = key.strip_prefix("in:") else { continue };
+            let loc = rest.trim().trim_matches('"').trim_matches('\'');
+            if !LOCATIONS.contains(&loc) {
+                continue;
+            }
+            let is_seq_opener = bare.len() != key.len();
+            let ind = indent(line) + if is_seq_opener { 2 } else { 0 };
+            let mut has_schema = false;
+            let mut has_content = false;
+            // Same directional scan as `parameters_missing_schema_or_content`: an
+            // in-first `- in: …` opener scans downward only; a mapping/name-first
+            // anchor scans both ways.
+            let steps: &[i64] = if is_seq_opener { &[1] } else { &[-1, 1] };
+            for &step in steps {
+                let mut j = i as i64;
+                loop {
+                    j += step;
+                    if j < 0 || j as usize >= lines.len() {
+                        break;
+                    }
+                    let l = lines[j as usize];
+                    if l.trim().is_empty() {
+                        break;
+                    }
+                    let li = indent(l);
+                    if li < ind {
+                        // Dedented out of this parameter object; a `- schema:`/
+                        // `- content:` sequence-item opener sits at `ind`-2 — read it
+                        // before leaving (mirrors the sibling extractor).
+                        if li + 2 == ind {
+                            match key_kind(l.trim_start()) {
+                                Some(true) => has_schema = true,
+                                Some(false) => has_content = true,
+                                None => {}
+                            }
+                        }
+                        break;
+                    }
+                    if li != ind {
+                        continue; // a nested child (e.g. a `content:` media-type schema)
+                    }
+                    match key_kind(l.trim_start()) {
+                        Some(true) => has_schema = true,
+                        Some(false) => has_content = true,
+                        None => {}
+                    }
+                }
+            }
+            if has_schema && has_content {
+                out.push(format!("{}@line {}", loc, i + 1));
+            }
+        }
+        out
+    }
+
+    /// The `location@line N` label of every parameter a spec declares whose object
     /// carries no *non-empty* `description:` — the human explanation of what the
     /// parameter is for (Spectral's `oas3-parameter-description`).
     ///
@@ -11071,6 +11170,128 @@ components:
             assert!(
                 parameters_missing_schema_or_content(api.body).is_empty(),
                 "{}: every located parameter must declare a `schema` or `content`",
+                api.name
+            );
+            for line in api.body.lines() {
+                let bare = line.trim_start();
+                let key = bare.strip_prefix("- ").unwrap_or(bare);
+                if let Some(rest) = key.strip_prefix("in:") {
+                    let loc = rest.trim().trim_matches('"').trim_matches('\'');
+                    if LOCATIONS.contains(&loc) {
+                        total_located += 1;
+                    }
+                }
+            }
+        }
+        assert!(
+            total_located >= 50,
+            "expected many located parameters across specs, got {total_located}"
+        );
+    }
+
+    #[test]
+    fn every_parameter_declares_at_most_one_of_schema_or_content() {
+        // Contract-harness invariant (OpenAPI Parameter Object mutual-exclusion):
+        // no parameter a mounted spec declares may carry BOTH a `schema` and a
+        // `content` — "A parameter MUST contain either a schema property, or a
+        // content property, but not both." A parameter with both declares two
+        // conflicting wire types for one input; a Redoc/Swagger "try it" panel and a
+        // codegen client each resolve the ambiguity their own way, so a caller's
+        // value is serialised one way by the docs and another by generated code.
+        //
+        // The upper-bound complement of `every_parameter_declares_a_schema_or_content`
+        // (the "at least one" side): that test proves a located parameter is typed by
+        // *some* value-type key but never caps the count, so a `schema:` left in place
+        // while a `content:` media-type block is pasted beneath it (or the reverse)
+        // passes it yet violates the OAS "not both" clause. Together the two pin
+        // *exactly one*, mirroring how `every_spec_declares_exactly_one_server` caps
+        // `every_spec_declares_a_non_empty_servers_array`. Verified true across all
+        // mounted specs before asserting (the corpus types every parameter with a
+        // `schema`, none with `content`, so none carries both → 0 drift).
+        for api in APIS {
+            let both = parameters_declaring_both_schema_and_content(api.body);
+            assert!(
+                both.is_empty(),
+                "{} spec declares parameter(s) carrying BOTH a `schema` and a \
+                 `content` (an OpenAPI Parameter Object MUST declare one, not both): \
+                 {:?}",
+                api.name,
+                both
+            );
+        }
+    }
+
+    #[test]
+    fn parameter_schema_content_mutual_exclusion_extraction_rules() {
+        // Unit-cover the `parameters_declaring_both_schema_and_content` extractor so
+        // the contract test above can't pass vacuously and its detection is pinned: a
+        // parameter is flagged only when its object (anchored on a valid `in:`
+        // location) carries a `schema:` sibling AND a `content:` sibling at its own
+        // indent; a `schema:` nested inside a `content:` media type does NOT re-count
+        // as the parameter's own type, a schema-only or content-only parameter is
+        // accepted, and a `$ref` parameter (no inline `in`) is exempt.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      parameters:
+        - name: good
+          in: header
+          schema:
+            type: string
+        - name: bad
+          in: query
+          schema:
+            type: string
+          content:
+            application/json:
+              schema:
+                type: object
+        - name: contentOnly
+          in: query
+          content:
+            application/json:
+              schema:
+                type: object
+        - $ref: '#/components/parameters/Shared'
+      responses:
+        '200':
+          description: ok
+components:
+  parameters:
+    Shared:
+      name: shared
+      in: query
+      schema:
+        type: string
+";
+        // Flagged: only the `bad` parameter (its `in: query` on line 15) — a
+        // parameter object carrying both a `schema:` and a `content:` sibling at its
+        // own indent. Not flagged: `good` (schema only), `contentOnly` (its
+        // `content:` media type's nested `schema:` sits deeper, not the parameter's
+        // own), the `$ref` parameter (no inline `in`), and the mapping `Shared`
+        // (schema only).
+        assert_eq!(
+            parameters_declaring_both_schema_and_content(body),
+            vec!["query@line 15".to_string()]
+        );
+
+        // Non-vacuous floor: across every registered spec, no located parameter
+        // carries both keys (the invariant the contract test asserts), and the corpus
+        // actually declares many located parameters (so the scan is never empty for a
+        // structural reason). Reuses the same located-parameter tally the sibling
+        // extraction test uses.
+        const LOCATIONS: [&str; 4] = ["query", "header", "path", "cookie"];
+        let mut total_located = 0usize;
+        for api in APIS {
+            assert!(
+                parameters_declaring_both_schema_and_content(api.body).is_empty(),
+                "{}: no located parameter may declare both a `schema` and a `content`",
                 api.name
             );
             for line in api.body.lines() {
