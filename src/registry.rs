@@ -25855,6 +25855,356 @@ components:
         );
     }
 
+    const TOKEN_PATTERN: &str = r"^[a-zA-Z0-9_\-]{1,64}$";
+
+    /// True when `s` matches the token `pattern` `^[a-zA-Z0-9_\-]{1,64}$` exactly: between
+    /// 1 and 64 characters, each an ASCII letter, digit, underscore, or hyphen, and nothing
+    /// else. Hand-rolled (no regex dep) mirroring `matches_name_pattern`'s shape-only stance,
+    /// so a legitimately shaped token is never a false positive.
+    ///
+    /// Two respects set this apart from the name pattern `^[a-zA-Z0-9_.-]+$`: the class here
+    /// admits **no dot** (a `.` is a valid name character but not a valid token character),
+    /// and the `{1,64}` quantifier is a genuine *ranged* length — both a non-empty floor and
+    /// a 64-character ceiling are part of the pattern itself (unlike name's unbounded `+`,
+    /// whose ceiling lives in a separate `maxLength` guarded by
+    /// `every_example_respects_its_string_length_bounds`). All admitted characters are ASCII,
+    /// so the byte length equals the character count; a multibyte character fails the
+    /// character-class test regardless.
+    fn matches_token_pattern(s: &str) -> bool {
+        (1..=64).contains(&s.len())
+            && s.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
+    }
+
+    /// The 1-based line numbers, in document order, of every `example:` keyword whose inline
+    /// scalar value sits in a Schema Object declaring a *same-indent*
+    /// `pattern: '^[a-zA-Z0-9_\-]{1,64}$'` sibling yet does not match that token pattern,
+    /// without a YAML dep. The token-pattern twin of `name_pattern_examples_malformed`: same
+    /// scoping, keyed on `TOKEN_PATTERN` instead of `NAME_PATTERN`.
+    ///
+    /// In OpenAPI 3.0.x (JSON Schema) an `example` is a sample *instance* of the schema, so a
+    /// field constrained by `pattern` MUST carry an example the pattern accepts. A token
+    /// example that includes a forbidden character (a space, a dot, a slash) or runs past the
+    /// 64-character ceiling advertises a sample the schema's own validator rejects, so a
+    /// Redoc/Swagger prefill and a codegen client's generated sample carry a value the field
+    /// can never legally hold. `^[a-zA-Z0-9_\-]{1,64}$` is the eSIM Remote Management
+    /// request-tracking token pattern (`sequenceNum`/`taskId`), and — like the IMEI/ICCID/name
+    /// patterns, unlike the UUID patterns which sit beside a `format: uuid` already guarded by
+    /// `every_uuid_format_example_is_a_well_formed_uuid` — it carries no `format`, so these
+    /// examples are otherwise unchecked.
+    ///
+    /// Scoping mirrors `name_pattern_examples_malformed` exactly: only an `example` carrying an
+    /// inline scalar (a block/object example opens no inline value and is skipped) with a
+    /// same-indent `pattern` sibling *equal to* `TOKEN_PATTERN` in the same Schema Object is
+    /// inspected — the sibling is scanned at the example's own indent, down through the
+    /// object's block then up, dedent-bounded, so a nested or following object's `pattern`
+    /// never pairs. The name pattern `^[a-zA-Z0-9_.-]+$` (dot-admitting, unbounded) and the
+    /// eSIM `clientId` `^[a-zA-Z0-9_\-]{1,128}$` (128-char) are *different* patterns and never
+    /// pair. An `example:` nested inside an outer `example:`/`examples:` payload (sample data,
+    /// not a schema keyword) is skipped. Only the token pattern is matched; other patterns are
+    /// out of scope.
+    fn token_pattern_examples_malformed(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let raw_inline = |l: &str, name: &str| -> Option<String> {
+            let (k, v) = l.trim_start().split_once(':')?;
+            if k.trim() != name {
+                return None;
+            }
+            let v = v.split('#').next().unwrap_or(v).trim();
+            if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            }
+        };
+        // Whether a same-indent `pattern:` sibling of line `i` (indent `c`) in the same
+        // Schema Object equals the token pattern: scan down through the object's block then
+        // up, dedent-bounded so a nested or following object's `pattern` never pairs.
+        let sibling_is_token_pattern = |i: usize, c: usize| -> bool {
+            let is_token_pattern = |l: &str| -> bool {
+                raw_inline(l, "pattern")
+                    .map(|v| v.trim_matches('"').trim_matches('\'') == TOKEN_PATTERN)
+                    .unwrap_or(false)
+            };
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_token_pattern(l) {
+                    return true;
+                }
+                j += 1;
+            }
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_token_pattern(l) {
+                    return true;
+                }
+            }
+            false
+        };
+        // True when line `i` (indent `c`) sits inside an outer `example:`/`examples:`
+        // payload — some enclosing container key up the indent ladder is
+        // `example`/`examples` — so an inner `example` key there is sample data, not a
+        // schema keyword.
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some(raw) = raw_inline(line, "example") else {
+                continue;
+            };
+            let c = indent(line);
+            if inside_example(i, c) {
+                continue;
+            }
+            if !sibling_is_token_pattern(i, c) {
+                continue;
+            }
+            let value = raw.trim_matches('"').trim_matches('\'');
+            if !matches_token_pattern(value) {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_token_pattern_example_conforms_to_the_token_pattern() {
+        // Contract-harness invariant (OpenAPI 3.0.x / JSON-Schema structural rule): where a
+        // Schema Object declares an inline `example` beside a same-indent
+        // `pattern: '^[a-zA-Z0-9_\-]{1,64}$'` (the eSIM Remote Management request-tracking
+        // token pattern used by `sequenceNum`/`taskId`), the example MUST match that pattern.
+        // An `example` is a sample *instance* of the schema, so a value the `pattern` rejects
+        // — a token carrying a space, a dot, a slash, or running past 64 characters — is a
+        // self-contradictory schema whose own validator rejects the sample it advertises, so
+        // a Redoc/Swagger prefill and a codegen client's generated sample carry a value no
+        // field constrained by this pattern can legally hold.
+        //
+        // The seventh member of the `pattern`-conformance family after E.164 / IMEI / ICCID /
+        // 32-hex / name / MAC, and the first over a *ranged-length* mixed alphanumeric-plus-
+        // `_-` alphabet: the `{1,64}` quantifier is a genuine bounded range (both a non-empty
+        // floor and a 64-character ceiling), so neither the name member (a *mixed* alphabet
+        // but an unbounded `+`, and it admits a dot the token class forbids) nor the ICCID
+        // member (a *ranged* length but a digit-only class) can express it — a dotted or
+        // over-length token is the fault they can't catch. Like the IMEI/ICCID/name patterns
+        // the token pattern carries no `format` sibling, so its examples are beyond the
+        // `format`-example family's reach; a general regex-engine test would need a new
+        // dependency (declined on binary-size grounds), so a concrete hand-validated shape is
+        // matched. Verified true across all mounted specs before asserting (six such
+        // example+pattern pairs across the eSIM spec, every one a conforming token).
+        for api in APIS {
+            let offenders = token_pattern_examples_malformed(api.body);
+            assert!(
+                offenders.is_empty(),
+                "{} spec declares an `example` beside a same-indent token \
+                 `pattern: '^[a-zA-Z0-9_\\-]{{1,64}}$'` that does not match that pattern (a \
+                 sample the pattern's own validator would reject) at `example:` line(s): {:?}",
+                api.name,
+                offenders
+            );
+        }
+    }
+
+    #[test]
+    fn token_pattern_example_extraction_rules() {
+        // Unit-cover `matches_token_pattern` and `token_pattern_examples_malformed` so the
+        // contract test above can't pass vacuously and its detection is pinned.
+        //
+        // Shape check: an all-letter token, a token mixing every allowed class member
+        // (letters, digits, `_`, `-`), a single character, and a 64-character token all pass;
+        // a space, a dot (allowed by the *name* pattern but not the token pattern), a slash,
+        // an empty string, and a 65-character token (past the range ceiling) all fail. The
+        // dot rejection and the ranged-length ceiling are what set this pattern apart from the
+        // name pattern.
+        assert!(matches_token_pattern("seq-0001"));
+        assert!(matches_token_pattern("task_ID-123"));
+        assert!(matches_token_pattern("a"));
+        assert!(matches_token_pattern(&"a".repeat(64)));
+        assert!(!matches_token_pattern("has space"));
+        assert!(!matches_token_pattern("a.b"));
+        assert!(!matches_token_pattern("a/b"));
+        assert!(!matches_token_pattern(""));
+        assert!(!matches_token_pattern(&"a".repeat(65)));
+
+        // Extractor: a valid quoted token and a valid unquoted token (each beside a same-indent
+        // token `pattern`) pass; a space-bearing and a dot-bearing value are flagged; a bad
+        // value whose `pattern` is declared *below* it is still paired (down-scan) and flagged;
+        // a value with no `pattern` sibling and one whose sibling is a *different* pattern (the
+        // dot-admitting name pattern `^[a-zA-Z0-9_.-]+$`) are skipped; an inner `example` inside
+        // an outer `example:` payload is skipped; an example in one property never pairs with a
+        // following property's `pattern` across the dedent; and a property literally named
+        // `example` (opening a block) is skipped.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    GoodQuoted:
+      type: string
+      pattern: '^[a-zA-Z0-9_\\-]{1,64}$'
+      example: \"seq-0001\"
+    GoodUnquoted:
+      type: string
+      pattern: '^[a-zA-Z0-9_\\-]{1,64}$'
+      example: task_ID-123
+    HasSpace:
+      type: string
+      pattern: '^[a-zA-Z0-9_\\-]{1,64}$'
+      example: \"has space\"
+    HasDot:
+      type: string
+      pattern: '^[a-zA-Z0-9_\\-]{1,64}$'
+      example: \"a.b\"
+    PatternBelow:
+      type: string
+      example: \"bad value\"
+      pattern: '^[a-zA-Z0-9_\\-]{1,64}$'
+    NoPattern:
+      type: string
+      example: \"no pattern here\"
+    OtherPattern:
+      type: string
+      pattern: '^[a-zA-Z0-9_.-]+$'
+      example: \"a.b\"
+    InExample:
+      type: object
+      example:
+        pattern: '^[a-zA-Z0-9_\\-]{1,64}$'
+        example: \"bad thing\"
+    Split:
+      type: object
+      properties:
+        a:
+          example: \"bad value\"
+        b:
+          type: string
+          pattern: '^[a-zA-Z0-9_\\-]{1,64}$'
+    NamedExample:
+      type: object
+      properties:
+        example:
+          type: string
+          pattern: '^[a-zA-Z0-9_\\-]{1,64}$'
+";
+        // Flagged, in document order: HasSpace.example (line 25, a space), HasDot.example
+        // (line 29, a dot — legal in a *name* but not a token), and PatternBelow.example
+        // (line 32, value `bad value` with a space, its token `pattern` a line below — down-
+        // scan pairs it). Not flagged: GoodQuoted/GoodUnquoted (valid tokens); NoPattern (no
+        // `pattern` sibling); OtherPattern (sibling is the dot-admitting *name* pattern, not
+        // the token pattern — its `a.b` example is a valid name and never inspected here);
+        // InExample's inner `example: \"bad thing\"` (sits inside the outer `example:`
+        // payload); Split.a.example, whose only token `pattern` is in the following property
+        // Split.b past a dedent; and NamedExample's `example:` property opening a block (no
+        // inline value).
+        assert_eq!(token_pattern_examples_malformed(body), vec![25, 29, 32]);
+
+        // Non-vacuous floor: across every registered spec every `example` beside a same-indent
+        // token `pattern` matches it (the invariant the contract test asserts), and the corpus
+        // actually declares several such pairs — so the pattern-comparison path runs on real
+        // data and a broken (always-empty) extractor can't hide behind a corpus that never
+        // pairs an example with the token pattern. Count pairs with a same-indent detector
+        // independent of the extractor's shape comparison.
+        let mut token_examples = 0usize;
+        for api in APIS {
+            assert!(
+                token_pattern_examples_malformed(api.body).is_empty(),
+                "{}: every example beside a same-indent token `pattern` must match it",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            let is_key = |l: &str, name: &str, val: Option<&str>| {
+                l.trim_start().split_once(':').is_some_and(|(k, v)| {
+                    k.trim() == name
+                        && val.is_none_or(|want| {
+                            v.split('#')
+                                .next()
+                                .unwrap_or(v)
+                                .trim()
+                                .trim_matches('"')
+                                .trim_matches('\'')
+                                == want
+                        })
+                })
+            };
+            for (i, l) in lines.iter().enumerate() {
+                if !is_key(l, "example", None) {
+                    continue;
+                }
+                if l.trim_start()
+                    .split_once(':')
+                    .map(|(_, v)| v.split('#').next().unwrap_or(v).trim().is_empty())
+                    .unwrap_or(true)
+                {
+                    continue;
+                }
+                let c = indent(l);
+                let lo = i.saturating_sub(6);
+                let hi = (i + 6).min(lines.len());
+                let has_token_pattern = (lo..hi).any(|j| {
+                    j != i
+                        && indent(lines[j]) == c
+                        && is_key(lines[j], "pattern", Some(TOKEN_PATTERN))
+                });
+                if has_token_pattern {
+                    token_examples += 1;
+                }
+            }
+        }
+        assert!(
+            token_examples >= 4,
+            "expected several example + same-indent token `pattern` pairs across specs, got {token_examples}"
+        );
+    }
+
     /// True when a `pattern` scalar (already unquoted) is the 32-hexadecimal-digit
     /// pattern `^[<hex>]{32}$` — a fixed run of exactly 32 case-insensitive hex digits —
     /// regardless of the order the three hex ranges are written in the character class.

@@ -3332,6 +3332,31 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - a **token-`pattern` example-conformance** contract test (`src/registry.rs`
+    `every_token_pattern_example_conforms_to_the_token_pattern`) asserts that where a mounted
+    spec declares an inline `example` beside a **same-indent**
+    `pattern: '^[a-zA-Z0-9_\-]{1,64}$'` (the eSIM Remote Management request-tracking token
+    pattern used by `sequenceNum`/`taskId`), the example is 1–64 characters each an ASCII
+    letter/digit/`_`/`-`. The **seventh member of the `pattern`-conformance family** after
+    E.164 / IMEI / ICCID / 32-hex / name / MAC, and the **first over a ranged-length mixed
+    alphanumeric-plus-`_-` alphabet**: the `{1,64}` quantifier is a genuine bounded range (a
+    non-empty floor *and* a 64-char ceiling both part of the pattern), so neither the name
+    member (a mixed alphabet but an unbounded `+`, and it admits a dot the token class forbids)
+    nor the ICCID member (a ranged length but a digit-only class) can express it — a dotted or
+    over-length token is the fault they can't catch. Like the IMEI/ICCID/name patterns the
+    token pattern carries **no `format` sibling**, so these examples were previously unchecked.
+    New pure `matches_token_pattern` (1..=64 chars; every byte `is_ascii_alphanumeric` or
+    `_`/`-`; no regex dep) + `token_pattern_examples_malformed` extractor cloning
+    `name_pattern_examples_malformed`'s scoping exactly (inline scalar `example`; same-indent
+    `pattern` sibling *equal to* `TOKEN_PATTERN` scanned down-then-up dedent-bounded, so the
+    dot-admitting name pattern `^[a-zA-Z0-9_.-]+$` and the eSIM `clientId`
+    `^[a-zA-Z0-9_\-]{1,128}$` never pair; outer-`example:`-payload / block-opener skipped).
+    Surveyed the corpus first: 6 example+token-`pattern` pairs (esim-remote-management
+    `sequenceNum`/`taskId`), all conforming → 0 drift. Unit-covered
+    (`token_pattern_example_extraction_rules`: space/dot/pattern-below flagged in document
+    order; valid quoted+unquoted, 64-char accept + 65-char reject via `matches_token_pattern`,
+    no-pattern, name-pattern sibling, nested-`example`, cross-property, block-opener cleared;
+    ≥4-pair non-vacuous floor).
   - a **MAC-address (`EUI-48`)-`pattern` example-conformance** contract test (`src/registry.rs`
     `every_mac_pattern_example_conforms_to_the_mac_pattern`) asserts that where a mounted spec
     declares an inline `example` beside a **same-indent** MAC `pattern`
@@ -5619,6 +5644,25 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-19 — Contract-test harness: added a **token-`pattern` example-conformance**
+  contract test (`src/registry.rs` `every_token_pattern_example_conforms_to_the_token_pattern`)
+  — where a mounted spec declares an inline `example` beside a **same-indent**
+  `pattern: '^[a-zA-Z0-9_\-]{1,64}$'` (the eSIM Remote Management request-tracking token pattern
+  used by `sequenceNum`/`taskId`), the example MUST be 1–64 characters each an ASCII
+  letter/digit/`_`/`-`. An `example` is a sample instance of the schema, so a token the pattern
+  rejects (a space, a dot, a slash, or a value past the 64-char ceiling, or a placeholder pasted
+  beside the pattern) is a self-contradictory schema whose own validator rejects the sample it
+  advertises. The **seventh member of the `pattern`-conformance family** after
+  E.164/IMEI/ICCID/32-hex/name/MAC, and the **first over a ranged-length mixed
+  alphanumeric-plus-`_-` alphabet**: the `{1,64}` quantifier bounds both ends, so neither the
+  name member (mixed alphabet but an unbounded `+`, dot-admitting) nor the ICCID member (ranged
+  length but digit-only) can express it. Carries no `format` sibling, so these examples were
+  previously unchecked. New pure `matches_token_pattern` + `token_pattern_examples_malformed`
+  extractor (cloning `name_pattern_examples_malformed`'s scoping, keyed on `TOKEN_PATTERN`; no
+  regex/YAML dep), unit-covered (`token_pattern_example_extraction_rules`; ≥4-pair non-vacuous
+  floor). Surveyed the corpus first: 6 example+token-`pattern` pairs (esim-remote-management),
+  all conforming → 0 drift. `cargo test` 2786 green (2 new), `cargo build --release` green,
+  no new deps. — binary (release): 5.1M (5,323,160 B).
 - 2026-08-19 — Contract-test harness: added a **MAC-address (EUI-48) `pattern`
   example-conformance** contract test (`src/registry.rs`
   `every_mac_pattern_example_conforms_to_the_mac_pattern`) — where a mounted spec declares an
