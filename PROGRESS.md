@@ -3332,6 +3332,23 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - an **array `example` item-count conformance** contract test (`src/registry.rs`
+    `every_array_example_respects_its_item_bounds`) asserts that where a mounted spec declares an
+    array `example` beside a same-indent `minItems`/`maxItems`, the example's element count lies
+    within those bounds. The **array-cardinality complement** of the scalar example-value family
+    (`every_example_respects_its_string_length_bounds` guards a string example's length,
+    `every_example_is_within_its_numeric_bounds` a numeric example's value) — no test compared an
+    array example's element count against its size bounds. New `array_examples_outside_their_item_bounds`
+    extractor (same-indent size-bound sibling scanned down-then-up dedent-bounded; outer-`example:`
+    payload skipped) with a no-dep `flow_count` (inline flow arrays — top-level commas at bracket
+    depth 1, quotes respected, `[]`→0, multi-line flow un-counted) and `block_count` (block
+    sequences — `- ` items at the first child's indent; a first child that is a mapping key, e.g. a
+    property literally named `example`, → None). Surveyed the corpus first: 4 array example+size-bound
+    pairs (connectivity-insights, consent-info, geofencing-subscriptions block seq,
+    call-forwarding-signal), all within `minItems: 1` → 0 drift. Unit-covered
+    (`array_example_item_bound_extraction_rules`: too-few flow / too-many flow / empty flow / too-few
+    block flagged in document order; good / equal-bound / scalar / no-bound / nested-`example` /
+    cross-property split / property-named-`example` cleared; ≥4-pair non-vacuous floor).
   - a **32-hex-`pattern` example-conformance** contract test (`src/registry.rs`
     `every_hex32_pattern_example_conforms_to_the_hex32_pattern`) asserts that where a mounted
     spec declares an inline `example` beside a **same-indent** 32-hexadecimal-digit `pattern`
@@ -5553,6 +5570,38 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-19 — Contract-test harness: added an **array `example` item-count conformance**
+  contract test (`src/registry.rs` `every_array_example_respects_its_item_bounds`) — where a
+  mounted spec declares an array `example` beside a **same-indent** `minItems` and/or `maxItems`,
+  the example's element count MUST lie within those bounds. An `example` is a sample instance of
+  the schema, so an array with fewer than `minItems` or more than `maxItems` elements is a
+  self-contradictory schema whose own validator rejects the sample it advertises — a Redoc/Swagger
+  prefill and a codegen client's generated sample then carry a value the size bound can never
+  legally hold. The **array-cardinality complement** of the scalar example-value family:
+  `every_example_respects_its_string_length_bounds` guards a string example's *length* and
+  `every_example_is_within_its_numeric_bounds` a numeric example's *value*, but **no test compared
+  an array example's element count** against `minItems`/`maxItems` (`every_example_matches_its_schema_type`
+  checks only the example's type; the size-bound tests check the bounds' own domain/ordering, never
+  against an example). New `array_examples_outside_their_item_bounds` extractor mirroring
+  `examples_outside_their_length_bounds`' scoping (same-indent size-bound sibling scanned
+  down-then-up dedent-bounded so a nested/following object's bound never pairs; an `example:` inside
+  an outer `example:`/`examples:` payload skipped) plus two element counters, no regex/YAML dep: a
+  `flow_count` for inline flow arrays (`example: [a, b]` → top-level commas at bracket depth 1, quotes
+  respected, empty `[]` → 0, a multi-line flow that never closes → left un-counted) and a
+  `block_count` for block sequences (`example:` opening a block whose first child is a `- ` item →
+  count items at that indent; a first child that is a mapping key — a property literally named
+  `example`, or an object example — → None, out of scope). **Surveyed the corpus first: 4 array
+  example+size-bound pairs (connectivity-insights port list, consent-info `scopes`,
+  geofencing-subscriptions `types` block sequence, call-forwarding-signal state list), every one
+  within its `minItems: 1` → 0 drift; a live guard that fires the moment a spec adds an
+  under/over-sized array example.** Unit-covered (`array_example_item_bound_extraction_rules`: a
+  too-few flow, a too-many flow, an empty flow below `minItems`, and a too-few block sequence flagged
+  in document order; a good/equal-bound/scalar/no-bound example, an `example` nested in an outer
+  `example:` payload, a cross-property split past a dedent, and a property literally named `example`
+  opening a schema block all cleared; ≥4-pair non-vacuous floor). Test-side only — no
+  request/response/behaviour change, so no vendored-spec edits. `cargo test` 2780 green (was 2778;
+  +2); `cargo build --release` succeeds. No new dependency; the extractor and both tests live in the
+  `#[cfg(test)]` module, so nothing ships in the binary. — binary (release): 5.1M (5,323,160 B; unchanged)
 - 2026-08-19 — Contract-test harness: added a **32-hex-`pattern` example-conformance**
   contract test (`src/registry.rs` `every_hex32_pattern_example_conforms_to_the_hex32_pattern`)
   — where a mounted spec declares an inline `example` beside a **same-indent** 32-hexadecimal-digit

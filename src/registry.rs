@@ -23316,6 +23316,471 @@ components:
         );
     }
 
+    /// The 1-based line numbers, in document order, of every array `example:` keyword
+    /// whose item count falls outside a sibling array-size bound — `minItems` or
+    /// `maxItems` — declared in the same Schema Object, without a YAML dep. The array-
+    /// cardinality analogue of `examples_outside_their_length_bounds` (which guards a
+    /// *string* example's character length against `minLength`/`maxLength`) and
+    /// `examples_outside_their_numeric_bounds` (a numeric example against
+    /// `minimum`/`maximum`); together the three cover the string, number and array value
+    /// families an `example` can carry.
+    ///
+    /// In OpenAPI 3.0.x (JSON Schema) an `example` is a sample *instance* of the schema,
+    /// so it MUST satisfy the schema's own constraints. Where the object bounds an array
+    /// with `minItems`/`maxItems`, an example with fewer than `minItems` or more than
+    /// `maxItems` elements is a self-contradictory schema whose own validator rejects the
+    /// sample it advertises, so a Redoc/Swagger "try it" prefill and a codegen client's
+    /// generated sample carry a value the size bound can never legally hold.
+    ///
+    /// Only an `example` whose value is a YAML **sequence** — an inline flow array
+    /// (`example: [a, b]`) or a block sequence (`example:` opening a block whose first
+    /// child is a `- ` item) — and that declares at least one same-object array-size
+    /// bound sibling is inspected; each bound is scanned at the example's own indent,
+    /// down through the object's block then up, dedent-bounded exactly like
+    /// `examples_outside_their_length_bounds`, so a nested or following sibling object's
+    /// bound never pairs, and read only when it is a non-negative-integer scalar.
+    /// Skipped: a scalar example (a number/string/boolean — the numeric-bound / length /
+    /// type tests' concern); a block-opening `example:` whose first child is *not* a
+    /// sequence item (a property literally named `example`, or an object/block-scalar
+    /// example); an inline flow array that never closes on its line (a multi-line flow,
+    /// left un-counted rather than miscounted); an example with no array-size-bound
+    /// sibling; and an `example:` nested inside an outer `example:`/`examples:` payload
+    /// (sample data, not a schema keyword). The comparison is inclusive — only a count
+    /// strictly below `minItems` or strictly above `maxItems` is flagged.
+    fn array_examples_outside_their_item_bounds(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        // The inline scalar of a `name:` key (inline comment stripped; surrounding
+        // quotes preserved); `None` when the line is a different key or opens a block.
+        let raw_inline = |l: &str, name: &str| -> Option<String> {
+            let (k, v) = l.trim_start().split_once(':')?;
+            if k.trim() != name {
+                return None;
+            }
+            let v = v.split('#').next().unwrap_or(v).trim();
+            if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            }
+        };
+        // A same-indent non-negative-integer array-size bound sibling `key` in the same
+        // object as line `i` (indent `c`): scan down through the object's block then up,
+        // dedent-bounded so a nested or following object's bound never pairs. A quoted or
+        // non-integer bound has no count to compare against and is treated as absent (its
+        // own domain is `every_size_bound_is_a_non_negative_integer`'s concern).
+        let sibling_int = |i: usize, c: usize, key: &str| -> Option<usize> {
+            let parse_int = |l: &str| -> Option<usize> {
+                let raw = raw_inline(l, key)?;
+                if raw.starts_with('"') || raw.starts_with('\'') {
+                    return None; // quoted → not a plain integer
+                }
+                raw.parse::<usize>().ok()
+            };
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c {
+                    if let Some(n) = parse_int(l) {
+                        return Some(n);
+                    }
+                }
+                j += 1;
+            }
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c {
+                    if let Some(n) = parse_int(l) {
+                        return Some(n);
+                    }
+                }
+            }
+            None
+        };
+        // True when line `i` (indent `c`) sits inside an outer `example:`/`examples:`
+        // payload — some enclosing container key up the indent ladder is
+        // `example`/`examples` — so an inner `example` key there is sample data.
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        // The element count of an inline flow sequence whose text starts with `[` — top-
+        // level commas (bracket/brace depth 0 inside the outer array, quotes respected)
+        // plus one when the array holds any content; `None` when the flow never closes on
+        // its line (a multi-line flow, left un-counted). Anything after the outer `]`
+        // (e.g. a trailing comment) is ignored.
+        let flow_count = |v: &str| -> Option<usize> {
+            let mut depth: i32 = 0;
+            let mut in_s = false;
+            let mut in_d = false;
+            let mut commas = 0usize;
+            let mut nonempty = false;
+            for ch in v.chars() {
+                if in_s {
+                    if ch == '\'' {
+                        in_s = false;
+                    }
+                    continue;
+                }
+                if in_d {
+                    if ch == '"' {
+                        in_d = false;
+                    }
+                    continue;
+                }
+                match ch {
+                    '[' | '{' => depth += 1,
+                    ']' | '}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            return Some(if nonempty { commas + 1 } else { 0 });
+                        }
+                    }
+                    '\'' => {
+                        in_s = true;
+                        if depth >= 1 {
+                            nonempty = true;
+                        }
+                    }
+                    '"' => {
+                        in_d = true;
+                        if depth >= 1 {
+                            nonempty = true;
+                        }
+                    }
+                    ',' if depth == 1 => commas += 1,
+                    c if depth >= 1 && !c.is_whitespace() => nonempty = true,
+                    _ => {}
+                }
+            }
+            None
+        };
+        // The element count of a block sequence opened by an `example:` at line `i`
+        // (indent `c`): the number of `- ` items at the first child's indent, bounded by
+        // the dedent that closes the block. `None` when the first non-empty child is not
+        // a sequence item (a property literally named `example`, or an object/block-scalar
+        // example) — those are not arrays and out of scope.
+        let block_count = |i: usize, c: usize| -> Option<usize> {
+            let mut child_indent: Option<usize> = None;
+            let mut count = 0usize;
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                let li = indent(l);
+                if li <= c {
+                    break;
+                }
+                let t = l.trim_start();
+                let is_item = t == "-" || t.starts_with("- ");
+                match child_indent {
+                    None => {
+                        if !is_item {
+                            return None; // first child is not a sequence item
+                        }
+                        child_indent = Some(li);
+                        count += 1;
+                    }
+                    Some(ci) => {
+                        if li == ci && is_item {
+                            count += 1;
+                        }
+                    }
+                }
+                j += 1;
+            }
+            child_indent.map(|_| count)
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some((k, v)) = line.trim_start().split_once(':') else {
+                continue;
+            };
+            if k.trim() != "example" {
+                continue;
+            }
+            let c = indent(line);
+            if inside_example(i, c) {
+                continue;
+            }
+            let min = sibling_int(i, c, "minItems");
+            let max = sibling_int(i, c, "maxItems");
+            if min.is_none() && max.is_none() {
+                continue;
+            }
+            let inline = v.split('#').next().unwrap_or(v).trim();
+            let count = if inline.is_empty() {
+                // opens a block — an array only when its first child is a `- ` item
+                match block_count(i, c) {
+                    Some(n) => n,
+                    None => continue,
+                }
+            } else if inline.starts_with('[') {
+                match flow_count(inline) {
+                    Some(n) => n,
+                    None => continue, // multi-line flow — not counted
+                }
+            } else {
+                continue; // scalar example — not an array (type/other tests' concern)
+            };
+            let below = min.is_some_and(|m| count < m);
+            let above = max.is_some_and(|m| count > m);
+            if below || above {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_array_example_respects_its_item_bounds() {
+        // Contract-harness invariant (OpenAPI 3.0.x / JSON-Schema structural rule):
+        // where a Schema Object declares an array `example` beside a `minItems` and/or
+        // `maxItems`, the example's element count MUST lie within those bounds. An
+        // `example` is a sample *instance* of the schema, so an array with fewer than
+        // `minItems` or more than `maxItems` elements — a placeholder emptied below a
+        // raised floor, a list pasted past a tightened cap — is a self-contradictory
+        // schema whose own validator rejects the sample it advertises, so a Redoc/Swagger
+        // "try it" prefill and a codegen client's generated sample carry a value the size
+        // bound can never legally hold.
+        //
+        // The array-cardinality complement of
+        // `every_example_respects_its_string_length_bounds` (string length) and
+        // `every_example_is_within_its_numeric_bounds` (numeric value): together they
+        // cover the three value families an `example` carries, and no existing test
+        // compares an array example's *element count* against its size bounds —
+        // `every_example_matches_its_schema_type` checks the example's type, and the
+        // size-bound tests (`every_size_bound_is_a_non_negative_integer`,
+        // `every_numeric_bound_is_ordered_low_to_high`) check the bounds' own domain and
+        // ordering, never against an example. Verified true across all mounted specs
+        // before asserting.
+        for api in APIS {
+            let offenders = array_examples_outside_their_item_bounds(api.body);
+            assert!(
+                offenders.is_empty(),
+                "{} spec declares an array `example` whose element count falls outside \
+                 its sibling `minItems`/`maxItems` bound (a sample the bound's own \
+                 validator would reject) at `example:` line(s): {:?}",
+                api.name,
+                offenders
+            );
+        }
+    }
+
+    #[test]
+    fn array_example_item_bound_extraction_rules() {
+        // Unit-cover `array_examples_outside_their_item_bounds` so the contract test
+        // above can't pass vacuously and its detection is pinned: an array example whose
+        // element count is within its bounds passes; one below a `minItems` (inline flow
+        // and block-sequence forms) and one above a `maxItems` are flagged in document
+        // order; an empty flow array below `minItems` is flagged; a count equal to a
+        // bound passes (inclusive); a scalar example is skipped (not an array); an example
+        // with no size-bound sibling is skipped; an `example:` nested inside an outer
+        // `example:` payload is skipped; an example in one property never pairs with a
+        // following property's bound across the dedent; and a property literally named
+        // `example` (opening a schema block, first child not a `- ` item) is skipped.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    GoodFlow:
+      type: array
+      minItems: 1
+      maxItems: 3
+      items:
+        type: integer
+      example: [1, 2]
+    TooFew:
+      type: array
+      minItems: 2
+      items:
+        type: string
+      example: [\"only\"]
+    TooMany:
+      type: array
+      maxItems: 2
+      items:
+        type: integer
+      example: [1, 2, 3]
+    EmptyBelow:
+      type: array
+      minItems: 1
+      items:
+        type: integer
+      example: []
+    EqualBound:
+      type: array
+      minItems: 2
+      maxItems: 2
+      items:
+        type: integer
+      example: [7, 8]
+    BlockFew:
+      type: array
+      minItems: 3
+      items:
+        type: string
+      example:
+        - a
+        - b
+    ScalarExample:
+      type: array
+      minItems: 5
+      example: \"notarray\"
+    NoBound:
+      type: array
+      items:
+        type: integer
+      example: [1]
+    InExample:
+      type: object
+      example:
+        minItems: 5
+        example: [1]
+    Split:
+      type: object
+      properties:
+        a:
+          example: [1]
+        b:
+          type: array
+          minItems: 5
+    NamedExample:
+      type: object
+      properties:
+        example:
+          type: array
+          minItems: 5
+          items:
+            type: integer
+";
+        // Flagged, in document order: line 26 (`TooFew.example: [\"only\"]`, 1 element <
+        // its `minItems: 2` sibling above), line 32 (`TooMany.example: [1, 2, 3]`, 3 >
+        // its `maxItems: 2`), line 38 (`EmptyBelow.example: []`, 0 < `minItems: 1`), and
+        // line 51 (`BlockFew.example:` block sequence of 2 items < `minItems: 3`). Not
+        // flagged: `GoodFlow` (2 in [1,3]); `EqualBound` (2 == both bounds, inclusive);
+        // `ScalarExample` (`\"notarray\"` is a scalar, not an array — left to the type
+        // test though 0-length rules don't apply); `NoBound` (no `minItems`/`maxItems`
+        // sibling); `InExample` (its inner `example: [1]` sits inside the outer `example:`
+        // payload, and the outer `example:` has no size-bound *sibling* — `minItems: 5`
+        // there is its child); `Split.a.example: [1]`, whose only candidate `minItems: 5`
+        // sits in the following property `Split.b` past a dedent, so the two never pair;
+        // and `NamedExample` (an `example:` opening a schema block whose first child is
+        // `type:`, not a `- ` item — a property literally named `example`, not an array).
+        assert_eq!(
+            array_examples_outside_their_item_bounds(body),
+            vec![26, 32, 38, 51]
+        );
+
+        // Non-vacuous floor: across every registered spec every array example with a
+        // sibling size bound lies within it (the invariant the contract test asserts),
+        // and the corpus actually declares several array example+size-bound pairs — so
+        // the count-comparison path runs on real data and a broken (always-empty)
+        // extractor can't hide behind a corpus that never pairs an array example with a
+        // size bound. Count pairs with a same-indent sibling detector independent of the
+        // extractor's element counting.
+        let mut bounded_arrays = 0usize;
+        for api in APIS {
+            assert!(
+                array_examples_outside_their_item_bounds(api.body).is_empty(),
+                "{}: every array example must lie within its sibling minItems/maxItems \
+                 bound",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            let is_key = |l: &str, name: &str| {
+                l.trim_start()
+                    .split_once(':')
+                    .is_some_and(|(k, _)| k.trim() == name)
+            };
+            for (i, l) in lines.iter().enumerate() {
+                if !is_key(l, "example") {
+                    continue;
+                }
+                let c = indent(l);
+                // A `minItems`/`maxItems` sibling at the same indent, dedent-bounded up
+                // or down (presence only — no value comparison).
+                let mut has_bound = false;
+                for dir in [1i64, -1] {
+                    let mut j = i as i64 + dir;
+                    while j >= 0 && (j as usize) < lines.len() {
+                        let x = lines[j as usize];
+                        if !x.trim().is_empty() {
+                            if indent(x) < c {
+                                break;
+                            }
+                            if indent(x) == c && (is_key(x, "minItems") || is_key(x, "maxItems")) {
+                                has_bound = true;
+                                break;
+                            }
+                        }
+                        j += dir;
+                    }
+                    if has_bound {
+                        break;
+                    }
+                }
+                if has_bound {
+                    bounded_arrays += 1;
+                }
+            }
+        }
+        assert!(
+            bounded_arrays >= 4,
+            "expected several array example+size-bound sibling pairs across specs, got {bounded_arrays}"
+        );
+    }
+
     /// The 1-based line numbers, in document order, of every `default:` keyword whose
     /// inline **quoted-string** value has a character length outside a sibling string
     /// bound — `minLength` or `maxLength` — declared in the same Schema Object, without
