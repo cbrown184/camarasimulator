@@ -22691,6 +22691,282 @@ components:
         }
     }
 
+    /// The 1-based line numbers, in document order, of every `readOnly: true` keyword
+    /// that has a `writeOnly: true` sibling in the **same** Schema Object — a property
+    /// marked as both read-only and write-only, which OpenAPI 3.0.x forbids.
+    ///
+    /// In OpenAPI 3.0.x a `readOnly: true` property is sent by the server in responses
+    /// but MUST NOT be sent by the client in requests, and a `writeOnly: true` property
+    /// is the mirror image; the spec states a property MUST NOT be marked as **both**.
+    /// A schema declaring both is self-contradictory — the property may appear in
+    /// neither direction — so a codegen client cannot decide whether to serialise the
+    /// field and a Redoc/Swagger view renders a contradictory annotation. The usual
+    /// cause is a copy-paste: a `writeOnly: true` pasted onto an already-`readOnly`
+    /// property (or vice-versa) while drafting a sibling schema.
+    ///
+    /// This is the `readOnly`/`writeOnly` member of the "no schema declares
+    /// contradictory facets" family alongside `every_numeric_bound_is_ordered_low_to_high`
+    /// (an inverted `minimum`/`maximum`): `every_boolean_schema_keyword_carries_a_boolean`
+    /// already proves each of `readOnly`/`writeOnly` is a well-typed boolean, but never
+    /// that the two are mutually exclusive on one object, so a both-`true` pair is a
+    /// legal-looking yet invalid schema no existing test sees.
+    ///
+    /// Pure and YAML-dep-free, scoped exactly like `defaults_violating_their_multiple_of`:
+    /// for each `readOnly` line whose inline scalar is truthy (`true`, case-insensitive)
+    /// at indent `c`, scan its object's block both directions (down then up), each
+    /// bounded by the first line indented *below* `c` (the dedent that closes the
+    /// object), for a same-indent `writeOnly` whose inline scalar is likewise truthy.
+    /// The exact-indent, dedent-bounded match keeps a `writeOnly` nested in a sub-schema
+    /// or belonging to a following sibling property from being mistaken for the pair. A
+    /// `readOnly`/`writeOnly` opening a block (no inline scalar), a falsy or non-boolean
+    /// value, or one nested inside an `example:`/`examples:` payload (sample data, not a
+    /// schema keyword) is skipped.
+    fn schemas_marking_both_read_only_and_write_only(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        // The inline scalar of a `name:` key, comment stripped, `None` when the line is
+        // a different key or opens a block (no inline value).
+        let raw_inline = |l: &str, name: &str| -> Option<String> {
+            let (k, v) = l.trim_start().split_once(':')?;
+            if k.trim() != name {
+                return None;
+            }
+            let v = v.split('#').next().unwrap_or(v).trim();
+            if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            }
+        };
+        // A boolean keyword's inline value is truthy — the canonical YAML `true`
+        // (case-insensitive), quotes tolerated. A falsy/non-boolean scalar is not.
+        let is_true = |raw: &str| -> bool {
+            raw.trim_matches('"').trim_matches('\'').eq_ignore_ascii_case("true")
+        };
+        // A same-indent `writeOnly: true` sibling in the same object as line `i` (indent
+        // `c`): scan down through the object's block then up, dedent-bounded so a nested
+        // or following object's keyword never pairs.
+        let has_write_only_sibling = |i: usize, c: usize| -> bool {
+            let truthy = |l: &str| raw_inline(l, "writeOnly").is_some_and(|r| is_true(&r));
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && truthy(l) {
+                    return true;
+                }
+                j += 1;
+            }
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && truthy(l) {
+                    return true;
+                }
+            }
+            false
+        };
+        // True when line `i` (indent `c`) sits inside an `example:`/`examples:` payload —
+        // some enclosing container key up the indent ladder is `example`/`examples`.
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some(raw) = raw_inline(line, "readOnly") else {
+                continue;
+            };
+            if !is_true(&raw) {
+                continue;
+            }
+            let c = indent(line);
+            if inside_example(i, c) {
+                continue;
+            }
+            if has_write_only_sibling(i, c) {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn no_schema_is_both_read_only_and_write_only() {
+        // Contract-harness invariant (OpenAPI 3.0.x structural rule): a Schema Object
+        // MUST NOT mark a property as both `readOnly: true` and `writeOnly: true` — the
+        // two are mutually exclusive (a field is server-set-in-responses or
+        // client-set-in-requests, never both), so a schema declaring both is
+        // self-contradictory: the property is legal in neither direction, a codegen
+        // client can't decide whether to serialise it, and a Redoc/Swagger view renders
+        // a contradictory annotation. The usual cause is a copy-paste of one flag onto
+        // an already-flagged property while drafting a sibling schema.
+        //
+        // The `readOnly`/`writeOnly` member of the "no contradictory facets" family
+        // (alongside `every_numeric_bound_is_ordered_low_to_high`'s inverted range):
+        // `every_boolean_schema_keyword_carries_a_boolean` proves each flag is a
+        // well-typed boolean but never that the two never co-occur on one object, so a
+        // both-`true` pair is a legal-looking yet invalid schema no existing test sees.
+        //
+        // The corpus declares both flags — `readOnly` on server-set identity/state
+        // fields and `writeOnly` on write-only secrets — but never together on one
+        // object, so the invariant holds at 0 drift today over live vocabulary; the guard
+        // fires the moment a spec pastes the second flag onto an already-flagged
+        // property (detection pinned by `read_write_only_mutual_exclusion_extraction_rules`).
+        let mut read_only_seen = 0usize;
+        let mut write_only_seen = 0usize;
+        for api in APIS {
+            let offenders = schemas_marking_both_read_only_and_write_only(api.body);
+            assert!(
+                offenders.is_empty(),
+                "{} spec marks a property as both `readOnly: true` and `writeOnly: true` \
+                 (OpenAPI forbids a property being both) at `readOnly:` line(s): {:?}",
+                api.name,
+                offenders
+            );
+            read_only_seen += api.body.matches("readOnly:").count();
+            write_only_seen += api.body.matches("writeOnly:").count();
+        }
+        // Non-vacuous floor: both flags are genuinely present across the corpus, so the
+        // mutual-exclusion scan runs over real `readOnly`/`writeOnly` vocabulary rather
+        // than passing because the keywords never appear.
+        assert!(
+            read_only_seen > 0 && write_only_seen > 0,
+            "expected the corpus to declare both readOnly and writeOnly \
+             (saw readOnly={read_only_seen}, writeOnly={write_only_seen})"
+        );
+    }
+
+    #[test]
+    fn read_write_only_mutual_exclusion_extraction_rules() {
+        // Unit-cover `schemas_marking_both_read_only_and_write_only` so the contract test
+        // above can't pass vacuously and its detection is pinned: a property carrying both
+        // truthy flags is flagged (whether `writeOnly` sits below or above the `readOnly`);
+        // a property with only one flag, one flag set to `false`, the two flags on
+        // *different* properties across a dedent, a flag opening a block, and a both-flag
+        // pair nested inside an `example:` payload are all cleared.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    BadBelow:
+      type: object
+      properties:
+        a:
+          type: string
+          readOnly: true
+          writeOnly: true
+    BadAbove:
+      type: object
+      properties:
+        b:
+          type: string
+          writeOnly: true
+          readOnly: true
+    OnlyRead:
+      type: object
+      properties:
+        c:
+          type: string
+          readOnly: true
+    ReadTrueWriteFalse:
+      type: object
+      properties:
+        d:
+          type: string
+          readOnly: true
+          writeOnly: false
+    SplitAcrossProps:
+      type: object
+      properties:
+        e:
+          type: string
+          readOnly: true
+        f:
+          type: string
+          writeOnly: true
+    BlockValue:
+      type: object
+      properties:
+        readOnly:
+          type: boolean
+    NestedExample:
+      type: object
+      example:
+        readOnly: true
+        writeOnly: true
+";
+        // Flagged, in document order: line 19 (`BadBelow.a.readOnly: true`, its
+        // `writeOnly: true` sibling on line 20, down-scan) and line 27
+        // (`BadAbove.b.readOnly: true`, its `writeOnly: true` sibling on line 26,
+        // up-scan). Not flagged: `OnlyRead.c` (no `writeOnly` sibling);
+        // `ReadTrueWriteFalse.d` (its `writeOnly: false` is falsy); `SplitAcrossProps`
+        // (its `readOnly`/`writeOnly` sit in different properties `e`/`f` past a dedent,
+        // so they never pair); `BlockValue` (a property literally named `readOnly:`
+        // opening a block has no inline scalar); and `NestedExample` (its
+        // `readOnly`/`writeOnly` sit inside the outer `example:` payload, sample data
+        // rather than schema keywords).
+        assert_eq!(
+            schemas_marking_both_read_only_and_write_only(body),
+            vec![19, 27]
+        );
+
+        // The corpus declares both flags but never together on one object, so the
+        // invariant holds at 0 drift across every registered spec (detection pinned by
+        // the synthetic body above, not by a corpus pair).
+        for api in APIS {
+            assert!(
+                schemas_marking_both_read_only_and_write_only(api.body).is_empty(),
+                "{}: no property may be marked both readOnly and writeOnly",
+                api.name
+            );
+        }
+    }
+
     /// The 1-based line numbers, in document order, of every `example:` keyword whose
     /// inline **quoted-string** value has a character length outside a sibling string
     /// bound — `minLength` or `maxLength` — declared in the same Schema Object, without

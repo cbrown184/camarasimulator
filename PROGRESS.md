@@ -5494,6 +5494,36 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-19 — Contract-test harness: added a **`readOnly`/`writeOnly` mutual-exclusion**
+  contract test (`src/registry.rs` `no_schema_is_both_read_only_and_write_only`) — no Schema
+  Object may mark a property as **both** `readOnly: true` and `writeOnly: true`. In OpenAPI
+  3.0.x the two are mutually exclusive: a `readOnly` field is server-set in responses and
+  absent from requests, a `writeOnly` field the mirror, and the spec forbids a property being
+  both — a schema declaring both is self-contradictory (legal in neither direction), so a
+  codegen client can't decide whether to serialise the field and a Redoc/Swagger view renders
+  a contradictory annotation. Usual cause is a copy-paste of one flag onto an already-flagged
+  property while drafting a sibling schema. This is the **`readOnly`/`writeOnly` member of the
+  "no contradictory facets" family** alongside `every_numeric_bound_is_ordered_low_to_high`'s
+  inverted `minimum`/`maximum`: `every_boolean_schema_keyword_carries_a_boolean` already proves
+  each flag is a well-typed boolean, but never that the two never co-occur on one object, so a
+  both-`true` pair is a legal-looking yet invalid schema no existing test saw. New pure
+  `schemas_marking_both_read_only_and_write_only` extractor (no YAML dep) clones
+  `defaults_violating_their_multiple_of`'s scoping exactly (a truthy inline `readOnly` scalar;
+  a same-indent truthy `writeOnly` sibling scanned down-then-up, dedent-bounded so a nested or
+  following property never pairs; a flag opening a block, a falsy value, or one inside an
+  `example:`/`examples:` payload skipped). **Surveyed the corpus first: `readOnly` (server-set
+  identity/state fields) and `writeOnly` (write-only secrets, e.g. network-access-domains) both
+  occur but never together on one object → 0 drift; a live-vocabulary guard (a corpus floor
+  asserts both flags are genuinely present, so the scan runs over real data), firing the moment
+  a spec pastes the second flag onto an already-flagged property.** Unit-covered
+  (`read_write_only_mutual_exclusion_extraction_rules`: a both-`true` property with `writeOnly`
+  below and one with it above flagged in document order; a lone flag, a `writeOnly: false`, the
+  two flags split across sibling properties past a dedent, a property literally named `readOnly:`
+  opening a block, and a both-flag pair nested in an `example:` payload all cleared). Test-side
+  only — no request/response/behaviour change, so no vendored-spec edits. `cargo test` 2772 green
+  (was 2770; +2); `cargo build --release` succeeds. No new dependency; the extractor and both
+  tests live in the `#[cfg(test)]` module, so nothing ships in the binary. — binary (release):
+  5.1M (5,323,160 B; unchanged)
 - 2026-08-19 — Contract-test harness: added a **path-item operation-presence**
   contract test (`src/registry.rs` `every_path_item_declares_at_least_one_operation`) — every
   Path Item Object a mounted spec declares MUST describe at least one HTTP operation (or defer to
