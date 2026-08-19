@@ -5669,6 +5669,38 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-19 — Contract-test harness: added a **geohash-`pattern` example-conformance**
+  contract test (`src/registry.rs` `every_geohash_pattern_example_conforms_to_the_geohash_pattern`)
+  — where a mounted spec declares an inline `example` beside a **same-indent**
+  `pattern: '^[0-9bcdefghjkmnpqrstuvwxyz]{1,12}$'` (the geohash-string pattern the location-data
+  APIs use for a `geohash` field), the example MUST be 1–12 characters, each an ASCII digit or a
+  lowercase geohash base32 letter. An `example` is a sample instance of the schema, so a geohash
+  the pattern rejects (an excluded letter `a`/`i`/`l`/`o`, an uppercase char, a value past the
+  12-char ceiling, or a placeholder pasted beside the pattern) is a self-contradictory schema whose
+  own validator rejects the sample it advertises. The **ninth member of the `pattern`-conformance
+  family** after E.164/IMEI/ICCID/32-hex/name/MAC/token/result-code, and the **first over a
+  restricted base32 alphabet that excludes specific letters**: the digit-run members accept only
+  decimal digits, the hex member only hex digits, and the name/token members accept the *entire*
+  ASCII letter set (plus `_`/`.`/`-`), so none can express geohash's alphabet — digits plus
+  lowercase letters with the four ambiguity-avoiding drops (`a`/`i`/`l`/`o`) genuinely removed
+  (ranges `b-h`/`j-k`/`m-n`/`p-z`). Carries no `format` sibling (there is no standard OpenAPI
+  `geohash` format), so these examples were previously unchecked. New pure `matches_geohash_pattern`
+  (1–12 chars; each byte an ASCII digit or a letter in the four allowed ranges; no regex/YAML dep) +
+  `geohash_pattern_examples_malformed` extractor (cloning `result_code_pattern_examples_malformed`'s
+  down-then-up dedent-bounded scoping, keyed on `GEOHASH_PATTERN`, stepping over the intervening
+  `minLength`/`maxLength`/`description` siblings both corpus pairs carry), unit-covered
+  (`geohash_pattern_example_extraction_rules`: the matcher clears `u4pruy`/a 12-char geohash/a lone
+  digit and rejects each excluded letter, an uppercase, a 13-char, an empty, and a punctuation
+  value; a excluded-letter, an uppercase, a too-long, and a pattern-below example flagged in
+  document order; valid examples across an intervening description/maxLength, a no-`pattern`
+  sibling, an ICCID-`pattern` sibling, a nested-`example` payload, a cross-property split, and a
+  property literally named `example` all cleared; ≥2-pair non-vacuous floor). **Surveyed the corpus
+  first: 2 example+geohash-`pattern` pairs (predictive-connectivity-data / population-density-data
+  `geohash`), both the well-formed `u4pruy` → 0 drift; a live guard that fires the moment a spec
+  adds a mis-shaped geohash example.** Test-side only — no request/response/behaviour change, so no
+  vendored-spec edits; the matcher, extractor and both tests live in the `#[cfg(test)]` module, so
+  nothing ships in the binary. `cargo test` 2790 green (was 2788; +2), `cargo build --release`
+  green, no new deps. — binary (release): 5.1M (5,323,160 B; unchanged).
 - 2026-08-19 — Contract-test harness: added a **result-code-`pattern` example-conformance**
   contract test (`src/registry.rs`
   `every_result_code_pattern_example_conforms_to_the_result_code_pattern`) — where a mounted spec
