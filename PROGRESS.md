@@ -5357,6 +5357,27 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-19 — Contract-test harness: added a **served-shared-documents OpenAPI-version pin**
+  contract test (`src/registry.rs` `served_shared_documents_pin_the_camara_openapi_3_0_3_version`)
+  — the two shared documents CamaraSim serves alongside the 60 business specs, the
+  `auth/openapi.yaml` OIDC/authorization spec (`/auth/openapi.yaml`, with its own `/docs` page)
+  and the `shared/errors.yaml` error-model/scenario fragment (`/shared/errors.yaml`, the `$ref`
+  target every business spec resolves to), MUST each pin exactly `openapi: 3.0.3` like the mounted
+  APIs. `every_spec_pins_the_camara_openapi_3_0_3_version` scopes to `APIS` only (mirroring the
+  family test it complements), so neither served shared document is version-pinned by it today — an
+  integrator (or a codegen client following the cross-file `$ref`s) fetches and reads both, and a
+  drift to `3.1.0` in either is read under a different `nullable`/`type`/JSON-Schema regime than it
+  was vendored as, the exact harm the business-spec pin guards against. Closes the asymmetry the way
+  the license/title/description tests already fold the auth spec in. Reuses the already-unit-covered
+  `openapi_version` extractor + shared `CAMARA_OPENAPI_VERSION` const (no YAML dep). **Surveyed
+  first: both shared documents already declare `openapi: 3.0.3` → 0 drift**; non-vacuous floor
+  asserts both were inspected (`checked == 2`). Test-side only — no request/response/behaviour
+  change, so no vendored-spec edits. `cargo test` 2753 green (was 2752; +1); `cargo build --release`
+  succeeds. No new dependency; the test lives in the `#[cfg(test)]` module, so nothing ships in the
+  binary. Sync note: on start, `origin/main` was force-updated (f900142→c92160a) reconciling two
+  divergent agent histories; the dropped commits' *tests* (readOnly/writeOnly, numeric-example,
+  204/304-content) are all already present at c92160a, so no unique work was lost — worked cleanly
+  from `origin/main` with a normal merge. — binary (release): 5.1M (5,323,160 B; unchanged)
 - 2026-08-19 — Contract-test harness: added a **canonical-server-default-base-URL** contract test
   (`src/registry.rs` `every_server_variable_default_is_the_canonical_base_url`) — every mounted
   spec's leading `{apiRoot}` server-variable `default:` MUST be exactly `http://localhost:8080`,

@@ -5119,6 +5119,63 @@ mod tests {
     }
 
     #[test]
+    fn served_shared_documents_pin_the_camara_openapi_3_0_3_version() {
+        // Contract-harness invariant (the CAMARA Commonalities OpenAPI-version rule),
+        // extended to the two **shared documents** CamaraSim serves alongside the
+        // business specs: the `auth/openapi.yaml` OIDC/authorization spec (served at
+        // `/auth/openapi.yaml`, with its own `/docs` page) and the shared
+        // `shared/errors.yaml` error-model / scenario fragment (served at
+        // `/shared/errors.yaml`, the `$ref` target every business spec resolves to).
+        // Both are OpenAPI 3.0.x documents an integrator — or a codegen client that
+        // follows the cross-file `$ref`s — fetches and reads, so each MUST pin the
+        // exact `openapi: 3.0.3` the whole CAMARA ecosystem is pinned to: a drift to
+        // `3.1.0` in either is read under a different `nullable`/`type` / JSON-Schema
+        // regime than it was vendored as, the same harm
+        // `every_spec_pins_the_camara_openapi_3_0_3_version` guards against for the
+        // mounted `APIS`. That sibling scopes to the business specs only (mirroring the
+        // family test it complements), so neither served shared document is pinned by
+        // it today; this closes the asymmetry the way the license/title/description
+        // tests already fold the auth spec in. Reuses the already-unit-covered
+        // `openapi_version` extractor and the shared `CAMARA_OPENAPI_VERSION` const.
+        //
+        // Surveyed first: both shared documents already declare `openapi: 3.0.3`, so
+        // 0 drift.
+        let shared_documents: [(&str, &str); 2] = [
+            (
+                "auth/openapi.yaml",
+                include_str!("../specs/auth/openapi.yaml"),
+            ),
+            (
+                "shared/errors.yaml",
+                include_str!("../specs/shared/errors.yaml"),
+            ),
+        ];
+        let mut checked = 0usize;
+        for (name, body) in shared_documents {
+            let v = openapi_version(body).unwrap_or_else(|| {
+                panic!(
+                    "{name} declares no root `openapi:` version — not a valid \
+                     OpenAPI document (the `openapi` field is REQUIRED at the root)"
+                )
+            });
+            assert_eq!(
+                v, CAMARA_OPENAPI_VERSION,
+                "{name} declares root `openapi: {v}`, not the CAMARA-mandated \
+                 `openapi: {CAMARA_OPENAPI_VERSION}` — 3.0 and 3.1 differ in \
+                 `nullable`/`type` handling, so a non-3.0.3 version is read under \
+                 different rules than it was vendored as"
+            );
+            checked += 1;
+        }
+        // Non-vacuous floor: both served shared documents were inspected.
+        assert_eq!(
+            checked, 2,
+            "expected a root `openapi:` version in both served shared documents, \
+             only checked {checked}"
+        );
+    }
+
+    #[test]
     fn spec_server_url_matches_mounted_base_path() {
         // Contract-harness invariant (DESIGN §9): every vendored CAMARA spec
         // declares its base path in `servers[].url` as `{apiRoot}/{name}/{version}`,
