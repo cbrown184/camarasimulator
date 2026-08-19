@@ -3332,6 +3332,30 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - a **MAC-address (`EUI-48`)-`pattern` example-conformance** contract test (`src/registry.rs`
+    `every_mac_pattern_example_conforms_to_the_mac_pattern`) asserts that where a mounted spec
+    declares an inline `example` beside a **same-indent** MAC `pattern`
+    (`^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$`, the EUI-48 hardware-address pattern the
+    network-access specs use verbatim), the example is 6 two-hex-digit groups separated by five
+    `:`/`-` (17 chars). The **sixth member of the `pattern`-conformance family** after E.164 /
+    IMEI / ICCID / 32-hex / name, and the **first over a separator-delimited group structure** —
+    the five prior members each accept one uninterrupted run of a single character class, so
+    none can express a grouped shape (a wrong group count / non-hex nibble / bad separator is the
+    fault they can't catch). No `format` sibling (there is no OpenAPI `mac` format), so these
+    examples were previously unchecked. New pure `matches_mac_pattern` (17 chars; hex at
+    positions ≠ `i%3==2`, `:`/`-` at the five separator slots; mixed separators accepted, faithful
+    to the pattern; no regex dep) + `mac_pattern_examples_malformed` extractor cloning
+    `iccid_pattern_examples_malformed`'s scoping exactly (inline scalar `example`; same-indent
+    `pattern` sibling *equal to* `MAC_PATTERN` scanned down-then-up dedent-bounded, stepping over
+    an intervening `description`/`maxLength` sibling as both corpus pairs have; the `:` in the
+    pattern's own `[:-]` never confuses the key split; outer-`example:`-payload / block-opener /
+    ICCID-pattern sibling skipped). Surveyed the corpus first: 2 example+MAC-`pattern` pairs
+    (network-access-domains `MacAddress.value`, network-access-devices `hardwareAddress.value`),
+    both well-formed → 0 drift. Unit-covered (`mac_pattern_example_extraction_rules`:
+    too-few-groups / non-hex / bad-separator / pattern-below flagged in document order; valid
+    colon+hyphen MACs across an intervening description/maxLength, no-pattern, ICCID-pattern
+    sibling, nested-`example`, cross-property, block-opener cleared; ≥2-pair non-vacuous floor —
+    only two MAC schemas exist in the corpus).
   - a **name-`pattern` example-conformance** contract test (`src/registry.rs`
     `every_name_pattern_example_conforms_to_the_name_pattern`) asserts that where a mounted
     spec declares an inline `example` beside a **same-indent** `pattern: '^[a-zA-Z0-9_.-]+$'`
@@ -5595,6 +5619,49 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-19 — Contract-test harness: added a **MAC-address (EUI-48) `pattern`
+  example-conformance** contract test (`src/registry.rs`
+  `every_mac_pattern_example_conforms_to_the_mac_pattern`) — where a mounted spec declares an
+  inline `example` beside a **same-indent** MAC `pattern`
+  (`^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$`), the example MUST be six 2-hex-digit groups
+  joined by five `:`/`-` separators (17 chars). An `example` is a sample instance of the schema,
+  so a MAC the pattern rejects (wrong group count, non-hex nibble, bad separator, or a
+  placeholder pasted beside the pattern) is a self-contradictory schema whose own validator
+  rejects the sample it advertises — a Redoc/Swagger prefill and a codegen client's sample then
+  carry a value the field can never legally hold. The **sixth member of the `pattern`-conformance
+  family** after E.164 / IMEI / ICCID / 32-hex / name, and the **first over a separator-delimited
+  group structure**: the five prior members each accept one uninterrupted run of a single
+  character class (decimal/hex digits or a name alphabet), so none can express this pattern's
+  grouped shape — 2-hex runs punctuated by `:`/`-` at fixed positions — and a wrong group count
+  or bad separator is the fault none of them catches. Like the IMEI/ICCID/32-hex patterns the MAC
+  pattern carries **no `format` sibling** (there is no standard OpenAPI `mac`/`eui48` format;
+  unlike the UUID patterns, guarded by `every_uuid_format_example_is_a_well_formed_uuid`), so a
+  MAC example's shape was previously unguarded — no existing test reads it (the format-example
+  family checks a `format:` sibling; the string-length test checks the `maxLength: 17` ceiling,
+  never the grouped shape). New pure `matches_mac_pattern` (exactly 17 chars; `:`/`-` at the five
+  separator slots `i%3==2`, ASCII hex elsewhere; mixed separators accepted, faithful to the
+  pattern's independent `[:-]`; no regex dep) + `mac_pattern_examples_malformed` extractor cloning
+  `iccid_pattern_examples_malformed`'s scoping exactly (an inline scalar `example`; a same-indent
+  `pattern` sibling *equal to* `MAC_PATTERN` scanned down-then-up dedent-bounded, stepping over an
+  intervening `description`/`maxLength` sibling as both corpus pairs have; the `:` inside the
+  pattern's own `[:-]` never confuses the first-colon key split; an `example` inside an outer
+  `example:`/`examples:` payload or a block-opening `example:` skipped, and an adjacent ICCID
+  `pattern` never pairs). **Surveyed the corpus first: 2 example+MAC-`pattern` pairs
+  (network-access-domains `MacAddress.value` `00:11:22:33:44:55`, network-access-devices
+  `hardwareAddress.value` `12:34:56:78:9A:BC`), both well-formed → 0 drift; a live guard that
+  fires the moment a spec adds a mis-shaped MAC example.** Unit-covered
+  (`mac_pattern_example_extraction_rules`: the matcher accepts colon / hyphen / mixed-separator /
+  mixed-case MACs and rejects a 5-group, a 7-group, a non-hex nibble, a `.`-separated, a
+  no-separator, and an empty value; a too-few-groups, a non-hex, a bad-separator, and a
+  pattern-below example flagged in document order; valid colon+hyphen examples across an
+  intervening description/maxLength, a no-`pattern` sibling, an ICCID-`pattern` sibling, a
+  nested-`example` payload, a cross-property split, and a property literally named `example`
+  opening a block all cleared; ≥2-pair non-vacuous floor — only two MAC schemas exist in the
+  corpus, so the floor is 2, not the family's usual 4). Test-side only — no
+  request/response/behaviour change, so no vendored-spec edits. `cargo test` 2784 green (was 2782;
+  +2); `cargo build --release` succeeds. No new dependency; the matcher, extractor and both tests
+  live in the `#[cfg(test)]` module, so nothing ships in the binary. — binary (release): 5.1M
+  (5,323,160 B; unchanged)
 - 2026-08-19 — Contract-test harness: added a **name-`pattern` example-conformance**
   contract test (`src/registry.rs` `every_name_pattern_example_conforms_to_the_name_pattern`)
   — where a mounted spec declares an inline `example` beside a **same-indent**

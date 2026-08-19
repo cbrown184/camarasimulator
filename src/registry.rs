@@ -26243,6 +26243,386 @@ components:
         );
     }
 
+    /// The MAC-address (EUI-48) `pattern` the CAMARA network-access specs use verbatim
+    /// (written in YAML as `"^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$"`): six 2-hex-digit
+    /// groups joined by five separators, each `:` or `-`. It is the corpus's next
+    /// unguarded *fixed-shape* `pattern` (the `value` of the `MacAddress`/EUI-48 hardware
+    /// address in Network Access Domains and Network Access Devices) and, like the
+    /// IMEI/ICCID/32-hex patterns and unlike a `format: uuid` field, carries **no `format`
+    /// sibling** (there is no standard OpenAPI `mac`/`eui48` format) — so its examples are
+    /// otherwise beyond the `format`-example family's reach. The natural sixth member of the
+    /// `pattern`-conformance family after E.164 / IMEI / ICCID / 32-hex / name, and the
+    /// **first over a separator-delimited group structure**: the five prior members each
+    /// accept one uninterrupted run of a single character class (decimal or hex digits, or a
+    /// name alphabet), so none can express this pattern's *grouped* shape — 2-hex runs
+    /// punctuated by `:`/`-` at fixed positions — and a value with the wrong group count, a
+    /// non-hex nibble, or a bad separator is the fault none of them can catch.
+    const MAC_PATTERN: &str = r"^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$";
+
+    /// True when `s` matches the MAC `pattern` `^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$`
+    /// exactly: 17 characters — six 2-digit ASCII-hex groups at positions 0,3,6,9,12,15 with
+    /// a `:` or `-` separator at each of positions 2,5,8,11,14. Hand-rolled (no regex dep),
+    /// faithful to the pattern: each `[:-]` is independent, so a mixed-separator address
+    /// (`00:11-22:33-44:55`) is accepted exactly as the regex would — mirroring the
+    /// E.164/IMEI/ICCID matchers' shape-only, pattern-faithful stance so a legitimately shaped
+    /// MAC is never a false positive.
+    fn matches_mac_pattern(s: &str) -> bool {
+        let b = s.as_bytes();
+        if b.len() != 17 {
+            return false;
+        }
+        b.iter().enumerate().all(|(i, &c)| {
+            if i % 3 == 2 {
+                c == b':' || c == b'-'
+            } else {
+                c.is_ascii_hexdigit()
+            }
+        })
+    }
+
+    /// The 1-based line numbers, in document order, of every `example:` keyword whose inline
+    /// scalar value sits in a Schema Object declaring a *same-indent* MAC `pattern` sibling
+    /// yet does not match that pattern, without a YAML dep. The MAC twin of
+    /// `iccid_pattern_examples_malformed`: same scoping, keyed on `MAC_PATTERN`.
+    ///
+    /// In OpenAPI 3.0.x (JSON Schema) an `example` is a sample *instance* of the schema, so a
+    /// field constrained by `pattern` MUST carry an example the pattern accepts. A MAC example
+    /// with the wrong group count, a non-hex nibble, a stray separator, or a placeholder pasted
+    /// beside the pattern advertises a sample the schema's own validator rejects, so a
+    /// Redoc/Swagger prefill and a codegen client's generated sample carry a value the field
+    /// can never legally hold. Unlike the UUID patterns (which sit beside a `format: uuid`
+    /// already guarded by `every_uuid_format_example_is_a_well_formed_uuid`), the MAC pattern
+    /// has no `format`, so these examples are otherwise unchecked.
+    ///
+    /// Scoping mirrors `iccid_pattern_examples_malformed` exactly: only an `example` carrying
+    /// an inline scalar (a block/object example opens no inline value and is skipped) with a
+    /// same-indent `pattern` sibling *equal to* `MAC_PATTERN` in the same Schema Object is
+    /// inspected — the sibling is scanned at the example's own indent, down through the object's
+    /// block then up, dedent-bounded, so a nested or following object's `pattern` never pairs
+    /// (an intervening `description`/`maxLength` sibling at the same indent is stepped over, as
+    /// both corpus pairs have). An `example:` nested inside an outer `example:`/`examples:`
+    /// payload (sample data, not a schema keyword) is skipped. Only the MAC pattern is matched;
+    /// other patterns are out of scope. The `:` inside the pattern's own value never confuses
+    /// the key split — `split_once(':')` keys on the first colon (after `pattern`), keeping the
+    /// bracket expression `[:-]` in the value.
+    fn mac_pattern_examples_malformed(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let raw_inline = |l: &str, name: &str| -> Option<String> {
+            let (k, v) = l.trim_start().split_once(':')?;
+            if k.trim() != name {
+                return None;
+            }
+            let v = v.split('#').next().unwrap_or(v).trim();
+            if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            }
+        };
+        // Whether a same-indent `pattern:` sibling of line `i` (indent `c`) in the same Schema
+        // Object equals the MAC pattern: scan down through the object's block then up,
+        // dedent-bounded so a nested or following object's `pattern` never pairs.
+        let sibling_is_mac_pattern = |i: usize, c: usize| -> bool {
+            let is_mac_pattern = |l: &str| -> bool {
+                raw_inline(l, "pattern")
+                    .map(|v| v.trim_matches('"').trim_matches('\'') == MAC_PATTERN)
+                    .unwrap_or(false)
+            };
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_mac_pattern(l) {
+                    return true;
+                }
+                j += 1;
+            }
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_mac_pattern(l) {
+                    return true;
+                }
+            }
+            false
+        };
+        // True when line `i` (indent `c`) sits inside an outer `example:`/`examples:` payload —
+        // some enclosing container key up the indent ladder is `example`/`examples` — so an
+        // inner `example` key there is sample data, not a schema keyword.
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some(raw) = raw_inline(line, "example") else {
+                continue;
+            };
+            let c = indent(line);
+            if inside_example(i, c) {
+                continue;
+            }
+            if !sibling_is_mac_pattern(i, c) {
+                continue;
+            }
+            let value = raw.trim_matches('"').trim_matches('\'');
+            if !matches_mac_pattern(value) {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_mac_pattern_example_conforms_to_the_mac_pattern() {
+        // Contract-harness invariant (OpenAPI 3.0.x / JSON-Schema structural rule): where a
+        // Schema Object declares an inline `example` beside a same-indent MAC `pattern`
+        // (`^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$`, the EUI-48 hardware-address pattern the
+        // CAMARA network-access specs use verbatim), the example MUST match that pattern. An
+        // `example` is a sample *instance* of the schema, so a value the `pattern` rejects — a
+        // MAC with the wrong group count, a non-hex nibble, a bad separator, or a placeholder
+        // pasted beside the pattern — is a self-contradictory schema whose own validator
+        // rejects the sample it advertises, so a Redoc/Swagger prefill and a codegen client's
+        // generated sample carry a value no field constrained by this pattern can legally hold.
+        //
+        // The sixth member of the `pattern`-conformance family after E.164 / IMEI / ICCID /
+        // 32-hex / name, and the first over a *separator-delimited group structure*: the five
+        // prior members each accept one uninterrupted run of a single character class, so none
+        // can express this pattern's grouped shape (2-hex runs punctuated by `:`/`-` at fixed
+        // positions) — a wrong group count or a bad separator is the fault they cannot catch.
+        // Like the IMEI/ICCID/32-hex patterns the MAC pattern carries no `format` sibling, so
+        // its examples are beyond the `format`-example family's reach; a general regex-engine
+        // test would need a new dependency (declined on binary-size grounds), so a concrete
+        // hand-validated shape is matched. Verified true across all mounted specs before
+        // asserting (Network Access Domains and Network Access Devices each declare one such
+        // example+pattern pair, both well-formed MACs).
+        for api in APIS {
+            let offenders = mac_pattern_examples_malformed(api.body);
+            assert!(
+                offenders.is_empty(),
+                "{} spec declares an `example` beside a same-indent MAC \
+                 `pattern: '^([0-9A-Fa-f]{{2}}[:-]){{5}}([0-9A-Fa-f]{{2}})$'` that does not \
+                 match that pattern (a sample the pattern's own validator would reject) at \
+                 `example:` line(s): {:?}",
+                api.name,
+                offenders
+            );
+        }
+    }
+
+    #[test]
+    fn mac_pattern_example_extraction_rules() {
+        // Unit-cover `matches_mac_pattern` and `mac_pattern_examples_malformed` so the contract
+        // test above can't pass vacuously and its detection is pinned.
+        //
+        // Shape check: a colon-separated and a hyphen-separated MAC pass, as does a
+        // mixed-separator one (each `[:-]` is independent in the pattern) and lower/upper-case
+        // hex; a 5-group (too few) and a 7-group (too many) address, a non-hex nibble, a bad
+        // separator (`.`), a missing separator (16 chars), and an empty string all fail.
+        assert!(matches_mac_pattern("00:11:22:33:44:55"));
+        assert!(matches_mac_pattern("00-11-22-33-44-55"));
+        assert!(matches_mac_pattern("00:11-22:33-44:55")); // mixed separators — pattern allows it
+        assert!(matches_mac_pattern("aB:cD:eF:12:34:56")); // mixed-case hex
+        assert!(!matches_mac_pattern("00:11:22:33:44")); // 5 groups — too few
+        assert!(!matches_mac_pattern("00:11:22:33:44:55:66")); // 7 groups — too many
+        assert!(!matches_mac_pattern("00:11:22:33:44:5G")); // non-hex nibble `G`
+        assert!(!matches_mac_pattern("00.11.22.33.44.55")); // `.` is not a `[:-]` separator
+        assert!(!matches_mac_pattern("001122334455")); // 12 chars, no separators
+        assert!(!matches_mac_pattern("")); // empty
+
+        // Extractor: a valid quoted colon MAC and a valid quoted hyphen MAC (each beside a
+        // same-indent MAC `pattern`, one with an intervening `description` block and one with an
+        // intervening `maxLength` sibling — the two shapes the corpus actually uses) pass; a
+        // too-few-groups, a non-hex, and a bad-separator value are flagged; a bad value whose
+        // `pattern` is declared *below* it is still paired (down-scan) and flagged; a value with
+        // no `pattern` sibling and one whose sibling is a *different* pattern (the ICCID
+        // `^[0-9]{19,20}$`) are skipped; an inner `example` inside an outer `example:` payload is
+        // skipped; an example in one property never pairs with a following property's `pattern`
+        // across the dedent; and a property literally named `example` (opening a block) is
+        // skipped.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    GoodColon:
+      type: string
+      pattern: \"^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$\"
+      description: |
+        a MAC
+      example: \"00:11:22:33:44:55\"
+    GoodHyphen:
+      type: string
+      pattern: \"^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$\"
+      maxLength: 17
+      example: \"00-11-22-33-44-55\"
+    TooFew:
+      type: string
+      pattern: \"^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$\"
+      example: \"00:11:22:33:44\"
+    NonHex:
+      type: string
+      pattern: \"^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$\"
+      example: \"00:11:22:33:44:5G\"
+    BadSep:
+      type: string
+      pattern: \"^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$\"
+      example: \"00.11.22.33.44.55\"
+    PatternBelow:
+      type: string
+      example: \"nope\"
+      pattern: \"^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$\"
+    NoPattern:
+      type: string
+      example: \"00:11:22:33:44:55-but-no-pattern-here\"
+    OtherPattern:
+      type: string
+      pattern: '^[0-9]{19,20}$'
+      example: \"8931089011234567890\"
+    InExample:
+      type: object
+      example:
+        pattern: \"^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$\"
+        example: \"bad\"
+    Split:
+      type: object
+      properties:
+        a:
+          example: \"bad\"
+        b:
+          type: string
+          pattern: \"^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$\"
+    NamedExample:
+      type: object
+      properties:
+        example:
+          type: string
+          pattern: \"^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$\"
+";
+        // Flagged, in document order: TooFew.example (5 groups), NonHex.example (`G` nibble),
+        // BadSep.example (`.` separators), and PatternBelow.example (value `nope`, MAC `pattern`
+        // a line below — down-scan pairs it). Not flagged: GoodColon/GoodHyphen (valid, across an
+        // intervening description/maxLength sibling); NoPattern (no `pattern` sibling);
+        // OtherPattern (sibling is the ICCID pattern, not MAC); InExample's inner `example`
+        // (inside the outer `example:` payload); Split.a.example (its only MAC `pattern` is in the
+        // following property past a dedent); and NamedExample's `example:` property opening a
+        // block (no inline value).
+        let flagged = mac_pattern_examples_malformed(body);
+        let flagged_vals: Vec<&str> = flagged
+            .iter()
+            .map(|&n| body.lines().nth(n - 1).unwrap().trim())
+            .collect();
+        assert_eq!(
+            flagged_vals,
+            vec![
+                "example: \"00:11:22:33:44\"",
+                "example: \"00:11:22:33:44:5G\"",
+                "example: \"00.11.22.33.44.55\"",
+                "example: \"nope\"",
+            ]
+        );
+
+        // Non-vacuous floor: across every registered spec every `example` beside a same-indent
+        // MAC `pattern` matches it (the invariant the contract test asserts), and the corpus
+        // actually declares such pairs — so the pattern-comparison path runs on real data and a
+        // broken (always-empty) extractor can't hide behind a corpus that never pairs. Only two
+        // MAC schemas exist in the corpus (Network Access Domains + Network Access Devices), so
+        // the floor is 2 (not the family's usual 4). Count pairs with a same-indent detector
+        // independent of the extractor's shape comparison.
+        let mut mac_examples = 0usize;
+        for api in APIS {
+            assert!(
+                mac_pattern_examples_malformed(api.body).is_empty(),
+                "{}: every example beside a same-indent MAC `pattern` must match it",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            let is_key = |l: &str, name: &str, val: Option<&str>| {
+                l.trim_start().split_once(':').is_some_and(|(k, v)| {
+                    k.trim() == name
+                        && val.is_none_or(|want| {
+                            v.split('#')
+                                .next()
+                                .unwrap_or(v)
+                                .trim()
+                                .trim_matches('"')
+                                .trim_matches('\'')
+                                == want
+                        })
+                })
+            };
+            for (i, l) in lines.iter().enumerate() {
+                if !is_key(l, "example", None) {
+                    continue;
+                }
+                if l.trim_start()
+                    .split_once(':')
+                    .map(|(_, v)| v.split('#').next().unwrap_or(v).trim().is_empty())
+                    .unwrap_or(true)
+                {
+                    continue;
+                }
+                let c = indent(l);
+                let lo = i.saturating_sub(6);
+                let hi = (i + 6).min(lines.len());
+                let has_mac = (lo..hi)
+                    .any(|j| j != i && indent(lines[j]) == c && is_key(lines[j], "pattern", Some(MAC_PATTERN)));
+                if has_mac {
+                    mac_examples += 1;
+                }
+            }
+        }
+        assert!(
+            mac_examples >= 2,
+            "expected the corpus's example + same-indent MAC `pattern` pairs, got {mac_examples}"
+        );
+    }
+
     /// True when `s` is a well-formed RFC 3339 `date-time` string — the concrete
     /// syntax OpenAPI's `format: date-time` names (JSON Schema's `date-time` is
     /// RFC 3339 §5.6). Shape-only and lenient on the calendar (it range-checks each
