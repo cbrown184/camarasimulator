@@ -4623,6 +4623,121 @@ mod tests {
         out
     }
 
+    /// True when `key` names a **JSON-family** media type — exactly
+    /// `application/json`, or any subtype carrying the RFC 6839 `+json`
+    /// structured-syntax suffix (`application/cloudevents+json`,
+    /// `application/merge-patch+json`). Media-type `type`/`subtype` tokens are
+    /// case-insensitive (RFC 2045 §5.1) and any `;`-introduced parameters name the
+    /// media *range*'s modifiers, not its type, so both are normalised away before
+    /// the comparison. A non-JSON type (`text/plain`, `application/xml`,
+    /// `application/octet-stream`, a `*` range) is not JSON-family.
+    fn is_json_family_media_type(key: &str) -> bool {
+        let base = key
+            .split(';')
+            .next()
+            .unwrap_or(key)
+            .trim()
+            .to_ascii_lowercase();
+        base == "application/json" || base.ends_with("+json")
+    }
+
+    /// Enumerate every **well-formed** media type a mounted business spec declares
+    /// directly under a `content:` Content Object that is not a JSON-family type —
+    /// reported as `"<path> <media-type>"` in document order, without a YAML dep.
+    ///
+    /// CAMARA Commonalities mandates JSON request/response payloads: every CamaraSim
+    /// handler serialises JSON, so the only media types the corpus declares are
+    /// `application/json` and the two `+json` structured-syntax variants CAMARA uses
+    /// — `application/cloudevents+json` (notification callbacks) and
+    /// `application/merge-patch+json` (the PATCH bodies). A content key naming any
+    /// other type — a `text/plain`, `application/xml`, or `application/octet-stream`
+    /// pasted from a non-CAMARA template — advertises a wire format the simulator
+    /// never emits, so a Redoc/Swagger/codegen client negotiates or builds a body at
+    /// a content type no handler produces.
+    ///
+    /// This is the *semantic-family* complement of
+    /// [`media_types_with_invalid_names`] (`every_media_type_key_names_a_valid_mime_type`),
+    /// which pins a content key's MIME *syntax* but accepts `text/plain` /
+    /// `application/xml` / `application/*` as perfectly valid, and of
+    /// [`media_types_missing_schema`], which pins that a media type carries a schema
+    /// but never reads *which* media type it is. Neither — nor any other content
+    /// sweep — restricts the type to JSON. Only *syntactically valid* media types are
+    /// judged here (via [`is_valid_media_type_key`]): a malformed key is
+    /// `media_types_with_invalid_names`' concern, so the two tests never double-report
+    /// the same key.
+    ///
+    /// Scoping mirrors [`media_types_with_invalid_names`] exactly: only within
+    /// `paths:`, only a `c+2` direct child of a `content:` mapping at indent `c`, and
+    /// a `content:` block qualifies as a Content Object only when a direct child is
+    /// itself MIME-shaped (contains a `/`) — so a schema **property** literally named
+    /// `content` is never mistaken for a media-type mapping.
+    fn content_media_types_not_json_family(body: &str) -> Vec<String> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let mut out = Vec::new();
+        let mut in_paths = false;
+        let mut path: Option<String> = None;
+        for (i, line) in lines.iter().enumerate() {
+            let is_top_level_key =
+                !line.is_empty() && !line.starts_with(char::is_whitespace);
+            if is_top_level_key {
+                in_paths = line.trim_end() == "paths:";
+                path = None;
+                continue;
+            }
+            if !in_paths {
+                continue;
+            }
+            if let Some(rest) = line.strip_prefix("  ") {
+                if !rest.starts_with(char::is_whitespace) && rest.starts_with('/') {
+                    let key = rest.trim_end().strip_suffix(':').unwrap_or(rest.trim_end());
+                    path = Some(key.to_string());
+                    continue;
+                }
+            }
+            if line.trim() != "content:" {
+                continue;
+            }
+            let Some(current_path) = path.as_deref() else { continue };
+            let c = indent(line);
+            // Collect this block's direct child keys (each media-type slot sits at
+            // c+2), in document order, walking until the block dedents out.
+            let mut children: Vec<&str> = Vec::new();
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) <= c {
+                    break; // dedented out of this content object
+                }
+                if indent(l) == c + 2 {
+                    let trimmed = l.trim_start();
+                    if !trimmed.starts_with('#') {
+                        if let Some((k, _)) = trimmed.split_once(':') {
+                            children.push(k.trim());
+                        }
+                    }
+                }
+                j += 1;
+            }
+            // Qualify as a Content Object only if a child is MIME-shaped; otherwise
+            // this is a schema property named `content`, not a media-type mapping.
+            if children.iter().any(|k| k.contains('/')) {
+                for k in children {
+                    // Only judge syntactically valid media types; a malformed key
+                    // belongs to `media_types_with_invalid_names`.
+                    if is_valid_media_type_key(k) && !is_json_family_media_type(k) {
+                        out.push(format!("{current_path} {k}"));
+                    }
+                }
+            }
+        }
+        out
+    }
+
     /// Enumerate every key a spec declares directly under a Path Item Object (a
     /// 4-space child of a 2-space `/…` path item beneath the top-level `paths:`
     /// block) that is neither a valid HTTP method nor a permitted Path Item field —
@@ -11386,6 +11501,163 @@ components:
         assert!(
             total_content_objects >= 50,
             "expected many content objects across specs, got {total_content_objects}"
+        );
+    }
+
+    #[test]
+    fn every_content_media_type_is_json_family() {
+        // Contract-harness invariant (CAMARA API Design Guidelines / Commonalities):
+        // every media type a mounted business spec declares under a `content:` Content
+        // Object MUST be JSON-family — `application/json`, or a `+json` structured-
+        // syntax subtype. CamaraSim is JSON-only: every handler serialises JSON, so
+        // the only content types the corpus carries are `application/json` and the two
+        // `+json` variants CAMARA standardises — `application/cloudevents+json` (the
+        // notification callbacks) and `application/merge-patch+json` (the PATCH bodies).
+        // A content key naming any other type — a `text/plain`, `application/xml`, or
+        // `application/octet-stream` pasted from a non-CAMARA template — advertises a
+        // wire format the simulator never emits, so a Redoc/Swagger "try it" panel or a
+        // codegen client negotiates or builds a body at a content type no route serves.
+        //
+        // This is the semantic-family complement of
+        // `every_media_type_key_names_a_valid_mime_type`, which pins a content key's
+        // MIME *syntax* yet accepts `text/plain` / `application/xml` / `application/*`
+        // as valid, and of `every_media_type_declares_a_schema`, which pins that a
+        // media type carries a schema but never reads which type it is — neither, nor
+        // any other content sweep, restricts the type to JSON. The auth spec's
+        // `application/x-www-form-urlencoded` token endpoints (RFC 6749) are out of
+        // scope here: `APIS` is the business-API registry and never lists `auth`, so
+        // the OAuth form bodies — the corpus's only non-JSON content — are not judged.
+        // Verified true across all mounted business specs before asserting.
+        for api in APIS {
+            let non_json = content_media_types_not_json_family(api.body);
+            assert!(
+                non_json.is_empty(),
+                "{} spec declares a non-JSON content media type (CAMARA payloads are \
+                 JSON — `application/json` or a `+json` subtype): {:?}",
+                api.name,
+                non_json
+            );
+        }
+    }
+
+    #[test]
+    fn content_media_type_json_family_extraction_rules() {
+        // Pin the JSON-family predicate so the contract test above can't drift: the
+        // exact `application/json`, every `+json` structured-syntax suffix (regardless
+        // of case or trailing parameters), pass; a non-JSON type fails.
+        for ok in [
+            "application/json",
+            "application/cloudevents+json",
+            "application/merge-patch+json",
+            "application/problem+json",
+            "APPLICATION/JSON",                 // case-insensitive type/subtype
+            "application/json; charset=utf-8",  // parameters ignored
+            "application/vnd.acme.thing+json",  // vendor tree with +json suffix
+        ] {
+            assert!(is_json_family_media_type(ok), "should accept {ok:?}");
+        }
+        for bad in [
+            "application/x-www-form-urlencoded",
+            "text/plain",
+            "application/xml",
+            "application/octet-stream",
+            "multipart/form-data",
+            "*/*",
+            "application/*",
+            "application/jsonx", // not a +json suffix, and not exactly application/json
+        ] {
+            assert!(!is_json_family_media_type(bad), "should reject {bad:?}");
+        }
+
+        // Unit-cover the `content_media_types_not_json_family` extractor: within
+        // `paths:`, a Content Object's well-formed non-JSON media types are flagged in
+        // document order; JSON-family ones are not; a malformed key (no slash) is left
+        // to `media_types_with_invalid_names` and never double-reported here; and a
+        // schema *property* literally named `content` is not a Content Object.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    post:
+      operationId: postA
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: \"#/components/schemas/Req\"
+          text/plain:
+            schema:
+              type: string
+      responses:
+        '200':
+          description: ok
+          content:
+            application/merge-patch+json:
+              schema:
+                type: object
+                properties:
+                  content:
+                    type: string
+        '400':
+          description: bad
+          content:
+            application/xml:
+              schema:
+                type: string
+            applicationjson:
+              schema:
+                type: string
+components:
+  schemas:
+    Req:
+      type: object
+      properties:
+        content:
+          type: string
+";
+        // Flagged, in document order: the request-body `text/plain` and the `400`
+        // response's `application/xml` — both well-formed and non-JSON. Not flagged:
+        // the two JSON-family types; the `applicationjson` malformed key (owned by
+        // `media_types_with_invalid_names`); the `content` *property* nested inside the
+        // `200` response's inline schema (no MIME-shaped child, opens no Content
+        // Object); and the `content` property under `components.schemas` (outside
+        // `paths:`).
+        assert_eq!(
+            content_media_types_not_json_family(body),
+            vec![
+                "/a text/plain".to_string(),
+                "/a application/xml".to_string(),
+            ]
+        );
+
+        // Non-vacuous floor: across every registered spec, every content media type is
+        // JSON-family (the invariant the contract test asserts), and the corpus
+        // actually declares many JSON-family content types, so a broken extractor can't
+        // hide behind an empty scan.
+        let mut json_family_media_types = 0usize;
+        for api in APIS {
+            assert!(
+                content_media_types_not_json_family(api.body).is_empty(),
+                "{}: every content media type must be JSON-family",
+                api.name
+            );
+            for line in api.body.lines() {
+                if let Some((k, _)) = line.trim_start().split_once(':') {
+                    if k.contains('/')
+                        && is_valid_media_type_key(k)
+                        && is_json_family_media_type(k)
+                    {
+                        json_family_media_types += 1;
+                    }
+                }
+            }
+        }
+        assert!(
+            json_family_media_types >= 100,
+            "expected many JSON-family content media types across specs, got {json_family_media_types}"
         );
     }
 

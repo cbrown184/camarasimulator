@@ -3332,6 +3332,26 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - a **JSON-family content-media-type** contract test (`src/registry.rs`
+    `every_content_media_type_is_json_family`) asserts every media type a mounted
+    business spec declares under a `content:` Content Object is JSON-family —
+    `application/json` or a `+json` structured-syntax subtype. CamaraSim is JSON-only
+    (every handler serialises JSON), and the corpus's only content types are
+    `application/json` + the two CAMARA `+json` variants
+    (`application/cloudevents+json` callbacks, `application/merge-patch+json` PATCH
+    bodies). The **semantic-family complement** of
+    `every_media_type_key_names_a_valid_mime_type` (which pins a content key's MIME
+    *syntax* yet accepts `text/plain`/`application/xml`/`application/*` as valid) and
+    of `every_media_type_declares_a_schema` (which never reads *which* type it is): a
+    non-JSON content key advertises a wire format no route emits. New pure
+    `content_media_types_not_json_family` + `is_json_family_media_type` (no YAML dep)
+    reuse `media_types_with_invalid_names`' `content:`-object scoping; only
+    syntactically valid keys are judged (a malformed key stays the sibling test's,
+    never double-reported). Auth's `application/x-www-form-urlencoded` token endpoints
+    are out of scope (`APIS` never lists `auth`). Surveyed the corpus first (399
+    content media types across the 60 business specs, all JSON-family) → 0 drift.
+    Unit-covered (`content_media_type_json_family_extraction_rules`), ≥100-media-type
+    floor.
   - a **canonical-`apiRoot`-server-variable** contract test (`src/registry.rs`
     `every_server_variable_is_named_apiroot`) asserts every mounted spec's server
     variable is named exactly `apiRoot` — the single Server Variable CAMARA
@@ -5312,6 +5332,37 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-19 — Contract-test harness: added a **JSON-family content-media-type** contract test
+  (`src/registry.rs` `every_content_media_type_is_json_family`) — every media type a mounted
+  business spec declares under a `content:` Content Object MUST be JSON-family: `application/json`
+  or a `+json` structured-syntax subtype. CamaraSim is JSON-only (every handler serialises JSON),
+  and CAMARA Commonalities mandates JSON payloads, so the corpus's only content types are
+  `application/json` plus the two CAMARA `+json` variants — `application/cloudevents+json`
+  (notification callbacks) and `application/merge-patch+json` (PATCH bodies). A content key naming
+  any other type (a `text/plain`, `application/xml`, `application/octet-stream` pasted from a
+  non-CAMARA template) advertises a wire format no route emits, so a Redoc/Swagger "try it" panel
+  or a codegen client negotiates/builds a body at a content type no handler produces. The
+  **semantic-family complement** of `every_media_type_key_names_a_valid_mime_type` (which pins a
+  content key's MIME *syntax* yet accepts `text/plain`/`application/xml`/`application/*` as valid)
+  and of `every_media_type_declares_a_schema` (which pins the schema is present but never reads
+  *which* type it is) — no existing content sweep restricts the type to JSON. New pure
+  `content_media_types_not_json_family` extractor + `is_json_family_media_type` predicate (no YAML
+  dep) reuse `media_types_with_invalid_names`' `content:`-object scoping (a `content:` block
+  qualifies only when a direct child is MIME-shaped, so a schema property named `content` is never
+  mistaken for a media-type mapping); only *syntactically valid* media types are judged (a
+  malformed key stays `media_types_with_invalid_names`', never double-reported). Auth's
+  `application/x-www-form-urlencoded` OAuth form endpoints (RFC 6749) are out of scope — `APIS` is
+  the business-API registry and never lists `auth`, the corpus's only non-JSON content. **Surveyed
+  the corpus first: 399 content media types across the 60 business specs, all JSON-family → 0
+  drift.** Non-vacuity from the unit test (`content_media_type_json_family_extraction_rules`:
+  `application/json`/`+json`/vendor-`+json` pass, case-insensitively and ignoring `;`-parameters;
+  `text/plain`/`application/xml`/`octet-stream`/`x-www-form-urlencoded`/`*/*`/`application/*`
+  rejected; a two-non-JSON-media-type body flags both in document order while a malformed
+  `applicationjson` key and a schema property named `content` are not; ≥100-media-type corpus
+  floor). Test-side only — no request/response/behaviour change, so no vendored-spec edits.
+  `cargo test` 2748 green (was 2746; +2); `cargo build --release` succeeds. No new dependency; the
+  extractor, predicate, and both tests live in the `#[cfg(test)]` module, so nothing ships in the
+  binary. — binary (release): 5.1M (5,323,160 B; unchanged)
 - 2026-08-18 — Contract-test harness: added a **canonical-`apiRoot`-server-variable** contract
   test (`src/registry.rs` `every_server_variable_is_named_apiroot`) — every mounted spec's server
   variable MUST be named exactly `apiRoot`, the single Server Variable CAMARA Commonalities pins
