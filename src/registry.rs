@@ -18206,6 +18206,212 @@ paths:
         );
     }
 
+    /// The `<path> -> {var}` label of every **path-template variable** a mounted
+    /// spec interpolates into a `paths:` key that no path parameter binds — without
+    /// a YAML dep.
+    ///
+    /// OpenAPI path templating requires that **every** `{name}` a path key
+    /// interpolates be backed by a Parameter Object with `in: path` and a matching
+    /// `name` (the well-known `path-declarations-must-exist` / `oas3-path-parameters`
+    /// lint). A template variable with no such parameter renders in Redoc/Swagger as
+    /// an unnamed, undocumented path segment — no description, no schema — and a
+    /// codegen client generates no argument to fill it, so the operation's request
+    /// URL can never be assembled at exactly the segment that varies. The routine
+    /// hazard in these specs: a resource path is pasted from a sibling
+    /// (`/payments/{paymentId}`) while the `parameters:` entry — or the shared
+    /// `components.parameters` `$ref` that supplies it — is not carried along,
+    /// leaving the `{…}` dangling.
+    ///
+    /// This is the reverse direction of the declared-side path-parameter tests,
+    /// which no existing test covers: [`path_parameters_missing_required_true`]
+    /// reads each *declared* `in: path` parameter and checks its `required: true`,
+    /// and [`declared_path_parameter_names`] collects those declared names — but
+    /// neither asks whether every *template variable* actually has one; and
+    /// `every_path_template_key_is_well_formed` only checks the `{…}` brace *syntax*
+    /// of the key, never that the name inside resolves to a parameter.
+    ///
+    /// Template variables are the balanced `{`…`}` spans (non-empty,
+    /// whitespace-free name) of each [`path_item_keys`] entry; an unbalanced or
+    /// empty brace yields no span and is the well-formedness test's concern, so it
+    /// is never mis-flagged here. The declared set is [`declared_path_parameter_names`],
+    /// which gathers the `name` of every `in: path` parameter object across the
+    /// whole document — both inline `parameters:` sequence items and the
+    /// `components.parameters` mapping form a `$ref` resolves to (so a
+    /// `- $ref: "#/components/parameters/PaymentId"` counts through its component's
+    /// `name`, without this test resolving the pointer itself). That document-wide
+    /// scope is a deliberate accept-side leniency: a variable is bound when *some*
+    /// path parameter of that name is declared anywhere (CamaraSim declares each
+    /// once — mostly as a shared component parameter — and reuses it), so a
+    /// correctly-`$ref`ed parameter is never false-flagged, at the cost of not
+    /// distinguishing two same-named variables on different paths (not a shape the
+    /// corpus exhibits). Reported in document order, deduped per `path -> {var}`.
+    fn unbound_path_template_variables(body: &str) -> Vec<String> {
+        let declared = declared_path_parameter_names(body);
+        let mut out = Vec::new();
+        for path in path_item_keys(body) {
+            let mut name = String::new();
+            let mut in_var = false;
+            for ch in path.chars() {
+                match ch {
+                    '{' => {
+                        in_var = true;
+                        name.clear();
+                    }
+                    '}' if in_var => {
+                        in_var = false;
+                        // A well-formed, non-empty, whitespace-free variable name
+                        // that no declared `in: path` parameter binds.
+                        if !name.is_empty()
+                            && !name.contains(char::is_whitespace)
+                            && !declared.contains(name.as_str())
+                        {
+                            let label = format!("{path} -> {{{name}}}");
+                            if !out.contains(&label) {
+                                out.push(label);
+                            }
+                        }
+                        name.clear();
+                    }
+                    _ if in_var => name.push(ch),
+                    _ => {}
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_path_template_variable_has_a_declared_path_parameter() {
+        // Contract-harness invariant (OpenAPI path-templating rule;
+        // `path-declarations-must-exist`): every `{name}` a mounted spec
+        // interpolates into a `paths:` key MUST be bound by a Parameter Object with
+        // `in: path` and that `name` — an inline `parameters:` entry or a
+        // `components.parameters` object a `$ref` supplies. A dangling variable
+        // renders as an unnamed, undocumented, unfillable path segment (no schema,
+        // no codegen argument) exactly where the URL varies. This is the reverse of
+        // the declared-side tests — `every_path_parameter_declares_required_true`
+        // reads declared path params, `every_path_template_key_is_well_formed`
+        // checks only the brace *syntax* of the key — neither cross-checks a
+        // template variable against a real parameter. Verified true across all
+        // mounted specs before asserting.
+        for api in APIS {
+            let unbound = unbound_path_template_variables(api.body);
+            assert!(
+                unbound.is_empty(),
+                "{} spec interpolates path-template variable(s) with no declared \
+                 `in: path` parameter (an unnamed, unfillable path segment): {:?}",
+                api.name,
+                unbound
+            );
+        }
+    }
+
+    #[test]
+    fn path_template_variable_binding_extraction_rules() {
+        // Unit-cover `unbound_path_template_variables` so the contract test above
+        // can't pass vacuously and its accept/flag boundary is pinned: a variable
+        // bound by an inline `in: path` parameter passes; one bound only through a
+        // `components.parameters` `$ref` (the component's own `name`/`in: path`)
+        // passes — the `$ref`-resolution path the corpus relies on; a variable with
+        // no parameter at all is flagged; a variable whose same-named parameter is
+        // `in: query` (not `path`) is flagged (only path parameters bind); and a
+        // path with no template variable contributes nothing. Flags are in document
+        // order.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /sessions/{sessionId}:
+    get:
+      operationId: getSession
+      parameters:
+        - name: sessionId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: ok
+  /payments/{paymentId}:
+    get:
+      operationId: getPayment
+      parameters:
+        - $ref: \"#/components/parameters/PaymentId\"
+      responses:
+        '200':
+          description: ok
+  /orphan/{missing}:
+    get:
+      operationId: getOrphan
+      responses:
+        '200':
+          description: ok
+  /q/{qvar}:
+    get:
+      operationId: getQ
+      parameters:
+        - name: qvar
+          in: query
+          schema:
+            type: string
+      responses:
+        '200':
+          description: ok
+  /plain/list:
+    get:
+      operationId: listPlain
+      responses:
+        '200':
+          description: ok
+components:
+  parameters:
+    PaymentId:
+      name: paymentId
+      in: path
+      required: true
+      schema:
+        type: string
+";
+        // Flagged, in document order: `/orphan/{missing}` (no parameter at all) and
+        // `/q/{qvar}` (its `qvar` parameter is `in: query`, not `path`). NOT flagged:
+        // `/sessions/{sessionId}` (inline `in: path`), `/payments/{paymentId}`
+        // (bound through the `PaymentId` component parameter's `in: path`), and
+        // `/plain/list` (no template variable).
+        assert_eq!(
+            unbound_path_template_variables(body),
+            vec![
+                "/orphan/{missing} -> {missing}".to_string(),
+                "/q/{qvar} -> {qvar}".to_string(),
+            ]
+        );
+
+        // Non-vacuous floor: across every registered spec every path-template
+        // variable is bound by a declared path parameter (the invariant the contract
+        // test asserts), and the corpus actually interpolates many such variables —
+        // so the membership-check path runs on real data and a broken (always-empty)
+        // extractor can't hide behind a corpus with no templated paths. Count
+        // template `{` openers with a detection independent of the extractor.
+        let mut templated = 0usize;
+        for api in APIS {
+            assert!(
+                unbound_path_template_variables(api.body).is_empty(),
+                "{}: every path-template variable must be bound by a declared \
+                 `in: path` parameter",
+                api.name
+            );
+            for path in path_item_keys(api.body) {
+                templated += path.matches('{').count();
+            }
+        }
+        assert!(
+            templated >= 40,
+            "expected many templated path variables across specs, got {templated}"
+        );
+    }
+
     /// Extract a descriptor for every `properties:` object a spec declares that
     /// lists the **same property name twice** — without a YAML dep.
     ///

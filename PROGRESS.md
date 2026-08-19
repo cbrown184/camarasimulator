@@ -3332,6 +3332,31 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - a **path-template-variable binding** contract test (`src/registry.rs`
+    `every_path_template_variable_has_a_declared_path_parameter`) asserts every
+    `{name}` a mounted spec interpolates into a `paths:` key is bound by a
+    Parameter Object with `in: path` and that `name` — the well-known
+    `path-declarations-must-exist` / `oas3-path-parameters` lint. A dangling
+    variable renders in Redoc/Swagger as an unnamed, undocumented, unfillable path
+    segment (no schema, no codegen argument) exactly where the URL varies. The
+    **reverse of the declared-side path-parameter tests**:
+    `every_path_parameter_declares_required_true` reads each *declared* `in: path`
+    param and checks its `required: true`, and `every_path_template_key_is_well_formed`
+    checks only the `{…}` brace *syntax* of the key — neither cross-checks a
+    template variable against a real parameter. New pure
+    `unbound_path_template_variables` extractor (no YAML dep) reuses the vetted
+    `path_item_keys` (balanced `{`…`}` spans) and `declared_path_parameter_names`,
+    which gathers `in: path` names from both inline `parameters:` sequence items
+    and the `components.parameters` mapping form a `$ref` resolves to — so a
+    `- $ref: "#/components/parameters/PaymentId"` counts through its component's
+    `name` without this test resolving the pointer. Document-wide declared scope is
+    a documented accept-side leniency (never false-flags a correctly-`$ref`ed
+    param). Surveyed the corpus first (51 templated variables across the mounted
+    specs — e.g. QoD `{sessionId}`, carrier-billing `{paymentId}`, click-to-dial
+    `{callId}`, dedicated-network `{networkId}`, all bound) → 0 drift. Unit-covered
+    (`path_template_variable_binding_extraction_rules`: inline-`path` bind,
+    component-`$ref` bind, no-param and `in: query` mismatch both flagged in
+    document order), ≥40-templated-variable floor.
   - a **JSON-family content-media-type** contract test (`src/registry.rs`
     `every_content_media_type_is_json_family`) asserts every media type a mounted
     business spec declares under a `content:` Content Object is JSON-family —
@@ -5332,6 +5357,39 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-19 — Contract-test harness: added a **path-template-variable binding** contract test
+  (`src/registry.rs` `every_path_template_variable_has_a_declared_path_parameter`) — every
+  `{name}` a mounted spec interpolates into a `paths:` key MUST be bound by a Parameter Object
+  with `in: path` and that `name` (the well-known `path-declarations-must-exist` /
+  `oas3-path-parameters` lint). A dangling template variable renders in Redoc/Swagger as an
+  unnamed, undocumented, unfillable path segment — no schema, no codegen argument — exactly where
+  the request URL varies; the routine hazard is a resource path pasted from a sibling
+  (`/payments/{paymentId}`) while its `parameters:` entry (or the shared `components.parameters`
+  `$ref` supplying it) is not carried along. The **reverse direction** of the declared-side tests:
+  `every_path_parameter_declares_required_true` reads each *declared* `in: path` param and checks
+  `required: true`, and `every_path_template_key_is_well_formed` checks only the `{…}` brace
+  *syntax* of the key — neither cross-checks a template variable against a real parameter. New pure
+  `unbound_path_template_variables` extractor (no YAML dep) reuses the vetted `path_item_keys`
+  (balanced `{`…`}` spans; a malformed/empty brace yields no span, staying the well-formedness
+  test's concern) and `declared_path_parameter_names`, which gathers `in: path` names from both
+  inline `parameters:` sequence items **and** the `components.parameters` mapping form a `$ref`
+  resolves to — so `- $ref: "#/components/parameters/PaymentId"` counts through its component's
+  `name` without this test resolving the pointer. Document-wide declared scope is a documented
+  accept-side leniency: a variable is bound when *some* path parameter of that name is declared
+  anywhere (CamaraSim declares each once — mostly as a shared component parameter — and reuses it),
+  so a correctly-`$ref`ed parameter is never false-flagged, at the cost of not distinguishing two
+  same-named variables on different paths (not a shape the corpus exhibits). **Surveyed the corpus
+  first: 51 templated variables across the mounted specs (QoD `{sessionId}`, carrier-billing
+  `{paymentId}`, blockchain `{id}`, click-to-dial `{callId}`, traffic-influence
+  `{trafficInfluenceID}`, dedicated-network `{networkId}`/`{accessId}`, edge-application-management
+  `{appId}`/`{appInstanceId}`/`{appDeploymentId}`, …), all bound → 0 drift.** Non-vacuity from the
+  unit test (`path_template_variable_binding_extraction_rules`: an inline-`in: path` bind and a
+  component-`$ref` bind both pass; a variable with no parameter and one whose same-named parameter
+  is `in: query` are both flagged in document order; a no-variable path contributes nothing;
+  ≥40-templated-variable corpus floor). Test-side only — no request/response/behaviour change, so
+  no vendored-spec edits. `cargo test` 2750 green (was 2748; +2); `cargo build --release` succeeds.
+  No new dependency; the extractor and both tests live in the `#[cfg(test)]` module, so nothing
+  ships in the binary. — binary (release): 5.1M (5,323,160 B; unchanged)
 - 2026-08-19 — Contract-test harness: added a **JSON-family content-media-type** contract test
   (`src/registry.rs` `every_content_media_type_is_json_family`) — every media type a mounted
   business spec declares under a `content:` Content Object MUST be JSON-family: `application/json`
