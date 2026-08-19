@@ -13094,6 +13094,252 @@ components:
         );
     }
 
+    /// Enumerate the 1-based line numbers of every object-schema `required:` array a
+    /// spec declares that is **empty** — a bare `required: []` (flow) or a `required:`
+    /// block whose only `-` items carry no name — without a YAML dep.
+    ///
+    /// OpenAPI 3.0.3's Schema Object constrains `required` to `minItems: 1` (the
+    /// official v3.0 meta-schema pins `type: array`, `items: {type: string}`,
+    /// `minItems: 1`, `uniqueItems: true`). An empty `required: []` is therefore an
+    /// **invalid 3.0.3 document**: it declares "this object requires some property"
+    /// while naming none, so a strict validator rejects the schema and a Redoc/Swagger
+    /// or codegen tool reads a contradictory, do-nothing constraint exactly where a
+    /// caller builds the payload. (This is why the sibling
+    /// `required_arrays_with_duplicate_entries` deliberately lets an empty array pass —
+    /// it is legal under OpenAPI 3.1 / JSON-Schema 2020-12; but every mounted spec pins
+    /// `openapi: 3.0.3`, enforced by `every_spec_pins_the_camara_openapi_3_0_3_version`,
+    /// so under the version the corpus actually declares, empty is invalid.) The live
+    /// drift it catches: a `required:` block whose every entry was deleted or renamed
+    /// away in an edit, leaving the now-meaningless empty shell behind.
+    ///
+    /// The **non-empty complement** of `every_required_array_lists_distinct_entries`
+    /// (which pins the *upper* structure — no repeats — but never the lower bound):
+    /// together they pin a `required` array to a non-empty set of distinct names,
+    /// mirroring how `every_parameter_declares_at_most_one_of_schema_or_content` caps
+    /// `every_parameter_declares_a_schema_or_content`. No sibling test reads a
+    /// `required` array's *cardinality*: the distinct-entries test tolerates empty by
+    /// design, and `required_entries_without_a_declared_property` cross-checks the
+    /// *names* an array lists (an empty array lists none, so it passes vacuously).
+    ///
+    /// Scoping clones `required_arrays_with_duplicate_entries` exactly — the scalar
+    /// `required: true`/`false` parameter/requestBody flag is never read as an array
+    /// (flow form must open with `[`; block form is a list only when its first non-blank
+    /// child is a `-` item), and a `- required:` sequence-item opener sits under a `- `
+    /// and is out of scope in both, an accepted leniency (harmless: such inline
+    /// `oneOf`/`anyOf`-member arrays in the corpus are single-element, never empty).
+    fn empty_required_arrays(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        // Unquote a scalar and trim a trailing ` # comment` (mirrors the sibling).
+        let norm = |raw: &str| -> String {
+            let mut v = raw.trim();
+            if let Some(pos) = v.find(" #") {
+                v = v[..pos].trim_end();
+            }
+            let v = v.trim();
+            let unq = v
+                .strip_prefix('"')
+                .and_then(|s| s.strip_suffix('"'))
+                .or_else(|| v.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')))
+                .unwrap_or(v);
+            unq.trim().to_string()
+        };
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < lines.len() {
+            let line = lines[i];
+            let t = line.trim_start();
+            if !t.starts_with("required:") {
+                i += 1;
+                continue;
+            }
+            let rest = t["required:".len()..].trim_start();
+            if rest.starts_with('[') {
+                // Flow list — gather across lines until the closing `]`.
+                let mut buf = rest.to_string();
+                let mut k = i;
+                while !buf.contains(']') && k + 1 < lines.len() {
+                    k += 1;
+                    buf.push(' ');
+                    buf.push_str(lines[k].trim());
+                }
+                let open = buf.find('[').map(|x| x + 1).unwrap_or(0);
+                let close = buf.rfind(']').unwrap_or(buf.len());
+                let inner = if close >= open { &buf[open..close] } else { "" };
+                let values: Vec<String> = if inner.trim().is_empty() {
+                    Vec::new()
+                } else {
+                    inner.split(',').map(|s| norm(s)).filter(|v| !v.is_empty()).collect()
+                };
+                if values.is_empty() {
+                    out.push(i + 1);
+                }
+                i = k + 1;
+                continue;
+            }
+            // Block form (empty value or only a trailing comment): a list only when its
+            // first non-blank child is a `- ` item (never a scalar `required: true` or a
+            // mapping). Flag when the list holds no non-empty entry.
+            if rest.is_empty() || rest.starts_with('#') {
+                let base = indent(line);
+                let mut values: Vec<String> = Vec::new();
+                let mut first_child_seen = false;
+                let mut is_list = false;
+                let mut j = i + 1;
+                while j < lines.len() {
+                    let l = lines[j];
+                    if l.trim().is_empty() || l.trim_start().starts_with('#') {
+                        j += 1;
+                        continue;
+                    }
+                    if indent(l) <= base {
+                        break; // dedented out of the required block
+                    }
+                    let item = l.trim_start();
+                    if !first_child_seen {
+                        first_child_seen = true;
+                        is_list = item.starts_with('-');
+                        if !is_list {
+                            break; // not a required array (e.g. a mapping child)
+                        }
+                    }
+                    if !item.starts_with('-') {
+                        break; // end of the contiguous list
+                    }
+                    let val = norm(item[1..].trim_start());
+                    if !val.is_empty() {
+                        values.push(val);
+                    }
+                    j += 1;
+                }
+                if is_list && values.is_empty() {
+                    out.push(i + 1);
+                }
+                i = j;
+                continue;
+            }
+            // Scalar `required: true` / `required: false` — a boolean flag, not an
+            // array; nothing to check.
+            i += 1;
+        }
+        out
+    }
+
+    #[test]
+    fn every_required_array_is_non_empty() {
+        // Contract-harness invariant (OpenAPI 3.0.3 structural rule): every
+        // object-schema `required:` array a mounted spec declares MUST be non-empty —
+        // the v3.0 Schema Object pins `required` to `minItems: 1`. An empty
+        // `required: []` is an invalid 3.0.3 document: it asserts the object requires
+        // some property while naming none, so a strict validator rejects it and a
+        // codegen/Redoc client reads a contradictory, do-nothing constraint right where
+        // a caller builds the payload.
+        //
+        // The non-empty complement of `every_required_array_lists_distinct_entries`
+        // (which caps the array with a no-repeats rule but, tolerating OpenAPI 3.1's
+        // empty-required, never sets its lower bound): together they pin a `required`
+        // array to a non-empty set of distinct names. Since every mounted spec pins
+        // `openapi: 3.0.3` (`every_spec_pins_the_camara_openapi_3_0_3_version`), the
+        // 3.0.3 lower bound applies to the whole corpus. Verified true across all
+        // mounted specs before asserting.
+        for api in APIS {
+            let empty = empty_required_arrays(api.body);
+            assert!(
+                empty.is_empty(),
+                "{} spec declares an empty `required` array (OpenAPI 3.0.3 pins \
+                 `required` to minItems: 1 — an empty array is an invalid, \
+                 do-nothing constraint) at line(s): {:?}",
+                api.name,
+                empty
+            );
+        }
+    }
+
+    #[test]
+    fn required_array_non_empty_extraction_rules() {
+        // Unit-cover the `empty_required_arrays` extractor so the contract test above
+        // can't pass vacuously and its detection is pinned: an empty flow `required: []`
+        // and a block `required:` whose only child is a bare `-` (no name) are both
+        // flagged; a scalar `required: true` boolean is never mistaken for an array; and
+        // non-empty flow / block required arrays pass. All in document order.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /x:
+    get:
+      parameters:
+        - name: q
+          in: query
+          required: true
+components:
+  schemas:
+    EmptyFlow:
+      type: object
+      required: []
+    EmptyBlock:
+      type: object
+      required:
+        -
+      properties:
+        a:
+          type: string
+    GoodFlow:
+      type: object
+      required: [device]
+    GoodBlock:
+      type: object
+      required:
+        - a
+        - b
+";
+        // Flagged, in document order: `EmptyFlow.required: []` (line 16) and
+        // `EmptyBlock.required:` (line 19, a lone nameless `-` child). Not flagged: the
+        // parameter's scalar `required: true` (a boolean flag, not an array), and
+        // `GoodFlow` / `GoodBlock` (each lists ≥1 entry).
+        assert_eq!(empty_required_arrays(body), vec![16, 19]);
+
+        // Non-vacuous floor: across every registered spec no `required` array is empty
+        // (the invariant the contract test asserts), and the corpus actually declares
+        // many *non-empty* array-form `required` blocks — so the parse-and-count path
+        // runs on real data and a broken (always-empty) extractor can't hide behind a
+        // corpus that never declares one. Count array-form `required:` declarations
+        // (flow `[…]` or a block whose next non-blank child is a `- ` item)
+        // independently of the extractor, and confirm none is flagged empty.
+        let mut array_required = 0usize;
+        for api in APIS {
+            assert!(
+                empty_required_arrays(api.body).is_empty(),
+                "{}: every `required` array must be non-empty",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            for (idx, line) in lines.iter().enumerate() {
+                let t = line.trim_start();
+                let Some(rest) = t.strip_prefix("required:") else { continue };
+                let rest = rest.trim_start();
+                if rest.starts_with('[') {
+                    array_required += 1;
+                } else if rest.is_empty() || rest.starts_with('#') {
+                    if lines[idx + 1..]
+                        .iter()
+                        .map(|l| l.trim())
+                        .find(|l| !l.is_empty() && !l.starts_with('#'))
+                        .is_some_and(|l| l.starts_with('-'))
+                    {
+                        array_required += 1;
+                    }
+                }
+            }
+        }
+        assert!(
+            array_required >= 100,
+            "expected many array-form `required` blocks across specs, got {array_required}"
+        );
+    }
+
     /// Enumerate every object-schema `required:` entry a spec declares that names a
     /// property the *same object* does not define under its sibling `properties:`
     /// block — reported as `"required '<entry>' not in properties [<keys>]"` in

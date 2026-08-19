@@ -3332,6 +3332,28 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - a **non-empty-`required`-array** contract test (`src/registry.rs`
+    `every_required_array_is_non_empty`) asserts no object-schema `required:` array a
+    mounted spec declares is empty — OpenAPI 3.0.3's Schema Object pins `required` to
+    `minItems: 1` (the v3.0 meta-schema: `type: array`, `items: {type: string}`,
+    `minItems: 1`, `uniqueItems: true`), so a bare `required: []` is an invalid 3.0.3
+    document that asserts the object requires *some* property while naming none. The
+    **non-empty complement** of `every_required_array_lists_distinct_entries` — which
+    caps the array (no repeats) but, tolerating OpenAPI 3.1's legal empty-required,
+    never sets its lower bound; together they pin a `required` array to a non-empty set
+    of distinct names (mirroring how the schema/content at-most-one test caps the
+    at-least-one test). Every mounted spec pins `openapi: 3.0.3`
+    (`every_spec_pins_the_camara_openapi_3_0_3_version`), so the 3.0.3 lower bound
+    applies corpus-wide. New pure `empty_required_arrays` extractor (no YAML dep) clones
+    `required_arrays_with_duplicate_entries`'s scoping exactly (the scalar
+    `required: true`/`false` flag is never read as an array; flow form opens with `[`,
+    block form is a list only when its first child is a `-` item; `- required:`
+    sequence-item openers out of scope — harmless, such inline arrays are single-element)
+    and flags a flow `required: []` or a block whose only `-` items carry no name.
+    Surveyed the corpus first (no empty `required` array across the 60 mounted specs,
+    many non-empty ones) → 0 drift. Unit-covered
+    (`required_array_non_empty_extraction_rules`: empty flow + bare-`-` block flagged,
+    scalar `required: true` / non-empty flow+block cleared; ≥100 array-form floor).
   - a **duplicate-component-key** contract test (`src/registry.rs`
     `every_components_object_lists_distinct_component_keys`) asserts no
     `components:` sub-object a mounted spec declares — `schemas:`, `parameters:`,
@@ -5402,6 +5424,40 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-19 — Contract-test harness: added a **non-empty-`required`-array** contract test
+  (`src/registry.rs` `every_required_array_is_non_empty`) — no object-schema `required:`
+  array a mounted spec declares may be empty. OpenAPI 3.0.3's Schema Object pins `required`
+  to `minItems: 1` (the official v3.0 meta-schema: `type: array`, `items: {type: string}`,
+  `minItems: 1`, `uniqueItems: true`), so a bare `required: []` is an **invalid 3.0.3
+  document** — it asserts the object requires *some* property while naming none, so a strict
+  validator rejects the schema and a Redoc/Swagger/codegen client reads a contradictory,
+  do-nothing constraint exactly where a caller builds the payload. The **non-empty
+  complement** of `every_required_array_lists_distinct_entries`, which caps a `required`
+  array (no repeats) but — deliberately, since an empty array is legal under OpenAPI 3.1 /
+  JSON-Schema 2020-12 — never set its lower bound; together they now pin a `required` array
+  to a non-empty set of distinct names (mirroring how
+  `every_parameter_declares_at_most_one_of_schema_or_content` caps
+  `every_parameter_declares_a_schema_or_content`). The 3.0.3 lower bound applies corpus-wide
+  because every mounted spec pins `openapi: 3.0.3`
+  (`every_spec_pins_the_camara_openapi_3_0_3_version`). No sibling test reads a `required`
+  array's *cardinality*: the distinct-entries test tolerates empty by design, and
+  `required_entries_without_a_declared_property` cross-checks the *names* an array lists (an
+  empty array lists none → passes vacuously). New pure `empty_required_arrays` extractor (no
+  YAML dep) clones `required_arrays_with_duplicate_entries`'s scoping exactly — the scalar
+  `required: true`/`false` parameter/requestBody flag is never read as an array (flow form
+  opens with `[`; block form is a list only when its first non-blank child is a `-` item), a
+  `- required:` sequence-item opener sits under a `- ` and is out of scope in both (accepted
+  leniency, harmless: such inline `oneOf`/`anyOf`-member arrays in the corpus are
+  single-element, never empty) — flagging a flow `required: []` or a block whose only `-`
+  items carry no name, by 1-based line. **Surveyed the corpus first: no empty `required`
+  array across the 60 mounted specs (many non-empty ones) → 0 drift.** Unit-covered
+  (`required_array_non_empty_extraction_rules`: an empty flow `required: []` and a block
+  `required:` whose only child is a bare nameless `-` both flagged in document order; a
+  scalar `required: true` boolean and non-empty flow/block arrays all cleared; ≥100
+  array-form `required`-block floor). Test-side only — no request/response/behaviour change,
+  so no vendored-spec edits. `cargo test` 2760 green (was 2758; +2); `cargo build --release`
+  succeeds. No new dependency; the extractor and both tests live in the `#[cfg(test)]`
+  module, so nothing ships in the binary. — binary (release): 5.1M (5,323,160 B; unchanged)
 - 2026-08-19 — Contract-test harness: added a **duplicate-component-key** contract test
   (`src/registry.rs` `every_components_object_lists_distinct_component_keys`) — no
   `components:` sub-object a mounted spec declares (`schemas:`/`parameters:`/`responses:`/
