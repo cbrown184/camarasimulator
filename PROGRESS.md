@@ -3332,6 +3332,24 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - an **IMEI-`pattern` example-conformance** contract test (`src/registry.rs`
+    `every_imei_pattern_example_conforms_to_the_imei_pattern`) asserts that where a mounted
+    spec declares an inline `example` beside a same-indent `pattern: '^[0-9]{15}$'` (the IMEI
+    pattern the CAMARA device specs use verbatim), the example is exactly 15 decimal digits.
+    The **second member of the `pattern`-conformance family** after
+    `every_e164_pattern_example_conforms_to_the_e164_pattern`, and the first that reaches
+    examples the `format`-example family cannot: the UUID patterns always sit beside a
+    `format: uuid` (already guarded by `every_uuid_format_example_is_a_well_formed_uuid`), but
+    the IMEI pattern carries **no `format`**, so an `imei` example's shape was previously
+    unchecked. New pure `matches_imei_pattern` (exactly 15 ASCII digits; no regex dep) +
+    `imei_pattern_examples_malformed` extractor cloning `e164_pattern_examples_malformed`'s
+    scoping exactly (inline scalar `example`; same-indent `pattern` sibling *equal to*
+    `IMEI_PATTERN` scanned down-then-up dedent-bounded; outer-`example:`-payload / block-opener
+    skipped). Surveyed the corpus first: 5 example+IMEI-`pattern` pairs (device-authenticity ×2,
+    esim-remote-management ×2, device-identifier ×1), all 15-digit → 0 drift. Unit-covered
+    (`imei_pattern_example_extraction_rules`: too-short/too-long/non-digit/pattern-below flagged
+    in document order; valid quoted+unquoted, no-pattern, E.164-pattern sibling, nested-`example`,
+    cross-property, block-opener cleared; ≥4-pair non-vacuous floor).
   - an **int32-`format` default-conformance** contract test (`src/registry.rs`
     `every_int32_format_default_is_a_well_formed_int32`) asserts that where a mounted spec
     declares an inline `default` beside a same-indent `format: int32`, the default is an
@@ -5494,6 +5512,38 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-19 — Contract-test harness: added an **IMEI-`pattern` example-conformance**
+  contract test (`src/registry.rs` `every_imei_pattern_example_conforms_to_the_imei_pattern`)
+  — where a mounted spec declares an inline `example` beside a **same-indent**
+  `pattern: '^[0-9]{15}$'`, the example MUST be exactly 15 decimal digits. An `example` is a
+  sample instance of the schema, so an IMEI the pattern rejects (a digit dropped or added, a
+  placeholder pasted beside the pattern) is a self-contradictory schema whose own validator
+  rejects the sample it advertises — a Redoc/Swagger prefill and a codegen client's generated
+  sample then carry a value the field can never legally hold. The **second member of the
+  `pattern`-conformance family** after `every_e164_pattern_example_conforms_to_the_e164_pattern`
+  and the **first that reaches examples the `format`-example family cannot**: the corpus's UUID
+  patterns always sit beside a `format: uuid` (already guarded by
+  `every_uuid_format_example_is_a_well_formed_uuid`), but the IMEI pattern has **no `format`
+  sibling**, so an `imei` example's shape was previously unguarded — no existing test reads an
+  example against its `pattern` (`every_pattern_declares_a_non_empty_string` checks only the
+  pattern keyword's own value; the example-value family checks an example's type / length /
+  numeric bounds / enum membership, never its pattern). New pure `matches_imei_pattern` (exactly
+  15 ASCII digits; no regex dep, mirroring `matches_e164_pattern`'s shape-only stance) +
+  `imei_pattern_examples_malformed` extractor cloning `e164_pattern_examples_malformed`'s scoping
+  exactly (an inline scalar `example`; a same-indent `pattern` sibling *equal to* the IMEI literal
+  scanned down-then-up, dedent-bounded; an `example` inside an outer `example:`/`examples:` payload
+  or a block-opening `example:` skipped; only the IMEI pattern matched — other patterns out of
+  scope). **Surveyed the corpus first: 5 example+IMEI-`pattern` pairs across the mounted specs
+  (device-authenticity ×2, esim-remote-management ×2, device-identifier ×1), all exactly 15 digits
+  → 0 drift; a live guard that fires the moment a spec adds a mis-shaped IMEI example.**
+  Unit-covered (`imei_pattern_example_extraction_rules`: a 5-digit, a 16-digit, an embedded-`X`,
+  and a `nope` with its `pattern` a line below all flagged in document order; a valid quoted and
+  unquoted 15-digit value, a no-`pattern` sibling, an E.164-`pattern` sibling, a nested-`example`
+  payload, a cross-property split, and a property literally named `example` opening a block all
+  cleared; ≥4-pair non-vacuous floor). Test-side only — no request/response/behaviour change, so
+  no vendored-spec edits. `cargo test` 2774 green (was 2772; +2); `cargo build --release`
+  succeeds. No new dependency; the extractor and both tests live in the `#[cfg(test)]` module, so
+  nothing ships in the binary. — binary (release): 5.1M (5,323,160 B; unchanged)
 - 2026-08-19 — Contract-test harness: added a **`readOnly`/`writeOnly` mutual-exclusion**
   contract test (`src/registry.rs` `no_schema_is_both_read_only_and_write_only`) — no Schema
   Object may mark a property as **both** `readOnly: true` and `writeOnly: true`. In OpenAPI

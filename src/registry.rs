@@ -24357,6 +24357,347 @@ components:
         );
     }
 
+    /// The IMEI `pattern` the CAMARA device specs use verbatim (written in YAML as
+    /// `'^[0-9]{15}$'`): exactly 15 decimal digits. After E.164 it is the corpus's
+    /// most-declared *fixed-shape* `pattern` (a device `imei` field recurs across the
+    /// device-authenticity / device-identifier / eSIM APIs) and, unlike a `format: uuid`
+    /// field, carries **no `format` sibling** — so its examples are the highest-coverage
+    /// `pattern` examples the `format`-example family cannot reach. The natural second
+    /// member of the `pattern`-conformance family after `E164_PATTERN`.
+    const IMEI_PATTERN: &str = r"^[0-9]{15}$";
+
+    /// True when `s` matches the IMEI `pattern` `^[0-9]{15}$` exactly: exactly 15 ASCII
+    /// decimal digits, nothing else. Hand-rolled (no regex dep) mirroring
+    /// `matches_e164_pattern`'s shape-only stance, so a legitimately shaped IMEI is never
+    /// a false positive.
+    fn matches_imei_pattern(s: &str) -> bool {
+        let b = s.as_bytes();
+        b.len() == 15 && b.iter().all(u8::is_ascii_digit)
+    }
+
+    /// The 1-based line numbers, in document order, of every `example:` keyword whose
+    /// inline scalar value sits in a Schema Object declaring a *same-indent*
+    /// `pattern: '^[0-9]{15}$'` sibling yet does not match that IMEI pattern, without a
+    /// YAML dep. The IMEI twin of `e164_pattern_examples_malformed`: same scoping, keyed
+    /// on `IMEI_PATTERN` instead of `E164_PATTERN`.
+    ///
+    /// In OpenAPI 3.0.x (JSON Schema) an `example` is a sample *instance* of the schema,
+    /// so a field constrained by `pattern` MUST carry an example the pattern accepts. An
+    /// IMEI example that is not exactly 15 digits — a digit dropped or added, a placeholder
+    /// pasted beside the pattern — advertises a sample the schema's own validator rejects,
+    /// so a Redoc/Swagger prefill and a codegen client's generated sample carry a value the
+    /// field can never legally hold. A live hazard in these device specs, where an `imei`
+    /// example is hand-authored per API and copied between siblings. Unlike the UUID
+    /// patterns (which always sit beside a `format: uuid` already guarded by
+    /// `every_uuid_format_example_is_a_well_formed_uuid`), the IMEI pattern has no `format`,
+    /// so these examples are otherwise unchecked.
+    ///
+    /// Scoping mirrors `e164_pattern_examples_malformed` exactly: only an `example`
+    /// carrying an inline scalar (a block/object example opens no inline value and is
+    /// skipped) with a same-indent `pattern` sibling *equal to* `IMEI_PATTERN` in the same
+    /// Schema Object is inspected — the sibling is scanned at the example's own indent,
+    /// down through the object's block then up, dedent-bounded, so a nested or following
+    /// object's `pattern` never pairs. An `example:` nested inside an outer
+    /// `example:`/`examples:` payload (sample data, not a schema keyword) is skipped. Only
+    /// the IMEI pattern is matched; other patterns are out of scope.
+    fn imei_pattern_examples_malformed(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let raw_inline = |l: &str, name: &str| -> Option<String> {
+            let (k, v) = l.trim_start().split_once(':')?;
+            if k.trim() != name {
+                return None;
+            }
+            let v = v.split('#').next().unwrap_or(v).trim();
+            if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            }
+        };
+        // Whether a same-indent `pattern:` sibling of line `i` (indent `c`) in the same
+        // Schema Object equals the IMEI pattern: scan down through the object's block then
+        // up, dedent-bounded so a nested or following object's `pattern` never pairs.
+        let sibling_is_imei_pattern = |i: usize, c: usize| -> bool {
+            let is_imei_pattern = |l: &str| -> bool {
+                raw_inline(l, "pattern")
+                    .map(|v| v.trim_matches('"').trim_matches('\'') == IMEI_PATTERN)
+                    .unwrap_or(false)
+            };
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_imei_pattern(l) {
+                    return true;
+                }
+                j += 1;
+            }
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_imei_pattern(l) {
+                    return true;
+                }
+            }
+            false
+        };
+        // True when line `i` (indent `c`) sits inside an outer `example:`/`examples:`
+        // payload — some enclosing container key up the indent ladder is
+        // `example`/`examples` — so an inner `example` key there is sample data, not a
+        // schema keyword.
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some(raw) = raw_inline(line, "example") else {
+                continue;
+            };
+            let c = indent(line);
+            if inside_example(i, c) {
+                continue;
+            }
+            if !sibling_is_imei_pattern(i, c) {
+                continue;
+            }
+            let value = raw.trim_matches('"').trim_matches('\'');
+            if !matches_imei_pattern(value) {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_imei_pattern_example_conforms_to_the_imei_pattern() {
+        // Contract-harness invariant (OpenAPI 3.0.x / JSON-Schema structural rule): where
+        // a Schema Object declares an inline `example` beside a same-indent
+        // `pattern: '^[0-9]{15}$'` (the IMEI pattern the CAMARA device specs use verbatim),
+        // the example MUST match that pattern. An `example` is a sample *instance* of the
+        // schema, so a value the `pattern` rejects — an IMEI with a digit dropped or added,
+        // or a placeholder pasted beside the pattern — is a self-contradictory schema whose
+        // own validator rejects the sample it advertises, so a Redoc/Swagger prefill and a
+        // codegen client's generated sample carry a value no field constrained by this
+        // pattern can legally hold.
+        //
+        // The second member of the `pattern`-conformance family after
+        // `every_e164_pattern_example_conforms_to_the_e164_pattern`, and the first that
+        // reaches examples the `format`-example family cannot: the UUID patterns always sit
+        // beside a `format: uuid` (already guarded by
+        // `every_uuid_format_example_is_a_well_formed_uuid`), but the IMEI pattern carries
+        // no `format`, so an `imei` example's shape was previously unchecked — no existing
+        // test reads an example against its `pattern` (`every_pattern_declares_a_non_empty_
+        // string` checks the pattern keyword's own value; the example-value family checks an
+        // example's JSON type / length / numeric bounds / enum membership, never its
+        // pattern). A general regex-engine test would need a new dependency (declined on
+        // binary-size grounds), so a concrete hand-validated shape is matched. Verified true
+        // across all mounted specs before asserting.
+        for api in APIS {
+            let offenders = imei_pattern_examples_malformed(api.body);
+            assert!(
+                offenders.is_empty(),
+                "{} spec declares an `example` beside a same-indent IMEI \
+                 `pattern: '^[0-9]{{15}}$'` that does not match that pattern (a sample the \
+                 pattern's own validator would reject) at `example:` line(s): {:?}",
+                api.name,
+                offenders
+            );
+        }
+    }
+
+    #[test]
+    fn imei_pattern_example_extraction_rules() {
+        // Unit-cover `matches_imei_pattern` and `imei_pattern_examples_malformed` so the
+        // contract test above can't pass vacuously and its detection is pinned.
+        //
+        // Shape check: exactly 15 decimal digits passes; 14 or 16 digits, an embedded
+        // non-digit, and an empty string all fail.
+        assert!(matches_imei_pattern("490154203237518")); // 15 digits
+        assert!(matches_imei_pattern("000000000000000")); // 15 digits (all zero)
+        assert!(!matches_imei_pattern("49015420323751")); // 14 digits — too short
+        assert!(!matches_imei_pattern("1234567890123456")); // 16 digits — too long
+        assert!(!matches_imei_pattern("49015420323751X")); // non-digit
+        assert!(!matches_imei_pattern("")); // empty
+
+        // Extractor: a valid quoted and a valid unquoted IMEI (each beside a same-indent
+        // IMEI `pattern`) pass; a too-short, a too-long, and a non-digit value are flagged;
+        // a bad value whose `pattern` is declared *below* it is still paired (down-scan) and
+        // flagged; a value with no `pattern` sibling and one whose sibling is a *different*
+        // pattern (E.164) are skipped; an inner `example` inside an outer `example:` payload
+        // is skipped; an example in one property never pairs with a following property's
+        // `pattern` across the dedent; and a property literally named `example` (opening a
+        // block) is skipped.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    GoodQuoted:
+      type: string
+      pattern: '^[0-9]{15}$'
+      example: \"490154203237518\"
+    GoodUnquoted:
+      type: string
+      pattern: '^[0-9]{15}$'
+      example: 490154203237518
+    TooShort:
+      type: string
+      pattern: '^[0-9]{15}$'
+      example: \"12345\"
+    TooLong:
+      type: string
+      pattern: '^[0-9]{15}$'
+      example: \"1234567890123456\"
+    NonDigit:
+      type: string
+      pattern: '^[0-9]{15}$'
+      example: \"49015420323751X\"
+    PatternBelow:
+      type: string
+      example: \"nope\"
+      pattern: '^[0-9]{15}$'
+    NoPattern:
+      type: string
+      example: \"490154203237518-but-no-pattern\"
+    OtherPattern:
+      type: string
+      pattern: '^\\+[1-9][0-9]{4,14}$'
+      example: \"+123456789012\"
+    InExample:
+      type: object
+      example:
+        pattern: '^[0-9]{15}$'
+        example: \"bad\"
+    Split:
+      type: object
+      properties:
+        a:
+          example: \"bad\"
+        b:
+          type: string
+          pattern: '^[0-9]{15}$'
+    NamedExample:
+      type: object
+      properties:
+        example:
+          type: string
+          pattern: '^[0-9]{15}$'
+";
+        // Flagged, in document order: TooShort.example (line 25, 5 digits), TooLong.example
+        // (line 29, 16 digits), NonDigit.example (line 33, an embedded `X`), and
+        // PatternBelow.example (line 36, value `nope` with its IMEI `pattern` a line below —
+        // down-scan pairs it). Not flagged: GoodQuoted/GoodUnquoted (valid 15-digit);
+        // NoPattern (no `pattern` sibling); OtherPattern (sibling is the E.164 pattern, not
+        // IMEI); InExample's inner `example: \"bad\"` (sits inside the outer `example:`
+        // payload); Split.a.example, whose only IMEI `pattern` is in the following property
+        // Split.b past a dedent; and NamedExample's `example:` property opening a block (no
+        // inline value).
+        assert_eq!(imei_pattern_examples_malformed(body), vec![25, 29, 33, 36]);
+
+        // Non-vacuous floor: across every registered spec every `example` beside a
+        // same-indent IMEI `pattern` matches it (the invariant the contract test asserts),
+        // and the corpus actually declares several such pairs — so the pattern-comparison
+        // path runs on real data and a broken (always-empty) extractor can't hide behind a
+        // corpus that never pairs an example with the IMEI pattern. Count pairs with a
+        // same-indent detector independent of the extractor's shape comparison.
+        let mut imei_examples = 0usize;
+        for api in APIS {
+            assert!(
+                imei_pattern_examples_malformed(api.body).is_empty(),
+                "{}: every example beside a same-indent IMEI `pattern` must match it",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            let is_key = |l: &str, name: &str, val: Option<&str>| {
+                l.trim_start().split_once(':').is_some_and(|(k, v)| {
+                    k.trim() == name
+                        && val.is_none_or(|want| {
+                            v.split('#')
+                                .next()
+                                .unwrap_or(v)
+                                .trim()
+                                .trim_matches('"')
+                                .trim_matches('\'')
+                                == want
+                        })
+                })
+            };
+            for (i, l) in lines.iter().enumerate() {
+                if !is_key(l, "example", None) {
+                    continue;
+                }
+                if l.trim_start()
+                    .split_once(':')
+                    .map(|(_, v)| v.split('#').next().unwrap_or(v).trim().is_empty())
+                    .unwrap_or(true)
+                {
+                    continue;
+                }
+                let c = indent(l);
+                let lo = i.saturating_sub(6);
+                let hi = (i + 6).min(lines.len());
+                let has_imei_pattern = (lo..hi).any(|j| {
+                    j != i
+                        && indent(lines[j]) == c
+                        && is_key(lines[j], "pattern", Some(IMEI_PATTERN))
+                });
+                if has_imei_pattern {
+                    imei_examples += 1;
+                }
+            }
+        }
+        assert!(
+            imei_examples >= 4,
+            "expected several example + same-indent IMEI `pattern` pairs across specs, got {imei_examples}"
+        );
+    }
+
     /// True when `s` is a well-formed RFC 3339 `date-time` string — the concrete
     /// syntax OpenAPI's `format: date-time` names (JSON Schema's `date-time` is
     /// RFC 3339 §5.6). Shape-only and lenient on the calendar (it range-checks each
