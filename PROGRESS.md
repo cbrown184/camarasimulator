@@ -3332,6 +3332,27 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - a **numeric-`example` `multipleOf`-conformance** contract test (`src/registry.rs`
+    `every_numeric_example_conforms_to_its_multiple_of`) asserts that where a mounted
+    spec declares a numeric `example` beside a `multipleOf`, the example is an integer
+    multiple of that step. An `example` is a sample instance of the schema, so an
+    off-grid value (`example: 2.5` under `multipleOf: 1`) advertises a sample the
+    schema's own validator rejects. The **`multipleOf` analogue of
+    `every_example_is_within_its_numeric_bounds`**: range and step are the two numeric
+    value-domain constraints an `example` can carry, and no existing test read the step
+    (the bounds test compares only `minimum`/`maximum`;
+    `every_numeric_schema_keyword_carries_a_number` checks `multipleOf` is a positive
+    number but never against an example; `every_example_matches_its_schema_type` checks
+    type not divisibility). New pure `examples_violating_their_multiple_of` extractor (no
+    YAML dep) clones `examples_outside_their_numeric_bounds`'s scoping (unquoted numeric
+    example scalar; same-object `multipleOf` sibling, down-then-up dedent-bounded scan;
+    outer-`example:`-payload / quoted / non-numeric / block-opener skipped) and tests
+    divisibility with a **relative** float tolerance `1e-9*max(1,|q|)`, `q = value / m`
+    (absorbs a genuine multiple's binary representation error, flags a true non-multiple;
+    a non-positive `multipleOf` skipped). Surveyed the corpus first: the one
+    example+`multipleOf` pair (Carrier Billing `ChargingInformation.amount` `9.99` vs
+    `0.001`) is a clean multiple → 0 drift. Unit-covered
+    (`example_multiple_of_extraction_rules`), ≥1 example+`multipleOf`-pair floor.
   - a **non-empty-`required`-array** contract test (`src/registry.rs`
     `every_required_array_is_non_empty`) asserts no object-schema `required:` array a
     mounted spec declares is empty — OpenAPI 3.0.3's Schema Object pins `required` to
@@ -5424,6 +5445,40 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-19 — Contract-test harness: added a **numeric-`example` `multipleOf`-conformance**
+  contract test (`src/registry.rs` `every_numeric_example_conforms_to_its_multiple_of`) — where
+  a Schema Object declares a numeric `example` beside a `multipleOf`, the example MUST be an
+  integer multiple of that step. An `example` is a sample *instance* of the schema, so a value
+  off the grid (`example: 2.5` under `multipleOf: 1`, `example: 9.9995` under `multipleOf:
+  0.001`) is a self-contradictory schema: the schema advertises a sample its own validator
+  rejects, so a Redoc/Swagger "try it" prefill and a codegen client's generated sample carry a
+  value the step can never legally hold. The **`multipleOf` analogue of
+  `every_example_is_within_its_numeric_bounds`** (an example vs its `minimum`/`maximum`): the two
+  numeric value-domain constraints an `example` can carry are its range and its step, and no
+  existing test read the step — the bounds test compares only against `minimum`/`maximum`,
+  `every_numeric_schema_keyword_carries_a_number` checks a `multipleOf` is a positive number but
+  never against a sibling example, and `every_example_matches_its_schema_type` checks an
+  example's *type* never its divisibility. New pure `examples_violating_their_multiple_of`
+  extractor (no YAML dep) clones `examples_outside_their_numeric_bounds`'s scoping exactly (an
+  unquoted numeric `example` scalar; a same-object `multipleOf` sibling scanned at the example's
+  own indent, down then up, dedent-bounded; an `example:` inside an outer `example:`/`examples:`
+  payload skipped; a quoted/non-numeric/blockless example skipped) and adds the divisibility
+  test. Multiplicity is inherently floating-point (`0.001` and `float`-typed amounts aren't exact
+  in binary), so conformance is `|q - round(q)|` against a **relative** tolerance `1e-9 *
+  max(1,|q|)` where `q = value / m` — loose enough to absorb a genuine multiple's representation
+  error (`9.99 / 0.001` → `9990`, diff `0`), tight enough to flag a true non-multiple (`12/5 =
+  2.4`, `9.995/0.01 = 999.5`); a non-positive `multipleOf` is skipped (a different test's concern
+  and a div-by-zero guard). **Surveyed the corpus first: the one numeric example+`multipleOf`
+  pair — Carrier Billing's `ChargingInformation.amount` `example: 9.99` beside `multipleOf:
+  0.001` — is a clean multiple → 0 drift.** Unit-covered (`example_multiple_of_extraction_rules`:
+  a `12`/`5` non-multiple above and a `9.995`/`0.01` non-multiple below flagged in document
+  order; integer and the real `9.99`/`0.001` decimal multiples cleared; `multipleOf: 0`, a quoted
+  `'12'`, a non-numeric `hello`, a step-less example, a nested `example:` payload, a
+  cross-property split, and a `example:` block-opener all skipped; ≥1 example+`multipleOf` pair
+  floor). Test-side only — no request/response/behaviour change, so no vendored-spec edits.
+  `cargo test` 2762 green (was 2760; +2); `cargo build --release` succeeds. No new dependency;
+  the extractor and both tests live in the `#[cfg(test)]` module, so nothing ships in the binary.
+  — binary (release): 5.1M (5,323,160 B; unchanged)
 - 2026-08-19 — Contract-test harness: added a **non-empty-`required`-array** contract test
   (`src/registry.rs` `every_required_array_is_non_empty`) — no object-schema `required:`
   array a mounted spec declares may be empty. OpenAPI 3.0.3's Schema Object pins `required`

@@ -21863,6 +21863,334 @@ components:
         );
     }
 
+    /// The 1-based line numbers, in document order, of every numeric `example:` keyword
+    /// whose inline unquoted value is **not an integer multiple** of a sibling
+    /// `multipleOf` declared in the same Schema Object, without a YAML dep. The
+    /// `multipleOf` analogue of `examples_outside_their_numeric_bounds` (which guards a
+    /// numeric example against `minimum`/`maximum`): together they cover the numeric
+    /// value-domain an `example` can violate — its range *and* its step.
+    ///
+    /// In OpenAPI 3.0.x (JSON Schema) an `example` is a sample *instance* of the schema,
+    /// so it MUST satisfy the schema's own constraints. Where the object constrains a
+    /// number with `multipleOf: m` (m > 0), a sample that is not an integer multiple of
+    /// `m` — an `example: 2.5` under `multipleOf: 1`, an `example: 9.9995` under
+    /// `multipleOf: 0.001` — is a self-contradictory schema: the schema advertises a
+    /// sample its own validator rejects, so a Redoc/Swagger "try it" prefill and a
+    /// codegen client's generated sample carry a value the step constraint can never
+    /// legally hold. The corpus does declare such a pair (a currency `amount`
+    /// `example: 9.99` beside `multipleOf: 0.001`), so the check runs on real data.
+    ///
+    /// Multiplicity is inherently a floating-point test (`0.001` and `float`-typed
+    /// amounts are not exact in binary), so conformance is `|q - round(q)|` against a
+    /// **relative** tolerance `1e-9 * max(1, |q|)` where `q = value / m` — loose enough
+    /// to absorb the representation error of a genuine multiple (`9.99 / 0.001` lands on
+    /// `9990` to within `0`), tight enough to flag a true non-multiple (`12 / 5 = 2.4`,
+    /// `9.995 / 0.01 = 999.5`). A non-positive or non-numeric `multipleOf` is skipped
+    /// here (a `multipleOf <= 0` is `every_numeric_schema_keyword_carries_a_number`'s
+    /// concern, and dividing by it is meaningless).
+    ///
+    /// Scoping mirrors `examples_outside_their_numeric_bounds` exactly: only an
+    /// `example` carrying an inline *unquoted numeric* scalar with a same-object
+    /// `multipleOf` sibling (scanned at the example's own indent, down through the
+    /// object's block then up, dedent-bounded so a nested or following sibling object's
+    /// keyword never pairs) is inspected. Skipped: an `example:` that opens a block (a
+    /// property literally named `example`, or an object/array example); a quoted or
+    /// non-numeric example (the type / length test's concern); an example with no
+    /// `multipleOf` sibling; and an `example:` nested inside an outer `example:`/
+    /// `examples:` payload (sample data, not a schema keyword).
+    fn examples_violating_their_multiple_of(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let raw_inline = |l: &str, name: &str| -> Option<String> {
+            let (k, v) = l.trim_start().split_once(':')?;
+            if k.trim() != name {
+                return None;
+            }
+            let v = v.split('#').next().unwrap_or(v).trim();
+            if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            }
+        };
+        // A same-indent `multipleOf` sibling in the same object as line `i` (indent
+        // `c`): scan down through the object's block then up, dedent-bounded so a nested
+        // or following object's keyword never pairs. Returns the parsed number only for
+        // an unquoted numeric scalar.
+        let sibling_num = |i: usize, c: usize, key: &str| -> Option<f64> {
+            let parse_num = |l: &str| -> Option<f64> {
+                let raw = raw_inline(l, key)?;
+                if raw.starts_with('"') || raw.starts_with('\'') {
+                    return None;
+                }
+                raw.parse::<f64>().ok()
+            };
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c {
+                    if let Some(n) = parse_num(l) {
+                        return Some(n);
+                    }
+                }
+                j += 1;
+            }
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c {
+                    if let Some(n) = parse_num(l) {
+                        return Some(n);
+                    }
+                }
+            }
+            None
+        };
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some(raw) = raw_inline(line, "example") else {
+                continue;
+            };
+            if raw.starts_with('"') || raw.starts_with('\'') {
+                continue;
+            }
+            let Ok(val) = raw.parse::<f64>() else {
+                continue;
+            };
+            let c = indent(line);
+            if inside_example(i, c) {
+                continue;
+            }
+            let Some(m) = sibling_num(i, c, "multipleOf") else {
+                continue;
+            };
+            if m <= 0.0 {
+                continue; // a non-positive multipleOf is a different test's concern
+            }
+            let q = val / m;
+            let tol = 1e-9 * q.abs().max(1.0);
+            if (q - q.round()).abs() > tol {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_numeric_example_conforms_to_its_multiple_of() {
+        // Contract-harness invariant (OpenAPI 3.0.x / JSON-Schema structural rule):
+        // where a Schema Object declares a numeric `example` beside a `multipleOf`, the
+        // example MUST be an integer multiple of that step. An `example` is a sample
+        // *instance* of the schema, so a value off the step — an `example: 2.5` under
+        // `multipleOf: 1`, an `example: 9.9995` under `multipleOf: 0.001` — is a
+        // self-contradictory schema: the schema advertises a sample its own validator
+        // rejects, so a Redoc/Swagger "try it" form pre-fills a control with an
+        // off-grid value and a codegen client's generated sample fails the step's own
+        // check.
+        //
+        // The `multipleOf` analogue of `every_example_is_within_its_numeric_bounds` (an
+        // example vs its `minimum`/`maximum`): the two numeric value-domain constraints
+        // an `example` can carry are its range and its step, and neither existing test
+        // reads the step — `every_example_is_within_its_numeric_bounds` compares only
+        // against the bounds, `every_numeric_schema_keyword_carries_a_number` checks a
+        // `multipleOf` is a positive number but never against a sibling example, and
+        // `every_example_matches_its_schema_type` checks an example's type never its
+        // divisibility. The corpus declares a real pair (a currency `amount`
+        // `example: 9.99` beside `multipleOf: 0.001`), so the divisibility path runs on
+        // live data. Verified true across all mounted specs before asserting.
+        for api in APIS {
+            let offenders = examples_violating_their_multiple_of(api.body);
+            assert!(
+                offenders.is_empty(),
+                "{} spec declares a numeric `example` that is not an integer multiple of \
+                 its sibling `multipleOf` (a value the step's own validator would reject) \
+                 at `example:` line(s): {:?}",
+                api.name,
+                offenders
+            );
+        }
+    }
+
+    #[test]
+    fn example_multiple_of_extraction_rules() {
+        // Unit-cover `examples_violating_their_multiple_of` so the contract test above
+        // can't pass vacuously and its detection is pinned: an example that is a clean
+        // multiple passes (integer and the real `9.99`/`0.001` decimal case); a
+        // non-multiple whose `multipleOf` sits above it and one whose `multipleOf` sits
+        // below it (down-scan) are both flagged in document order; a `multipleOf: 0`
+        // sibling is skipped (a different test's concern, and a div-by-zero guard); a
+        // quoted or non-numeric example is skipped; an example with no `multipleOf`
+        // sibling is skipped; an `example:` nested inside an outer `example:` payload is
+        // skipped; an example in one property never pairs with a following property's
+        // `multipleOf` across the dedent; and an `example:` opening a block (a property
+        // literally named `example`) is skipped.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    GoodInt:
+      type: integer
+      multipleOf: 5
+      example: 20
+    GoodDecimal:
+      type: number
+      multipleOf: 0.001
+      example: 9.99
+    BadAboveStep:
+      type: integer
+      multipleOf: 5
+      example: 12
+    BadBelowStep:
+      type: number
+      example: 9.995
+      multipleOf: 0.01
+    ZeroStep:
+      type: number
+      multipleOf: 0
+      example: 7
+    Quoted:
+      type: string
+      multipleOf: 5
+      example: '12'
+    NonNumeric:
+      type: string
+      multipleOf: 5
+      example: hello
+    NoStep:
+      type: integer
+      example: 13
+    NestedExample:
+      type: object
+      example:
+        multipleOf: 5
+        example: 12
+    Split:
+      type: object
+      properties:
+        a:
+          example: 12
+        b:
+          type: integer
+          multipleOf: 5
+    NamedExample:
+      type: object
+      properties:
+        example:
+          type: integer
+          multipleOf: 5
+";
+        // Flagged, in document order: line 25 (`BadAboveStep.example: 12`, 12/5 = 2.4,
+        // its `multipleOf: 5` sibling above) and line 28 (`BadBelowStep.example: 9.995`,
+        // 9.995/0.01 = 999.5, its `multipleOf: 0.01` sibling below — down-scan). Not
+        // flagged: `GoodInt` (20/5 = 4); `GoodDecimal` (9.99/0.001 = 9990, the real
+        // corpus shape); `ZeroStep` (`multipleOf: 0`, skipped — a different test's
+        // concern and a div-by-zero guard); `Quoted` (`'12'` is a quoted string, not a
+        // number); `NonNumeric` (`hello` isn't numeric); `NoStep` (no `multipleOf`
+        // sibling); `NestedExample` (its inner `example: 12` sits inside the outer
+        // `example:` payload); `Split.a.example: 12`, whose only candidate
+        // `multipleOf: 5` sits in the following property `Split.b` past a dedent, so the
+        // two never pair; and `NamedExample` (an `example:` opening a block has no
+        // inline scalar).
+        assert_eq!(examples_violating_their_multiple_of(body), vec![25, 28]);
+
+        // Non-vacuous floor: across every registered spec every numeric example with a
+        // sibling `multipleOf` is a clean multiple of it (the invariant the contract
+        // test asserts), and the corpus actually declares such a pair (the currency
+        // `amount` example beside its `0.001` step) — so the divisibility path runs on
+        // real data and a broken (always-empty) extractor can't hide behind a corpus
+        // that never pairs an example with a `multipleOf`. Count pairs with a window
+        // detector independent of the extractor's divisibility comparison.
+        let mut stepped_examples = 0usize;
+        for api in APIS {
+            assert!(
+                examples_violating_their_multiple_of(api.body).is_empty(),
+                "{}: every numeric example must be an integer multiple of its sibling \
+                 multipleOf",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            let is_num_key = |l: &str, name: &str| {
+                l.trim_start().split_once(':').is_some_and(|(k, v)| {
+                    k.trim() == name
+                        && v.split('#')
+                            .next()
+                            .unwrap_or(v)
+                            .trim()
+                            .parse::<f64>()
+                            .is_ok()
+                })
+            };
+            for (i, l) in lines.iter().enumerate() {
+                if !is_num_key(l, "example") {
+                    continue;
+                }
+                let c = indent(l);
+                let lo = i.saturating_sub(8);
+                let hi = (i + 8).min(lines.len());
+                let has_step = (lo..hi)
+                    .any(|j| j != i && indent(lines[j]) == c && is_num_key(lines[j], "multipleOf"));
+                if has_step {
+                    stepped_examples += 1;
+                }
+            }
+        }
+        assert!(
+            stepped_examples >= 1,
+            "expected at least one numeric example+multipleOf sibling pair across specs, \
+             got {stepped_examples}"
+        );
+    }
+
     /// The 1-based line numbers, in document order, of every `example:` keyword whose
     /// inline **quoted-string** value has a character length outside a sibling string
     /// bound — `minLength` or `maxLength` — declared in the same Schema Object, without
