@@ -3332,6 +3332,31 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - a **result-code-`pattern` example-conformance** contract test (`src/registry.rs`
+    `every_result_code_pattern_example_conforms_to_the_result_code_pattern`) asserts that where a
+    mounted spec declares an inline `example` beside a **same-indent** eSIM result-code `pattern`
+    (`^B[0-9]{6}$`, the `resultCode` pattern the eSIM Remote Management `BaseCmpResp…` envelopes
+    use verbatim), the example is a literal `B` + exactly six decimal digits (`B100000`). The
+    **eighth member of the `pattern`-conformance family** after E.164 / IMEI / ICCID / 32-hex /
+    name / MAC / token, and the **first over a fixed literal-alpha prefix + fixed-length digit
+    run**: E.164's leading `\+` is a symbol over a variable-length digit run, the IMEI/ICCID/TAC
+    members are bare digit runs with no alpha anchor, and the name/token members are variable
+    alphanumeric classes with no mandatory leading literal — so none can express a required `B`
+    sentinel then exactly six digits (a wrong prefix / wrong digit count / non-digit tail is the
+    fault they can't catch). Like the IMEI/ICCID/32-hex/MAC patterns the result-code pattern
+    carries **no `format` sibling**, so these examples were previously unchecked. New pure
+    `matches_result_code_pattern` (7 chars; `b[0]=='B'`, `b[1..]` all ASCII digits; no regex dep)
+    + `result_code_pattern_examples_malformed` extractor cloning `mac_pattern_examples_malformed`'s
+    scoping exactly (an inline scalar `example`; a same-indent `pattern` sibling *equal to*
+    `RESULT_CODE_PATTERN` scanned down-then-up dedent-bounded, stepping over the intervening
+    `maxLength`/`description` siblings both corpus pairs carry; outer-`example:`-payload /
+    block-opener / ICCID-pattern sibling skipped). Surveyed the corpus first: 2 example+result-code
+    `pattern` pairs (esim-remote-management `BaseCmpRespEidProfileListResp` /
+    `BaseCmpRespProfileResultQueryResp` `resultCode`), both `B100000` → 0 drift. Unit-covered
+    (`result_code_pattern_example_extraction_rules`: wrong-prefix / too-few-digits / non-digit-tail /
+    pattern-below flagged in document order; valid codes across an intervening description/maxLength,
+    no-pattern, ICCID-pattern sibling, nested-`example`, cross-property, block-opener cleared;
+    ≥2-pair non-vacuous floor — only two result-code schemas exist in the corpus).
   - a **token-`pattern` example-conformance** contract test (`src/registry.rs`
     `every_token_pattern_example_conforms_to_the_token_pattern`) asserts that where a mounted
     spec declares an inline `example` beside a **same-indent**
@@ -5644,6 +5669,32 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-19 — Contract-test harness: added a **result-code-`pattern` example-conformance**
+  contract test (`src/registry.rs`
+  `every_result_code_pattern_example_conforms_to_the_result_code_pattern`) — where a mounted spec
+  declares an inline `example` beside a **same-indent** eSIM result-code `pattern` (`^B[0-9]{6}$`,
+  the `resultCode` pattern the eSIM Remote Management `BaseCmpResp…` envelopes use verbatim), the
+  example MUST be a literal `B` followed by exactly six decimal digits (`B100000` — success; any
+  other value — failure). An `example` is a sample instance of the schema, so a result code the
+  pattern rejects (a wrong prefix, the wrong digit count, a non-digit tail, or a placeholder pasted
+  beside the pattern) is a self-contradictory schema whose own validator rejects the sample it
+  advertises. The **eighth member of the `pattern`-conformance family** after
+  E.164/IMEI/ICCID/32-hex/name/MAC/token, and the **first over a fixed literal-alpha prefix +
+  fixed-length digit run**: E.164's leading `\+` is a symbol over a variable-length digit run, the
+  IMEI/ICCID/TAC members are bare digit runs with no alpha anchor, and the name/token members are
+  variable alphanumeric classes with no mandatory leading literal — so none can express a required
+  `B` sentinel then exactly six digits. Carries no `format` sibling, so these examples were
+  previously unchecked. New pure `matches_result_code_pattern` + `result_code_pattern_examples_
+  malformed` extractor (cloning `mac_pattern_examples_malformed`'s down-then-up dedent-bounded
+  scoping, keyed on `RESULT_CODE_PATTERN`, stepping over the intervening `maxLength`/`description`
+  siblings both corpus pairs carry; no regex/YAML dep), unit-covered
+  (`result_code_pattern_example_extraction_rules`; ≥2-pair non-vacuous floor — only eSIM declares
+  it). Surveyed the corpus first: 2 example+result-code-`pattern` pairs (esim-remote-management
+  `BaseCmpRespEidProfileListResp` / `BaseCmpRespProfileResultQueryResp` `resultCode`), both
+  `B100000` → 0 drift. Test-side only — no request/response/behaviour change, so no vendored-spec
+  edits; the matcher, extractor and both tests live in the `#[cfg(test)]` module, so nothing ships
+  in the binary. `cargo test` 2788 green (2 new), `cargo build --release` green, no new deps. —
+  binary (release): 5.1M (5,323,160 B; unchanged).
 - 2026-08-19 — Contract-test harness: added a **token-`pattern` example-conformance**
   contract test (`src/registry.rs` `every_token_pattern_example_conforms_to_the_token_pattern`)
   — where a mounted spec declares an inline `example` beside a **same-indent**

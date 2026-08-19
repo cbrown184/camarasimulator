@@ -26973,6 +26973,373 @@ components:
         );
     }
 
+    /// The eSIM result-code `pattern` the eSIM Remote Management spec uses verbatim
+    /// (written in YAML as `'^B[0-9]{6}$'`): a literal ASCII `B` followed by exactly six
+    /// decimal digits (`B100000` — success; any other value — failure). It is the corpus's
+    /// next unguarded *fixed-shape* `pattern` (the `resultCode` of the SGP.32-style
+    /// `BaseCmpResp…` envelopes in eSIM Remote Management) and, like the IMEI/ICCID/32-hex/MAC
+    /// patterns and unlike a `format: uuid` field, carries **no `format` sibling** (there is no
+    /// OpenAPI format for an eSIM result code) — so its examples are otherwise beyond the
+    /// `format`-example family's reach. The eighth member of the `pattern`-conformance family
+    /// after E.164 / IMEI / ICCID / 32-hex / name / MAC / token, and the **first over a fixed
+    /// literal-alpha prefix + fixed-length digit run**: E.164's leading `\+` is a symbol (and
+    /// its digit run is variable-length `{4,14}`), the IMEI/ICCID/TAC members are bare digit
+    /// runs with no alpha anchor, and the name/token members are variable alphanumeric classes
+    /// with no mandatory leading literal — so none can express this pattern's shape (a required
+    /// `B` sentinel then exactly six digits), and a value with the wrong prefix, the wrong digit
+    /// count, or a non-digit tail is the fault none of them can catch.
+    const RESULT_CODE_PATTERN: &str = r"^B[0-9]{6}$";
+
+    /// True when `s` matches the eSIM result-code `pattern` `^B[0-9]{6}$` exactly: 7 characters
+    /// — a literal `B` at position 0 followed by six ASCII decimal digits. Hand-rolled (no regex
+    /// dep), faithful to the pattern (a case-sensitive `B`, exactly six digits, no more), mirroring
+    /// the E.164/IMEI/ICCID/MAC matchers' shape-only, pattern-faithful stance so a legitimately
+    /// shaped result code is never a false positive.
+    fn matches_result_code_pattern(s: &str) -> bool {
+        let b = s.as_bytes();
+        b.len() == 7 && b[0] == b'B' && b[1..].iter().all(u8::is_ascii_digit)
+    }
+
+    /// The 1-based line numbers, in document order, of every `example:` keyword whose inline
+    /// scalar value sits in a Schema Object declaring a *same-indent* eSIM result-code `pattern`
+    /// sibling yet does not match that pattern, without a YAML dep. The result-code twin of
+    /// `mac_pattern_examples_malformed`: same scoping, keyed on `RESULT_CODE_PATTERN`.
+    ///
+    /// In OpenAPI 3.0.x (JSON Schema) an `example` is a sample *instance* of the schema, so a
+    /// field constrained by `pattern` MUST carry an example the pattern accepts. A result-code
+    /// example with the wrong prefix, the wrong digit count, a non-digit tail, or a placeholder
+    /// pasted beside the pattern advertises a sample the schema's own validator rejects, so a
+    /// Redoc/Swagger prefill and a codegen client's generated sample carry a value the field can
+    /// never legally hold. Unlike the UUID patterns (guarded via their `format: uuid` sibling by
+    /// `every_uuid_format_example_is_a_well_formed_uuid`), the result-code pattern has no
+    /// `format`, so these examples are otherwise unchecked.
+    ///
+    /// Scoping mirrors `mac_pattern_examples_malformed` exactly: only an `example` carrying an
+    /// inline scalar (a block/object example opens no inline value and is skipped) with a
+    /// same-indent `pattern` sibling *equal to* `RESULT_CODE_PATTERN` in the same Schema Object is
+    /// inspected — the sibling is scanned at the example's own indent, down through the object's
+    /// block then up, dedent-bounded, so a nested or following object's `pattern` never pairs (an
+    /// intervening `maxLength`/`description` sibling at the same indent is stepped over, as both
+    /// corpus pairs have: `pattern` then `maxLength` then `description` then `example`). An
+    /// `example:` nested inside an outer `example:`/`examples:` payload (sample data, not a schema
+    /// keyword) is skipped. Only the result-code pattern is matched; other patterns are out of
+    /// scope.
+    fn result_code_pattern_examples_malformed(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let raw_inline = |l: &str, name: &str| -> Option<String> {
+            let (k, v) = l.trim_start().split_once(':')?;
+            if k.trim() != name {
+                return None;
+            }
+            let v = v.split('#').next().unwrap_or(v).trim();
+            if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            }
+        };
+        // Whether a same-indent `pattern:` sibling of line `i` (indent `c`) in the same Schema
+        // Object equals the result-code pattern: scan down through the object's block then up,
+        // dedent-bounded so a nested or following object's `pattern` never pairs.
+        let sibling_is_result_code_pattern = |i: usize, c: usize| -> bool {
+            let is_result_code_pattern = |l: &str| -> bool {
+                raw_inline(l, "pattern")
+                    .map(|v| v.trim_matches('"').trim_matches('\'') == RESULT_CODE_PATTERN)
+                    .unwrap_or(false)
+            };
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_result_code_pattern(l) {
+                    return true;
+                }
+                j += 1;
+            }
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_result_code_pattern(l) {
+                    return true;
+                }
+            }
+            false
+        };
+        // True when line `i` (indent `c`) sits inside an outer `example:`/`examples:` payload —
+        // some enclosing container key up the indent ladder is `example`/`examples` — so an
+        // inner `example` key there is sample data, not a schema keyword.
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some(raw) = raw_inline(line, "example") else {
+                continue;
+            };
+            let c = indent(line);
+            if inside_example(i, c) {
+                continue;
+            }
+            if !sibling_is_result_code_pattern(i, c) {
+                continue;
+            }
+            let value = raw.trim_matches('"').trim_matches('\'');
+            if !matches_result_code_pattern(value) {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_result_code_pattern_example_conforms_to_the_result_code_pattern() {
+        // Contract-harness invariant (OpenAPI 3.0.x / JSON-Schema structural rule): where a
+        // Schema Object declares an inline `example` beside a same-indent eSIM result-code
+        // `pattern` (`^B[0-9]{6}$`, the `resultCode` pattern the eSIM Remote Management
+        // `BaseCmpResp…` envelopes use verbatim), the example MUST match that pattern. An
+        // `example` is a sample *instance* of the schema, so a value the `pattern` rejects — a
+        // result code with the wrong prefix, the wrong digit count, a non-digit tail, or a
+        // placeholder pasted beside the pattern — is a self-contradictory schema whose own
+        // validator rejects the sample it advertises, so a Redoc/Swagger prefill and a codegen
+        // client's generated sample carry a value no field constrained by this pattern can
+        // legally hold.
+        //
+        // The eighth member of the `pattern`-conformance family after E.164 / IMEI / ICCID /
+        // 32-hex / name / MAC / token, and the first over a *fixed literal-alpha prefix +
+        // fixed-length digit run*: E.164's leading `\+` is a symbol over a variable-length digit
+        // run, the IMEI/ICCID/TAC members are bare digit runs with no alpha anchor, and the
+        // name/token members are variable alphanumeric classes with no mandatory leading literal
+        // — so none can express this pattern's shape (a required `B` sentinel then exactly six
+        // digits). Like the IMEI/ICCID/32-hex/MAC patterns the result-code pattern carries no
+        // `format` sibling, so its examples are beyond the `format`-example family's reach; a
+        // general regex-engine test would need a new dependency (declined on binary-size grounds),
+        // so a concrete hand-validated shape is matched. Verified true across all mounted specs
+        // before asserting (eSIM Remote Management declares two such example+pattern pairs, both
+        // the well-formed success code `B100000`).
+        for api in APIS {
+            let offenders = result_code_pattern_examples_malformed(api.body);
+            assert!(
+                offenders.is_empty(),
+                "{} spec declares an `example` beside a same-indent eSIM result-code \
+                 `pattern: '^B[0-9]{{6}}$'` that does not match that pattern (a sample the \
+                 pattern's own validator would reject) at `example:` line(s): {:?}",
+                api.name,
+                offenders
+            );
+        }
+    }
+
+    #[test]
+    fn result_code_pattern_example_extraction_rules() {
+        // Unit-cover `matches_result_code_pattern` and `result_code_pattern_examples_malformed`
+        // so the contract test above can't pass vacuously and its detection is pinned.
+        //
+        // Shape check: the success code `B100000` and another well-formed `B999999` pass; a
+        // wrong prefix (`A100000`), a lower-case `b`, too few digits (`B10000`), too many digits
+        // (`B1000000`), a non-digit tail (`B10000X`), and an empty string all fail.
+        assert!(matches_result_code_pattern("B100000"));
+        assert!(matches_result_code_pattern("B999999"));
+        assert!(!matches_result_code_pattern("A100000")); // wrong prefix letter
+        assert!(!matches_result_code_pattern("b100000")); // case-sensitive `B`
+        assert!(!matches_result_code_pattern("B10000")); // 5 digits — too few
+        assert!(!matches_result_code_pattern("B1000000")); // 7 digits — too many
+        assert!(!matches_result_code_pattern("B10000X")); // non-digit tail
+        assert!(!matches_result_code_pattern("")); // empty
+
+        // Extractor: two valid result codes (each beside a same-indent result-code `pattern`, one
+        // with an intervening `description` block and one with an intervening `maxLength` sibling
+        // — the two shapes the corpus actually uses) pass; a wrong-prefix, a too-few-digits, and a
+        // non-digit-tail value are flagged; a bad value whose `pattern` is declared *below* it is
+        // still paired (down-scan) and flagged; a value with no `pattern` sibling and one whose
+        // sibling is a *different* pattern (the ICCID `^[0-9]{19,20}$`) are skipped; an inner
+        // `example` inside an outer `example:` payload is skipped; an example in one property never
+        // pairs with a following property's `pattern` across the dedent; and a property literally
+        // named `example` (opening a block) is skipped.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    GoodBlockDesc:
+      type: string
+      pattern: '^B[0-9]{6}$'
+      description: |
+        a result code
+      example: 'B100000'
+    GoodMaxLen:
+      type: string
+      pattern: '^B[0-9]{6}$'
+      maxLength: 32
+      example: 'B999999'
+    WrongPrefix:
+      type: string
+      pattern: '^B[0-9]{6}$'
+      example: 'A100000'
+    TooFew:
+      type: string
+      pattern: '^B[0-9]{6}$'
+      example: 'B10000'
+    NonDigit:
+      type: string
+      pattern: '^B[0-9]{6}$'
+      example: 'B10000X'
+    PatternBelow:
+      type: string
+      example: 'nope'
+      pattern: '^B[0-9]{6}$'
+    NoPattern:
+      type: string
+      example: 'B100000-but-no-pattern-here'
+    OtherPattern:
+      type: string
+      pattern: '^[0-9]{19,20}$'
+      example: '8931089011234567890'
+    InExample:
+      type: object
+      example:
+        pattern: '^B[0-9]{6}$'
+        example: 'bad'
+    Split:
+      type: object
+      properties:
+        a:
+          example: 'bad'
+        b:
+          type: string
+          pattern: '^B[0-9]{6}$'
+    NamedExample:
+      type: object
+      properties:
+        example:
+          type: string
+          pattern: '^B[0-9]{6}$'
+";
+        // Flagged, in document order: WrongPrefix.example (`A100000`), TooFew.example (`B10000`),
+        // NonDigit.example (`B10000X`), and PatternBelow.example (value `nope`, result-code
+        // `pattern` a line below — down-scan pairs it). Not flagged: GoodBlockDesc/GoodMaxLen
+        // (valid, across an intervening description/maxLength sibling); NoPattern (no `pattern`
+        // sibling); OtherPattern (sibling is the ICCID pattern, not result-code); InExample's inner
+        // `example` (inside the outer `example:` payload); Split.a.example (its only result-code
+        // `pattern` is in the following property past a dedent); and NamedExample's `example:`
+        // property opening a block (no inline value).
+        let flagged = result_code_pattern_examples_malformed(body);
+        let flagged_vals: Vec<&str> = flagged
+            .iter()
+            .map(|&n| body.lines().nth(n - 1).unwrap().trim())
+            .collect();
+        assert_eq!(
+            flagged_vals,
+            vec![
+                "example: 'A100000'",
+                "example: 'B10000'",
+                "example: 'B10000X'",
+                "example: 'nope'",
+            ]
+        );
+
+        // Non-vacuous floor: across every registered spec every `example` beside a same-indent
+        // result-code `pattern` matches it (the invariant the contract test asserts), and the
+        // corpus actually declares such pairs — so the pattern-comparison path runs on real data
+        // and a broken (always-empty) extractor can't hide behind a corpus that never pairs. Only
+        // eSIM Remote Management declares this pattern (two `resultCode` schemas), so the floor is
+        // 2 (not the family's usual 4). Count pairs with a same-indent detector independent of the
+        // extractor's shape comparison.
+        let mut result_code_examples = 0usize;
+        for api in APIS {
+            assert!(
+                result_code_pattern_examples_malformed(api.body).is_empty(),
+                "{}: every example beside a same-indent result-code `pattern` must match it",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            let is_key = |l: &str, name: &str, val: Option<&str>| {
+                l.trim_start().split_once(':').is_some_and(|(k, v)| {
+                    k.trim() == name
+                        && val.is_none_or(|want| {
+                            v.split('#')
+                                .next()
+                                .unwrap_or(v)
+                                .trim()
+                                .trim_matches('"')
+                                .trim_matches('\'')
+                                == want
+                        })
+                })
+            };
+            for (i, l) in lines.iter().enumerate() {
+                if !is_key(l, "example", None) {
+                    continue;
+                }
+                if l.trim_start()
+                    .split_once(':')
+                    .map(|(_, v)| v.split('#').next().unwrap_or(v).trim().is_empty())
+                    .unwrap_or(true)
+                {
+                    continue;
+                }
+                let c = indent(l);
+                let lo = i.saturating_sub(6);
+                let hi = (i + 6).min(lines.len());
+                let has_result_code = (lo..hi).any(|j| {
+                    j != i && indent(lines[j]) == c && is_key(lines[j], "pattern", Some(RESULT_CODE_PATTERN))
+                });
+                if has_result_code {
+                    result_code_examples += 1;
+                }
+            }
+        }
+        assert!(
+            result_code_examples >= 2,
+            "expected the corpus's example + same-indent result-code `pattern` pairs, got {result_code_examples}"
+        );
+    }
+
     /// True when `s` is a well-formed RFC 3339 `date-time` string — the concrete
     /// syntax OpenAPI's `format: date-time` names (JSON Schema's `date-time` is
     /// RFC 3339 §5.6). Shape-only and lenient on the calendar (it range-checks each
