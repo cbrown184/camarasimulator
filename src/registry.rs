@@ -22191,6 +22191,304 @@ components:
         );
     }
 
+    /// The 1-based line numbers, in document order, of every numeric `default:` keyword
+    /// whose inline unquoted value is **not an integer multiple** of a sibling
+    /// `multipleOf` declared in the same Schema Object, without a YAML dep. The
+    /// `default` twin of `examples_violating_their_multiple_of`: that extractor guards a
+    /// numeric `example` against its `multipleOf` step, this one guards a numeric
+    /// `default` — completing the value-domain matrix, since the range side already
+    /// checks both (an example via `examples_outside_their_numeric_bounds`, a default
+    /// via `defaults_outside_their_numeric_bounds`).
+    ///
+    /// In OpenAPI 3.0.x (JSON Schema) a `default` is a fall-back *instance* of the
+    /// schema, so it MUST satisfy the schema's own constraints. Where the object
+    /// constrains a number with `multipleOf: m` (m > 0), a `default` that is not an
+    /// integer multiple of `m` — a `default: 2.5` under `multipleOf: 1`, a
+    /// `default: 9.9995` under `multipleOf: 0.001` — is a self-contradictory schema: the
+    /// schema pre-supplies a value its own validator rejects, so a Redoc/Swagger form
+    /// pre-fills a control with an off-grid value and a codegen client's default fails
+    /// the step's own check exactly where a caller reads or builds the payload.
+    ///
+    /// Multiplicity is inherently a floating-point test (`0.001` and `float`-typed
+    /// amounts are not exact in binary), so conformance is `|q - round(q)|` against a
+    /// **relative** tolerance `1e-9 * max(1, |q|)` where `q = value / m` — loose enough
+    /// to absorb the representation error of a genuine multiple, tight enough to flag a
+    /// true non-multiple (`12 / 5 = 2.4`, `9.995 / 0.01 = 999.5`). A non-positive or
+    /// non-numeric `multipleOf` is skipped here (a `multipleOf <= 0` is
+    /// `every_numeric_schema_keyword_carries_a_number`'s concern, and dividing by it is
+    /// meaningless).
+    ///
+    /// Scoping mirrors `examples_violating_their_multiple_of` /
+    /// `defaults_outside_their_numeric_bounds` exactly: only a `default` carrying an
+    /// inline *unquoted numeric* scalar with a same-object `multipleOf` sibling (scanned
+    /// at the default's own indent, down through the object's block then up,
+    /// dedent-bounded so a nested or following sibling object's keyword never pairs) is
+    /// inspected. Skipped: a `default:` that opens a block (a property literally named
+    /// `default`, or an object/array default); a quoted or non-numeric default (the
+    /// type / length test's concern); a default with no `multipleOf` sibling; and a
+    /// `default:` nested inside an outer `example:`/`examples:` payload (sample data, not
+    /// a schema keyword).
+    fn defaults_violating_their_multiple_of(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let raw_inline = |l: &str, name: &str| -> Option<String> {
+            let (k, v) = l.trim_start().split_once(':')?;
+            if k.trim() != name {
+                return None;
+            }
+            let v = v.split('#').next().unwrap_or(v).trim();
+            if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            }
+        };
+        // A same-indent `multipleOf` sibling in the same object as line `i` (indent
+        // `c`): scan down through the object's block then up, dedent-bounded so a nested
+        // or following object's keyword never pairs. Returns the parsed number only for
+        // an unquoted numeric scalar.
+        let sibling_num = |i: usize, c: usize, key: &str| -> Option<f64> {
+            let parse_num = |l: &str| -> Option<f64> {
+                let raw = raw_inline(l, key)?;
+                if raw.starts_with('"') || raw.starts_with('\'') {
+                    return None;
+                }
+                raw.parse::<f64>().ok()
+            };
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c {
+                    if let Some(n) = parse_num(l) {
+                        return Some(n);
+                    }
+                }
+                j += 1;
+            }
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c {
+                    if let Some(n) = parse_num(l) {
+                        return Some(n);
+                    }
+                }
+            }
+            None
+        };
+        // True when line `i` (indent `c`) sits inside an `example:`/`examples:` payload
+        // — some enclosing container key up the indent ladder is `example`/`examples`.
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some(raw) = raw_inline(line, "default") else {
+                continue;
+            };
+            if raw.starts_with('"') || raw.starts_with('\'') {
+                continue;
+            }
+            let Ok(val) = raw.parse::<f64>() else {
+                continue;
+            };
+            let c = indent(line);
+            if inside_example(i, c) {
+                continue;
+            }
+            let Some(m) = sibling_num(i, c, "multipleOf") else {
+                continue;
+            };
+            if m <= 0.0 {
+                continue; // a non-positive multipleOf is a different test's concern
+            }
+            let q = val / m;
+            let tol = 1e-9 * q.abs().max(1.0);
+            if (q - q.round()).abs() > tol {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_numeric_default_conforms_to_its_multiple_of() {
+        // Contract-harness invariant (OpenAPI 3.0.x / JSON-Schema structural rule):
+        // where a Schema Object declares a numeric `default` beside a `multipleOf`, the
+        // default MUST be an integer multiple of that step. A `default` is a fall-back
+        // *instance* of the schema, so a value off the step — a `default: 2.5` under
+        // `multipleOf: 1`, a `default: 9.9995` under `multipleOf: 0.001` — is a
+        // self-contradictory schema: the schema pre-supplies a sample its own validator
+        // rejects, so a Redoc/Swagger form pre-fills a control with an off-grid value
+        // and a codegen client's default fails the step's own check.
+        //
+        // The `default` twin of `every_numeric_example_conforms_to_its_multiple_of`, and
+        // the `multipleOf` analogue of `every_default_is_within_its_numeric_bounds`:
+        // range and step are the two numeric value-domain constraints a `default` can
+        // carry, and until now only the range side read a default's step — the bounds
+        // test compares only `minimum`/`maximum`,
+        // `every_numeric_schema_keyword_carries_a_number` checks a `multipleOf` is a
+        // positive number but never against a sibling default, and
+        // `every_default_matches_its_schema_type` checks a default's type never its
+        // divisibility. The corpus declares `multipleOf` steps (the currency `amount`
+        // family) but no `default` beside one today, so this is a guard: it holds at 0
+        // drift now and goes live the moment a spec adds a default under a stepped
+        // number (its detection is pinned by `default_multiple_of_extraction_rules`).
+        // Verified true across all mounted specs before asserting.
+        for api in APIS {
+            let offenders = defaults_violating_their_multiple_of(api.body);
+            assert!(
+                offenders.is_empty(),
+                "{} spec declares a numeric `default` that is not an integer multiple of \
+                 its sibling `multipleOf` (a value the step's own validator would reject) \
+                 at `default:` line(s): {:?}",
+                api.name,
+                offenders
+            );
+        }
+    }
+
+    #[test]
+    fn default_multiple_of_extraction_rules() {
+        // Unit-cover `defaults_violating_their_multiple_of` so the contract test above
+        // can't pass vacuously and its detection is pinned: a default that is a clean
+        // multiple passes (integer and the `9.99`/`0.001` decimal case); a non-multiple
+        // whose `multipleOf` sits above it and one whose `multipleOf` sits below it
+        // (down-scan) are both flagged in document order; a `multipleOf: 0` sibling is
+        // skipped (a different test's concern, and a div-by-zero guard); a quoted or
+        // non-numeric default is skipped; a default with no `multipleOf` sibling is
+        // skipped; a `default:` nested inside an outer `example:` payload is skipped; a
+        // default in one property never pairs with a following property's `multipleOf`
+        // across the dedent; and a `default:` opening a block (a property literally named
+        // `default`) is skipped.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    GoodInt:
+      type: integer
+      multipleOf: 5
+      default: 20
+    GoodDecimal:
+      type: number
+      multipleOf: 0.001
+      default: 9.99
+    BadAboveStep:
+      type: integer
+      multipleOf: 5
+      default: 12
+    BadBelowStep:
+      type: number
+      default: 9.995
+      multipleOf: 0.01
+    ZeroStep:
+      type: number
+      multipleOf: 0
+      default: 7
+    Quoted:
+      type: string
+      multipleOf: 5
+      default: '12'
+    NonNumeric:
+      type: string
+      multipleOf: 5
+      default: hello
+    NoStep:
+      type: integer
+      default: 13
+    NestedExample:
+      type: object
+      example:
+        multipleOf: 5
+        default: 12
+    Split:
+      type: object
+      properties:
+        a:
+          default: 12
+        b:
+          type: integer
+          multipleOf: 5
+    NamedDefault:
+      type: object
+      properties:
+        default:
+          type: integer
+          multipleOf: 5
+";
+        // Flagged, in document order: line 25 (`BadAboveStep.default: 12`, 12/5 = 2.4,
+        // its `multipleOf: 5` sibling above) and line 28 (`BadBelowStep.default: 9.995`,
+        // 9.995/0.01 = 999.5, its `multipleOf: 0.01` sibling below — down-scan). Not
+        // flagged: `GoodInt` (20/5 = 4); `GoodDecimal` (9.99/0.001 = 9990); `ZeroStep`
+        // (`multipleOf: 0`, skipped — a different test's concern and a div-by-zero
+        // guard); `Quoted` (`'12'` is a quoted string, not a number); `NonNumeric`
+        // (`hello` isn't numeric); `NoStep` (no `multipleOf` sibling); `NestedExample`
+        // (its inner `default: 12` sits inside the outer `example:` payload);
+        // `Split.a.default: 12`, whose only candidate `multipleOf: 5` sits in the
+        // following property `Split.b` past a dedent, so the two never pair; and
+        // `NamedDefault` (a `default:` opening a block has no inline scalar).
+        assert_eq!(defaults_violating_their_multiple_of(body), vec![25, 28]);
+
+        // The corpus declares `multipleOf` steps but no `default` beside one today, so
+        // the invariant holds at 0 drift across every registered spec (a guard, like the
+        // other 0-occurrence structural checks). Detection itself is pinned by the
+        // synthetic body above, not by a corpus pair.
+        for api in APIS {
+            assert!(
+                defaults_violating_their_multiple_of(api.body).is_empty(),
+                "{}: every numeric default must be an integer multiple of its sibling \
+                 multipleOf",
+                api.name
+            );
+        }
+    }
+
     /// The 1-based line numbers, in document order, of every `example:` keyword whose
     /// inline **quoted-string** value has a character length outside a sibling string
     /// bound — `minLength` or `maxLength` — declared in the same Schema Object, without

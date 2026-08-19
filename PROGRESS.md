@@ -3332,6 +3332,16 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - a **numeric-`default` `multipleOf`-conformance** contract test (`src/registry.rs`
+    `every_numeric_default_conforms_to_its_multiple_of`) asserts that where a mounted spec
+    declares a numeric `default` beside a `multipleOf`, the default is an integer multiple of
+    that step. The **`default` twin** of `every_numeric_example_conforms_to_its_multiple_of`
+    and the `multipleOf` analogue of `every_default_is_within_its_numeric_bounds`: it completes
+    the value-domain matrix (range checked on both example and default; step, previously, on the
+    example only). New pure `defaults_violating_their_multiple_of` extractor (no YAML dep)
+    mirrors the example version's scoping with the same relative-tolerance divisibility test.
+    The corpus's `multipleOf` steps carry no `default` sibling → 0 drift (a guard). Unit-covered
+    (`default_multiple_of_extraction_rules`).
   - a **numeric-`example` `multipleOf`-conformance** contract test (`src/registry.rs`
     `every_numeric_example_conforms_to_its_multiple_of`) asserts that where a mounted
     spec declares a numeric `example` beside a `multipleOf`, the example is an integer
@@ -5445,6 +5455,35 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-19 — Contract-test harness: added a **numeric-`default` `multipleOf`-conformance**
+  contract test (`src/registry.rs` `every_numeric_default_conforms_to_its_multiple_of`) — where a
+  Schema Object declares a numeric `default` beside a `multipleOf`, the default MUST be an integer
+  multiple of that step. A `default` is a fall-back *instance* of the schema, so a value off the
+  grid (`default: 2.5` under `multipleOf: 1`) is a self-contradictory schema: the schema
+  pre-supplies a value its own validator rejects, so a Redoc/Swagger form pre-fills a control with
+  an off-grid value and a codegen client's default fails the step's own check. The **`default`
+  twin of `every_numeric_example_conforms_to_its_multiple_of`** (added last pass) and the
+  **`multipleOf` analogue of `every_default_is_within_its_numeric_bounds`**: this completes the
+  value-domain matrix — the range side already checks both an example
+  (`examples_outside_their_numeric_bounds`) and a default
+  (`defaults_outside_their_numeric_bounds`), but until now the step side read only the example. New
+  pure `defaults_violating_their_multiple_of` extractor (no YAML dep) mirrors
+  `examples_violating_their_multiple_of` / `defaults_outside_their_numeric_bounds` exactly (an
+  unquoted numeric `default` scalar; a same-object `multipleOf` sibling scanned at the default's
+  own indent, down then up, dedent-bounded; a `default:` inside an outer `example:`/`examples:`
+  payload skipped; a quoted/non-numeric/blockless default skipped) with the same relative-tolerance
+  divisibility test (`|q - round(q)|` vs `1e-9*max(1,|q|)`, `q = value/m`; non-positive
+  `multipleOf` skipped). **Surveyed the corpus first: the `multipleOf` steps present (the Carrier
+  Billing `amount`/`taxAmount`/`fee` family) carry no `default` sibling, so 0 default+`multipleOf`
+  pairs → 0 drift; a guard that goes live the moment a spec adds a default under a stepped number.**
+  Unit-covered (`default_multiple_of_extraction_rules`: a `12`/`5` non-multiple above and a
+  `9.995`/`0.01` non-multiple below flagged in document order; integer and the `9.99`/`0.001`
+  decimal multiples cleared; `multipleOf: 0`, a quoted `'12'`, a non-numeric `hello`, a step-less
+  default, a nested `example:` payload, a cross-property split, and a `default:` block-opener all
+  skipped; corpus 0-drift asserted per spec). Test-side only — no request/response/behaviour
+  change, so no vendored-spec edits. `cargo test` 2764 green (was 2762; +2); `cargo build
+  --release` succeeds. No new dependency; the extractor and both tests live in the `#[cfg(test)]`
+  module, so nothing ships in the binary. — binary (release): 5.1M (5,323,160 B; unchanged)
 - 2026-08-19 — Contract-test harness: added a **numeric-`example` `multipleOf`-conformance**
   contract test (`src/registry.rs` `every_numeric_example_conforms_to_its_multiple_of`) — where
   a Schema Object declares a numeric `example` beside a `multipleOf`, the example MUST be an
