@@ -3332,6 +3332,23 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - an **int32-`format` default-conformance** contract test (`src/registry.rs`
+    `every_int32_format_default_is_a_well_formed_int32`) asserts that where a mounted spec
+    declares an inline `default` beside a same-indent `format: int32`, the default is an
+    integer within the signed 32-bit range. The **`default` twin** of
+    `every_int32_format_example_is_a_well_formed_int32`: the value-domain checks already
+    applied to both an `example` and a `default` (numeric bounds, `multipleOf`,
+    string-length) had, on the *format* side, only the example version — a `format: int32`
+    field's fall-back instance was unguarded. New pure `int32_format_defaults_malformed`
+    extractor (no YAML dep) clones `int32_format_examples_malformed`'s scoping exactly
+    (inline scalar only, block-scalar / outer-`example:`-payload / other-format skipped;
+    same-indent `format: int32` sibling scanned down-then-up dedent-bounded) and reuses the
+    shared `is_well_formed_int32`. Non-vacuous: the corpus declares `format: int32` defaults
+    (the device-swap / sim-swap `maxAge: default 240`), so the integer path runs on real
+    data → 0 drift. Unit-covered (`int32_format_default_extraction_rules`: fraction /
+    overflow / format-below flagged; valid / no-format / int64-sibling / cross-property /
+    block-scalar / nested-`example` / named-`default` cleared; ≥1 default+`format: int32`
+    floor).
   - an **E.164-`pattern` example-conformance** contract test (`src/registry.rs`
     `every_e164_pattern_example_conforms_to_the_e164_pattern`) asserts that where a
     mounted spec declares an `example` beside a same-indent
@@ -5477,6 +5494,39 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-19 — Contract-test harness: added an **int32-`format` default-conformance**
+  contract test (`src/registry.rs` `every_int32_format_default_is_a_well_formed_int32`) — where a
+  mounted spec declares an inline `default` beside a same-indent `format: int32`, the default MUST
+  be an integer within the signed 32-bit range. A `default` is the schema's fall-back *instance*,
+  so a value that is not a valid int32 (a fraction, a placeholder, or a magnitude overflowing i32)
+  is a self-contradictory schema whose own validator rejects the fall-back it pre-supplies — a
+  Redoc/Swagger form then pre-fills a control (`maxAge`/`page`/`perPage`/count) with an
+  out-of-range value and a codegen client mapping `int32` onto a 32-bit integer carries a default
+  the field can never legally hold. The **`default` twin of
+  `every_int32_format_example_is_a_well_formed_int32`**: the value-domain constraints the corpus
+  already checks on *both* an example and a default (numeric bounds via
+  `every_{example,default}_is_within_its_numeric_bounds`, `multipleOf` via
+  `every_numeric_{example,default}_conforms_to_its_multiple_of`, string-length via
+  `every_{example,default}_respects_its_string_length_bounds`) had, on the **format** side, only
+  the example version — the whole format-example family (uuid/date-time/uri/int32/…) is
+  example-only, so a `format: int32` field's fall-back instance was the one unguarded value-domain
+  facet. New pure `int32_format_defaults_malformed` extractor (no YAML dep) clones
+  `int32_format_examples_malformed`'s scoping exactly (an inline scalar `default`; a block-scalar
+  `default: >-`/`|` skipped; a same-indent `format: int32` sibling matched exactly — `int64` never
+  pairs — scanned down-then-up, dedent-bounded; a `default:` inside an outer `example:`/`examples:`
+  payload skipped) and reuses the shared `is_well_formed_int32`. **Surveyed the corpus first:
+  `format: int32` defaults are present (the device-swap `maxAge: default 240` beside `format:
+  int32`, mirrored in sim-swap), all well-formed → 0 drift; a live (non-vacuous) guard, not a
+  vacuous one — the `int32_format_default_extraction_rules` floor asserts ≥1 real
+  default+`format: int32` pair so the integer path runs on corpus data.** Unit-covered
+  (`int32_format_default_extraction_rules`: a `3.5` fraction, a `2147483648` overflow, and a
+  `nope` with its `format: int32` a line below all flagged in document order; a valid `240`, a
+  no-`format` sibling, an `int64` sibling's overflowing `9999999999`, a cross-property split, a
+  `>-` block-scalar, a nested-`example` payload, and a property named `default` all cleared).
+  Test-side only — no request/response/behaviour change, so no vendored-spec edits. `cargo test`
+  2768 green (was 2766; +2); `cargo build --release` succeeds. No new dependency; the extractor
+  and both tests live in the `#[cfg(test)]` module, so nothing ships in the binary.
+  — binary (release): 5.1M (5,323,160 B; unchanged)
 - 2026-08-19 — Contract-test harness: added an **E.164-`pattern` example-conformance**
   contract test (`src/registry.rs` `every_e164_pattern_example_conforms_to_the_e164_pattern`)
   — where a mounted spec declares an inline `example` beside a **same-indent**
