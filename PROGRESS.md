@@ -3332,6 +3332,29 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - a **32-hex-`pattern` example-conformance** contract test (`src/registry.rs`
+    `every_hex32_pattern_example_conforms_to_the_hex32_pattern`) asserts that where a mounted
+    spec declares an inline `example` beside a **same-indent** 32-hexadecimal-digit `pattern`
+    (`^[<hex>]{32}$`), the example is exactly 32 ASCII hex digits. The **fourth member of the
+    `pattern`-conformance family** after E.164/IMEI/ICCID, and the **first over a hexadecimal
+    (rather than decimal) alphabet**. Like the IMEI/ICCID patterns the 32-hex pattern carries
+    **no `format` sibling** (unlike the UUID patterns, always beside a `format: uuid` guarded by
+    `every_uuid_format_example_is_a_well_formed_uuid`), so an `eId`/`networkKey` example's shape
+    was previously unchecked. New structural `is_hex32_pattern` recognizer (accepts both corpus
+    spellings — the eSIM `eId` `^[A-Fa-f0-9]{32}$` and the Trust-Domain Thread `networkKey`
+    `^[0-9a-fA-F]{32}$`, i.e. any ordering of the three hex ranges — the one respect it departs
+    from the exact-literal E.164/IMEI/ICCID members: the pattern is semantically one, spelled two
+    ways) + `matches_hex32_pattern` (32 ASCII hex digits via `u8::is_ascii_hexdigit`; no regex
+    dep) + `hex32_pattern_examples_malformed` extractor cloning `imei_pattern_examples_malformed`'s
+    scoping exactly (inline scalar `example`; same-indent `pattern` sibling the recognizer accepts,
+    scanned down-then-up dedent-bounded so a 16-hex or different-length pattern never pairs;
+    outer-`example:`-payload / block-opener skipped). Surveyed the corpus first: 8 example+32-hex-
+    `pattern` pairs (esim-remote-management `eId` ×7, network-access-domains `networkKey` ×1), all
+    32 hex → 0 drift. Unit-covered (`hex32_pattern_example_extraction_rules`: recognizer accepts
+    both spellings + a third ordering, rejects a hex-lowercase-only / wrong-length / IMEI / UUID
+    pattern; a 31-digit/33-digit/non-hex value + a value with its `pattern` a line below flagged in
+    document order; valid both-spelling, no-pattern, IMEI-sibling, 16-hex-sibling, nested-`example`,
+    cross-property, block-opener cleared; ≥4-pair non-vacuous floor).
   - an **ICCID-`pattern` example-conformance** contract test (`src/registry.rs`
     `every_iccid_pattern_example_conforms_to_the_iccid_pattern`) asserts that where a mounted
     spec declares an inline `example` beside a same-indent `pattern: '^[0-9]{19,20}$'` (the
@@ -5530,6 +5553,50 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-19 — Contract-test harness: added a **32-hex-`pattern` example-conformance**
+  contract test (`src/registry.rs` `every_hex32_pattern_example_conforms_to_the_hex32_pattern`)
+  — where a mounted spec declares an inline `example` beside a **same-indent** 32-hexadecimal-digit
+  `pattern` (`^[<hex>]{32}$`), the example MUST be exactly 32 ASCII hex digits. An `example` is a
+  sample instance of the schema, so a 32-hex identifier the pattern rejects (a digit dropped or
+  added, a non-hex character, a placeholder pasted beside the pattern) is a self-contradictory
+  schema whose own validator rejects the sample it advertises — a Redoc/Swagger prefill and a
+  codegen client's generated sample then carry a value the field can never legally hold. The
+  **fourth member of the `pattern`-conformance family** after
+  `every_e164_pattern_example_conforms_to_the_e164_pattern`,
+  `every_imei_pattern_example_conforms_to_the_imei_pattern`, and
+  `every_iccid_pattern_example_conforms_to_the_iccid_pattern`, and the **first over a hexadecimal
+  (rather than decimal) alphabet** — it carries the family from the digit runs (E.164/IMEI/ICCID)
+  to the hex identifiers (the eSIM eUICC `eId`, the Trust-Domain Thread `networkKey`). Like the
+  IMEI/ICCID patterns the 32-hex pattern carries **no `format` sibling** (unlike the UUID patterns,
+  always beside a `format: uuid` already guarded by `every_uuid_format_example_is_a_well_formed_uuid`),
+  so an `eId`/`networkKey` example's shape was previously unguarded — no existing test reads an
+  example against its `pattern` (`every_pattern_declares_a_non_empty_string` checks only the
+  pattern keyword's own value; the example-value family checks an example's type / length / numeric
+  bounds / enum membership, never its pattern). New structural `is_hex32_pattern` recognizer:
+  the corpus spells this one pattern two ways — the eSIM `eId` writes `^[A-Fa-f0-9]{32}$`, the
+  network-access-domains Thread `networkKey` writes `^[0-9a-fA-F]{32}$` — so the recognizer pins the
+  structure (`^[` … `]{32}$`) and accepts any ordering of the three hex ranges {`0-9`,`a-f`,`A-F`}
+  as one semantic pattern (the one respect it departs from the exact-literal E.164/IMEI/ICCID
+  members), rejecting a lookalike (hex-lowercase-only `^[0-9a-f]{32}$`, or a different-length
+  `^[0-9a-fA-F]{16}$`). Plus `matches_hex32_pattern` (exactly 32 ASCII hex digits via
+  `u8::is_ascii_hexdigit`; no regex dep) + `hex32_pattern_examples_malformed` extractor cloning
+  `imei_pattern_examples_malformed`'s scoping exactly (an inline scalar `example`; a same-indent
+  `pattern` sibling the recognizer accepts, scanned down-then-up dedent-bounded — so a nested or
+  following object's `pattern`, or an adjacent 16-hex pattern, never pairs; an `example` inside an
+  outer `example:`/`examples:` payload or a block-opening `example:` skipped). **Surveyed the
+  corpus first: 8 example+32-hex-`pattern` pairs (esim-remote-management `eId` ×7,
+  network-access-domains `networkKey` ×1), every one exactly 32 hex → 0 drift; a live guard that
+  fires the moment a spec adds a mis-shaped 32-hex example.** Unit-covered
+  (`hex32_pattern_example_extraction_rules`: the recognizer accepts both corpus spellings + a third
+  ordering and rejects a hex-lowercase-only / wrong-length / IMEI / UUID pattern; a 31-digit, a
+  33-digit, an embedded-`g`, and a `nope` with its `pattern` a line below all flagged in document
+  order; a valid quoted example under each spelling, a no-`pattern` sibling, an IMEI-`pattern`
+  sibling, a 16-hex-`pattern` sibling, a nested-`example` payload, a cross-property split, and a
+  property literally named `example` opening a block all cleared; ≥4-pair non-vacuous floor).
+  Test-side only — no request/response/behaviour change, so no vendored-spec edits. `cargo test`
+  2778 green (was 2776; +2); `cargo build --release` succeeds. No new dependency; the recognizer,
+  matcher, extractor and both tests live in the `#[cfg(test)]` module, so nothing ships in the
+  binary. — binary (release): 5.1M (5,323,160 B; unchanged)
 - 2026-08-19 — Contract-test harness: added an **ICCID-`pattern` example-conformance**
   contract test (`src/registry.rs` `every_iccid_pattern_example_conforms_to_the_iccid_pattern`)
   — where a mounted spec declares an inline `example` beside a **same-indent**

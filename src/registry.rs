@@ -25045,6 +25045,394 @@ components:
         );
     }
 
+    /// True when a `pattern` scalar (already unquoted) is the 32-hexadecimal-digit
+    /// pattern `^[<hex>]{32}$` — a fixed run of exactly 32 case-insensitive hex digits —
+    /// regardless of the order the three hex ranges are written in the character class.
+    ///
+    /// The corpus spells this one pattern two ways: the eSIM Remote Management `eId`
+    /// (eUICC identifier) field writes `^[A-Fa-f0-9]{32}$`, while the Network Access
+    /// Domains Thread `networkKey` writes `^[0-9a-fA-F]{32}$`. Both denote the identical
+    /// character set {`0-9`, `a-f`, `A-F`}, so the recognizer accepts any ordering of
+    /// those three ranges rather than a single verbatim literal — the one respect in
+    /// which this member departs from the exact-literal E.164/IMEI/ICCID members: the
+    /// pattern is semantically one, spelled two ways. The structure is pinned
+    /// (`^[` … `]{32}$`) and the class must be *exactly* the three hex ranges, each once
+    /// and nothing else, so a lookalike (a hex-lowercase-only `^[0-9a-f]{32}$`, or a
+    /// different length `^[0-9a-fA-F]{16}$`) is not mistaken for it.
+    fn is_hex32_pattern(p: &str) -> bool {
+        let Some(inner) = p.strip_prefix("^[").and_then(|s| s.strip_suffix("]{32}$")) else {
+            return false;
+        };
+        // The class must be exactly the three hex ranges, each present once, nothing
+        // else. Remove each range once (they never overlap); require all three found
+        // and no residue.
+        let mut rest = inner.to_string();
+        for tok in ["0-9", "a-f", "A-F"] {
+            match rest.find(tok) {
+                Some(pos) => {
+                    rest.replace_range(pos..pos + tok.len(), "");
+                }
+                None => return false,
+            }
+        }
+        rest.is_empty()
+    }
+
+    /// True when `s` matches the 32-hex pattern `^[<hex>]{32}$` exactly: exactly 32 ASCII
+    /// hexadecimal digits (`0-9`/`a-f`/`A-F`), nothing else. Hand-rolled (no regex dep)
+    /// mirroring `matches_imei_pattern`'s shape-only stance, so a legitimately shaped
+    /// value is never a false positive; the accepted alphabet is the hex digits (via
+    /// `u8::is_ascii_hexdigit`) and the length is fixed at 32.
+    fn matches_hex32_pattern(s: &str) -> bool {
+        let b = s.as_bytes();
+        b.len() == 32 && b.iter().all(u8::is_ascii_hexdigit)
+    }
+
+    /// The 1-based line numbers, in document order, of every `example:` keyword whose
+    /// inline scalar value sits in a Schema Object declaring a *same-indent* 32-hex
+    /// `pattern` sibling (`^[<hex>]{32}$`, either corpus spelling) yet is not 32 ASCII hex
+    /// digits, without a YAML dep. The 32-hex twin of `imei_pattern_examples_malformed`:
+    /// identical scoping, keyed on the `is_hex32_pattern` recognizer instead of an exact
+    /// `IMEI_PATTERN` equality.
+    ///
+    /// In OpenAPI 3.0.x (JSON Schema) an `example` is a sample *instance* of the schema,
+    /// so a field constrained by `pattern` MUST carry an example the pattern accepts. A
+    /// 32-hex example that is not exactly 32 hex digits — a digit dropped or added, a
+    /// placeholder pasted beside the pattern, a non-hex character — advertises a sample
+    /// the schema's own validator rejects, so a Redoc/Swagger prefill and a codegen
+    /// client's generated sample carry a value the field can never legally hold. A live
+    /// hazard in these eSIM / Trust-Domain specs, where an `eId`/`networkKey` example is
+    /// hand-authored and copied between siblings. Like the IMEI/ICCID patterns and unlike
+    /// the UUID patterns (always beside a `format: uuid` already guarded by
+    /// `every_uuid_format_example_is_a_well_formed_uuid`), the 32-hex pattern carries no
+    /// `format`, so these examples are otherwise unchecked.
+    ///
+    /// Scoping mirrors `imei_pattern_examples_malformed` exactly: only an `example`
+    /// carrying an inline scalar (a block/object example opens no inline value and is
+    /// skipped) with a same-indent `pattern` sibling the `is_hex32_pattern` recognizer
+    /// accepts, in the same Schema Object, is inspected — the sibling is scanned at the
+    /// example's own indent, down through the object's block then up, dedent-bounded, so a
+    /// nested or following object's `pattern` never pairs. An `example:` nested inside an
+    /// outer `example:`/`examples:` payload (sample data, not a schema keyword) is skipped.
+    /// Only the 32-hex pattern is matched; other patterns are out of scope.
+    fn hex32_pattern_examples_malformed(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let raw_inline = |l: &str, name: &str| -> Option<String> {
+            let (k, v) = l.trim_start().split_once(':')?;
+            if k.trim() != name {
+                return None;
+            }
+            let v = v.split('#').next().unwrap_or(v).trim();
+            if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            }
+        };
+        // Whether a same-indent `pattern:` sibling of line `i` (indent `c`) in the same
+        // Schema Object is a 32-hex pattern: scan down through the object's block then up,
+        // dedent-bounded so a nested or following object's `pattern` never pairs.
+        let sibling_is_hex32_pattern = |i: usize, c: usize| -> bool {
+            let is_hex32 = |l: &str| -> bool {
+                raw_inline(l, "pattern")
+                    .map(|v| is_hex32_pattern(v.trim_matches('"').trim_matches('\'')))
+                    .unwrap_or(false)
+            };
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_hex32(l) {
+                    return true;
+                }
+                j += 1;
+            }
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_hex32(l) {
+                    return true;
+                }
+            }
+            false
+        };
+        // True when line `i` (indent `c`) sits inside an outer `example:`/`examples:`
+        // payload — some enclosing container key up the indent ladder is
+        // `example`/`examples` — so an inner `example` key there is sample data, not a
+        // schema keyword.
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some(raw) = raw_inline(line, "example") else {
+                continue;
+            };
+            let c = indent(line);
+            if inside_example(i, c) {
+                continue;
+            }
+            if !sibling_is_hex32_pattern(i, c) {
+                continue;
+            }
+            let value = raw.trim_matches('"').trim_matches('\'');
+            if !matches_hex32_pattern(value) {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_hex32_pattern_example_conforms_to_the_hex32_pattern() {
+        // Contract-harness invariant (OpenAPI 3.0.x / JSON-Schema structural rule): where
+        // a Schema Object declares an inline `example` beside a same-indent 32-hex
+        // `pattern` (`^[<hex>]{32}$` — the eSIM `eId` writes `^[A-Fa-f0-9]{32}$`, the
+        // Trust-Domain Thread `networkKey` writes `^[0-9a-fA-F]{32}$`; both denote 32
+        // case-insensitive hex digits), the example MUST match that pattern. An `example`
+        // is a sample *instance* of the schema, so a value the `pattern` rejects — a
+        // 32-hex identifier with a digit dropped or added, a non-hex character, or a
+        // placeholder pasted beside the pattern — is a self-contradictory schema whose own
+        // validator rejects the sample it advertises, so a Redoc/Swagger prefill and a
+        // codegen client's generated sample carry a value no field constrained by this
+        // pattern can legally hold.
+        //
+        // The fourth member of the `pattern`-conformance family after
+        // `every_e164_pattern_example_conforms_to_the_e164_pattern`,
+        // `every_imei_pattern_example_conforms_to_the_imei_pattern`, and
+        // `every_iccid_pattern_example_conforms_to_the_iccid_pattern`, and the first over a
+        // *hexadecimal* (rather than decimal) alphabet: like the IMEI/ICCID patterns the
+        // 32-hex pattern carries no `format` sibling (unlike the UUID patterns, always
+        // beside a `format: uuid` already guarded by
+        // `every_uuid_format_example_is_a_well_formed_uuid`), so an `eId`/`networkKey`
+        // example's shape was previously unchecked — no existing test reads an example
+        // against its `pattern` (`every_pattern_declares_a_non_empty_string` checks the
+        // pattern keyword's own value; the example-value family checks an example's JSON
+        // type / length / numeric bounds / enum membership, never its pattern). A general
+        // regex-engine test would need a new dependency (declined on binary-size grounds),
+        // so a concrete hand-validated shape is matched. Verified true across all mounted
+        // specs before asserting.
+        for api in APIS {
+            let offenders = hex32_pattern_examples_malformed(api.body);
+            assert!(
+                offenders.is_empty(),
+                "{} spec declares an `example` beside a same-indent 32-hex \
+                 `pattern: '^[<hex>]{{32}}$'` that does not match that pattern (a sample the \
+                 pattern's own validator would reject) at `example:` line(s): {:?}",
+                api.name,
+                offenders
+            );
+        }
+    }
+
+    #[test]
+    fn hex32_pattern_example_extraction_rules() {
+        // Unit-cover `is_hex32_pattern`, `matches_hex32_pattern`, and
+        // `hex32_pattern_examples_malformed` so the contract test above can't pass
+        // vacuously and its detection is pinned.
+        //
+        // Pattern recognizer: both corpus spellings and a third ordering of the three hex
+        // ranges are accepted; a hex-lowercase-only class (missing `A-F`), a wrong length
+        // (`{16}`), a decimal-only IMEI pattern, and a UUID pattern are all rejected.
+        assert!(is_hex32_pattern("^[A-Fa-f0-9]{32}$")); // eSIM `eId` spelling
+        assert!(is_hex32_pattern("^[0-9a-fA-F]{32}$")); // Thread `networkKey` spelling
+        assert!(is_hex32_pattern("^[a-fA-F0-9]{32}$")); // another ordering
+        assert!(!is_hex32_pattern("^[0-9a-f]{32}$")); // missing the `A-F` range
+        assert!(!is_hex32_pattern("^[0-9a-fA-F]{16}$")); // wrong length
+        assert!(!is_hex32_pattern("^[0-9]{15}$")); // IMEI, decimal-only
+        assert!(!is_hex32_pattern(
+            "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        )); // UUID
+
+        // Shape check: exactly 32 hex digits (either case) passes; 31 or 33 digits, an
+        // embedded non-hex character, and an empty string all fail.
+        assert!(matches_hex32_pattern("A1B2C3D4E5F600000000000000000001")); // 32 hex
+        assert!(matches_hex32_pattern("dfd34f0f05cad978ec4e32b0413038ff")); // 32 hex
+        assert!(!matches_hex32_pattern("abcdef0123456789abcdef012345678")); // 31 — too short
+        assert!(!matches_hex32_pattern("abcdef0123456789abcdef0123456789a")); // 33 — too long
+        assert!(!matches_hex32_pattern("gbcdef0123456789abcdef0123456789")); // non-hex `g`
+        assert!(!matches_hex32_pattern("")); // empty
+
+        // Extractor: a valid quoted example beside each corpus spelling passes; a
+        // too-short, a too-long, and a non-hex value are flagged; a bad value whose
+        // `pattern` is declared *below* it is still paired (down-scan) and flagged; a value
+        // with no `pattern` sibling, one whose sibling is a *different* pattern (IMEI), and
+        // one whose sibling is a *different-length* hex pattern (16-hex) are skipped; an
+        // inner `example` inside an outer `example:` payload is skipped; an example in one
+        // property never pairs with a following property's `pattern` across the dedent; and
+        // a property literally named `example` (opening a block) is skipped.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    GoodSpellingA:
+      type: string
+      pattern: '^[A-Fa-f0-9]{32}$'
+      example: \"A1B2C3D4E5F600000000000000000001\"
+    GoodSpellingB:
+      type: string
+      pattern: \"^[0-9a-fA-F]{32}$\"
+      example: \"dfd34f0f05cad978ec4e32b0413038ff\"
+    TooShort:
+      type: string
+      pattern: '^[A-Fa-f0-9]{32}$'
+      example: \"abcdef0123456789abcdef012345678\"
+    TooLong:
+      type: string
+      pattern: '^[A-Fa-f0-9]{32}$'
+      example: \"abcdef0123456789abcdef0123456789a\"
+    NonHex:
+      type: string
+      pattern: '^[A-Fa-f0-9]{32}$'
+      example: \"gbcdef0123456789abcdef0123456789\"
+    PatternBelow:
+      type: string
+      example: \"nope\"
+      pattern: '^[A-Fa-f0-9]{32}$'
+    NoPattern:
+      type: string
+      example: \"abcdef0123456789abcdef0123456789\"
+    OtherPattern:
+      type: string
+      pattern: '^[0-9]{15}$'
+      example: \"490154203237518\"
+    Hex16:
+      type: string
+      pattern: '^[0-9a-fA-F]{16}$'
+      example: \"d63e8e3e495ebbc3\"
+    InExample:
+      type: object
+      example:
+        pattern: '^[A-Fa-f0-9]{32}$'
+        example: \"bad\"
+    Split:
+      type: object
+      properties:
+        a:
+          example: \"bad\"
+        b:
+          type: string
+          pattern: '^[A-Fa-f0-9]{32}$'
+    NamedExample:
+      type: object
+      properties:
+        example:
+          type: string
+          pattern: '^[A-Fa-f0-9]{32}$'
+";
+        // Flagged, in document order: TooShort.example (line 25, 31 hex), TooLong.example
+        // (line 29, 33 hex), NonHex.example (line 33, an embedded `g`), and
+        // PatternBelow.example (line 36, value `nope` with its 32-hex `pattern` a line
+        // below — down-scan pairs it). Not flagged: GoodSpellingA/GoodSpellingB (valid
+        // 32-hex, each corpus spelling); NoPattern (no `pattern` sibling); OtherPattern
+        // (sibling is the IMEI pattern); Hex16 (sibling is a 16-hex pattern, wrong length);
+        // InExample's inner `example: \"bad\"` (sits inside the outer `example:` payload);
+        // Split.a.example, whose only 32-hex `pattern` is in the following property Split.b
+        // past a dedent; and NamedExample's `example:` property opening a block (no inline
+        // value).
+        assert_eq!(hex32_pattern_examples_malformed(body), vec![25, 29, 33, 36]);
+
+        // Non-vacuous floor: across every registered spec every `example` beside a
+        // same-indent 32-hex `pattern` matches it (the invariant the contract test
+        // asserts), and the corpus actually declares several such pairs — so the
+        // pattern-comparison path runs on real data and a broken (always-empty) extractor
+        // can't hide behind a corpus that never pairs an example with a 32-hex pattern.
+        // Count pairs with a same-indent detector independent of the extractor.
+        let mut hex32_examples = 0usize;
+        for api in APIS {
+            assert!(
+                hex32_pattern_examples_malformed(api.body).is_empty(),
+                "{}: every example beside a same-indent 32-hex `pattern` must match it",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            let is_example = |l: &str| {
+                l.trim_start().split_once(':').is_some_and(|(k, v)| {
+                    k.trim() == "example"
+                        && !v.split('#').next().unwrap_or(v).trim().is_empty()
+                })
+            };
+            let is_hex32_pat = |l: &str| {
+                l.trim_start().split_once(':').is_some_and(|(k, v)| {
+                    k.trim() == "pattern"
+                        && is_hex32_pattern(
+                            v.split('#')
+                                .next()
+                                .unwrap_or(v)
+                                .trim()
+                                .trim_matches('"')
+                                .trim_matches('\''),
+                        )
+                })
+            };
+            for (i, l) in lines.iter().enumerate() {
+                if !is_example(l) {
+                    continue;
+                }
+                let c = indent(l);
+                let lo = i.saturating_sub(6);
+                let hi = (i + 6).min(lines.len());
+                let has_hex32 = (lo..hi).any(|j| {
+                    j != i && indent(lines[j]) == c && is_hex32_pat(lines[j])
+                });
+                if has_hex32 {
+                    hex32_examples += 1;
+                }
+            }
+        }
+        assert!(
+            hex32_examples >= 4,
+            "expected several example + same-indent 32-hex `pattern` pairs across specs, got {hex32_examples}"
+        );
+    }
+
     /// True when `s` is a well-formed RFC 3339 `date-time` string — the concrete
     /// syntax OpenAPI's `format: date-time` names (JSON Schema's `date-time` is
     /// RFC 3339 §5.6). Shape-only and lenient on the calendar (it range-checks each
