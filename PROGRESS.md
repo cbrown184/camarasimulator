@@ -5357,6 +5357,23 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-19 — Contract-test harness: added a **fleet-wide verbatim-spec-serving** test
+  (`src/apis/openapi.rs` `serves_every_spec_body_verbatim`) — for **every** mounted API the
+  serving route's response body MUST equal its registered `ApiSpec.body` byte-for-byte (plus 200
+  + the YAML content type). The **byte-equality complement** of `serves_every_mounted_api_spec`,
+  whose fleet loop asserts only status, content-type, and a loose *looks-like-YAML* heuristic
+  (`starts_with("#")` / `contains("openapi:")`) that a truncated, stale, or cross-wired body could
+  still satisfy: only `serves_an_api_spec_as_yaml` pinned a served body to its vendored file, and
+  only for `number-verification`. Now the exact source-of-truth body — the one the 287 registry
+  contract tests validate and the sibling `/{api}/v{n}/docs` Redoc page renders against — is what a
+  caller fetching `/{api}/v{n}/openapi.yaml` receives for all 60 specs, guarding the serving layer
+  itself (route wiring / `include_str!` drift) rather than the spec text. Registry-driven (iterates
+  `crate::registry::APIS`), so a newly mounted API is covered automatically; non-vacuity asserts
+  every registered API was exercised (`count == APIS.len()`, ≥28 floor). **Surveyed first: all 60
+  served bodies already match their registry entry → 0 drift.** Test-only (a `#[tokio::test]` in the
+  `#[cfg(test)]` module) — no request/response/behaviour change, so no vendored-spec edits, and
+  nothing ships in the binary. `cargo test` 2754 green (was 2753; +1); `cargo build --release`
+  succeeds. No new dependency. — binary (release): 5.1M (5,323,160 B; unchanged)
 - 2026-08-19 — Contract-test harness: added a **served-shared-documents OpenAPI-version pin**
   contract test (`src/registry.rs` `served_shared_documents_pin_the_camara_openapi_3_0_3_version`)
   — the two shared documents CamaraSim serves alongside the 60 business specs, the

@@ -201,6 +201,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn serves_every_spec_body_verbatim() {
+        // The **byte-equality complement** of `serves_every_mounted_api_spec`, which
+        // proves each mounted spec URL resolves (200), is YAML content-typed, and
+        // *looks* like an OpenAPI doc (`starts_with("#")` / `contains("openapi:")`) —
+        // a loose heuristic a truncated, stale, or cross-wired body could still
+        // satisfy. Only `serves_an_api_spec_as_yaml` pins a served body to its
+        // vendored file byte-for-byte, and only for `number-verification`. Here every
+        // mounted API's served body MUST equal its registered `ApiSpec.body` verbatim,
+        // so the serving route can never hand a caller a spec differing — even by a
+        // trailing byte — from the single source of truth the contract tests validate
+        // and the sibling `/{api}/v{n}/docs` Redoc page renders against. Driven by the
+        // registry (the single source of truth), so a newly mounted API is covered
+        // automatically.
+        let mut count = 0;
+        for api in crate::registry::APIS {
+            count += 1;
+            let path = api.spec_url();
+            let (status, content_type, body) = fetch(&path).await;
+            assert_eq!(status, StatusCode::OK, "spec {path} should be served");
+            assert_eq!(content_type, YAML_CONTENT_TYPE, "spec {path} content-type");
+            assert_eq!(
+                body, api.body,
+                "served body for {path} must be its registered spec verbatim"
+            );
+        }
+        // Non-vacuity: every registered API was exercised, and the catalog is full.
+        assert_eq!(
+            count,
+            crate::registry::APIS.len(),
+            "every registered API must be exercised"
+        );
+        assert!(count >= 28, "expected the full API-spec catalog, got {count}");
+    }
+
+    #[tokio::test]
     async fn serves_the_shared_ref_targets_so_specs_resolve() {
         // Every API spec `$ref`s these two by relative path; they must be served
         // at the resolved URLs or the served specs are not resolvable.
