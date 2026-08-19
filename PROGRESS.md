@@ -3332,6 +3332,31 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - a **name-`pattern` example-conformance** contract test (`src/registry.rs`
+    `every_name_pattern_example_conforms_to_the_name_pattern`) asserts that where a mounted
+    spec declares an inline `example` beside a **same-indent** `pattern: '^[a-zA-Z0-9_.-]+$'`
+    (the CAMARA QoS-family profile-name pattern), the example is one-or-more characters each
+    an ASCII letter/digit/`_`/`.`/`-`. The **fifth member of the `pattern`-conformance
+    family** after E.164 / IMEI / ICCID / 32-hex, and the **first over a mixed
+    alphanumeric-plus-punctuation alphabet** (the digit-run and hex members all accept a
+    single class of digits) whose `+` quantifier imposes only a non-empty floor — no fixed/
+    ranged-length check can express it; the `maxLength` ceiling stays guarded by
+    `every_example_respects_its_string_length_bounds`. Like the IMEI/ICCID patterns the name
+    pattern carries **no `format`** sibling (unlike the UUID patterns, guarded by
+    `every_uuid_format_example_is_a_well_formed_uuid`), so these examples were previously
+    unchecked. New pure `matches_name_pattern` (non-empty; every byte
+    `is_ascii_alphanumeric` or `_`/`.`/`-`; no regex dep) + `name_pattern_examples_malformed`
+    extractor cloning `iccid_pattern_examples_malformed`'s scoping exactly (inline scalar
+    `example`; same-indent `pattern` sibling *equal to* `NAME_PATTERN` scanned down-then-up
+    dedent-bounded — both corpus quotings normalize to the same inner text, and the eSIM
+    `^[a-zA-Z0-9_\-]{1,64}$` token pattern, no dot / length-bounded, never pairs;
+    outer-`example:`-payload / block-opener skipped). Surveyed the corpus first: 6
+    example+name-`pattern` pairs (qos-profiles `voice`, quality-on-demand `QOS_L`,
+    qos-provisioning `QOS_E`, qos-booking `QOS_E`, dedicated-network-areas `QOS_M`,
+    dedicated-network-profiles `standard`), all conforming → 0 drift. Unit-covered
+    (`name_pattern_example_extraction_rules`: space/slash/`@`/pattern-below flagged in
+    document order; valid quoted + dotted-hyphenated, no-pattern, IMEI-pattern sibling,
+    nested-`example`, cross-property, block-opener cleared; ≥4-pair non-vacuous floor).
   - an **array `example` item-count conformance** contract test (`src/registry.rs`
     `every_array_example_respects_its_item_bounds`) asserts that where a mounted spec declares an
     array `example` beside a same-indent `minItems`/`maxItems`, the example's element count lies
@@ -5570,6 +5595,49 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-19 — Contract-test harness: added a **name-`pattern` example-conformance**
+  contract test (`src/registry.rs` `every_name_pattern_example_conforms_to_the_name_pattern`)
+  — where a mounted spec declares an inline `example` beside a **same-indent**
+  `pattern: '^[a-zA-Z0-9_.-]+$'` (the CAMARA QoS-family profile-name pattern), the example
+  MUST be one-or-more characters each an ASCII letter/digit/`_`/`.`/`-`. An `example` is a
+  sample instance of the schema, so a name the pattern rejects (a space, slash, `@`, or a
+  placeholder pasted beside the pattern) is a self-contradictory schema whose own validator
+  rejects the sample it advertises — a Redoc/Swagger prefill and a codegen client's generated
+  sample then carry a value the field can never legally hold. The **fifth member of the
+  `pattern`-conformance family** after `every_e164_pattern_example_conforms_to_the_e164_pattern`,
+  `…imei…`, `…iccid…`, and `…hex32…`, and the **first over a mixed
+  alphanumeric-plus-punctuation alphabet**: the four prior members all accept a single class
+  of hex/decimal digits with a fixed or ranged length, so none can express this pattern's
+  `+`-quantified shape (a non-empty floor with the character class the only constraint; the
+  `maxLength` ceiling stays guarded by `every_example_respects_its_string_length_bounds`).
+  Like the IMEI/ICCID/32-hex patterns the name pattern carries **no `format` sibling** (unlike
+  the UUID patterns, always beside a `format: uuid` already guarded by
+  `every_uuid_format_example_is_a_well_formed_uuid`), so a QoS profile-name example's shape was
+  previously unguarded — no existing test reads this example against its `pattern`
+  (`every_pattern_declares_a_non_empty_string` checks only the pattern keyword's own value; the
+  example-value family checks an example's type / length / numeric bounds / enum membership,
+  never its pattern). New pure `matches_name_pattern` (non-empty; every byte
+  `u8::is_ascii_alphanumeric` or `_`/`.`/`-`; no regex dep) + `name_pattern_examples_malformed`
+  extractor cloning `iccid_pattern_examples_malformed`'s scoping exactly (an inline scalar
+  `example`; a same-indent `pattern` sibling *equal to* `NAME_PATTERN` scanned down-then-up
+  dedent-bounded — so a nested/following object's `pattern` never pairs, and in particular the
+  eSIM `^[a-zA-Z0-9_\-]{1,64}$` token pattern, no dot / length-bounded, is a *different* pattern
+  and never pairs; both corpus quotings `'…'`/`"…"` normalize to the same inner text; an
+  `example` inside an outer `example:`/`examples:` payload or a block-opening `example:`
+  skipped). **Surveyed the corpus first: 6 example+name-`pattern` pairs (qos-profiles `voice`,
+  quality-on-demand `QOS_L`, qos-provisioning `QOS_E`, qos-booking `QOS_E`,
+  dedicated-network-areas `QOS_M`, dedicated-network-profiles `standard`), every one a
+  conforming name → 0 drift; a live guard that fires the moment a spec adds a mis-shaped name
+  example.** Unit-covered (`name_pattern_example_extraction_rules`: the matcher accepts an
+  all-letter / every-class-member / single-char name and rejects a space / slash / `@` / empty;
+  a space-, slash-, and `@`-bearing example plus a bad value with its `pattern` a line below all
+  flagged in document order; a valid quoted + dotted-hyphenated example, a no-`pattern` sibling,
+  an IMEI-`pattern` sibling, a nested-`example` payload, a cross-property split, and a property
+  literally named `example` opening a block all cleared; ≥4-pair non-vacuous floor). Test-side
+  only — no request/response/behaviour change, so no vendored-spec edits. `cargo test` 2782
+  green (was 2780; +2); `cargo build --release` succeeds. No new dependency; the matcher,
+  extractor and both tests live in the `#[cfg(test)]` module, so nothing ships in the binary.
+  — binary (release): 5.1M (5,323,160 B; unchanged)
 - 2026-08-19 — Contract-test harness: added an **array `example` item-count conformance**
   contract test (`src/registry.rs` `every_array_example_respects_its_item_bounds`) — where a
   mounted spec declares an array `example` beside a **same-indent** `minItems` and/or `maxItems`,

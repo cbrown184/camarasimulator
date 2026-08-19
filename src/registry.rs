@@ -25510,6 +25510,351 @@ components:
         );
     }
 
+    const NAME_PATTERN: &str = r"^[a-zA-Z0-9_.-]+$";
+
+    /// True when `s` matches the name `pattern` `^[a-zA-Z0-9_.-]+$` exactly: one or more
+    /// characters, each an ASCII letter, digit, underscore, dot, or hyphen, and nothing
+    /// else. Hand-rolled (no regex dep) mirroring `matches_imei_pattern`'s shape-only
+    /// stance, so a legitimately shaped name is never a false positive; unlike the fixed-
+    /// or ranged-length digit runs (IMEI/ICCID) this pattern's `+` quantifier imposes only
+    /// a non-empty floor (an accompanying `maxLength` caps the ceiling and is guarded
+    /// separately by `every_example_respects_its_string_length_bounds`).
+    fn matches_name_pattern(s: &str) -> bool {
+        !s.is_empty()
+            && s.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-'))
+    }
+
+    /// The 1-based line numbers, in document order, of every `example:` keyword whose
+    /// inline scalar value sits in a Schema Object declaring a *same-indent*
+    /// `pattern: '^[a-zA-Z0-9_.-]+$'` sibling yet does not match that name pattern, without
+    /// a YAML dep. The name-pattern twin of `iccid_pattern_examples_malformed`: same
+    /// scoping, keyed on `NAME_PATTERN` instead of `ICCID_PATTERN`.
+    ///
+    /// In OpenAPI 3.0.x (JSON Schema) an `example` is a sample *instance* of the schema, so
+    /// a field constrained by `pattern` MUST carry an example the pattern accepts. A name
+    /// example that includes a character the class forbids — a space, a slash, an `@`, a
+    /// placeholder pasted beside the pattern — advertises a sample the schema's own
+    /// validator rejects, so a Redoc/Swagger prefill and a codegen client's generated
+    /// sample carry a value the field can never legally hold. `^[a-zA-Z0-9_.-]+$` is the
+    /// CAMARA QoS-family profile-name pattern (QoS Profiles / Quality on Demand /
+    /// QoS Provisioning / QoS Booking / the Dedicated Network APIs), and — like the
+    /// IMEI/ICCID patterns, unlike the UUID patterns which sit beside a `format: uuid`
+    /// already guarded by `every_uuid_format_example_is_a_well_formed_uuid` — it carries no
+    /// `format`, so these examples are otherwise unchecked.
+    ///
+    /// Scoping mirrors `iccid_pattern_examples_malformed` exactly: only an `example`
+    /// carrying an inline scalar (a block/object example opens no inline value and is
+    /// skipped) with a same-indent `pattern` sibling *equal to* `NAME_PATTERN` in the same
+    /// Schema Object is inspected — the sibling is scanned at the example's own indent,
+    /// down through the object's block then up, dedent-bounded, so a nested or following
+    /// object's `pattern` never pairs (in particular the eSIM `^[a-zA-Z0-9_\-]{1,64}$`
+    /// token pattern — no dot, length-bounded — is a *different* pattern and never pairs).
+    /// Both corpus quotings (`'^[a-zA-Z0-9_.-]+$'` and `"^[a-zA-Z0-9_.-]+$"`) normalize to
+    /// the same inner text and match. An `example:` nested inside an outer
+    /// `example:`/`examples:` payload (sample data, not a schema keyword) is skipped. Only
+    /// the name pattern is matched; other patterns are out of scope.
+    fn name_pattern_examples_malformed(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let raw_inline = |l: &str, name: &str| -> Option<String> {
+            let (k, v) = l.trim_start().split_once(':')?;
+            if k.trim() != name {
+                return None;
+            }
+            let v = v.split('#').next().unwrap_or(v).trim();
+            if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            }
+        };
+        // Whether a same-indent `pattern:` sibling of line `i` (indent `c`) in the same
+        // Schema Object equals the name pattern: scan down through the object's block then
+        // up, dedent-bounded so a nested or following object's `pattern` never pairs.
+        let sibling_is_name_pattern = |i: usize, c: usize| -> bool {
+            let is_name_pattern = |l: &str| -> bool {
+                raw_inline(l, "pattern")
+                    .map(|v| v.trim_matches('"').trim_matches('\'') == NAME_PATTERN)
+                    .unwrap_or(false)
+            };
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_name_pattern(l) {
+                    return true;
+                }
+                j += 1;
+            }
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_name_pattern(l) {
+                    return true;
+                }
+            }
+            false
+        };
+        // True when line `i` (indent `c`) sits inside an outer `example:`/`examples:`
+        // payload — some enclosing container key up the indent ladder is
+        // `example`/`examples` — so an inner `example` key there is sample data, not a
+        // schema keyword.
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some(raw) = raw_inline(line, "example") else {
+                continue;
+            };
+            let c = indent(line);
+            if inside_example(i, c) {
+                continue;
+            }
+            if !sibling_is_name_pattern(i, c) {
+                continue;
+            }
+            let value = raw.trim_matches('"').trim_matches('\'');
+            if !matches_name_pattern(value) {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_name_pattern_example_conforms_to_the_name_pattern() {
+        // Contract-harness invariant (OpenAPI 3.0.x / JSON-Schema structural rule): where a
+        // Schema Object declares an inline `example` beside a same-indent
+        // `pattern: '^[a-zA-Z0-9_.-]+$'` (the CAMARA QoS-family profile-name pattern), the
+        // example MUST match that pattern. An `example` is a sample *instance* of the
+        // schema, so a value the `pattern` rejects — a name carrying a space, slash, `@`, or
+        // any character outside `[A-Za-z0-9_.-]` — is a self-contradictory schema whose own
+        // validator rejects the sample it advertises, so a Redoc/Swagger prefill and a
+        // codegen client's generated sample carry a value no field constrained by this
+        // pattern can legally hold.
+        //
+        // The fifth member of the `pattern`-conformance family after E.164 / IMEI / ICCID /
+        // 32-hex, and the first over a *mixed alphanumeric-plus-punctuation* alphabet (the
+        // digit-run and hex members all accept a single character class of digits): the
+        // `+` quantifier imposes only a non-empty floor, so this member cannot be expressed
+        // by any fixed- or ranged-length check — the accompanying `maxLength` ceiling is
+        // guarded separately by `every_example_respects_its_string_length_bounds`. Like the
+        // IMEI/ICCID patterns the name pattern carries no `format` sibling, so its examples
+        // are beyond the `format`-example family's reach; a general regex-engine test would
+        // need a new dependency (declined on binary-size grounds), so a concrete hand-
+        // validated shape is matched. Verified true across all mounted specs before
+        // asserting (six such example+pattern pairs across the QoS-family specs, every one a
+        // conforming name).
+        for api in APIS {
+            let offenders = name_pattern_examples_malformed(api.body);
+            assert!(
+                offenders.is_empty(),
+                "{} spec declares an `example` beside a same-indent name \
+                 `pattern: '^[a-zA-Z0-9_.-]+$'` that does not match that pattern (a sample the \
+                 pattern's own validator would reject) at `example:` line(s): {:?}",
+                api.name,
+                offenders
+            );
+        }
+    }
+
+    #[test]
+    fn name_pattern_example_extraction_rules() {
+        // Unit-cover `matches_name_pattern` and `name_pattern_examples_malformed` so the
+        // contract test above can't pass vacuously and its detection is pinned.
+        //
+        // Shape check: an all-letter name, a name mixing every allowed class member
+        // (letters, digits, `_`, `.`, `-`), and a single character all pass; a space, a
+        // slash, an `@`, and an empty string all fail. The mixed-class acceptance and the
+        // non-empty floor are the whole point of the `[A-Za-z0-9_.-]+` pattern.
+        assert!(matches_name_pattern("voice"));
+        assert!(matches_name_pattern("QOS_1.2-3"));
+        assert!(matches_name_pattern("a"));
+        assert!(!matches_name_pattern("has space"));
+        assert!(!matches_name_pattern("a/b"));
+        assert!(!matches_name_pattern("a@b"));
+        assert!(!matches_name_pattern(""));
+
+        // Extractor: a valid quoted name and a valid unquoted dotted-hyphenated name (each
+        // beside a same-indent name `pattern`) pass; a space-, slash-, and `@`-bearing value
+        // are flagged; a bad value whose `pattern` is declared *below* it is still paired
+        // (down-scan) and flagged; a value with no `pattern` sibling and one whose sibling is
+        // a *different* pattern (the fixed-length IMEI `^[0-9]{15}$`) are skipped; an inner
+        // `example` inside an outer `example:` payload is skipped; an example in one property
+        // never pairs with a following property's `pattern` across the dedent; and a property
+        // literally named `example` (opening a block) is skipped.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    GoodQuoted:
+      type: string
+      pattern: '^[a-zA-Z0-9_.-]+$'
+      example: \"voice\"
+    GoodUnquoted:
+      type: string
+      pattern: '^[a-zA-Z0-9_.-]+$'
+      example: QOS_1.2-3
+    HasSpace:
+      type: string
+      pattern: '^[a-zA-Z0-9_.-]+$'
+      example: \"has space\"
+    HasSlash:
+      type: string
+      pattern: '^[a-zA-Z0-9_.-]+$'
+      example: \"a/b\"
+    AtSign:
+      type: string
+      pattern: '^[a-zA-Z0-9_.-]+$'
+      example: \"a@b\"
+    PatternBelow:
+      type: string
+      example: \"bad value\"
+      pattern: '^[a-zA-Z0-9_.-]+$'
+    NoPattern:
+      type: string
+      example: \"no pattern here\"
+    OtherPattern:
+      type: string
+      pattern: '^[0-9]{15}$'
+      example: \"490154203237518\"
+    InExample:
+      type: object
+      example:
+        pattern: '^[a-zA-Z0-9_.-]+$'
+        example: \"bad thing\"
+    Split:
+      type: object
+      properties:
+        a:
+          example: \"bad value\"
+        b:
+          type: string
+          pattern: '^[a-zA-Z0-9_.-]+$'
+    NamedExample:
+      type: object
+      properties:
+        example:
+          type: string
+          pattern: '^[a-zA-Z0-9_.-]+$'
+";
+        // Flagged, in document order: HasSpace.example (line 25, a space), HasSlash.example
+        // (line 29, a slash), AtSign.example (line 33, an `@`), and PatternBelow.example
+        // (line 36, value `bad value` with its name `pattern` a line below — down-scan pairs
+        // it). Not flagged: GoodQuoted/GoodUnquoted (valid names); NoPattern (no `pattern`
+        // sibling); OtherPattern (sibling is the fixed-length IMEI pattern, not the name
+        // pattern); InExample's inner `example: \"bad thing\"` (sits inside the outer
+        // `example:` payload); Split.a.example, whose only name `pattern` is in the following
+        // property Split.b past a dedent; and NamedExample's `example:` property opening a
+        // block (no inline value).
+        assert_eq!(name_pattern_examples_malformed(body), vec![25, 29, 33, 36]);
+
+        // Non-vacuous floor: across every registered spec every `example` beside a
+        // same-indent name `pattern` matches it (the invariant the contract test asserts),
+        // and the corpus actually declares several such pairs — so the pattern-comparison
+        // path runs on real data and a broken (always-empty) extractor can't hide behind a
+        // corpus that never pairs an example with the name pattern. Count pairs with a
+        // same-indent detector independent of the extractor's shape comparison.
+        let mut name_examples = 0usize;
+        for api in APIS {
+            assert!(
+                name_pattern_examples_malformed(api.body).is_empty(),
+                "{}: every example beside a same-indent name `pattern` must match it",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            let is_key = |l: &str, name: &str, val: Option<&str>| {
+                l.trim_start().split_once(':').is_some_and(|(k, v)| {
+                    k.trim() == name
+                        && val.is_none_or(|want| {
+                            v.split('#')
+                                .next()
+                                .unwrap_or(v)
+                                .trim()
+                                .trim_matches('"')
+                                .trim_matches('\'')
+                                == want
+                        })
+                })
+            };
+            for (i, l) in lines.iter().enumerate() {
+                if !is_key(l, "example", None) {
+                    continue;
+                }
+                if l.trim_start()
+                    .split_once(':')
+                    .map(|(_, v)| v.split('#').next().unwrap_or(v).trim().is_empty())
+                    .unwrap_or(true)
+                {
+                    continue;
+                }
+                let c = indent(l);
+                let lo = i.saturating_sub(6);
+                let hi = (i + 6).min(lines.len());
+                let has_name_pattern = (lo..hi).any(|j| {
+                    j != i
+                        && indent(lines[j]) == c
+                        && is_key(lines[j], "pattern", Some(NAME_PATTERN))
+                });
+                if has_name_pattern {
+                    name_examples += 1;
+                }
+            }
+        }
+        assert!(
+            name_examples >= 4,
+            "expected several example + same-indent name `pattern` pairs across specs, got {name_examples}"
+        );
+    }
+
     /// True when a `pattern` scalar (already unquoted) is the 32-hexadecimal-digit
     /// pattern `^[<hex>]{32}$` — a fixed run of exactly 32 case-insensitive hex digits —
     /// regardless of the order the three hex ranges are written in the character class.
