@@ -24698,6 +24698,353 @@ components:
         );
     }
 
+    /// The ICCID `pattern` the CAMARA eSIM specs use verbatim (written in YAML as
+    /// `'^[0-9]{19,20}$'`): 19 **or** 20 decimal digits. After E.164 and IMEI it is the
+    /// corpus's next-most-declared *fixed-shape* `pattern` (a profile `iccid` field recurs
+    /// across the eSIM Remote Management operations) and, like the IMEI pattern and unlike a
+    /// `format: uuid` field, carries **no `format` sibling** — so its examples are otherwise
+    /// beyond the `format`-example family's reach. The natural third member of the
+    /// `pattern`-conformance family after `E164_PATTERN` and `IMEI_PATTERN`, and the first
+    /// whose shape is a *variable-length* digit run (19 or 20), so a value one digit shy of
+    /// 19 or one past 20 is the fault the fixed-length IMEI check cannot express.
+    const ICCID_PATTERN: &str = r"^[0-9]{19,20}$";
+
+    /// True when `s` matches the ICCID `pattern` `^[0-9]{19,20}$` exactly: 19 or 20 ASCII
+    /// decimal digits, nothing else. Hand-rolled (no regex dep) mirroring
+    /// `matches_imei_pattern`'s shape-only stance, so a legitimately shaped ICCID is never a
+    /// false positive; the only difference from the IMEI matcher is the accepted length set
+    /// ({19, 20} instead of {15}), matching the `{19,20}` quantifier.
+    fn matches_iccid_pattern(s: &str) -> bool {
+        let b = s.as_bytes();
+        (b.len() == 19 || b.len() == 20) && b.iter().all(u8::is_ascii_digit)
+    }
+
+    /// The 1-based line numbers, in document order, of every `example:` keyword whose
+    /// inline scalar value sits in a Schema Object declaring a *same-indent*
+    /// `pattern: '^[0-9]{19,20}$'` sibling yet does not match that ICCID pattern, without a
+    /// YAML dep. The ICCID twin of `imei_pattern_examples_malformed`: same scoping, keyed on
+    /// `ICCID_PATTERN` instead of `IMEI_PATTERN`.
+    ///
+    /// In OpenAPI 3.0.x (JSON Schema) an `example` is a sample *instance* of the schema, so a
+    /// field constrained by `pattern` MUST carry an example the pattern accepts. An ICCID
+    /// example that is not 19 or 20 digits — a digit dropped or added, a placeholder pasted
+    /// beside the pattern — advertises a sample the schema's own validator rejects, so a
+    /// Redoc/Swagger prefill and a codegen client's generated sample carry a value the field
+    /// can never legally hold. A live hazard in the eSIM specs, where an `iccid` example is
+    /// hand-authored and copied between the profile-list / task-response siblings. Unlike the
+    /// UUID patterns (which sit beside a `format: uuid` already guarded by
+    /// `every_uuid_format_example_is_a_well_formed_uuid`), the ICCID pattern has no `format`,
+    /// so these examples are otherwise unchecked.
+    ///
+    /// Scoping mirrors `imei_pattern_examples_malformed` exactly: only an `example` carrying
+    /// an inline scalar (a block/object example opens no inline value and is skipped) with a
+    /// same-indent `pattern` sibling *equal to* `ICCID_PATTERN` in the same Schema Object is
+    /// inspected — the sibling is scanned at the example's own indent, down through the
+    /// object's block then up, dedent-bounded, so a nested or following object's `pattern`
+    /// never pairs (in particular the adjacent `imei` property's `^[0-9]{15}$` pattern is not
+    /// this pattern and never pairs). An `example:` nested inside an outer
+    /// `example:`/`examples:` payload (sample data, not a schema keyword) is skipped. Only the
+    /// ICCID pattern is matched; other patterns are out of scope.
+    fn iccid_pattern_examples_malformed(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let raw_inline = |l: &str, name: &str| -> Option<String> {
+            let (k, v) = l.trim_start().split_once(':')?;
+            if k.trim() != name {
+                return None;
+            }
+            let v = v.split('#').next().unwrap_or(v).trim();
+            if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            }
+        };
+        // Whether a same-indent `pattern:` sibling of line `i` (indent `c`) in the same
+        // Schema Object equals the ICCID pattern: scan down through the object's block then
+        // up, dedent-bounded so a nested or following object's `pattern` never pairs.
+        let sibling_is_iccid_pattern = |i: usize, c: usize| -> bool {
+            let is_iccid_pattern = |l: &str| -> bool {
+                raw_inline(l, "pattern")
+                    .map(|v| v.trim_matches('"').trim_matches('\'') == ICCID_PATTERN)
+                    .unwrap_or(false)
+            };
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_iccid_pattern(l) {
+                    return true;
+                }
+                j += 1;
+            }
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_iccid_pattern(l) {
+                    return true;
+                }
+            }
+            false
+        };
+        // True when line `i` (indent `c`) sits inside an outer `example:`/`examples:`
+        // payload — some enclosing container key up the indent ladder is
+        // `example`/`examples` — so an inner `example` key there is sample data, not a
+        // schema keyword.
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some(raw) = raw_inline(line, "example") else {
+                continue;
+            };
+            let c = indent(line);
+            if inside_example(i, c) {
+                continue;
+            }
+            if !sibling_is_iccid_pattern(i, c) {
+                continue;
+            }
+            let value = raw.trim_matches('"').trim_matches('\'');
+            if !matches_iccid_pattern(value) {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_iccid_pattern_example_conforms_to_the_iccid_pattern() {
+        // Contract-harness invariant (OpenAPI 3.0.x / JSON-Schema structural rule): where a
+        // Schema Object declares an inline `example` beside a same-indent
+        // `pattern: '^[0-9]{19,20}$'` (the ICCID pattern the CAMARA eSIM specs use verbatim),
+        // the example MUST match that pattern. An `example` is a sample *instance* of the
+        // schema, so a value the `pattern` rejects — an ICCID with a digit dropped or added,
+        // or a placeholder pasted beside the pattern — is a self-contradictory schema whose
+        // own validator rejects the sample it advertises, so a Redoc/Swagger prefill and a
+        // codegen client's generated sample carry a value no field constrained by this
+        // pattern can legally hold.
+        //
+        // The third member of the `pattern`-conformance family after
+        // `every_e164_pattern_example_conforms_to_the_e164_pattern` and
+        // `every_imei_pattern_example_conforms_to_the_imei_pattern`, and the first whose
+        // shape is a *variable-length* digit run: the IMEI check asserts an exact length
+        // (15), so it cannot express the ICCID pattern's 19-or-20 fault (a value that is 18
+        // or 21 digits). Like the IMEI pattern the ICCID pattern carries no `format` sibling,
+        // so its examples are beyond the `format`-example family's reach; a general
+        // regex-engine test would need a new dependency (declined on binary-size grounds), so
+        // a concrete hand-validated shape is matched. Verified true across all mounted specs
+        // before asserting (the eSIM Remote Management spec declares 4 such example+pattern
+        // pairs, every one 19 digits).
+        for api in APIS {
+            let offenders = iccid_pattern_examples_malformed(api.body);
+            assert!(
+                offenders.is_empty(),
+                "{} spec declares an `example` beside a same-indent ICCID \
+                 `pattern: '^[0-9]{{19,20}}$'` that does not match that pattern (a sample the \
+                 pattern's own validator would reject) at `example:` line(s): {:?}",
+                api.name,
+                offenders
+            );
+        }
+    }
+
+    #[test]
+    fn iccid_pattern_example_extraction_rules() {
+        // Unit-cover `matches_iccid_pattern` and `iccid_pattern_examples_malformed` so the
+        // contract test above can't pass vacuously and its detection is pinned.
+        //
+        // Shape check: 19 and 20 decimal digits both pass; 18 or 21 digits, an embedded
+        // non-digit, and an empty string all fail. The both-lengths acceptance is the whole
+        // point of a `{19,20}` pattern and what distinguishes this matcher from the
+        // fixed-length IMEI one.
+        assert!(matches_iccid_pattern("8931089011234567890")); // 19 digits
+        assert!(matches_iccid_pattern("89310890112345678901")); // 20 digits
+        assert!(matches_iccid_pattern("0000000000000000000")); // 19 digits (all zero)
+        assert!(!matches_iccid_pattern("893108901123456789")); // 18 digits — too short
+        assert!(!matches_iccid_pattern("893108901123456789012")); // 21 digits — too long
+        assert!(!matches_iccid_pattern("893108901123456789X")); // 19 chars, non-digit
+        assert!(!matches_iccid_pattern("")); // empty
+
+        // Extractor: a valid quoted 19-digit and a valid unquoted 20-digit ICCID (each beside
+        // a same-indent ICCID `pattern`) pass; an 18-digit, a 21-digit, and a non-digit value
+        // are flagged; a bad value whose `pattern` is declared *below* it is still paired
+        // (down-scan) and flagged; a value with no `pattern` sibling and one whose sibling is
+        // a *different* pattern (the fixed-length IMEI `^[0-9]{15}$`) are skipped; an inner
+        // `example` inside an outer `example:` payload is skipped; an example in one property
+        // never pairs with a following property's `pattern` across the dedent; and a property
+        // literally named `example` (opening a block) is skipped.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    GoodQuoted:
+      type: string
+      pattern: '^[0-9]{19,20}$'
+      example: \"8931089011234567890\"
+    GoodUnquoted:
+      type: string
+      pattern: '^[0-9]{19,20}$'
+      example: 89310890112345678901
+    TooShort:
+      type: string
+      pattern: '^[0-9]{19,20}$'
+      example: \"893108901123456789\"
+    TooLong:
+      type: string
+      pattern: '^[0-9]{19,20}$'
+      example: \"893108901123456789012\"
+    NonDigit:
+      type: string
+      pattern: '^[0-9]{19,20}$'
+      example: \"893108901123456789X\"
+    PatternBelow:
+      type: string
+      example: \"nope\"
+      pattern: '^[0-9]{19,20}$'
+    NoPattern:
+      type: string
+      example: \"8931089011234567890-but-no-pattern\"
+    OtherPattern:
+      type: string
+      pattern: '^[0-9]{15}$'
+      example: \"490154203237518\"
+    InExample:
+      type: object
+      example:
+        pattern: '^[0-9]{19,20}$'
+        example: \"bad\"
+    Split:
+      type: object
+      properties:
+        a:
+          example: \"bad\"
+        b:
+          type: string
+          pattern: '^[0-9]{19,20}$'
+    NamedExample:
+      type: object
+      properties:
+        example:
+          type: string
+          pattern: '^[0-9]{19,20}$'
+";
+        // Flagged, in document order: TooShort.example (line 25, 18 digits), TooLong.example
+        // (line 29, 21 digits), NonDigit.example (line 33, an embedded `X`), and
+        // PatternBelow.example (line 36, value `nope` with its ICCID `pattern` a line below —
+        // down-scan pairs it). Not flagged: GoodQuoted/GoodUnquoted (valid 19/20-digit);
+        // NoPattern (no `pattern` sibling); OtherPattern (sibling is the fixed-length IMEI
+        // pattern, not ICCID); InExample's inner `example: \"bad\"` (sits inside the outer
+        // `example:` payload); Split.a.example, whose only ICCID `pattern` is in the following
+        // property Split.b past a dedent; and NamedExample's `example:` property opening a
+        // block (no inline value).
+        assert_eq!(iccid_pattern_examples_malformed(body), vec![25, 29, 33, 36]);
+
+        // Non-vacuous floor: across every registered spec every `example` beside a
+        // same-indent ICCID `pattern` matches it (the invariant the contract test asserts),
+        // and the corpus actually declares several such pairs — so the pattern-comparison
+        // path runs on real data and a broken (always-empty) extractor can't hide behind a
+        // corpus that never pairs an example with the ICCID pattern. Count pairs with a
+        // same-indent detector independent of the extractor's shape comparison.
+        let mut iccid_examples = 0usize;
+        for api in APIS {
+            assert!(
+                iccid_pattern_examples_malformed(api.body).is_empty(),
+                "{}: every example beside a same-indent ICCID `pattern` must match it",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            let is_key = |l: &str, name: &str, val: Option<&str>| {
+                l.trim_start().split_once(':').is_some_and(|(k, v)| {
+                    k.trim() == name
+                        && val.is_none_or(|want| {
+                            v.split('#')
+                                .next()
+                                .unwrap_or(v)
+                                .trim()
+                                .trim_matches('"')
+                                .trim_matches('\'')
+                                == want
+                        })
+                })
+            };
+            for (i, l) in lines.iter().enumerate() {
+                if !is_key(l, "example", None) {
+                    continue;
+                }
+                if l.trim_start()
+                    .split_once(':')
+                    .map(|(_, v)| v.split('#').next().unwrap_or(v).trim().is_empty())
+                    .unwrap_or(true)
+                {
+                    continue;
+                }
+                let c = indent(l);
+                let lo = i.saturating_sub(6);
+                let hi = (i + 6).min(lines.len());
+                let has_iccid_pattern = (lo..hi).any(|j| {
+                    j != i
+                        && indent(lines[j]) == c
+                        && is_key(lines[j], "pattern", Some(ICCID_PATTERN))
+                });
+                if has_iccid_pattern {
+                    iccid_examples += 1;
+                }
+            }
+        }
+        assert!(
+            iccid_examples >= 4,
+            "expected several example + same-indent ICCID `pattern` pairs across specs, got {iccid_examples}"
+        );
+    }
+
     /// True when `s` is a well-formed RFC 3339 `date-time` string — the concrete
     /// syntax OpenAPI's `format: date-time` names (JSON Schema's `date-time` is
     /// RFC 3339 §5.6). Shape-only and lenient on the calendar (it range-checks each

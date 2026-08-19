@@ -3332,6 +3332,24 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - an **ICCID-`pattern` example-conformance** contract test (`src/registry.rs`
+    `every_iccid_pattern_example_conforms_to_the_iccid_pattern`) asserts that where a mounted
+    spec declares an inline `example` beside a same-indent `pattern: '^[0-9]{19,20}$'` (the
+    ICCID pattern the CAMARA eSIM specs use verbatim), the example is 19 or 20 decimal digits.
+    The **third member of the `pattern`-conformance family** after the E.164 and IMEI members,
+    and the **first with a variable-length shape** — the fixed-length IMEI check (exactly 15)
+    cannot express the `{19,20}` fault (an 18- or 21-digit value). Like the IMEI pattern the
+    ICCID pattern carries **no `format`**, so an `iccid` example's shape was previously
+    unchecked. New pure `matches_iccid_pattern` (19 or 20 ASCII digits; no regex dep) +
+    `iccid_pattern_examples_malformed` extractor cloning `imei_pattern_examples_malformed`'s
+    scoping exactly (inline scalar `example`; same-indent `pattern` sibling *equal to*
+    `ICCID_PATTERN` scanned down-then-up dedent-bounded, so the adjacent `imei` property's
+    `^[0-9]{15}$` never pairs; outer-`example:`-payload / block-opener skipped). Surveyed the
+    corpus first: 4 example+ICCID-`pattern` pairs (esim-remote-management), all 19-digit → 0
+    drift. Unit-covered (`iccid_pattern_example_extraction_rules`: 18-digit/21-digit/non-digit/
+    pattern-below flagged in document order; valid 19-quoted+20-unquoted, no-pattern,
+    IMEI-pattern sibling, nested-`example`, cross-property, block-opener cleared; ≥4-pair
+    non-vacuous floor).
   - an **IMEI-`pattern` example-conformance** contract test (`src/registry.rs`
     `every_imei_pattern_example_conforms_to_the_imei_pattern`) asserts that where a mounted
     spec declares an inline `example` beside a same-indent `pattern: '^[0-9]{15}$'` (the IMEI
@@ -5512,6 +5530,45 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-19 — Contract-test harness: added an **ICCID-`pattern` example-conformance**
+  contract test (`src/registry.rs` `every_iccid_pattern_example_conforms_to_the_iccid_pattern`)
+  — where a mounted spec declares an inline `example` beside a **same-indent**
+  `pattern: '^[0-9]{19,20}$'`, the example MUST be 19 or 20 decimal digits. An `example` is a
+  sample instance of the schema, so an ICCID the pattern rejects (a digit dropped or added, a
+  placeholder pasted beside the pattern) is a self-contradictory schema whose own validator
+  rejects the sample it advertises — a Redoc/Swagger prefill and a codegen client's generated
+  sample then carry a value the field can never legally hold. The **third member of the
+  `pattern`-conformance family** after `every_e164_pattern_example_conforms_to_the_e164_pattern`
+  and `every_imei_pattern_example_conforms_to_the_imei_pattern`, and the **first with a
+  variable-length shape**: the IMEI check asserts an exact length (15), so it cannot express
+  the ICCID pattern's 19-or-20 fault (an 18- or 21-digit value) — this member is what carries
+  the family to a ranged digit-run. Like the IMEI pattern the ICCID pattern carries **no
+  `format` sibling** (unlike the UUID patterns, always beside a `format: uuid` already guarded
+  by `every_uuid_format_example_is_a_well_formed_uuid`), so an `iccid` example's shape was
+  previously unguarded — no existing test reads an example against its `pattern`
+  (`every_pattern_declares_a_non_empty_string` checks only the pattern keyword's own value; the
+  example-value family checks an example's type / length / numeric bounds / enum membership,
+  never its pattern). New pure `matches_iccid_pattern` (19 or 20 ASCII digits — the only
+  difference from `matches_imei_pattern` is the accepted length set, matching the `{19,20}`
+  quantifier; no regex dep) + `iccid_pattern_examples_malformed` extractor cloning
+  `imei_pattern_examples_malformed`'s scoping exactly (an inline scalar `example`; a same-indent
+  `pattern` sibling *equal to* the ICCID literal scanned down-then-up, dedent-bounded — so the
+  adjacent `imei` property's `^[0-9]{15}$` pattern, a *different* pattern, never pairs; an
+  `example` inside an outer `example:`/`examples:` payload or a block-opening `example:`
+  skipped; only the ICCID pattern matched — other patterns out of scope). **Surveyed the corpus
+  first: 4 example+ICCID-`pattern` pairs (all in esim-remote-management's profile-list /
+  task-response schemas), every one the 19-digit `8931089011234567890` → 0 drift; a live guard
+  that fires the moment a spec adds a mis-shaped ICCID example (2 further ICCID patterns carry
+  no example sibling and are correctly skipped).** Unit-covered
+  (`iccid_pattern_example_extraction_rules`: an 18-digit, a 21-digit, an embedded-`X`, and a
+  `nope` with its `pattern` a line below all flagged in document order; a valid quoted 19-digit
+  and unquoted 20-digit value, a no-`pattern` sibling, a fixed-length IMEI-`pattern` sibling, a
+  nested-`example` payload, a cross-property split, and a property literally named `example`
+  opening a block all cleared; ≥4-pair non-vacuous floor). Test-side only — no
+  request/response/behaviour change, so no vendored-spec edits. `cargo test` 2776 green (was
+  2774; +2); `cargo build --release` succeeds. No new dependency; the extractor and both tests
+  live in the `#[cfg(test)]` module, so nothing ships in the binary. — binary (release): 5.1M
+  (5,323,160 B; unchanged)
 - 2026-08-19 — Contract-test harness: added an **IMEI-`pattern` example-conformance**
   contract test (`src/registry.rs` `every_imei_pattern_example_conforms_to_the_imei_pattern`)
   — where a mounted spec declares an inline `example` beside a **same-indent**
