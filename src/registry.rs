@@ -983,6 +983,141 @@ mod tests {
         out
     }
 
+    /// The canonical base URL CamaraSim serves every API on: the scheme+authority
+    /// of the socket `main.rs` binds by default (`0.0.0.0:8080`, addressed as
+    /// `localhost:8080`). Every spec's `{apiRoot}` server-variable default is
+    /// pinned to exactly this string so the served docs "try it" panel targets the
+    /// running simulator.
+    const CANONICAL_SERVER_BASE_URL: &str = "http://localhost:8080";
+
+    /// Every leading server-variable `default:` — the value substituted at the
+    /// **head** of a server `url:` template (`url: "{apiRoot}/…"`) — that is not
+    /// exactly [`CANONICAL_SERVER_BASE_URL`], reported as `"line <N>: <value>"` in
+    /// document order, without a YAML dep.
+    ///
+    /// CamaraSim serves every mounted spec from one origin — the `0.0.0.0:8080`
+    /// socket `main.rs` binds — so a spec's `{apiRoot}` default is not free text: it
+    /// MUST be the base URL the simulator actually listens on (`http://localhost:8080`)
+    /// or the served `/{api}/v{n}/docs` "try it" panel and every codegen client
+    /// assemble request URLs against an origin nothing answers on (a wrong port, a
+    /// pasted CAMARA-template production host, `https://` where the simulator speaks
+    /// plain HTTP) — every call then connection-refuses or 404s exactly where a
+    /// caller issues it, though the spec parses and the default is a perfectly
+    /// well-formed absolute URI.
+    ///
+    /// The **exact-value complement** of
+    /// `every_leading_server_variable_default_is_a_well_formed_absolute_uri` (which
+    /// proves the default is *some* absolute URI but accepts any scheme/host/port)
+    /// and of `every_server_variable_is_named_apiroot` (which pins the variable's
+    /// *name* but never reads its *value*): a default of
+    /// `https://api.example.com/5g` — absolute, and under an `apiRoot` key — passes
+    /// both yet points callers at an origin the simulator never serves. Mirrors how
+    /// `every_spec_pins_the_camara_openapi_3_0_3_version` pins the exact version its
+    /// looser sibling leaves open and `every_info_license_name_is_the_camara_apache_identifier`
+    /// pins the licence identifier the presence-only licence test never reads.
+    ///
+    /// Scoping is identical to `server_variable_defaults_not_absolute_uri` (only the
+    /// top-level `servers:` block; a leading variable opens a server `url:` after an
+    /// optional `- ` dash and surrounding quotes; a variable is a direct-child key of
+    /// a `variables:` mapping and its `default:` is read from its own sub-block, an
+    /// inline `#` comment and surrounding quotes stripped). An empty `default` is
+    /// skipped — its absence is `server_url_undefined_variables`'s concern; a
+    /// non-leading variable (mid-template, whose default need not be a base URL) is
+    /// out of scope.
+    fn leading_server_variable_defaults_not_canonical(body: &str) -> Vec<String> {
+        let lines: Vec<&str> = body.lines().collect();
+
+        // Isolate the top-level `servers:` block (identical to the siblings).
+        let start = match lines.iter().position(|l| *l == "servers:") {
+            Some(s) => s,
+            None => return Vec::new(),
+        };
+        let end = lines[start + 1..]
+            .iter()
+            .position(|l| !l.is_empty() && !l.starts_with(char::is_whitespace))
+            .map(|off| start + 1 + off)
+            .unwrap_or(lines.len());
+        let block_start = start + 1;
+        let block = &lines[block_start..end];
+
+        // Leading variable names: the `{name}` that opens a server `url:` value.
+        let mut leading: Vec<String> = Vec::new();
+        for l in block {
+            let t = l.trim_start();
+            let t = t.strip_prefix("- ").unwrap_or(t);
+            if let Some(url) = t.strip_prefix("url:") {
+                let url = url.trim().trim_matches('"').trim_matches('\'');
+                if let Some(rest) = url.strip_prefix('{') {
+                    if let Some(close) = rest.find('}') {
+                        let name = &rest[..close];
+                        if !name.is_empty() {
+                            leading.push(name.to_string());
+                        }
+                    }
+                }
+            }
+        }
+
+        // Walk each `variables:` mapping; for a direct-child variable that opens a
+        // url template, flag its `default:` when the value is not the canonical URL.
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let mut out = Vec::new();
+        let mut k = 0;
+        while k < block.len() {
+            if block[k].trim() != "variables:" {
+                k += 1;
+                continue;
+            }
+            let v_indent = indent(block[k]);
+            let mut child_indent: Option<usize> = None;
+            let mut m = k + 1;
+            while m < block.len() {
+                let l = block[m];
+                if l.trim().is_empty() {
+                    m += 1;
+                    continue;
+                }
+                let ind = indent(l);
+                if ind <= v_indent {
+                    break; // end of the `variables:` mapping
+                }
+                let ci = *child_indent.get_or_insert(ind);
+                if ind == ci {
+                    let name = l.trim().split_once(':').map(|(k, _)| k.trim()).unwrap_or("");
+                    if !name.is_empty() && leading.iter().any(|n| n == name) {
+                        let mut n = m + 1;
+                        while n < block.len() {
+                            let ll = block[n];
+                            if ll.trim().is_empty() {
+                                n += 1;
+                                continue;
+                            }
+                            if indent(ll) <= ci {
+                                break;
+                            }
+                            if let Some(rest) = ll.trim().strip_prefix("default:") {
+                                let val = rest
+                                    .split('#')
+                                    .next()
+                                    .unwrap_or(rest)
+                                    .trim()
+                                    .trim_matches('"')
+                                    .trim_matches('\'');
+                                if !val.is_empty() && val != CANONICAL_SERVER_BASE_URL {
+                                    out.push(format!("line {}: {}", block_start + n + 1, val));
+                                }
+                            }
+                            n += 1;
+                        }
+                    }
+                }
+                m += 1;
+            }
+            k = m;
+        }
+        out
+    }
+
     /// The names, in document order, of every server variable a spec declares
     /// under `servers[].variables:` whose key is **not** the canonical CAMARA
     /// name `apiRoot` — without a YAML dep.
@@ -5959,6 +6094,164 @@ paths: {}
                 server_variable_defaults_not_absolute_uri(api.body).is_empty(),
                 "{}: every leading server-variable default must be a well-formed \
                  absolute URI",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            if let Some(start) = lines.iter().position(|l| *l == "servers:") {
+                let end = lines[start + 1..]
+                    .iter()
+                    .position(|l| !l.is_empty() && !l.starts_with(char::is_whitespace))
+                    .map(|off| start + 1 + off)
+                    .unwrap_or(lines.len());
+                for l in &lines[start + 1..end] {
+                    if let Some(rest) = l.trim().strip_prefix("default:") {
+                        if !rest.split('#').next().unwrap_or(rest).trim().is_empty() {
+                            server_defaults += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            server_defaults >= 28,
+            "expected many server-block defaults across specs, got {server_defaults}"
+        );
+    }
+
+    #[test]
+    fn every_server_variable_default_is_the_canonical_base_url() {
+        // Contract-harness invariant: every mounted spec's leading `{apiRoot}`
+        // server-variable `default:` MUST be exactly the base URL the simulator
+        // serves on — `http://localhost:8080`, the `0.0.0.0:8080` socket `main.rs`
+        // binds by default. The served `/{api}/v{n}/docs` "try it" panel pre-fills
+        // its base-URL selector from this default and every codegen client bakes it
+        // into a URL-builder, so a default pointing anywhere else aims callers at an
+        // origin the running simulator never answers on.
+        //
+        // The exact-value complement of
+        // `every_leading_server_variable_default_is_a_well_formed_absolute_uri`
+        // (proves the default is *some* absolute URI, accepts any scheme/host/port)
+        // and of `every_server_variable_is_named_apiroot` (pins the variable's
+        // *name*, never its *value*): a default of `https://api.example.com/5g` —
+        // absolute, under an `apiRoot` key — passes both yet routes every "try it"
+        // call and generated client to an origin nothing serves. Mirrors how
+        // `every_spec_pins_the_camara_openapi_3_0_3_version` pins the exact value its
+        // looser sibling leaves open. Verified true across all mounted specs before
+        // asserting.
+        for api in APIS {
+            let bad = leading_server_variable_defaults_not_canonical(api.body);
+            assert!(
+                bad.is_empty(),
+                "{} spec declares a leading server-url variable whose `default:` is \
+                 not the canonical CamaraSim base URL `{}` (points callers at an \
+                 origin the simulator never serves) at: {:?}",
+                api.name,
+                CANONICAL_SERVER_BASE_URL,
+                bad
+            );
+        }
+    }
+
+    #[test]
+    fn server_variable_canonical_default_extraction_rules() {
+        // Unit-cover `leading_server_variable_defaults_not_canonical` so the contract
+        // test above can't pass vacuously and its accept/flag boundary is pinned: the
+        // canonical `http://localhost:8080` (with and without surrounding quotes)
+        // passes; a plausible-but-wrong absolute URI (wrong port, a production host,
+        // an `https://` scheme) is each flagged with its line and value; a non-leading
+        // variable's non-canonical default is out of scope; an empty `default:` is
+        // skipped (presence is the sibling's concern); and a spec with no `servers:`
+        // block yields nothing.
+        let good = "\
+servers:
+  - url: \"{apiRoot}/x/v1\"
+    variables:
+      apiRoot:
+        default: http://localhost:8080
+";
+        assert!(leading_server_variable_defaults_not_canonical(good).is_empty());
+
+        // A quoted canonical default is equally accepted (quotes stripped).
+        let good_quoted = "\
+servers:
+  - url: \"{apiRoot}/x/v1\"
+    variables:
+      apiRoot:
+        default: \"http://localhost:8080\"
+";
+        assert!(leading_server_variable_defaults_not_canonical(good_quoted).is_empty());
+
+        // Wrong port (line 5) — absolute and well-formed, but not the served origin.
+        let wrong_port = "\
+servers:
+  - url: \"{apiRoot}/x/v1\"
+    variables:
+      apiRoot:
+        default: http://localhost:9090
+";
+        assert_eq!(
+            leading_server_variable_defaults_not_canonical(wrong_port),
+            vec!["line 5: http://localhost:9090".to_string()]
+        );
+
+        // A pasted production host (line 5) → flagged.
+        let prod_host = "\
+servers:
+  - url: \"{apiRoot}/x/v1\"
+    variables:
+      apiRoot:
+        default: https://api.example.com/5g
+";
+        assert_eq!(
+            leading_server_variable_defaults_not_canonical(prod_host),
+            vec!["line 5: https://api.example.com/5g".to_string()]
+        );
+
+        // `region` is mid-template (not leading), so its non-canonical default is out
+        // of scope; `apiRoot`'s canonical default → nothing flagged.
+        let non_leading = "\
+servers:
+  - url: \"{apiRoot}/{region}/v1\"
+    variables:
+      apiRoot:
+        default: http://localhost:8080
+      region:
+        default: us
+";
+        assert!(leading_server_variable_defaults_not_canonical(non_leading).is_empty());
+
+        // An empty `default:` is the presence test's concern, skipped here.
+        let empty_default = "\
+servers:
+  - url: \"{apiRoot}/x/v1\"
+    variables:
+      apiRoot:
+        default:
+";
+        assert!(leading_server_variable_defaults_not_canonical(empty_default).is_empty());
+
+        // No `servers:` block → nothing to inspect.
+        let no_servers = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths: {}
+";
+        assert!(leading_server_variable_defaults_not_canonical(no_servers).is_empty());
+
+        // Non-vacuous floor: across every registered spec every leading
+        // server-variable default is the canonical base URL (the invariant the
+        // contract test asserts), and the corpus actually declares many server-block
+        // defaults — so the equality path runs on real data and a broken
+        // (always-empty) extractor can't hide behind a corpus that never declares a
+        // default. Count server-block defaults with a detector independent of the
+        // extractor's equality check.
+        let mut server_defaults = 0usize;
+        for api in APIS {
+            assert!(
+                leading_server_variable_defaults_not_canonical(api.body).is_empty(),
+                "{}: every leading server-variable default must be the canonical base URL",
                 api.name
             );
             let lines: Vec<&str> = api.body.lines().collect();

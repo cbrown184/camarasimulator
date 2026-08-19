@@ -5357,6 +5357,35 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-19 — Contract-test harness: added a **canonical-server-default-base-URL** contract test
+  (`src/registry.rs` `every_server_variable_default_is_the_canonical_base_url`) — every mounted
+  spec's leading `{apiRoot}` server-variable `default:` MUST be exactly `http://localhost:8080`,
+  the base URL the simulator serves on (`main.rs` binds `0.0.0.0:8080` by default). The served
+  `/{api}/v{n}/docs` "try it" panel pre-fills its base-URL selector from this default and every
+  codegen client bakes it into a URL-builder, so a default pointing elsewhere aims callers at an
+  origin the running simulator never answers on — a wrong port, a pasted CAMARA-template production
+  host, or `https://` where the sim speaks plain HTTP → every call connection-refuses/404s exactly
+  where a caller issues it, though the spec parses and the default is a perfectly well-formed
+  absolute URI. The **exact-value complement** of
+  `every_leading_server_variable_default_is_a_well_formed_absolute_uri` (proves the default is
+  *some* absolute URI, accepts any scheme/host/port) and of `every_server_variable_is_named_apiroot`
+  (pins the variable's *name*, never its *value*): a `https://api.example.com/5g` default — absolute,
+  under an `apiRoot` key — passes both yet routes callers to an unserved origin. Mirrors how
+  `every_spec_pins_the_camara_openapi_3_0_3_version` pins the exact value its looser sibling leaves
+  open. New pure `leading_server_variable_defaults_not_canonical` extractor + `CANONICAL_SERVER_BASE_URL`
+  const (no YAML dep) reuse `server_variable_defaults_not_absolute_uri`'s scoping exactly (top-level
+  `servers:` block; a leading variable opens a server `url:`; a `variables:` direct-child's `default:`
+  read from its own sub-block, `#`-comment + quotes stripped; empty default skipped; non-leading
+  variable out of scope), swapping the URI-shape check for equality against the canonical URL and
+  reporting `"line <N>: <value>"` so a failure names the drift. **Surveyed the corpus first: all 60
+  mounted business specs default `{apiRoot}` to `http://localhost:8080` → 0 drift.** Non-vacuity from
+  the unit test (`server_variable_canonical_default_extraction_rules`: canonical quoted/unquoted pass;
+  wrong-port and production-host defaults each flagged with line+value; a non-leading variable's
+  non-canonical default out of scope; empty default and no-`servers` doc yield nothing; ≥28
+  server-default corpus floor). Test-side only — no request/response/behaviour change, so no vendored-spec
+  edits. `cargo test` 2752 green (was 2750; +2); `cargo build --release` succeeds. No new dependency;
+  the extractor, const, and both tests live in the `#[cfg(test)]` module, so nothing ships in the
+  binary. — binary (release): 5.1M (5,323,160 B; unchanged)
 - 2026-08-19 — Contract-test harness: added a **path-template-variable binding** contract test
   (`src/registry.rs` `every_path_template_variable_has_a_declared_path_parameter`) — every
   `{name}` a mounted spec interpolates into a `paths:` key MUST be bound by a Parameter Object
