@@ -5494,6 +5494,34 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-19 — Contract-test harness: added a **path-item operation-presence**
+  contract test (`src/registry.rs` `every_path_item_declares_at_least_one_operation`) — every
+  Path Item Object a mounted spec declares MUST describe at least one HTTP operation (or defer to
+  one via `$ref`). A path item holding only non-operation fields
+  (`summary`/`description`/`servers`/`parameters`) is a **dead endpoint**: a URL a client can reach
+  but invoke nothing on, and a codegen resource with no callable methods. This is the
+  **presence-side complement of `every_path_item_key_names_a_valid_operation_or_field`** — that
+  test proves each key *under* a path item is a valid verb or field, but a path item whose verbs
+  were all deleted (or mistyped, then caught by the validity test and removed) leaves a well-formed
+  path item with **zero** operations that the validity test passes (every remaining key is legal,
+  there is simply no operation among them); the operation enumerators
+  (`operations_without_responses`, `operations_without_operation_id`, the response-key/summary
+  tests) all iterate operations they *find* and never assert one exists, so an operationless path
+  item is invisible to them too. New pure `path_items_without_operation` extractor (no YAML dep)
+  clones `invalid_path_item_keys`'s scoping exactly (a two-space path-item key `  /foo:` under
+  `paths:`; its fields/operations four spaces in; quotes/comments tolerated), tracking per path
+  item whether any four-space key is one of the eight HTTP methods and exempting a `$ref` path item
+  (OpenAPI lets a `$ref` item supply its operations by reference). **Surveyed the corpus first: 136
+  path items across the mounted specs, every one declaring ≥1 operation → 0 drift; a live
+  (non-vacuous) guard whose per-path-item evaluation runs on real data (the extraction-rules floor
+  asserts ≥100 real path items scanned).** Unit-covered (`path_item_operation_presence_extraction_
+  rules`: a `/no-op` path with only `summary`/`description`/`parameters` flagged; a `/has-op` with
+  `get`, a `$ref` path item, and a schema property literally named `get` under
+  `components.schemas` all cleared; document order pinned). Test-side only — no
+  request/response/behaviour change, so no vendored-spec edits. `cargo test` 2770 green (was 2768;
+  +2); `cargo build --release` succeeds. No new dependency; the extractor and both tests live in
+  the `#[cfg(test)]` module, so nothing ships in the binary. — binary (release): 5.1M (5,323,160 B;
+  unchanged)
 - 2026-08-19 — Contract-test harness: added an **int32-`format` default-conformance**
   contract test (`src/registry.rs` `every_int32_format_default_is_a_well_formed_int32`) — where a
   mounted spec declares an inline `default` beside a same-indent `format: int32`, the default MUST

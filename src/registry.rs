@@ -12341,6 +12341,208 @@ paths:
         );
     }
 
+    /// Returns the templates of Path Item Objects that declare **no** HTTP
+    /// operation, in document order — without a YAML dep.
+    ///
+    /// In OpenAPI 3.0.x a Paths Object maps a URL template to a Path Item
+    /// Object, whose reason to exist is to describe the operations available on
+    /// that path. A path item that declares only non-operation fields
+    /// (`summary`/`description`/`servers`/`parameters`) and no method
+    /// (`get`/`post`/…) exposes a URL that answers nothing: a client can reach
+    /// it but invoke no operation, and codegen emits a resource with no callable
+    /// methods. In these self-contained CAMARA leaf specs a path is an endpoint,
+    /// so an operationless path item is a dead path — almost always a verb
+    /// deleted or mistyped away, leaving its parameters/description orphaned.
+    ///
+    /// Scans exactly like [`invalid_path_item_keys`]: a path-item key sits two
+    /// spaces in under `paths:` (`  /foo:`), its fields/operations four spaces
+    /// in. A four-space key is counted as an operation when — leading whitespace
+    /// stripped, quotes tolerated — it is one of the eight HTTP methods. A path
+    /// item carrying a `$ref` is exempt: OpenAPI lets a `$ref` path item supply
+    /// its operations by reference, so its own body legitimately declares none.
+    fn path_items_without_operation(body: &str) -> Vec<String> {
+        const METHODS: [&str; 8] =
+            ["get", "put", "post", "delete", "patch", "options", "head", "trace"];
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let mut out = Vec::new();
+        let mut in_paths = false;
+        let mut path: Option<String> = None;
+        let mut has_op = false;
+        let mut exempt = false;
+        // Flush the path item we were accumulating: flag it when it named no
+        // operation and was not a `$ref` item.
+        macro_rules! flush {
+            () => {
+                if let Some(p) = path.take() {
+                    if !has_op && !exempt {
+                        out.push(p);
+                    }
+                }
+            };
+        }
+        for line in body.lines() {
+            let is_top_level_key =
+                !line.is_empty() && !line.starts_with(char::is_whitespace);
+            if is_top_level_key {
+                flush!();
+                in_paths = line.trim_end() == "paths:";
+                has_op = false;
+                exempt = false;
+                continue;
+            }
+            if !in_paths {
+                continue;
+            }
+            if let Some(rest) = line.strip_prefix("  ") {
+                if !rest.starts_with(char::is_whitespace) && rest.starts_with('/') {
+                    flush!(); // a new path item begins — settle the previous one
+                    let key =
+                        rest.trim_end().strip_suffix(':').unwrap_or(rest.trim_end());
+                    path = Some(key.to_string());
+                    has_op = false;
+                    exempt = false;
+                    continue;
+                }
+            }
+            if path.is_none() || indent(line) != 4 {
+                continue;
+            }
+            let trimmed = line.trim_start();
+            if trimmed.starts_with('#') {
+                continue;
+            }
+            let Some((raw_key, _)) = trimmed.split_once(':') else { continue };
+            let key = raw_key.trim().trim_matches(|c| c == '"' || c == '\'');
+            if METHODS.contains(&key) {
+                has_op = true;
+            } else if key == "$ref" {
+                exempt = true;
+            }
+        }
+        flush!(); // settle the final path item at EOF
+        out
+    }
+
+    #[test]
+    fn every_path_item_declares_at_least_one_operation() {
+        // Contract-harness invariant (OpenAPI structural rule): every Path Item
+        // Object a mounted spec declares MUST describe at least one HTTP
+        // operation (or defer to one via `$ref`). A path item holding only
+        // non-operation fields (`summary`/`description`/`servers`/`parameters`)
+        // is a dead endpoint — a URL a client can reach but invoke nothing on,
+        // and a codegen resource with no callable methods.
+        //
+        // This is the presence-side complement of
+        // `every_path_item_key_names_a_valid_operation_or_field`: that test
+        // proves each key *under* a path item is a valid verb or field, but a
+        // path item whose verbs were all deleted (or mistyped, then caught by
+        // the validity test and removed) leaves a well-formed path item with
+        // zero operations that the validity test passes — every remaining key is
+        // legal, there is simply no operation among them. The operation
+        // enumerators (`operations_without_responses`,
+        // `operations_without_operation_id`, the response-key/summary tests) all
+        // iterate operations they *find* and never assert one exists, so an
+        // operationless path item is invisible to them too. Verified true across
+        // all mounted specs before asserting (every path item names ≥1 method).
+        for api in APIS {
+            let dead = path_items_without_operation(api.body);
+            assert!(
+                dead.is_empty(),
+                "{} spec declares Path Item Object(s) with no HTTP operation (a \
+                 dead endpoint — a URL a client reaches but invokes nothing on): \
+                 {:?}",
+                api.name,
+                dead
+            );
+        }
+    }
+
+    #[test]
+    fn path_item_operation_presence_extraction_rules() {
+        // Unit-cover the `path_items_without_operation` extractor so the contract
+        // test above can't pass vacuously and its detection is pinned: within
+        // `paths:`, a two-space path-item key is flagged only when none of its
+        // four-space keys is an HTTP method and it carries no `$ref`; a path item
+        // with a verb passes; a `$ref` path item is exempt; and a path with only
+        // `summary`/`description`/`parameters` is flagged — in document order.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /has-op:
+    summary: A resource
+    parameters:
+      - name: x-correlator
+        in: header
+    get:
+      operationId: getIt
+      responses:
+        '200':
+          description: ok
+  /no-op:
+    summary: Orphaned
+    description: its verb was deleted
+    parameters:
+      - name: x-correlator
+        in: header
+  /ref-item:
+    $ref: '#/components/pathItems/Shared'
+components:
+  schemas:
+    Foo:
+      type: object
+      properties:
+        get:
+          type: string
+";
+        // Flagged, in document order: only `/no-op` (its four-space keys are all
+        // non-operation fields). Not flagged: `/has-op` (declares `get`);
+        // `/ref-item` (a `$ref` path item, exempt); and the `get` *property*
+        // under `components.schemas.Foo.properties` — outside `paths:`, never a
+        // path-item operation.
+        assert_eq!(
+            path_items_without_operation(body),
+            vec!["/no-op".to_string()]
+        );
+
+        // Non-vacuous floor: across every registered spec no path item is
+        // operationless (the invariant the contract test asserts), and the
+        // corpus actually declares many path items, so the per-path-item
+        // evaluation runs on real data and a broken (always-empty) extractor
+        // can't hide behind a corpus that declares no paths. Count two-space
+        // path-item keys under `paths:` with a detector independent of the
+        // extractor's operation search.
+        let mut path_items = 0usize;
+        for api in APIS {
+            assert!(
+                path_items_without_operation(api.body).is_empty(),
+                "{}: every path item must declare at least one operation",
+                api.name
+            );
+            let mut in_paths = false;
+            for line in api.body.lines() {
+                if !line.is_empty() && !line.starts_with(char::is_whitespace) {
+                    in_paths = line.trim_end() == "paths:";
+                    continue;
+                }
+                if !in_paths {
+                    continue;
+                }
+                if let Some(rest) = line.strip_prefix("  ") {
+                    if !rest.starts_with(char::is_whitespace) && rest.starts_with('/') {
+                        path_items += 1;
+                    }
+                }
+            }
+        }
+        assert!(
+            path_items >= 100,
+            "expected many path items across specs, got {path_items}"
+        );
+    }
+
     #[test]
     fn every_ref_target_is_a_fragment_pointer() {
         // Contract-harness invariant (OpenAPI reference rule, as these specs use it):
