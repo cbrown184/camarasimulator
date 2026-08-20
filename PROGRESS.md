@@ -5669,6 +5669,38 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-20 — Contract-test harness: added a **bounded-any-char-`pattern` example-conformance**
+  contract test (`src/registry.rs` `every_text256_pattern_example_conforms_to_the_text256_pattern`)
+  — where a mounted spec declares an inline `example` beside a **same-indent**
+  `pattern: '^[\s\S]{0,256}$'` (the eSIM Remote Management CMP `resultDesc`/`message` free-text
+  fields), the example MUST match it. `[\s\S]` is the union of whitespace and non-whitespace, i.e.
+  **every** character (newlines/control chars included), so the pattern's *only* constraint is a
+  256-character ceiling (the empty string is legal) — an `example` is a sample instance, so a
+  value longer than 256 chars is a self-contradictory schema whose own validator rejects the sample
+  it advertises. The **sixteenth member of the `pattern`-conformance family** after E.164/IMEI/
+  ICCID/32-hex/name/MAC/token/result-code/geohash/app-name/TAC/region/DNS-label/sink-URL/UUID, and
+  the **first over an unrestricted character class bounded only by a length ceiling**: every prior
+  member constrains the alphabet (a digit run, a scheme literal, a hyphen-joined hex layout, an
+  alphanumeric class), whereas this one admits any character and pins nothing but a maximum length,
+  so none of them can express it (an over-256-char value is the fault they can't catch). Carries
+  **no `format` sibling**, so these examples are beyond the `format`-example family's reach. New
+  pure `matches_text256_pattern` (a `chars().count() <= 256` length check on Unicode scalars; no
+  regex/YAML dep) + `text256_pattern_examples_malformed` extractor cloning
+  `result_code_pattern_examples_malformed`'s down-then-up dedent-bounded same-indent scoping, keyed
+  on `TEXT256_PATTERN` — the same-indent scan steps over deeper-indented lines, so the corpus's
+  `pattern`→`maxLength`→`description`→`example` shape **and** its folded `description: >-`
+  multi-line block (continuation lines sit deeper than the property indent) both pair correctly.
+  Unit-covered (`text256_pattern_example_extraction_rules`: matcher clears empty / short /
+  embedded-newline / exactly-256 and rejects 257; a 257-char value beside the pattern and one with
+  the pattern a line below flagged in document order; a no-`pattern` sibling, a result-code-pattern
+  sibling, a nested-`example` payload, a cross-property split, and a block-opening `example:`
+  property all cleared; ≥4-pair non-vacuous floor). Surveyed the corpus first: 4 example+text256-
+  `pattern` pairs (esim-remote-management: two `resultDesc`, two `message`), all ≤256 chars → 0
+  drift; a live guard that fires the moment a spec adds an over-length free-text example. Test-side
+  only — no request/response/behaviour change, so no vendored-spec edits; the matcher, extractor and
+  both tests live in the `#[cfg(test)]` module, so nothing ships in the binary. `cargo test` 2806
+  green (was 2804; +2), `cargo build --release` green, no new deps. — binary (release): 5.1M
+  (5,323,160 B; unchanged).
 - 2026-08-20 — Contract-test harness: added an **RFC 4122 UUID-`pattern` example-conformance**
   contract test (`src/registry.rs` `every_uuid_pattern_example_conforms_to_the_uuid_pattern`) —
   where a mounted spec declares an inline `example` beside a **same-indent**
