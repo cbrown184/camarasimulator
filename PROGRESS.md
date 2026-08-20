@@ -5669,6 +5669,39 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-20 — Contract-test harness: added a **no-semicolon-`pattern` example-conformance**
+  contract test (`src/registry.rs` `every_no_semicolon_pattern_example_conforms_to_the_no_semicolon_pattern`)
+  — where a mounted spec declares an inline `example` beside a **same-indent** `pattern: '^[^;]*$'`
+  (the Capabilities and Restrictions `name` field, which reserves `;` as a capability-token
+  separator), the example MUST match it. `[^;]` is a **negated character class** — it admits every
+  character except a semicolon (the empty string is legal, and the class even admits newlines) — so
+  `^[^;]*$` matches a value iff it contains no `;` anywhere; an `example` is a sample instance, so a
+  `name` sample carrying a semicolon is a self-contradictory schema whose own validator rejects the
+  sample it advertises. The **eighteenth member of the `pattern`-conformance family** after
+  E.164/IMEI/ICCID/32-hex/name/MAC/token/result-code/bounded-any-char/geohash/app-name/TAC/region/
+  DNS-label/sink-URL/UUID/DPV-purpose, and the **first over a negated character class** — an
+  *exclusion* constraint (every char but `;`) rather than the *inclusion* constraints of every prior
+  member (an allowed alphabet, a fixed literal prefix, or a structured layout): none of those can
+  express "any character but `;`", so a semicolon-bearing example is the fault they can't catch (the
+  nearest is the bounded-any-char member `^[\s\S]{0,256}$`, which also admits every character but is
+  bound only by a length ceiling and excludes nothing). Carries **no `format` sibling**, so these
+  examples are beyond the `format`-example family's reach. New pure `matches_no_semicolon_pattern`
+  (a `!s.contains(';')` check — exactly faithful to `^[^;]*$` for every input; no regex/YAML dep) +
+  `no_semicolon_pattern_examples_malformed` extractor cloning `dpv_purpose_pattern_examples_malformed`'s
+  down-then-up dedent-bounded same-indent scoping, keyed on `NO_SEMICOLON_PATTERN` — the same-indent
+  scan steps over deeper-indented lines, so a folded `description: >-`→`pattern`→`example` shape pairs
+  correctly. Unit-covered (`no_semicolon_pattern_example_extraction_rules`: matcher clears empty /
+  spaced / other-punctuation and rejects an embedded / lone / trailing semicolon; an embedded-`;`, a
+  trailing-`;`, and a pattern-below value flagged in document order; a no-`pattern` sibling, a
+  result-code-pattern sibling, a nested-`example` payload, a cross-property split, and a
+  block-opening `example:` property all cleared; ≥1-pair non-vacuous floor — Capabilities and
+  Restrictions is the only mounted spec with a `^[^;]*$` field). Surveyed the corpus first: 1
+  example+no-semicolon-`pattern` pair (capabilities-and-restrictions `name`, `cap1`) → 0 drift; a
+  live guard that fires the moment a spec adds a semicolon-bearing name example. Test-side only — no
+  request/response/behaviour change, so no vendored-spec edits; the matcher, extractor and both tests
+  live in the `#[cfg(test)]` module, so nothing ships in the binary. `cargo test` 2810 green (was
+  2808; +2), `cargo build --release` green, no new deps. — binary (release): 5.1M (5,323,160 B;
+  unchanged).
 - 2026-08-20 — Contract-test harness: added a **DPV-purpose-`pattern` example-conformance**
   contract test (`src/registry.rs` `every_dpv_purpose_pattern_example_conforms_to_the_dpv_purpose_pattern`)
   — where a mounted spec declares an inline `example` beside a **same-indent**

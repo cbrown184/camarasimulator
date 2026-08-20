@@ -31223,6 +31223,367 @@ components:
         );
     }
 
+    const NO_SEMICOLON_PATTERN: &str = r"^[^;]*$";
+
+    /// True when `s` matches the no-semicolon `pattern` `^[^;]*$` exactly: a string of zero or more
+    /// characters, none of which is an ASCII semicolon (`;`). The pattern is a *negated* character
+    /// class — it admits every character except `;` (the empty string is legal, and the class even
+    /// admits newlines) — so its only constraint is the absence of a semicolon. `^[^;]*$` therefore
+    /// matches a string iff that string contains no `;` anywhere, which `!s.contains(';')` captures
+    /// exactly for every input. Hand-rolled (no regex dep), mirroring the other matchers' shape-only
+    /// stance so a legitimately shaped value is never a false positive; the one fault it catches is a
+    /// semicolon anywhere in the value (the capabilities-and-restrictions `name` field reserves `;`
+    /// as a separator).
+    fn matches_no_semicolon_pattern(s: &str) -> bool {
+        !s.contains(';')
+    }
+
+    /// The 1-based line numbers, in document order, of every `example:` keyword whose inline scalar
+    /// value sits in a Schema Object declaring a *same-indent* no-semicolon `pattern` sibling
+    /// (`^[^;]*$`) yet contains a semicolon, without a YAML dep. The no-semicolon twin of
+    /// `dpv_purpose_pattern_examples_malformed`: same scoping, keyed on `NO_SEMICOLON_PATTERN`.
+    ///
+    /// In OpenAPI 3.0.x (JSON Schema) an `example` is a sample *instance* of the schema, so a field
+    /// constrained by `pattern` MUST carry an example the pattern accepts. A `name` example carrying
+    /// a semicolon advertises a sample the schema's own validator rejects, so a Redoc/Swagger prefill
+    /// and a codegen client's generated sample carry a value no field bound by this pattern can
+    /// legally hold. This pattern carries no `format` sibling, so these examples are otherwise beyond
+    /// the `format`-example family's reach.
+    ///
+    /// Scoping mirrors `dpv_purpose_pattern_examples_malformed` exactly: only an `example` carrying
+    /// an inline scalar (a block/object example opens no inline value and is skipped) with a
+    /// same-indent `pattern` sibling *equal to* `NO_SEMICOLON_PATTERN` in the same Schema Object is
+    /// inspected — the sibling is scanned at the example's own indent, down through the object's
+    /// block then up, dedent-bounded, so a nested or following object's `pattern` never pairs. The
+    /// same-indent scan steps over any intervening deeper-indented lines, so a folded
+    /// `description: >-` block followed by `pattern` → `example` pairs correctly. An `example:`
+    /// nested inside an outer `example:`/`examples:` payload (sample data, not a schema keyword) is
+    /// skipped. Only the no-semicolon pattern is matched; other patterns are out of scope.
+    fn no_semicolon_pattern_examples_malformed(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let raw_inline = |l: &str, name: &str| -> Option<String> {
+            let (k, v) = l.trim_start().split_once(':')?;
+            if k.trim() != name {
+                return None;
+            }
+            let v = v.split('#').next().unwrap_or(v).trim();
+            if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            }
+        };
+        // Whether a same-indent `pattern:` sibling of line `i` (indent `c`) in the same Schema
+        // Object equals the no-semicolon pattern: scan down through the object's block then up,
+        // dedent-bounded so a nested or following object's `pattern` never pairs.
+        let sibling_is_no_semicolon_pattern = |i: usize, c: usize| -> bool {
+            let is_no_semicolon_pattern = |l: &str| -> bool {
+                raw_inline(l, "pattern")
+                    .map(|v| v.trim_matches('"').trim_matches('\'') == NO_SEMICOLON_PATTERN)
+                    .unwrap_or(false)
+            };
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_no_semicolon_pattern(l) {
+                    return true;
+                }
+                j += 1;
+            }
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_no_semicolon_pattern(l) {
+                    return true;
+                }
+            }
+            false
+        };
+        // True when line `i` (indent `c`) sits inside an outer `example:`/`examples:` payload —
+        // some enclosing container key up the indent ladder is `example`/`examples` — so an inner
+        // `example` key there is sample data, not a schema keyword.
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some(raw) = raw_inline(line, "example") else {
+                continue;
+            };
+            let c = indent(line);
+            if inside_example(i, c) {
+                continue;
+            }
+            if !sibling_is_no_semicolon_pattern(i, c) {
+                continue;
+            }
+            let value = raw.trim_matches('"').trim_matches('\'');
+            if !matches_no_semicolon_pattern(value) {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_no_semicolon_pattern_example_conforms_to_the_no_semicolon_pattern() {
+        // Contract-harness invariant (OpenAPI 3.0.x / JSON-Schema structural rule): where a Schema
+        // Object declares an inline `example` beside a same-indent no-semicolon `pattern` (`^[^;]*$`,
+        // the capabilities-and-restrictions `name` field's pattern), the example MUST match that
+        // pattern. An `example` is a sample *instance* of the schema, so a `name` sample carrying a
+        // semicolon is a self-contradictory schema whose own validator rejects the sample it
+        // advertises, and a Redoc/Swagger prefill and a codegen client's generated sample then carry
+        // a value no field bound by this pattern can legally hold.
+        //
+        // The eighteenth member of the `pattern`-conformance family after E.164 / IMEI / ICCID /
+        // 32-hex / name / MAC / token / result-code / bounded-any-char / geohash / app-name / TAC /
+        // region / DNS-label / sink-URL / UUID / DPV-purpose, and the first over a *negated character
+        // class* — an exclusion constraint (every character except `;`) rather than the inclusion
+        // constraints of every prior member (an allowed alphabet, a fixed literal prefix, or a
+        // structured layout). None of those inclusion-shaped matchers can express "any character but
+        // `;`", so a semicolon-bearing example is the fault they can't catch; the closest is the
+        // bounded-any-char member (`^[\s\S]{0,256}$`), which also admits every character but is bound
+        // only by a length ceiling and excludes nothing. Like the IMEI / ICCID / name patterns it
+        // carries no `format` sibling, so its examples are beyond the `format`-example family's reach;
+        // a general regex-engine test would need a new dependency (declined on binary-size grounds),
+        // so a concrete hand-validated matcher is checked. Verified true across all mounted specs
+        // before asserting (Capabilities and Restrictions declares one such example+pattern pair —
+        // the `name` field).
+        for api in APIS {
+            let offenders = no_semicolon_pattern_examples_malformed(api.body);
+            assert!(
+                offenders.is_empty(),
+                "{} spec declares an `example` beside a same-indent no-semicolon \
+                 `pattern: '^[^;]*$'` that contains a semicolon (a sample the pattern's own \
+                 validator would reject) at `example:` line(s): {:?}",
+                api.name,
+                offenders
+            );
+        }
+    }
+
+    #[test]
+    fn no_semicolon_pattern_example_extraction_rules() {
+        // Unit-cover `matches_no_semicolon_pattern` and `no_semicolon_pattern_examples_malformed` so
+        // the contract test above can't pass vacuously and its detection is pinned.
+        //
+        // Shape check: the empty string and semicolon-free values (letters, spaces, and other
+        // punctuation) pass; any value carrying a semicolon — lone, leading, embedded, or trailing —
+        // fails (the class excludes only `;`).
+        assert!(matches_no_semicolon_pattern("cap1"));
+        assert!(matches_no_semicolon_pattern("")); // empty is legal
+        assert!(matches_no_semicolon_pattern("Acme Corp")); // spaces + letters fine
+        assert!(matches_no_semicolon_pattern("a-b_c.d/e:f")); // every non-`;` char fine
+        assert!(!matches_no_semicolon_pattern("a;b")); // embedded semicolon
+        assert!(!matches_no_semicolon_pattern(";")); // lone semicolon
+        assert!(!matches_no_semicolon_pattern("trailing;")); // trailing semicolon
+
+        // Extractor: two semicolon-free values (one across an intervening folded `description: >-`
+        // block then a same-indent `pattern`, mirroring the corpus's folded shape; one plain) pass; a
+        // value with an embedded semicolon and a value with a trailing semicolon are flagged; a bad
+        // value whose `pattern` is declared *below* it is still paired (down-scan) and flagged; a
+        // value with no `pattern` sibling and one whose sibling is a *different* pattern (the
+        // result-code `^B[0-9]{6}$`) are skipped; an inner `example` inside an outer `example:`
+        // payload is skipped; an example in one property never pairs with a following property's
+        // `pattern` across the dedent; and a property literally named `example` (opening a block) is
+        // skipped.
+        let body = format!(
+            "openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    GoodFolded:
+      type: string
+      description: >-
+        A capability name; a semicolon separates capability tokens, so a single
+        name carries none.
+      pattern: '{p}'
+      example: capabilityAlpha
+    GoodPlain:
+      type: string
+      pattern: '{p}'
+      example: cap1
+    BadEmbedded:
+      type: string
+      pattern: '{p}'
+      example: cap1;cap2
+    BadTrailing:
+      type: string
+      pattern: '{p}'
+      example: cap1;
+    PatternBelow:
+      type: string
+      example: a;b
+      pattern: '{p}'
+    NoPattern:
+      type: string
+      example: a;b
+    OtherPattern:
+      type: string
+      pattern: '^B[0-9]{{6}}$'
+      example: a;b
+    InExample:
+      type: object
+      example:
+        pattern: '{p}'
+        example: a;b
+    Split:
+      type: object
+      properties:
+        a:
+          example: a;b
+        b:
+          type: string
+          pattern: '{p}'
+    NamedExample:
+      type: object
+      properties:
+        example:
+          type: string
+          pattern: '{p}'
+",
+            p = NO_SEMICOLON_PATTERN
+        );
+        // Flagged, in document order: BadEmbedded.example (an embedded `;` beside a same-indent
+        // no-semicolon `pattern`), BadTrailing.example (a trailing `;`), and PatternBelow.example (bad
+        // value, no-semicolon `pattern` a line below — down-scan pairs it). Not flagged:
+        // GoodFolded/GoodPlain (semicolon-free, the former across an intervening folded `>-`
+        // description proving the same-indent scan steps over the deeper continuation lines);
+        // NoPattern (no `pattern` sibling); OtherPattern (sibling is the result-code pattern, not
+        // no-semicolon — a semicolon value there is out of scope); InExample's inner `example`
+        // (inside the outer `example:` payload); Split.a.example (its only no-semicolon `pattern` is
+        // in the following property past a dedent); and NamedExample's `example:` property opening a
+        // block (no inline value).
+        let flagged = no_semicolon_pattern_examples_malformed(&body);
+        let flagged_props: Vec<&str> = flagged
+            .iter()
+            .map(|&n| {
+                // Walk up to the nearest schema-name line (indent 4) for a stable label.
+                let lines: Vec<&str> = body.lines().collect();
+                let mut k = n - 1;
+                loop {
+                    let l = lines[k];
+                    let ind = l.len() - l.trim_start().len();
+                    if ind == 4 && l.trim_end().ends_with(':') {
+                        break l.trim().trim_end_matches(':');
+                    }
+                    if k == 0 {
+                        break "";
+                    }
+                    k -= 1;
+                }
+            })
+            .collect();
+        assert_eq!(
+            flagged_props,
+            vec!["BadEmbedded", "BadTrailing", "PatternBelow"]
+        );
+
+        // Non-vacuous floor: across every registered spec every `example` beside a same-indent
+        // no-semicolon `pattern` matches it (the invariant the contract test asserts), and the corpus
+        // actually declares such a pair — so the matcher path runs on real data and a broken
+        // (always-empty) extractor can't hide behind a corpus that never pairs. Capabilities and
+        // Restrictions is the only mounted spec with a `^[^;]*$` field (`name`), so the floor is one;
+        // count pairs with a same-indent detector independent of the extractor's matcher.
+        let mut no_semicolon_examples = 0usize;
+        for api in APIS {
+            assert!(
+                no_semicolon_pattern_examples_malformed(api.body).is_empty(),
+                "{}: every example beside a same-indent no-semicolon `pattern` must match it",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            let is_key = |l: &str, name: &str, val: Option<&str>| {
+                l.trim_start().split_once(':').is_some_and(|(k, v)| {
+                    k.trim() == name
+                        && val.is_none_or(|want| {
+                            v.split('#')
+                                .next()
+                                .unwrap_or(v)
+                                .trim()
+                                .trim_matches('"')
+                                .trim_matches('\'')
+                                == want
+                        })
+                })
+            };
+            for (i, l) in lines.iter().enumerate() {
+                if !is_key(l, "example", None) {
+                    continue;
+                }
+                if l.trim_start()
+                    .split_once(':')
+                    .map(|(_, v)| v.split('#').next().unwrap_or(v).trim().is_empty())
+                    .unwrap_or(true)
+                {
+                    continue;
+                }
+                let c = indent(l);
+                let lo = i.saturating_sub(6);
+                let hi = (i + 6).min(lines.len());
+                let has_no_semicolon = (lo..hi).any(|j| {
+                    j != i
+                        && indent(lines[j]) == c
+                        && is_key(lines[j], "pattern", Some(NO_SEMICOLON_PATTERN))
+                });
+                if has_no_semicolon {
+                    no_semicolon_examples += 1;
+                }
+            }
+        }
+        assert!(
+            no_semicolon_examples >= 1,
+            "expected the corpus's example + same-indent no-semicolon `pattern` pair, got {no_semicolon_examples}"
+        );
+    }
+
     /// True when `s` is a well-formed RFC 3339 `date-time` string — the concrete
     /// syntax OpenAPI's `format: date-time` names (JSON Schema's `date-time` is
     /// RFC 3339 §5.6). Shape-only and lenient on the calendar (it range-checks each
