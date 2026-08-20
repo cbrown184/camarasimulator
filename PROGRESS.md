@@ -5669,6 +5669,47 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-20 — Contract-test harness: added a **full-date-`pattern` example-conformance** contract test
+  (`src/registry.rs` `every_date_pattern_example_conforms_to_the_date_pattern`) — where a mounted spec
+  declares an inline `example` beside a **same-indent** `pattern: '^\d{4}-\d{2}-\d{2}$'` (the ISO-8601 /
+  RFC 3339 `full-date` `YYYY-MM-DD` shape — the network-traffic-analysis `accessDate` field, a record's
+  calendar-date slot), the example MUST match it. A date example with a one-digit month (`2024-6-01`) /
+  day (`2024-06-1`), a two-digit year (`24-06-01`), `/` separators (`2024/06/01`), or a trailing time
+  suffix (`2024-06-01T00:00:00Z`) is a self-contradictory schema whose own validator rejects the sample
+  it advertises, so a Redoc/Swagger prefill and a codegen client's generated sample carry a value the
+  field can never legally hold. The **twenty-ninth member of the `pattern`-conformance family** after
+  E.164/IMEI/ICCID/32-hex/name/MAC/token/result-code/bounded-any-char (256)/geohash/app-name/TAC/region/
+  DNS-label/sink-URL/UUID/DPV-purpose/no-semicolon/IMEISV/no-CR/LF/OTP-template/16-hex/4-hex/
+  bounded-any-char (512)/SSID/WPA-password/semver/email, and the **first over a hyphen-delimited
+  fixed-width numeric-triplet (calendar-date) structure**: no earlier member joins three all-digit runs
+  of *fixed, differing* widths (4/2/2) with two literal `-`. MAC is the nearest neighbour
+  (separator-joined groups) but is hex, `:`/`-`, and six equal-width pairs; IMEI/IMEISV/TAC are single
+  fixed-width digit runs with no internal separator; semver is dot-delimited and variable-width. So a
+  one-digit month, a two-digit year, `/` separators, or a date-time value in a date field is the fault
+  only this member can catch. Unlike SSID/WPA/semver/email the `accessDate` field **does** carry a
+  `format` sibling (`format: date`), so a `format`-example guard sees the declaration too — but this
+  member is the first to guard the *`pattern`* example for it, and its exact-pattern-equality scoping
+  fires only where the same-indent `pattern` equals `DATE_PATTERN`, independent of `format`. New pure
+  `matches_date_pattern` (splits on `-` → exactly three ASCII-digit runs of width 4/2/2, shape-only, no
+  calendar range check; no regex/YAML dep) + `date_pattern_examples_malformed` extractor cloning
+  `email_pattern_examples_malformed`'s down-then-up dedent-bounded same-indent scoping, keyed on
+  `DATE_PATTERN` (single-quoted single-backslash `\d` in the YAML source, so raw-string comparison is
+  verbatim, mirroring `SEMVER_PATTERN`). The same-indent scan steps over the corpus's intervening
+  `maxLength: 10` + `description`, so the `type`→`format`→`pattern`→`maxLength`→`description`→`example`
+  shape pairs correctly. Unit-covered (`date_pattern_example_extraction_rules`: matcher accepts corpus
+  `2024-06-01`/`2020-01-01`/`9999-12-31`/shape-only `0000-00-00`/`2024-13-40` and rejects empty/
+  one-digit-month/one-digit-day/two-digit-year/`/`-separators/date-time/two-parts/four-parts/non-digit-
+  year/trailing-space; a one-digit-month, `/`-separated, two-digit-year, date-time, and a one-digit-month
+  `PatternBelow` (pattern one line below — down-scan pairs it) flagged in document order; a Good case
+  across an intervening `maxLength`+`description`, a no-`pattern` sibling, an IMEI-pattern sibling with a
+  date value out of scope, a nested-`example` payload, a cross-property split, and a block-opening
+  `example:` property all cleared; ≥1-pair non-vacuous floor — Network Traffic Analysis is the only
+  mounted spec with a full-date `pattern`). Surveyed the corpus first: 1 example+date-`pattern` pair
+  (network-traffic-analysis `accessDate`, `2024-06-01`) → 0 drift; a live guard that fires the moment a
+  spec adds a malformed date example. Test-side only — no request/response/behaviour change, so no
+  vendored-spec edits; the matcher, extractor and both tests live in the `#[cfg(test)]` module, so
+  nothing ships in the binary. `cargo test` 2832 green (was 2830; +2), `cargo build --release` green,
+  no new deps. — binary (release): 5.1M (5,323,160 B; unchanged).
 - 2026-08-20 — Contract-test harness: added an **email-`pattern` example-conformance** contract test
   (`src/registry.rs` `every_email_pattern_example_conforms_to_the_email_pattern`) — where a mounted
   spec declares an inline `example` beside a **same-indent** `pattern:

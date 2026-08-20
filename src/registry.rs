@@ -35513,6 +35513,418 @@ components:
         );
     }
 
+    // NB: written as it appears *raw in the YAML source* (single-quoted, so the `\d`
+    // stays a single backslash in the file), because `raw_inline("pattern")` returns the
+    // source substring after stripping only the outer quotes (no YAML-escape decoding),
+    // and this constant is compared to it verbatim, mirroring how the SEMVER_PATTERN
+    // constant (also single-quoted, single-backslash in its source) is authored.
+    const DATE_PATTERN: &str = r"^\d{4}-\d{2}-\d{2}$";
+
+    /// True when `s` matches the full-date `pattern` `^\d{4}-\d{2}-\d{2}$` exactly — the
+    /// ISO-8601 / RFC 3339 **`full-date`** shape (`YYYY-MM-DD`) the `accessDate` field (a
+    /// record's calendar-date slot) uses. **Shape-only** (a `\d{4}-\d{2}-\d{2}` string of
+    /// the right widths and separators), never a calendar check — it does not range-check
+    /// the month or day, matching the other `matches_*_pattern` acceptors so a
+    /// legitimately-shaped sample is never a false positive. Grammar mirrors the pattern:
+    /// three all-ASCII-digit runs of width 4 / 2 / 2, joined by two literal `-` — and
+    /// nothing else (the anchors forbid any leading/trailing char, so a time suffix or a
+    /// stray separator is a reject). Hand-rolled (no regex dep).
+    fn matches_date_pattern(s: &str) -> bool {
+        // Split on the literal `-`. `\d` admits no `-`, so a well-formed value yields
+        // exactly three parts; a leading/trailing/doubled `-`, or a `-` inside a run,
+        // changes the part count or empties a part and is rejected below.
+        let parts: [&str; 3] = match s.split('-').collect::<Vec<_>>().try_into() {
+            Ok(p) => p,
+            Err(_) => return false, // not exactly three `-`-separated parts
+        };
+        // Widths 4 / 2 / 2, each part all ASCII digits.
+        let widths = [4usize, 2, 2];
+        parts
+            .iter()
+            .zip(widths)
+            .all(|(p, w)| p.len() == w && p.bytes().all(|b| b.is_ascii_digit()))
+    }
+
+    /// The 1-based line numbers, in document order, of every `example:` keyword whose inline
+    /// scalar value sits in a Schema Object declaring a *same-indent* full-date `pattern`
+    /// sibling (`^\d{4}-\d{2}-\d{2}$`) yet is not a well-formed `YYYY-MM-DD` string, without
+    /// a YAML dep. The date twin of `email_pattern_examples_malformed`: same scoping, keyed
+    /// on `DATE_PATTERN`.
+    ///
+    /// In OpenAPI 3.0.x (JSON Schema) an `example` is a sample *instance* of the schema, so a
+    /// field constrained by `pattern` MUST carry an example the pattern accepts. A date
+    /// example with a one-digit month/day, a two-digit year, `/` separators, or a trailing
+    /// time suffix is a sample the schema's own validator rejects, so a Redoc/Swagger prefill
+    /// and a codegen client's generated sample carry a value the field can never legally hold.
+    ///
+    /// Unlike the SSID / WPA-password / semver / email patterns the `accessDate` field DOES
+    /// carry a `format` sibling (`format: date`), so a `format`-example guard also sees this
+    /// declaration — but this member is the first to guard the *`pattern`* example for it, and
+    /// its exact-pattern-equality scoping fires only where the same-indent `pattern` equals
+    /// `DATE_PATTERN`, independent of `format`.
+    ///
+    /// Scoping mirrors `email_pattern_examples_malformed` exactly: only an `example` carrying
+    /// an inline scalar (a block/object example opens no inline value and is skipped) with a
+    /// same-indent `pattern` sibling *equal to* `DATE_PATTERN` in the same Schema Object is
+    /// inspected — the sibling is scanned at the example's own indent, down through the
+    /// object's block then up, dedent-bounded, so a nested or following object's `pattern`
+    /// never pairs. The same-indent scan steps over any intervening same-indent non-`pattern`
+    /// siblings (e.g. the corpus's `maxLength` + `description` between `pattern` and
+    /// `example`), so a `type`→`format`→`pattern`→`maxLength`→`description`→`example` shape
+    /// pairs correctly. An `example:` nested inside an outer `example:`/`examples:` payload
+    /// (sample data, not a schema keyword) is skipped.
+    fn date_pattern_examples_malformed(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let raw_inline = |l: &str, name: &str| -> Option<String> {
+            let (k, v) = l.trim_start().split_once(':')?;
+            if k.trim() != name {
+                return None;
+            }
+            let v = v.split('#').next().unwrap_or(v).trim();
+            if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            }
+        };
+        // Whether a same-indent `pattern:` sibling of line `i` (indent `c`) in the same
+        // Schema Object equals the date pattern: scan down through the object's block then
+        // up, dedent-bounded so a nested or following object's `pattern` never pairs.
+        let sibling_is_date_pattern = |i: usize, c: usize| -> bool {
+            let is_date_pattern = |l: &str| -> bool {
+                raw_inline(l, "pattern")
+                    .map(|v| v.trim_matches('"').trim_matches('\'') == DATE_PATTERN)
+                    .unwrap_or(false)
+            };
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_date_pattern(l) {
+                    return true;
+                }
+                j += 1;
+            }
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_date_pattern(l) {
+                    return true;
+                }
+            }
+            false
+        };
+        // True when line `i` (indent `c`) sits inside an outer `example:`/`examples:`
+        // payload — some enclosing container key up the indent ladder is
+        // `example`/`examples` — so an inner `example` key there is sample data, not a
+        // schema keyword.
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some(raw) = raw_inline(line, "example") else {
+                continue;
+            };
+            let c = indent(line);
+            if inside_example(i, c) {
+                continue;
+            }
+            if !sibling_is_date_pattern(i, c) {
+                continue;
+            }
+            let value = raw.trim_matches('"').trim_matches('\'');
+            if !matches_date_pattern(value) {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_date_pattern_example_conforms_to_the_date_pattern() {
+        // Contract-harness invariant (OpenAPI 3.0.x / JSON-Schema structural rule): where a
+        // Schema Object declares an inline `example` beside a same-indent full-date `pattern`
+        // (`^\d{4}-\d{2}-\d{2}$`, the `YYYY-MM-DD` shape a calendar-date field takes — the
+        // `accessDate` field uses this pattern verbatim), the example MUST match that pattern.
+        // An `example` is a sample *instance* of the schema, so a value with a one-digit
+        // month/day, a two-digit year, `/` separators, or a trailing time suffix is a
+        // self-contradictory schema whose own validator rejects the sample it advertises, so a
+        // Redoc/Swagger prefill and a codegen client's generated sample carry a value no field
+        // constrained by this pattern can hold.
+        //
+        // The twenty-ninth member of the `pattern`-conformance family after E.164 / IMEI /
+        // ICCID / 32-hex / name / MAC / token / result-code / bounded-any-char (256-wide) /
+        // geohash / app-name / TAC / region / DNS-label / sink-URL / UUID / DPV-purpose /
+        // no-semicolon / IMEISV / no-CR/LF / OTP-template / 16-hex / 4-hex / bounded-any-char
+        // (512-wide) / SSID / WPA-password / semver / email, and the **first over a
+        // hyphen-delimited fixed-width numeric-triplet (calendar-date) structure**: no earlier
+        // member joins three all-digit runs of *fixed, differing* widths (4 / 2 / 2) with two
+        // literal `-`. MAC is the nearest neighbour (separator-joined groups) but is hex, `:`
+        // or `-`, and six equal-width pairs; IMEI / IMEISV / TAC are single fixed-width digit
+        // runs with no internal separator; semver is dot-delimited and variable-width. So a
+        // one-digit month (`2024-6-01`), a two-digit year (`24-06-01`), `/` separators
+        // (`2024/06/01`), or a date-time value in a date field (`2024-06-01T00:00:00Z`) is the
+        // fault only this member can catch. Unlike SSID / WPA / semver / email the field also
+        // carries a `format: date` sibling, so a `format`-example guard sees the declaration
+        // too — but this member is the first to guard the *`pattern`* example for it, and its
+        // exact-pattern-equality scoping is independent of `format`. A general regex-engine
+        // test would need a new dependency (declined on binary-size grounds), so a concrete
+        // hand-validated shape is matched. Verified true across all mounted specs before
+        // asserting (Network Traffic Analysis declares one such example+pattern pair — the
+        // `accessDate` field, `2024-06-01`).
+        for api in APIS {
+            let offenders = date_pattern_examples_malformed(api.body);
+            assert!(
+                offenders.is_empty(),
+                "{} spec declares an `example` beside a same-indent full-date \
+                 `pattern: '^\\d{{4}}-\\d{{2}}-\\d{{2}}$'` that does not match that pattern \
+                 (a sample the pattern's own validator would reject) at `example:` line(s): {:?}",
+                api.name,
+                offenders
+            );
+        }
+    }
+
+    #[test]
+    fn date_pattern_example_extraction_rules() {
+        // Unit-cover `matches_date_pattern` and `date_pattern_examples_malformed`
+        // so the contract test above can't pass vacuously and its detection is pinned.
+        //
+        // Shape check (shape-only, no calendar validation): the corpus value, the min/max
+        // boundary strings, and a shape-valid-but-impossible calendar date all pass; a
+        // one-digit month/day, a two-digit year, a non-digit run, `/` separators, a trailing
+        // time suffix, too few / too many `-`-parts, a trailing space and the empty string all
+        // fail.
+        assert!(matches_date_pattern("2024-06-01")); // corpus example
+        assert!(matches_date_pattern("2020-01-01"));
+        assert!(matches_date_pattern("9999-12-31"));
+        assert!(matches_date_pattern("0000-00-00")); // shape-only: widths ok, not a real date
+        assert!(matches_date_pattern("2024-13-40")); // shape-only: out-of-range but well-shaped
+        assert!(!matches_date_pattern("")); // empty
+        assert!(!matches_date_pattern("2024-6-01")); // one-digit month
+        assert!(!matches_date_pattern("2024-06-1")); // one-digit day
+        assert!(!matches_date_pattern("24-06-01")); // two-digit year
+        assert!(!matches_date_pattern("2024/06/01")); // `/` separators → one part
+        assert!(!matches_date_pattern("2024-06-01T00:00:00Z")); // date-time in a date field
+        assert!(!matches_date_pattern("2024-06")); // two parts
+        assert!(!matches_date_pattern("2024-06-01-02")); // four parts
+        assert!(!matches_date_pattern("abcd-06-01")); // non-digit year run
+        assert!(!matches_date_pattern("2024-06-01 ")); // trailing space widens the last part
+
+        // Extractor: a valid quoted and a valid unquoted date value pass — the first across an
+        // intervening same-indent `maxLength` + `description` (mirroring the corpus
+        // `type`→`format`→`pattern`→`maxLength`→`description`→`example` shape), proving the
+        // same-indent scan steps over them. Various malformed samples are flagged in document
+        // order; a value with no `pattern` sibling and one whose sibling is a *different*
+        // pattern (an IMEI `^[0-9]{15}$`) are skipped; an inner `example` inside an outer
+        // `example:` payload is skipped; an example in one property never pairs with a
+        // following property's `pattern` across the dedent; and a property literally named
+        // `example` (opening a block) is skipped.
+        let body = format!(
+            "openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    GoodShape:
+      type: string
+      format: date
+      pattern: '{p}'
+      maxLength: 10
+      description: The calendar date.
+      example: \"2024-06-01\"
+    GoodUnquoted:
+      type: string
+      pattern: '{p}'
+      example: 2020-01-01
+    OneDigitMonth:
+      type: string
+      pattern: '{p}'
+      example: 2024-6-01
+    Slashes:
+      type: string
+      pattern: '{p}'
+      example: 2024/06/01
+    ShortYear:
+      type: string
+      pattern: '{p}'
+      example: 24-06-01
+    DateTime:
+      type: string
+      pattern: '{p}'
+      example: \"2024-06-01T00:00:00Z\"
+    PatternBelow:
+      type: string
+      example: 2024-6-01
+      pattern: '{p}'
+    NoPattern:
+      type: string
+      example: 2024-6-01
+    OtherPattern:
+      type: string
+      pattern: '{imei}'
+      example: 2024-6-01
+    InExample:
+      type: object
+      example:
+        pattern: '{p}'
+        example: 2024-6-01
+    Split:
+      type: object
+      properties:
+        a:
+          example: 2024-6-01
+        b:
+          type: string
+          pattern: '{p}'
+    NamedExample:
+      type: object
+      properties:
+        example:
+          type: string
+          pattern: '{p}'
+",
+            p = DATE_PATTERN,
+            imei = r"^[0-9]{15}$",
+        );
+        // Flagged, in document order: OneDigitMonth.example (one-digit month); Slashes.example
+        // (`/` separators); ShortYear.example (two-digit year); DateTime.example (time suffix);
+        // PatternBelow.example (one-digit month with `pattern` a line below — down-scan pairs
+        // it). Not flagged: GoodShape / GoodUnquoted (both valid; the former across intervening
+        // maxLength + description, proving the same-indent scan steps over them); NoPattern (no
+        // `pattern` sibling); OtherPattern (sibling is the IMEI pattern, not date — its value is
+        // out of scope here); InExample's inner `example` (inside the outer `example:` payload);
+        // Split.a.example (its only date `pattern` is in the following property past a dedent);
+        // and NamedExample's `example:` property opening a block (no inline value).
+        let flagged = date_pattern_examples_malformed(&body);
+        let flagged_props: Vec<&str> = flagged
+            .iter()
+            .map(|&n| {
+                let lines: Vec<&str> = body.lines().collect();
+                let mut k = n - 1;
+                loop {
+                    let l = lines[k];
+                    let ind = l.len() - l.trim_start().len();
+                    if ind == 4 && l.trim_end().ends_with(':') {
+                        break l.trim().trim_end_matches(':');
+                    }
+                    if k == 0 {
+                        break "";
+                    }
+                    k -= 1;
+                }
+            })
+            .collect();
+        assert_eq!(
+            flagged_props,
+            vec!["OneDigitMonth", "Slashes", "ShortYear", "DateTime", "PatternBelow"]
+        );
+
+        // Non-vacuous floor: across every registered spec every `example` beside a same-indent
+        // full-date `pattern` matches it (the invariant the contract test asserts), and the
+        // corpus actually declares such a pair — so the pattern-comparison path runs on real
+        // data and a broken (always-empty) extractor can't hide behind a corpus that never
+        // pairs. Network Traffic Analysis is the only mounted spec with this full-date
+        // `pattern`, so the floor is one; count pairs with a same-indent detector independent
+        // of the extractor's shape comparison.
+        let mut date_examples = 0usize;
+        for api in APIS {
+            assert!(
+                date_pattern_examples_malformed(api.body).is_empty(),
+                "{}: every example beside a same-indent full-date `pattern` must match it",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            let is_key = |l: &str, name: &str, val: Option<&str>| {
+                l.trim_start().split_once(':').is_some_and(|(k, v)| {
+                    k.trim() == name
+                        && val.is_none_or(|want| {
+                            v.split('#')
+                                .next()
+                                .unwrap_or(v)
+                                .trim()
+                                .trim_matches('"')
+                                .trim_matches('\'')
+                                == want
+                        })
+                })
+            };
+            for (i, l) in lines.iter().enumerate() {
+                if !is_key(l, "example", None) {
+                    continue;
+                }
+                if l.trim_start()
+                    .split_once(':')
+                    .map(|(_, v)| v.split('#').next().unwrap_or(v).trim().is_empty())
+                    .unwrap_or(true)
+                {
+                    continue;
+                }
+                let c = indent(l);
+                let lo = i.saturating_sub(8);
+                let hi = (i + 8).min(lines.len());
+                let has_date_pattern = (lo..hi).any(|j| {
+                    j != i
+                        && indent(lines[j]) == c
+                        && is_key(lines[j], "pattern", Some(DATE_PATTERN))
+                });
+                if has_date_pattern {
+                    date_examples += 1;
+                }
+            }
+        }
+        assert!(
+            date_examples >= 1,
+            "expected the corpus's example + same-indent full-date `pattern` pair, got {date_examples}"
+        );
+    }
+
     /// True when `s` is a well-formed RFC 3339 `date-time` string — the concrete
     /// syntax OpenAPI's `format: date-time` names (JSON Schema's `date-time` is
     /// RFC 3339 §5.6). Shape-only and lenient on the calendar (it range-checks each
