@@ -5669,6 +5669,50 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-20 — Contract-test harness: added a **campaign-id (`UUID@domain`)-`pattern`
+  example-conformance** contract test (`src/registry.rs`
+  `every_campaign_id_pattern_example_conforms_to_the_campaign_id_pattern`) — where a mounted spec
+  declares an inline `example` beside a **same-indent** `pattern:
+  "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$"`
+  (the Sponsored Data `CampaignId` field's `UUID@domain.tld` shape — a campaign onboarding
+  identifier), the example MUST match it. A campaign-id example whose local part is not a
+  hyphen-grouped hex UUID (a plain email address `acme@sponsor.example.com`, a bare UUID with no
+  `@`), with a second `@`, a domain with no dotted TLD (`…@localhost`), a one-character TLD
+  (`…@x.c`), a digit in the TLD (`…@x.c0m`), or a trailing dot is a self-contradictory schema whose
+  own validator rejects the sample it advertises, so a Redoc/Swagger prefill and a codegen client's
+  generated sample carry a value the field can never legally hold. The **thirtieth member of the
+  `pattern`-conformance family** after E.164/IMEI/ICCID/32-hex/name/MAC/token/result-code/
+  bounded-any-char (256)/geohash/app-name/TAC/region/DNS-label/sink-URL/UUID/DPV-purpose/
+  no-semicolon/IMEISV/no-CR/LF/OTP-template/16-hex/4-hex/bounded-any-char (512)/SSID/WPA-password/
+  semver/email/full-date, and the **first over a UUID-local-part `@`-domain compound**: the email
+  member (the nearest neighbour — also `@`-separated with a `\.[a-zA-Z]{2,}` TLD) admits a general
+  `[a-zA-Z0-9._%+-]+` local part, and the two UUID members constrain a bare UUID with no `@` at
+  all; neither can express a local part pinned to exactly a hyphen-grouped hex UUID *joined* to an
+  email-style domain. So a non-UUID local part, a bare UUID, or a domain with no dotted TLD is the
+  fault only this member can catch. Carries **no `format` sibling** (the `CampaignId` field is
+  `type: string` with only `pattern` + `example`), so it is beyond the `format`-example family's
+  reach. New pure `matches_campaign_id_pattern` (splits at the FIRST `@`, rejects a second; local
+  part via new `is_hex_uuid_local` — five ASCII-hex runs of widths 8-4-4-4-12 joined by four `-`,
+  case-insensitive, shape-only, no RFC 4122 version-nibble constraint; domain leg identical to
+  `matches_email_pattern` — non-empty host in `[a-zA-Z0-9.-]`, `rsplit_once('.')`, maximal
+  ≥2-letter ASCII TLD; no regex/YAML dep) + `campaign_id_pattern_examples_malformed` extractor
+  cloning `email_pattern_examples_malformed`'s down-then-up dedent-bounded same-indent scoping,
+  keyed on `CAMPAIGN_ID_PATTERN` (double-quoted in the YAML source: `\\.` — a double backslash — so
+  raw-string comparison is verbatim, mirroring EMAIL/SSID/WPA-password). Unit-covered
+  (`campaign_id_pattern_example_extraction_rules`: matcher accepts corpus value / upper-case hex /
+  multi-label domain and rejects empty / bare-UUID / second-`@` / empty-local / plain-email-local /
+  7-hex-group / non-hex-group / 4-group / no-dotted-TLD / 1-char-TLD / digit-in-TLD / trailing-dot;
+  a no-`@`, non-UUID-local, 1-char-TLD, and a bare-UUID `PatternBelow` flagged in document order; a
+  Good case across an intervening `description`, a no-`pattern` sibling, a **plain email**-`pattern`
+  sibling out of scope proving the two `@`-patterns never cross-pair, a nested-`example` payload, a
+  cross-property split, and a block-opening `example:` property all cleared; ≥1-pair non-vacuous
+  floor — Sponsored Data is the only mounted spec with this `UUID@domain` `pattern`). Surveyed the
+  corpus first: 1 example+campaign-id-`pattern` pair (sponsored-data `CampaignId`,
+  `123e4567-e89b-12d3-a456-426614174000@sponsor.example.com`) → 0 drift; a live guard that fires the
+  moment a spec adds a malformed campaign-id example. Test-side only — no request/response/behaviour
+  change, so no vendored-spec edits; the matcher, extractor and both tests live in the `#[cfg(test)]`
+  module, so nothing ships in the binary. `cargo test` 2834 green (was 2832; +2), `cargo build
+  --release` green, no new deps. — binary (release): 5.1M (5,323,160 B; unchanged).
 - 2026-08-20 — Contract-test harness: added a **full-date-`pattern` example-conformance** contract test
   (`src/registry.rs` `every_date_pattern_example_conforms_to_the_date_pattern`) — where a mounted spec
   declares an inline `example` beside a **same-indent** `pattern: '^\d{4}-\d{2}-\d{2}$'` (the ISO-8601 /
