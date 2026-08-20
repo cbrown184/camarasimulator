@@ -29005,6 +29005,367 @@ components:
         );
     }
 
+    const REGION_PATTERN: &str = r"^[A-Za-z0-9-]+$";
+
+    /// True when `s` matches the region-name `pattern` `^[A-Za-z0-9-]+$` exactly: one or more
+    /// characters, each an ASCII letter, digit, or hyphen, and nothing else. Hand-rolled (no regex
+    /// dep) mirroring `matches_name_pattern`'s shape-only stance, so a legitimately shaped region
+    /// name is never a false positive; unlike the fixed- or ranged-length digit runs (IMEI/ICCID)
+    /// this pattern's `+` quantifier imposes only a non-empty floor (an accompanying `maxLength: 64`
+    /// caps the ceiling and is guarded separately by `every_example_respects_its_string_length_bounds`).
+    fn matches_region_pattern(s: &str) -> bool {
+        !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+    }
+
+    /// The 1-based line numbers, in document order, of every `example:` keyword whose inline scalar
+    /// value sits in a Schema Object declaring a *same-indent* region-name `pattern`
+    /// `^[A-Za-z0-9-]+$` sibling yet does not match that pattern, without a YAML dep. The
+    /// region-name twin of `name_pattern_examples_malformed`: same scoping, keyed on
+    /// `REGION_PATTERN` instead of `NAME_PATTERN`.
+    ///
+    /// In OpenAPI 3.0.x (JSON Schema) an `example` is a sample *instance* of the schema, so a field
+    /// constrained by `pattern` MUST carry an example the pattern accepts. A region example carrying
+    /// a character the class forbids — a space, an underscore, a dot, a slash, or a placeholder
+    /// pasted beside the pattern — advertises a sample the schema's own validator rejects, so a
+    /// Redoc/Swagger prefill and a codegen client's generated sample carry a value the field can
+    /// never legally hold. `^[A-Za-z0-9-]+$` is the Optimal Edge Discovery `edgeCloudRegion` /
+    /// `EdgeCloudRegion` region-name pattern, and — like the IMEI/ICCID/name patterns, unlike the
+    /// UUID patterns which sit beside a `format: uuid` already guarded by
+    /// `every_uuid_format_example_is_a_well_formed_uuid` — it carries no `format`, so these examples
+    /// are otherwise unchecked.
+    ///
+    /// Scoping mirrors `name_pattern_examples_malformed` exactly: only an `example` carrying an
+    /// inline scalar (a block/object example opens no inline value and is skipped) with a same-indent
+    /// `pattern` sibling *equal to* `REGION_PATTERN` in the same Schema Object is inspected — the
+    /// sibling is scanned at the example's own indent, down through the object's block then up,
+    /// dedent-bounded, so a nested or following object's `pattern` never pairs, and an intervening
+    /// `maxLength`/`description` sibling at the same indent is stepped over (the corpus's
+    /// `edgeCloudRegion` request property has a `maxLength` then a `description` block between its
+    /// `pattern` and `example`). In particular the CAMARA QoS-family name pattern
+    /// `^[a-zA-Z0-9_.-]+$` — which admits `_` and `.` this class forbids — is a *different* pattern
+    /// and never pairs. An `example:` nested inside an outer `example:`/`examples:` payload (sample
+    /// data, not a schema keyword) is skipped. Only the region pattern is matched.
+    fn region_pattern_examples_malformed(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let raw_inline = |l: &str, name: &str| -> Option<String> {
+            let (k, v) = l.trim_start().split_once(':')?;
+            if k.trim() != name {
+                return None;
+            }
+            let v = v.split('#').next().unwrap_or(v).trim();
+            if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            }
+        };
+        // Whether a same-indent `pattern:` sibling of line `i` (indent `c`) in the same Schema
+        // Object equals the region pattern: scan down through the object's block then up,
+        // dedent-bounded so a nested or following object's `pattern` never pairs.
+        let sibling_is_region_pattern = |i: usize, c: usize| -> bool {
+            let is_region_pattern = |l: &str| -> bool {
+                raw_inline(l, "pattern")
+                    .map(|v| v.trim_matches('"').trim_matches('\'') == REGION_PATTERN)
+                    .unwrap_or(false)
+            };
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_region_pattern(l) {
+                    return true;
+                }
+                j += 1;
+            }
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_region_pattern(l) {
+                    return true;
+                }
+            }
+            false
+        };
+        // True when line `i` (indent `c`) sits inside an outer `example:`/`examples:` payload —
+        // some enclosing container key up the indent ladder is `example`/`examples` — so an
+        // inner `example` key there is sample data, not a schema keyword.
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some(raw) = raw_inline(line, "example") else {
+                continue;
+            };
+            let c = indent(line);
+            if inside_example(i, c) {
+                continue;
+            }
+            if !sibling_is_region_pattern(i, c) {
+                continue;
+            }
+            let value = raw.trim_matches('"').trim_matches('\'');
+            if !matches_region_pattern(value) {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_region_pattern_example_conforms_to_the_region_pattern() {
+        // Contract-harness invariant (OpenAPI 3.0.x / JSON-Schema structural rule): where a Schema
+        // Object declares an inline `example` beside a same-indent region-name `pattern`
+        // (`^[A-Za-z0-9-]+$`, the Optimal Edge Discovery `edgeCloudRegion` / `EdgeCloudRegion`
+        // pattern), the example MUST match that pattern. An `example` is a sample *instance* of the
+        // schema, so a value the `pattern` rejects — a region carrying a space, `_`, `.`, `/`, or
+        // any character outside `[A-Za-z0-9-]` — is a self-contradictory schema whose own validator
+        // rejects the sample it advertises, so a Redoc/Swagger prefill and a codegen client's
+        // generated sample carry a value no field constrained by this pattern can legally hold.
+        //
+        // The twelfth member of the `pattern`-conformance family after E.164 / IMEI / ICCID /
+        // 32-hex / name / MAC / token / result-code / geohash / app-name / TAC, and the first over a
+        // letter-digit-hyphen alphabet with *no* underscore or dot: the closest sibling, the CAMARA
+        // QoS-family name pattern `^[a-zA-Z0-9_.-]+$`, admits `_` and `.` this class forbids, so a
+        // region example carrying either is a fault the name matcher cannot catch (each family
+        // member is keyed on the exact pattern string, so the two never pair). The `+` quantifier
+        // imposes only a non-empty floor — the accompanying `maxLength: 64` ceiling is guarded
+        // separately by `every_example_respects_its_string_length_bounds` — so this member cannot be
+        // expressed by any fixed- or ranged-length check. Like the IMEI/ICCID/name patterns the
+        // region pattern carries no `format` sibling, so its examples are beyond the `format`-example
+        // family's reach; a general regex-engine test would need a new dependency (declined on
+        // binary-size grounds), so a concrete hand-validated shape is matched. Verified true across
+        // all mounted specs before asserting (Optimal Edge Discovery declares three such
+        // example+pattern pairs, every one a conforming region — `us-east-1` / `eu-west-1`).
+        for api in APIS {
+            let offenders = region_pattern_examples_malformed(api.body);
+            assert!(
+                offenders.is_empty(),
+                "{} spec declares an `example` beside a same-indent region-name \
+                 `pattern: '^[A-Za-z0-9-]+$'` that does not match that pattern (a sample the \
+                 pattern's own validator would reject) at `example:` line(s): {:?}",
+                api.name,
+                offenders
+            );
+        }
+    }
+
+    #[test]
+    fn region_pattern_example_extraction_rules() {
+        // Unit-cover `matches_region_pattern` and `region_pattern_examples_malformed` so the
+        // contract test above can't pass vacuously and its detection is pinned.
+        //
+        // Shape check: the corpus regions `us-east-1` / `eu-west-1`, an all-letter region, and a
+        // single character all pass; a value with an underscore (`us_east`) or a dot (`v1.2`) —
+        // both admitted by the name pattern but not this one — a space, a slash, and an empty
+        // string all fail. The no-underscore/no-dot alphabet and the non-empty floor are the whole
+        // point of the `^[A-Za-z0-9-]+$` pattern.
+        assert!(matches_region_pattern("us-east-1"));
+        assert!(matches_region_pattern("eu-west-1"));
+        assert!(matches_region_pattern("Region"));
+        assert!(matches_region_pattern("a"));
+        assert!(!matches_region_pattern("us_east")); // underscore — a name char, not a region char
+        assert!(!matches_region_pattern("v1.2")); // dot — a name char, not a region char
+        assert!(!matches_region_pattern("us east")); // space
+        assert!(!matches_region_pattern("a/b")); // slash
+        assert!(!matches_region_pattern("")); // empty
+
+        // Extractor: two valid regions (one across an intervening `maxLength` + `description` block —
+        // the corpus's request-property shape — and one adjacent) pass; an underscore-, dot-, and
+        // space-bearing value are flagged; a bad value whose `pattern` is declared *below* it is
+        // still paired (down-scan) and flagged; a value with no `pattern` sibling and one whose
+        // sibling is the *different* name pattern `^[a-zA-Z0-9_.-]+$` (which admits `_`) are skipped;
+        // an inner `example` inside an outer `example:` payload is skipped; an example in one
+        // property never pairs with a following property's `pattern` across the dedent; and a
+        // property literally named `example` (opening a block) is skipped.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    GoodBlockDesc:
+      type: string
+      pattern: '^[A-Za-z0-9-]+$'
+      maxLength: 64
+      description: >-
+        the edge cloud region
+      example: \"us-east-1\"
+    GoodAdjacent:
+      type: string
+      pattern: '^[A-Za-z0-9-]+$'
+      example: eu-west-1
+    HasUnderscore:
+      type: string
+      pattern: '^[A-Za-z0-9-]+$'
+      example: \"us_east\"
+    HasDot:
+      type: string
+      pattern: '^[A-Za-z0-9-]+$'
+      example: \"v1.2\"
+    HasSpace:
+      type: string
+      pattern: '^[A-Za-z0-9-]+$'
+      example: \"us east\"
+    PatternBelow:
+      type: string
+      example: \"bad region\"
+      pattern: '^[A-Za-z0-9-]+$'
+    NoPattern:
+      type: string
+      example: \"no pattern here\"
+    NamePattern:
+      type: string
+      pattern: '^[a-zA-Z0-9_.-]+$'
+      example: \"has_underscore\"
+    InExample:
+      type: object
+      example:
+        pattern: '^[A-Za-z0-9-]+$'
+        example: \"bad thing\"
+    Split:
+      type: object
+      properties:
+        a:
+          example: \"bad region\"
+        b:
+          type: string
+          pattern: '^[A-Za-z0-9-]+$'
+    NamedExample:
+      type: object
+      properties:
+        example:
+          type: string
+          pattern: '^[A-Za-z0-9-]+$'
+";
+        // Flagged, in document order: HasUnderscore.example (`us_east`), HasDot.example (`v1.2`),
+        // HasSpace.example (`us east`), and PatternBelow.example (value `bad region`, region
+        // `pattern` a line below — down-scan pairs it). Not flagged: GoodBlockDesc/GoodAdjacent
+        // (valid, one across an intervening maxLength/description block); NoPattern (no `pattern`
+        // sibling); NamePattern (sibling is the name pattern `^[a-zA-Z0-9_.-]+$`, not the region
+        // pattern — a value with `_` the region matcher would reject, proving exact-pattern keying);
+        // InExample's inner `example` (inside the outer `example:` payload); Split.a.example (its
+        // only region `pattern` is in the following property past a dedent); and NamedExample's
+        // `example:` property opening a block (no inline value).
+        let flagged = region_pattern_examples_malformed(body);
+        let flagged_vals: Vec<&str> = flagged
+            .iter()
+            .map(|&n| body.lines().nth(n - 1).unwrap().trim())
+            .collect();
+        assert_eq!(
+            flagged_vals,
+            vec![
+                "example: \"us_east\"",
+                "example: \"v1.2\"",
+                "example: \"us east\"",
+                "example: \"bad region\"",
+            ]
+        );
+
+        // Non-vacuous floor: across every registered spec every `example` beside a same-indent
+        // region `pattern` matches it (the invariant the contract test asserts), and the corpus
+        // actually declares such pairs — so the pattern-comparison path runs on real data and a
+        // broken (always-empty) extractor can't hide behind a corpus that never pairs. Only Optimal
+        // Edge Discovery declares this pattern (three `edgeCloudRegion`/`EdgeCloudRegion` schemas),
+        // so the floor is 2 (not the family's usual 4). Count pairs with a same-indent detector
+        // independent of the extractor's shape comparison.
+        let mut region_examples = 0usize;
+        for api in APIS {
+            assert!(
+                region_pattern_examples_malformed(api.body).is_empty(),
+                "{}: every example beside a same-indent region `pattern` must match it",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            let is_key = |l: &str, name: &str, val: Option<&str>| {
+                l.trim_start().split_once(':').is_some_and(|(k, v)| {
+                    k.trim() == name
+                        && val.is_none_or(|want| {
+                            v.split('#')
+                                .next()
+                                .unwrap_or(v)
+                                .trim()
+                                .trim_matches('"')
+                                .trim_matches('\'')
+                                == want
+                        })
+                })
+            };
+            for (i, l) in lines.iter().enumerate() {
+                if !is_key(l, "example", None) {
+                    continue;
+                }
+                if l.trim_start()
+                    .split_once(':')
+                    .map(|(_, v)| v.split('#').next().unwrap_or(v).trim().is_empty())
+                    .unwrap_or(true)
+                {
+                    continue;
+                }
+                let c = indent(l);
+                let lo = i.saturating_sub(6);
+                let hi = (i + 6).min(lines.len());
+                let has_region = (lo..hi).any(|j| {
+                    j != i
+                        && indent(lines[j]) == c
+                        && is_key(lines[j], "pattern", Some(REGION_PATTERN))
+                });
+                if has_region {
+                    region_examples += 1;
+                }
+            }
+        }
+        assert!(
+            region_examples >= 2,
+            "expected the corpus's example + same-indent region `pattern` pairs, got {region_examples}"
+        );
+    }
+
     /// True when `s` is a well-formed RFC 3339 `date-time` string — the concrete
     /// syntax OpenAPI's `format: date-time` names (JSON Schema's `date-time` is
     /// RFC 3339 §5.6). Shape-only and lenient on the calendar (it range-checks each

@@ -5669,7 +5669,44 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-20 — Contract-test harness: added a **region-name-`pattern` example-conformance**
+  contract test (`src/registry.rs`
+  `every_region_pattern_example_conforms_to_the_region_pattern`) — where a mounted spec declares
+  an inline `example` beside a **same-indent** `pattern: '^[A-Za-z0-9-]+$'` (Optimal Edge
+  Discovery's `edgeCloudRegion` / `EdgeCloudRegion` region-name pattern), the example MUST be a
+  non-empty run of ASCII letters, digits, and hyphens — no underscore, no dot, no other
+  character. An `example` is a sample instance of the schema, so a region the pattern rejects (a
+  space, an underscore, a dot, a slash, or a placeholder pasted beside the pattern) is a
+  self-contradictory schema whose own validator rejects the sample it advertises. The **twelfth
+  member of the `pattern`-conformance family** after E.164/IMEI/ICCID/32-hex/name/MAC/token/
+  result-code/geohash/app-name/TAC, and the **first over a letter-digit-hyphen alphabet that
+  excludes `_` and `.`**: the closest sibling, the CAMARA QoS-family name pattern
+  `^[a-zA-Z0-9_.-]+$`, *admits* `_` and `.` this class forbids, so a region example carrying
+  either is a fault the name matcher can't catch (each family member is keyed on the exact
+  pattern string, so the two never pair). The `+` quantifier imposes only a non-empty floor — the
+  `maxLength: 64` ceiling is guarded separately by `every_example_respects_its_string_length_bounds`
+  — so this member can't be expressed by any fixed-/ranged-length check. Carries no `format`
+  sibling, so these examples were previously unchecked. New pure `matches_region_pattern`
+  (non-empty; each byte ASCII-alphanumeric or `-`; no regex/YAML dep) +
+  `region_pattern_examples_malformed` extractor (cloning `name_pattern_examples_malformed`'s
+  down-then-up dedent-bounded scoping, keyed on `REGION_PATTERN`, stepping over the intervening
+  `maxLength`/`description` block the corpus's request property carries between its `pattern` and
+  `example`), unit-covered (`region_pattern_example_extraction_rules`: the matcher clears
+  `us-east-1`/`eu-west-1`/an all-letter/a 1-char region and rejects an underscore, a dot, a space,
+  a slash, and an empty value; an underscore-, a dot-, a space-, and a pattern-below example
+  flagged in document order; valid regions across an intervening maxLength/description block, an
+  adjacent pair, a no-`pattern` sibling, a **name-pattern** sibling (`_`-bearing value skipped —
+  proves exact-pattern keying), a nested-`example` payload, a cross-property split, and a property
+  literally named `example` all cleared; ≥2-pair non-vacuous floor). **Surveyed the corpus first:
+  3 example+region-`pattern` pairs (optimal-edge-discovery `edgeCloudRegion` request property,
+  `EdgeCloudZone.edgeCloudRegion`, and the `EdgeCloudRegion` schema — `us-east-1`/`eu-west-1`),
+  all well-formed → 0 drift; a live guard that fires the moment a spec adds a mis-shaped region
+  example.** Test-side only — no request/response/behaviour change, so no vendored-spec edits; the
+  matcher, extractor and both tests live in the `#[cfg(test)]` module, so nothing ships in the
+  binary. `cargo test` 2798 green (was 2796; +2), `cargo build --release` green, no new deps. —
+  binary (release): 5.1M (5,323,160 B; unchanged).
 - 2026-08-20 — Contract-test harness: added a **TAC-`pattern` example-conformance**
+  contract test (`src/registry.rs` `every_tac_pattern_example_conforms_to_the_tac_pattern`)
   contract test (`src/registry.rs` `every_tac_pattern_example_conforms_to_the_tac_pattern`)
   — where a mounted spec declares an inline `example` beside a **same-indent**
   `pattern: '^[0-9]{8}$'` (the Type Allocation Code — Device Identifier's `tac` field, "the
