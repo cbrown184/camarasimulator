@@ -33448,6 +33448,368 @@ components:
         );
     }
 
+    const TEXT512_PATTERN: &str = r"^[\s\S]{0,512}$";
+
+    /// True when `s` matches the bounded-any-char `pattern` `^[\s\S]{0,512}$` exactly: the
+    /// character class `[\s\S]` is the union of "whitespace" and "non-whitespace", i.e. *every*
+    /// character (newlines and control characters included), and the `{0,512}` quantifier admits
+    /// 0 to 512 of them — so the pattern's *only* constraint is a 512-character ceiling (the empty
+    /// string is legal). The matcher is therefore a pure length check on Unicode scalar values,
+    /// mirroring `matches_text256_pattern`'s shape-only stance so a legitimately shaped free-text
+    /// value is never a false positive; the sole fault it can catch is an example *longer* than
+    /// 512 characters. The 512-wide sibling of the 256-wide `TEXT256_PATTERN`.
+    fn matches_text512_pattern(s: &str) -> bool {
+        s.chars().count() <= 512
+    }
+
+    /// The 1-based line numbers, in document order, of every `example:` keyword whose inline
+    /// scalar value sits in a Schema Object declaring a *same-indent* bounded-any-char `pattern`
+    /// sibling (`^[\s\S]{0,512}$`) yet exceeds its 512-character ceiling, without a YAML dep. The
+    /// 512-wide twin of `text256_pattern_examples_malformed`: same scoping, keyed on
+    /// `TEXT512_PATTERN` instead of `TEXT256_PATTERN`.
+    ///
+    /// In OpenAPI 3.0.x (JSON Schema) an `example` is a sample *instance* of the schema, so a
+    /// field constrained by `pattern` MUST carry an example the pattern accepts. A free-text
+    /// example longer than 512 characters advertises a sample the schema's own validator rejects,
+    /// so a Redoc/Swagger prefill and a codegen client's generated sample carry a value the field
+    /// can never legally hold. This pattern carries no `format` sibling, so these examples are
+    /// otherwise unchecked by the `format`-example family.
+    ///
+    /// Scoping mirrors `text256_pattern_examples_malformed` exactly: only an `example` carrying
+    /// an inline scalar (a block/object example opens no inline value and is skipped) with a
+    /// same-indent `pattern` sibling *equal to* `TEXT512_PATTERN` in the same Schema Object is
+    /// inspected — the sibling is scanned at the example's own indent, down through the object's
+    /// block then up, dedent-bounded, so a nested or following object's `pattern` never pairs.
+    /// The same-indent scan steps over intervening deeper-indented lines, so the corpus's
+    /// `pattern` → `maxLength: 512` → `description` → `example` shape pairs correctly. An
+    /// `example:` nested inside an outer `example:`/`examples:` payload (sample data, not a
+    /// schema keyword) is skipped. Only the 512-wide bounded-any-char pattern is matched; the
+    /// 256-wide sibling (`TEXT256_PATTERN`) and every other pattern are out of scope — a 512-wide
+    /// example beside the 256-wide pattern is caught by `text256_pattern_examples_malformed`, and
+    /// vice-versa.
+    fn text512_pattern_examples_malformed(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let raw_inline = |l: &str, name: &str| -> Option<String> {
+            let (k, v) = l.trim_start().split_once(':')?;
+            if k.trim() != name {
+                return None;
+            }
+            let v = v.split('#').next().unwrap_or(v).trim();
+            if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            }
+        };
+        // Whether a same-indent `pattern:` sibling of line `i` (indent `c`) in the same Schema
+        // Object equals the 512-wide bounded-any-char pattern: scan down through the object's
+        // block then up, dedent-bounded so a nested or following object's `pattern` never pairs.
+        let sibling_is_text512_pattern = |i: usize, c: usize| -> bool {
+            let is_text512_pattern = |l: &str| -> bool {
+                raw_inline(l, "pattern")
+                    .map(|v| v.trim_matches('"').trim_matches('\'') == TEXT512_PATTERN)
+                    .unwrap_or(false)
+            };
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_text512_pattern(l) {
+                    return true;
+                }
+                j += 1;
+            }
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_text512_pattern(l) {
+                    return true;
+                }
+            }
+            false
+        };
+        // True when line `i` (indent `c`) sits inside an outer `example:`/`examples:` payload —
+        // some enclosing container key up the indent ladder is `example`/`examples` — so an inner
+        // `example` key there is sample data, not a schema keyword.
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some(raw) = raw_inline(line, "example") else {
+                continue;
+            };
+            let c = indent(line);
+            if inside_example(i, c) {
+                continue;
+            }
+            if !sibling_is_text512_pattern(i, c) {
+                continue;
+            }
+            let value = raw.trim_matches('"').trim_matches('\'');
+            if !matches_text512_pattern(value) {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_text512_pattern_example_conforms_to_the_text512_pattern() {
+        // Contract-harness invariant (OpenAPI 3.0.x / JSON-Schema structural rule): where a Schema
+        // Object declares an inline `example` beside a same-indent bounded-any-char `pattern`
+        // (`^[\s\S]{0,512}$`, the free-text `resultMsg` pattern the eSIM Remote Management
+        // `TaskResult` envelope uses), the example MUST match that pattern. `[\s\S]` is *every*
+        // character, so the pattern's only constraint is a 512-character ceiling; an `example` is
+        // a sample *instance* of the schema, so a value longer than 512 characters is a
+        // self-contradictory schema whose own validator rejects the sample it advertises, and a
+        // Redoc/Swagger prefill and a codegen client's generated sample then carry a value no
+        // field constrained by this pattern can legally hold.
+        //
+        // The twenty-fourth member of the `pattern`-conformance family after E.164 / IMEI / ICCID
+        // / 32-hex / name / MAC / token / result-code / bounded-any-char (256-wide) / geohash /
+        // app-name / TAC / region / DNS-label / sink-URL / UUID / DPV-purpose / no-semicolon /
+        // IMEISV / no-CR/LF / OTP-template / 16-hex / 4-hex, and the *second bounded-any-char
+        // ceiling* after `TEXT256_PATTERN` — the first pinning exactly 512 characters. Each family
+        // member is keyed on the exact pattern string, so the 256-wide member (keyed on
+        // `TEXT256_PATTERN`, ceiling 256) never pairs with `^[\s\S]{0,512}$`, and — crucially — a
+        // 257-to-512-character value beside this pattern is legal here but rejected by the 256-wide
+        // member (a length between the two ceilings passes the shared any-char alphabet check yet
+        // straddles the two length pins); a value *longer than 512* is the fault the 256-wide
+        // member also flags but only when the pattern is `^[\s\S]{0,256}$`, so a 513-char example
+        // beside the 512-wide `pattern` is the fault only this member can catch. Like the 256-wide
+        // / IMEI / ICCID / MAC / token / result-code patterns it carries no `format` sibling, so
+        // its examples are beyond the `format`-example family's reach; a general regex-engine test
+        // would need a new dependency (declined on binary-size grounds), so a concrete
+        // hand-validated length bound is checked. Verified true across all mounted specs before
+        // asserting (eSIM Remote Management declares one such example+pattern pair — the
+        // `resultMsg` field, `Operation completed successfully` at 31 chars, well under 512).
+        for api in APIS {
+            let offenders = text512_pattern_examples_malformed(api.body);
+            assert!(
+                offenders.is_empty(),
+                "{} spec declares an `example` beside a same-indent bounded-any-char \
+                 `pattern: '^[\\s\\S]{{0,512}}$'` that exceeds its 512-character ceiling (a sample \
+                 the pattern's own validator would reject) at `example:` line(s): {:?}",
+                api.name,
+                offenders
+            );
+        }
+    }
+
+    #[test]
+    fn text512_pattern_example_extraction_rules() {
+        // Unit-cover `matches_text512_pattern` and `text512_pattern_examples_malformed` so the
+        // contract test above can't pass vacuously and its detection is pinned.
+        //
+        // Shape check: the empty string, a short value, a value with an embedded newline, a value
+        // of exactly 512 characters, and — crucially — a 257-character value (illegal under the
+        // 256-wide sibling but legal here) all pass (the pattern admits any character and an
+        // inclusive 512 ceiling); a 513-character value fails.
+        assert!(matches_text512_pattern(""));
+        assert!(matches_text512_pattern("Operation completed successfully"));
+        assert!(matches_text512_pattern("line\nbreak")); // `[\s\S]` includes newlines
+        assert!(matches_text512_pattern(&"a".repeat(257))); // legal under the 512-wide ceiling
+        assert!(matches_text512_pattern(&"a".repeat(512))); // ceiling is inclusive
+        assert!(!matches_text512_pattern(&"a".repeat(513))); // one over the ceiling
+
+        // Extractor: a valid free-text value beside a same-indent bounded-any-char `pattern`,
+        // across an intervening `maxLength: 512` and single-line `description` (the corpus's
+        // `pattern`→`maxLength`→`description`→`example` shape), passes; a 513-character value is
+        // flagged; a bad (over-length) value whose `pattern` is declared *below* it is still
+        // paired (down-scan) and flagged; a value with no `pattern` sibling and one whose sibling
+        // is the 256-wide bounded-any-char pattern (same class, different length ceiling) are
+        // skipped — the 256-wide value there is out of scope, caught by `text256_pattern`'s guard
+        // instead. An inner `example` inside an outer `example:` payload is skipped; an example in
+        // one property never pairs with a following property's `pattern` across the dedent; and a
+        // property literally named `example` (opening a block) is skipped.
+        let over = "x".repeat(513);
+        let body = format!(
+            "openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    GoodMaxLenDesc:
+      type: string
+      pattern: '{p}'
+      maxLength: 512
+      description: Human-readable description of the task result.
+      example: Operation completed successfully
+    TooLong:
+      type: string
+      pattern: '{p}'
+      example: '{over}'
+    PatternBelow:
+      type: string
+      example: '{over}'
+      pattern: '{p}'
+    NoPattern:
+      type: string
+      example: '{over}'
+    OtherPattern:
+      type: string
+      pattern: '{p256}'
+      example: '{over}'
+    InExample:
+      type: object
+      example:
+        pattern: '{p}'
+        example: '{over}'
+    Split:
+      type: object
+      properties:
+        a:
+          example: '{over}'
+        b:
+          type: string
+          pattern: '{p}'
+    NamedExample:
+      type: object
+      properties:
+        example:
+          type: string
+          pattern: '{p}'
+",
+            p = TEXT512_PATTERN,
+            p256 = TEXT256_PATTERN,
+            over = over
+        );
+        // Flagged, in document order: TooLong.example (513 chars beside a same-indent text512
+        // `pattern`) and PatternBelow.example (513 chars, text512 `pattern` a line below —
+        // down-scan pairs it). Not flagged: GoodMaxLenDesc (valid, across an intervening
+        // maxLength+single-line description — proving the same-indent scan steps over both);
+        // NoPattern (no `pattern` sibling); OtherPattern (sibling is the 256-wide bounded-any-char
+        // pattern, not 512-wide — an over-length value there is out of scope, caught by the
+        // 256-wide guard instead); InExample's inner `example` (inside the outer `example:`
+        // payload); Split.a.example (its only 512-wide `pattern` is in the following property past
+        // a dedent); and NamedExample's `example:` property opening a block (no inline value).
+        let flagged = text512_pattern_examples_malformed(&body);
+        let flagged_props: Vec<&str> = flagged
+            .iter()
+            .map(|&n| {
+                // Walk up to the nearest schema-name line (indent 4) for a stable label.
+                let lines: Vec<&str> = body.lines().collect();
+                let mut k = n - 1;
+                loop {
+                    let l = lines[k];
+                    let ind = l.len() - l.trim_start().len();
+                    if ind == 4 && l.trim_end().ends_with(':') {
+                        break l.trim().trim_end_matches(':');
+                    }
+                    if k == 0 {
+                        break "";
+                    }
+                    k -= 1;
+                }
+            })
+            .collect();
+        assert_eq!(flagged_props, vec!["TooLong", "PatternBelow"]);
+
+        // Non-vacuous floor: across every registered spec every `example` beside a same-indent
+        // 512-wide bounded-any-char `pattern` matches it (the invariant the contract test
+        // asserts), and the corpus actually declares such a pair — so the length-comparison path
+        // runs on real data and a broken (always-empty) extractor can't hide behind a corpus that
+        // never pairs. eSIM Remote Management is the only mounted spec with a `^[\s\S]{0,512}$`
+        // field (`resultMsg`), so the floor is one; count pairs with a same-indent detector
+        // independent of the extractor's length comparison.
+        let mut text512_examples = 0usize;
+        for api in APIS {
+            assert!(
+                text512_pattern_examples_malformed(api.body).is_empty(),
+                "{}: every example beside a same-indent bounded-any-char (512) `pattern` must match it",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            let is_key = |l: &str, name: &str, val: Option<&str>| {
+                l.trim_start().split_once(':').is_some_and(|(k, v)| {
+                    k.trim() == name
+                        && val.is_none_or(|want| {
+                            v.split('#')
+                                .next()
+                                .unwrap_or(v)
+                                .trim()
+                                .trim_matches('"')
+                                .trim_matches('\'')
+                                == want
+                        })
+                })
+            };
+            for (i, l) in lines.iter().enumerate() {
+                if !is_key(l, "example", None) {
+                    continue;
+                }
+                if l.trim_start()
+                    .split_once(':')
+                    .map(|(_, v)| v.split('#').next().unwrap_or(v).trim().is_empty())
+                    .unwrap_or(true)
+                {
+                    continue;
+                }
+                let c = indent(l);
+                let lo = i.saturating_sub(6);
+                let hi = (i + 6).min(lines.len());
+                let has_text512 = (lo..hi).any(|j| {
+                    j != i
+                        && indent(lines[j]) == c
+                        && is_key(lines[j], "pattern", Some(TEXT512_PATTERN))
+                });
+                if has_text512 {
+                    text512_examples += 1;
+                }
+            }
+        }
+        assert!(
+            text512_examples >= 1,
+            "expected the corpus's example + same-indent 512-wide bounded-any-char `pattern` pair, got {text512_examples}"
+        );
+    }
+
     /// True when `s` is a well-formed RFC 3339 `date-time` string — the concrete
     /// syntax OpenAPI's `format: date-time` names (JSON Schema's `date-time` is
     /// RFC 3339 §5.6). Shape-only and lenient on the calendar (it range-checks each

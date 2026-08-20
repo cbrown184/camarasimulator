@@ -5669,6 +5669,43 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-20 — Contract-test harness: added a **512-wide bounded-any-char-`pattern` example-conformance**
+  contract test (`src/registry.rs` `every_text512_pattern_example_conforms_to_the_text512_pattern`) —
+  where a mounted spec declares an inline `example` beside a **same-indent** `pattern: '^[\s\S]{0,512}$'`
+  (the eSIM Remote Management `TaskResult.resultMsg` field — a free-text task-result description), the
+  example MUST match it. `[\s\S]` is the union of "whitespace" and "non-whitespace" — every character
+  (newlines and control characters included) — so `{0,512}` pins nothing but a 512-character ceiling
+  (empty is legal); a free-text example longer than 512 characters is a self-contradictory schema whose
+  own validator rejects the sample it advertises, so a Redoc/Swagger prefill and a codegen client's
+  generated sample carry a value the field can never legally hold. The **twenty-fourth member of the
+  `pattern`-conformance family** after E.164/IMEI/ICCID/32-hex/name/MAC/token/result-code/
+  bounded-any-char (256-wide)/geohash/app-name/TAC/region/DNS-label/sink-URL/UUID/DPV-purpose/
+  no-semicolon/IMEISV/no-CR/LF/OTP-template/16-hex/4-hex, and the **second bounded-any-char ceiling**
+  after `TEXT256_PATTERN` — the first pinning exactly 512 characters. Each member is keyed on the exact
+  pattern string, so the 256-wide member (`TEXT256_PATTERN`, ceiling 256) never pairs with
+  `^[\s\S]{0,512}$` — and, crucially, a 257-to-512-character value beside this pattern is legal here but
+  rejected by the 256-wide member (a length between the two ceilings passes the shared any-char
+  alphabet check yet straddles the two length pins); a 513-char example beside the 512-wide `pattern`
+  is the fault only this member can catch. Carries **no `format` sibling**, so beyond the
+  `format`-example family's reach. New pure `matches_text512_pattern` (Unicode-scalar count ≤ 512;
+  no regex/YAML dep) + `text512_pattern_examples_malformed` extractor cloning
+  `text256_pattern_examples_malformed`'s down-then-up dedent-bounded same-indent scoping, keyed on
+  `TEXT512_PATTERN` — the same-indent scan steps over the corpus's intervening `maxLength: 512` +
+  single-line `description` siblings, so the `pattern`→`maxLength`→`description`→`example` shape pairs
+  correctly. Unit-covered (`text512_pattern_example_extraction_rules`: matcher accepts empty / short /
+  embedded-newline / 257-char (illegal under the 256-wide sibling but legal here) / 512-char and rejects
+  513-char; a 513-char value and a 513-char `PatternBelow` (pattern one line below — down-scan pairs it)
+  flagged in document order; a Good case across an intervening maxLength + description, plus a
+  no-`pattern` sibling, a 256-wide-bounded-any-char sibling (same class, different ceiling),
+  a nested-`example` payload, a cross-property split, and a block-opening `example:` property all
+  cleared; ≥1-pair non-vacuous floor — eSIM Remote Management is the only mounted spec with a
+  `^[\s\S]{0,512}$` field carrying an inline example). Surveyed the corpus first: 1 example+512-wide-
+  bounded-any-char-`pattern` pair (esim-remote-management `resultMsg`, `Operation completed
+  successfully` at 31 chars) → 0 drift; a live guard that fires the moment a spec adds an
+  over-512-character example. Test-side only — no request/response/behaviour change, so no
+  vendored-spec edits; the matcher, extractor and both tests live in the `#[cfg(test)]` module, so
+  nothing ships in the binary. `cargo test` 2822 green (was 2820; +2), `cargo build --release` green,
+  no new deps. — binary (release): 5.1M (5,323,160 B; unchanged).
 - 2026-08-20 — Contract-test harness: added a **4-hex-`pattern` example-conformance** contract test
   (`src/registry.rs` `every_hex4_pattern_example_conforms_to_the_hex4_pattern`) — where a mounted
   spec declares an inline `example` beside a **same-indent** `pattern: '^[0-9a-fA-F]{4}$'` (the
