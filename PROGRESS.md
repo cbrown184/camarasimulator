@@ -5669,6 +5669,44 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-20 — Contract-test harness: added an **RFC 4122 UUID-`pattern` example-conformance**
+  contract test (`src/registry.rs` `every_uuid_pattern_example_conforms_to_the_uuid_pattern`) —
+  where a mounted spec declares an inline `example` beside a **same-indent**
+  `pattern: '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'` (the
+  `appId`/`appInstanceId`/`appDeploymentId`/… identifier pattern across the edge/network-access
+  `vwip` specs), the example MUST be a canonical 8-4-4-4-12 UUID in **strict lowercase** hex with the
+  version nibble in `1..=5` (index 14) and the variant nibble in `8/9/a/b` (index 19). An `example`
+  is a sample instance of the schema, so a UUID the pattern rejects (uppercase hex, a version nibble
+  outside `1..=5`, or a non-RFC-4122 variant nibble) is a self-contradictory schema whose own
+  validator rejects the sample it advertises. The **fifteenth member of the `pattern`-conformance
+  family** after E.164/IMEI/ICCID/32-hex/name/MAC/token/result-code/geohash/app-name/TAC/region/
+  DNS-label/sink-URL, and the **first over a structured, mixed-constraint form**: prior members are a
+  single character class, a fixed/ranged-length run, a scheme literal, or a hyphen-joined hex run,
+  whereas this one pins a fixed hyphen layout AND a strict-lowercase alphabet AND two
+  position-specific nibble ranges. **Crucially these schemas also carry a `format: uuid` sibling, but
+  its guard `every_uuid_format_example_is_a_well_formed_uuid` is case-insensitive and lenient on the
+  version/variant nibbles** (it accepts any hex at those positions and uppercase throughout), so an
+  uppercase or wrong-version/variant UUID example passes there while violating this pattern — the
+  exact gap this member closes; each family member is keyed on the exact pattern string, so the
+  case-insensitive, version/variant-agnostic UUID pattern `^[0-9a-fA-F]{8}-…-[0-9a-fA-F]{12}$` some
+  specs use never pairs. New pure `matches_uuid_v1to5_pattern` (36 bytes; hyphens at 8/13/18/23;
+  lowercase hex elsewhere; index 14 ∈ `1..=5`; index 19 ∈ `8/9/a/b`; no regex/YAML dep) +
+  `uuid_pattern_examples_malformed` extractor (cloning `http_url_pattern_examples_malformed`'s
+  down-then-up dedent-bounded scoping, keyed on `UUID_PATTERN`, stepping over the intervening
+  `format`/`minLength`/`maxLength`/`description` block the corpus's uuid schema carries between
+  `pattern` and `example`), unit-covered (`uuid_pattern_example_extraction_rules`: the matcher clears
+  a v5/var8 and a v1/varb UUID and rejects uppercase, version 0, version 6, variant 3, variant c,
+  too-short, too-long, non-hex, mis-hyphenated, and empty; an uppercase, a bad-version, and a
+  bad-variant example flagged in document order plus a pattern-below down-scan pair; a no-`pattern`
+  sibling, a case-insensitive-`pattern` sibling (uppercase value skipped — proves exact-pattern
+  keying), a nested-`example` payload, a cross-property split, and a property literally named
+  `example` all cleared; ≥2-pair non-vacuous floor). Surveyed the corpus first: 14 example+UUID-
+  `pattern` pairs (edge-application-management + network-access-domains `vwip`), all conforming → 0
+  drift; a live guard that fires the moment a spec adds a mis-shaped (uppercase / wrong-version /
+  wrong-variant) UUID example. Test-side only — no request/response/behaviour change, so no
+  vendored-spec edits; the matcher, extractor and both tests live in the `#[cfg(test)]` module, so
+  nothing ships in the binary. `cargo test` 2804 green (was 2802; +2), `cargo build --release` green,
+  no new deps. — binary (release): 5.1M (5,323,160 B; unchanged).
 - 2026-08-20 — Contract-test harness: added a **sink-URL-`pattern` example-conformance**
   contract test (`src/registry.rs` `every_http_url_pattern_example_conforms_to_the_http_url_pattern`)
   — where a mounted spec declares an inline `example` beside a **same-indent**

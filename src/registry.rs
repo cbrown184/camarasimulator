@@ -30111,6 +30111,392 @@ components:
         );
     }
 
+    const UUID_PATTERN: &str =
+        r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$";
+
+    /// True when `s` matches the RFC 4122 UUID `pattern`
+    /// `^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$` exactly: the
+    /// canonical 8-4-4-4-12 hyphenated form, but strictly *lowercase* hex, with the version nibble
+    /// (first hex of group 3, string index 14) pinned to `1..=5` and the variant nibble (first hex of
+    /// group 4, string index 19) pinned to `8/9/a/b`. Hand-rolled (no regex dep) mirroring
+    /// `is_well_formed_uuid`'s shape-only stance, but *narrower*: it rejects the uppercase hex, the
+    /// out-of-range version bits (`0`/`6`–`f`), and the non-RFC-4122 variant bits (`0`–`7`/`c`–`f`)
+    /// that a bare `format: uuid` shape check accepts, so it never false-flags a genuinely
+    /// RFC-4122-shaped sample yet catches the exact narrowings this pattern adds over the format.
+    fn matches_uuid_v1to5_pattern(s: &str) -> bool {
+        let b = s.as_bytes();
+        if b.len() != 36 {
+            return false;
+        }
+        let is_lower_hex = |c: u8| c.is_ascii_digit() || (b'a'..=b'f').contains(&c);
+        b.iter().enumerate().all(|(i, &c)| match i {
+            8 | 13 | 18 | 23 => c == b'-',
+            // version nibble: first hex of group 3 must be 1–5
+            14 => (b'1'..=b'5').contains(&c),
+            // variant nibble: first hex of group 4 must be 8, 9, a, or b
+            19 => matches!(c, b'8' | b'9' | b'a' | b'b'),
+            // every other hex position is strictly lowercase (no uppercase A–F)
+            _ => is_lower_hex(c),
+        })
+    }
+
+    /// The 1-based line numbers, in document order, of every `example:` keyword whose inline scalar
+    /// value sits in a Schema Object declaring a *same-indent* RFC 4122 UUID `pattern`
+    /// `^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$` sibling yet does not
+    /// match that pattern, without a YAML dep. The UUID-pattern twin of
+    /// `http_url_pattern_examples_malformed`: same scoping, keyed on `UUID_PATTERN` and judged by
+    /// `matches_uuid_v1to5_pattern`.
+    ///
+    /// In OpenAPI 3.0.x (JSON Schema) an `example` is a sample *instance* of the schema, so a field
+    /// constrained by `pattern` MUST carry an example the pattern accepts. A UUID example the pattern
+    /// rejects — an uppercase-hex UUID, a version nibble outside `1..=5`, or a variant nibble outside
+    /// `8/9/a/b` — advertises a sample the schema's own validator rejects, so a Redoc/Swagger prefill
+    /// and a codegen client's generated sample carry a value the field can never legally hold. Unlike
+    /// the `format: uuid` sibling these schemas also carry — whose example guard
+    /// `every_uuid_format_example_is_a_well_formed_uuid` is *case-insensitive and lenient on the
+    /// version/variant nibbles* — this pattern is strictly narrower, so its added constraints
+    /// (lowercase-only, version `1..=5`, RFC-4122 variant) are beyond the format guard's reach and
+    /// were otherwise unchecked.
+    ///
+    /// Scoping mirrors `http_url_pattern_examples_malformed` exactly: only an `example` carrying an
+    /// inline scalar (a block/object example opens no inline value and is skipped) with a same-indent
+    /// `pattern` sibling *equal to* `UUID_PATTERN` in the same Schema Object is inspected — the sibling
+    /// is scanned at the example's own indent, down through the object's block then up, dedent-bounded,
+    /// so a nested or following object's `pattern` never pairs, and an intervening
+    /// `format`/`minLength`/`maxLength`/`description` sibling at the same indent is stepped over (the
+    /// corpus's uuid schema has a `format`/`minLength`/`maxLength` block between its declared keys). In
+    /// particular the case-insensitive, version/variant-agnostic UUID pattern some specs use
+    /// (`^[0-9a-fA-F]{8}-…-[0-9a-fA-F]{12}$`) is a *different* string and never pairs. An `example:`
+    /// nested inside an outer `example:`/`examples:` payload (sample data, not a schema keyword) is
+    /// skipped. Only the strict `UUID_PATTERN` string is matched.
+    fn uuid_pattern_examples_malformed(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let raw_inline = |l: &str, name: &str| -> Option<String> {
+            let (k, v) = l.trim_start().split_once(':')?;
+            if k.trim() != name {
+                return None;
+            }
+            let v = v.split('#').next().unwrap_or(v).trim();
+            if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            }
+        };
+        // Whether a same-indent `pattern:` sibling of line `i` (indent `c`) in the same Schema
+        // Object equals the strict UUID pattern: scan down through the object's block then up,
+        // dedent-bounded so a nested or following object's `pattern` never pairs.
+        let sibling_is_uuid_pattern = |i: usize, c: usize| -> bool {
+            let is_uuid_pattern = |l: &str| -> bool {
+                raw_inline(l, "pattern")
+                    .map(|v| v.trim_matches('"').trim_matches('\'') == UUID_PATTERN)
+                    .unwrap_or(false)
+            };
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_uuid_pattern(l) {
+                    return true;
+                }
+                j += 1;
+            }
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_uuid_pattern(l) {
+                    return true;
+                }
+            }
+            false
+        };
+        // True when line `i` (indent `c`) sits inside an outer `example:`/`examples:` payload —
+        // some enclosing container key up the indent ladder is `example`/`examples` — so an
+        // inner `example` key there is sample data, not a schema keyword.
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some(raw) = raw_inline(line, "example") else {
+                continue;
+            };
+            let c = indent(line);
+            if inside_example(i, c) {
+                continue;
+            }
+            if !sibling_is_uuid_pattern(i, c) {
+                continue;
+            }
+            let value = raw.trim_matches('"').trim_matches('\'');
+            if !matches_uuid_v1to5_pattern(value) {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_uuid_pattern_example_conforms_to_the_uuid_pattern() {
+        // Contract-harness invariant (OpenAPI 3.0.x / JSON-Schema structural rule): where a Schema
+        // Object declares an inline `example` beside a same-indent RFC 4122 UUID `pattern`
+        // (`^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`, the
+        // `appId`/`appInstanceId`/… identifier pattern across the edge/network-access `vwip` specs),
+        // the example MUST match that pattern. An `example` is a sample *instance* of the schema, so a
+        // value the `pattern` rejects — an uppercase-hex UUID, a version nibble outside `1..=5`, or a
+        // variant nibble outside `8/9/a/b` — is a self-contradictory schema whose own validator rejects
+        // the sample it advertises, so a Redoc/Swagger prefill and a codegen client's generated sample
+        // carry a value no field constrained by this pattern can legally hold.
+        //
+        // The fifteenth member of the `pattern`-conformance family after E.164 / IMEI / ICCID / 32-hex
+        // / name / MAC / token / result-code / geohash / app-name / TAC / region / DNS-label / sink-URL,
+        // and the first over a *structured, mixed-constraint* form: prior members are a single character
+        // class, a fixed/ranged-length run, a scheme literal, or a hyphen-joined hex run; this one pins
+        // a fixed layout (hyphens at 8/13/18/23) AND a strict-lowercase hex alphabet AND two
+        // position-specific nibble ranges (version `1..=5` at index 14, variant `8/9/a/b` at index 19).
+        // Crucially these same schemas also carry a `format: uuid` sibling, but its example guard
+        // `every_uuid_format_example_is_a_well_formed_uuid` is case-insensitive and lenient on the
+        // version/variant nibbles, so an uppercase or wrong-version/variant UUID example passes there
+        // while violating this pattern — the exact gap this member closes. Each family member is keyed
+        // on the exact pattern string, so the case-insensitive, version/variant-agnostic UUID pattern
+        // `^[0-9a-fA-F]{8}-…-[0-9a-fA-F]{12}$` some specs use never pairs. A general regex-engine test
+        // would need a new dependency (declined on binary-size grounds), so a concrete hand-validated
+        // shape is matched. Verified true across all mounted specs before asserting (the edge/
+        // network-access `vwip` specs declare 14 such example+pattern pairs, all conforming).
+        for api in APIS {
+            let offenders = uuid_pattern_examples_malformed(api.body);
+            assert!(
+                offenders.is_empty(),
+                "{} spec declares an `example` beside a same-indent RFC 4122 UUID \
+                 `pattern: '^[0-9a-f]{{8}}-[0-9a-f]{{4}}-[1-5][0-9a-f]{{3}}-[89ab][0-9a-f]{{3}}-[0-9a-f]{{12}}$'` \
+                 that does not match that pattern (a sample the pattern's own validator would reject) at \
+                 `example:` line(s): {:?}",
+                api.name,
+                offenders
+            );
+        }
+    }
+
+    #[test]
+    fn uuid_pattern_example_extraction_rules() {
+        // Unit-cover `matches_uuid_v1to5_pattern` and `uuid_pattern_examples_malformed` so the contract
+        // test above can't pass vacuously and its detection is pinned.
+        //
+        // Shape check: a canonical lowercase UUID with version 5 / variant 8 and one with version 1 /
+        // variant b pass; an uppercase UUID (accepted by the `format: uuid` guard but not this
+        // pattern), a version-0 and a version-6 nibble, a variant-3 and a variant-c nibble, a too-short
+        // / too-long / non-hex / mis-hyphenated value all fail. The strict lowercase alphabet and the
+        // version/variant nibble ranges are the whole point of this pattern over `format: uuid`.
+        assert!(matches_uuid_v1to5_pattern("5e3a8c2f-1b4d-5a6e-8f90-2c1d3e4f5a6b")); // v5 var8
+        assert!(matches_uuid_v1to5_pattern("00000000-0000-1000-b000-000000000000")); // v1 var b
+        assert!(!matches_uuid_v1to5_pattern("5E3A8C2F-1B4D-5A6E-8F90-2C1D3E4F5A6B")); // uppercase
+        assert!(!matches_uuid_v1to5_pattern("5e3a8c2f-1b4d-0a6e-8f90-2c1d3e4f5a6b")); // version 0
+        assert!(!matches_uuid_v1to5_pattern("5e3a8c2f-1b4d-6a6e-8f90-2c1d3e4f5a6b")); // version 6
+        assert!(!matches_uuid_v1to5_pattern("5e3a8c2f-1b4d-5a6e-3f90-2c1d3e4f5a6b")); // variant 3
+        assert!(!matches_uuid_v1to5_pattern("5e3a8c2f-1b4d-5a6e-cf90-2c1d3e4f5a6b")); // variant c
+        assert!(!matches_uuid_v1to5_pattern("5e3a8c2f-1b4d-5a6e-8f90")); // too short
+        assert!(!matches_uuid_v1to5_pattern("5e3a8c2f-1b4d-5a6e-8f90-2c1d3e4f5a6bb")); // too long
+        assert!(!matches_uuid_v1to5_pattern("zzzzzzzz-1b4d-5a6e-8f90-2c1d3e4f5a6b")); // non-hex
+        assert!(!matches_uuid_v1to5_pattern("5e3a8c2f-15b4d-a6e-8f90-2c1d3e4f5a6b")); // mis-hyphenated
+        assert!(!matches_uuid_v1to5_pattern("")); // empty
+
+        // Extractor: two valid UUIDs (one across an intervening `format` + `minLength`/`maxLength` +
+        // `description` block — the corpus's uuid schema shape — and one adjacent) pass; an uppercase,
+        // a bad-version, and a bad-variant value are flagged; a bad value whose `pattern` is declared
+        // *below* it is still paired (down-scan) and flagged; a value with no `pattern` sibling and one
+        // whose sibling is the *different* case-insensitive UUID pattern are skipped; an inner
+        // `example` inside an outer `example:` payload is skipped; an example in one property never
+        // pairs with a following property's `pattern` across the dedent; and a property literally named
+        // `example` (opening a block) is skipped.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    GoodBlockDesc:
+      type: string
+      pattern: '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
+      format: uuid
+      minLength: 36
+      maxLength: 36
+      description: >-
+        the resource id
+      example: \"5e3a8c2f-1b4d-5a6e-8f90-2c1d3e4f5a6b\"
+    GoodAdjacent:
+      type: string
+      pattern: '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
+      example: \"6ec0bd7f-11c0-53da-975e-2a8ad9ebae0b\"
+    Uppercase:
+      type: string
+      pattern: '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
+      example: \"5E3A8C2F-1B4D-5A6E-8F90-2C1D3E4F5A6B\"
+    BadVersion:
+      type: string
+      pattern: '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
+      example: \"5e3a8c2f-1b4d-6a6e-8f90-2c1d3e4f5a6b\"
+    BadVariant:
+      type: string
+      pattern: '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
+      example: \"5e3a8c2f-1b4d-5a6e-3f90-2c1d3e4f5a6b\"
+    PatternBelow:
+      type: string
+      example: \"not-a-uuid\"
+      pattern: '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
+    NoPattern:
+      type: string
+      example: \"whatever\"
+    CaseInsensitivePattern:
+      type: string
+      pattern: '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+      example: \"5E3A8C2F-1B4D-5A6E-8F90-2C1D3E4F5A6B\"
+    InExample:
+      type: object
+      example:
+        pattern: '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
+        example: \"BAD-THING\"
+    Split:
+      type: object
+      properties:
+        a:
+          example: \"not-a-uuid\"
+        b:
+          type: string
+          pattern: '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
+    NamedExample:
+      type: object
+      properties:
+        example:
+          type: string
+          pattern: '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
+";
+        // Flagged, in document order: Uppercase.example, BadVersion.example, BadVariant.example, and
+        // PatternBelow.example (value `not-a-uuid`, uuid `pattern` a line below — down-scan pairs it).
+        // Not flagged: GoodBlockDesc/GoodAdjacent (valid, one across an intervening format/minLength/
+        // maxLength/description block); NoPattern (no `pattern` sibling); CaseInsensitivePattern (its
+        // sibling is the case-insensitive `^[0-9a-fA-F]…$`, not this exact string — an uppercase value
+        // the strict matcher would also reject, proving exact-pattern keying); InExample's inner
+        // `example` (inside the outer `example:` payload); Split.a.example (its only uuid `pattern` is
+        // in the following property past a dedent); and NamedExample's `example:` property opening a
+        // block (no inline value).
+        let flagged = uuid_pattern_examples_malformed(body);
+        let flagged_vals: Vec<&str> = flagged
+            .iter()
+            .map(|&n| body.lines().nth(n - 1).unwrap().trim())
+            .collect();
+        assert_eq!(
+            flagged_vals,
+            vec![
+                "example: \"5E3A8C2F-1B4D-5A6E-8F90-2C1D3E4F5A6B\"",
+                "example: \"5e3a8c2f-1b4d-6a6e-8f90-2c1d3e4f5a6b\"",
+                "example: \"5e3a8c2f-1b4d-5a6e-3f90-2c1d3e4f5a6b\"",
+                "example: \"not-a-uuid\"",
+            ]
+        );
+
+        // Non-vacuous floor: across every registered spec every `example` beside a same-indent strict
+        // UUID `pattern` matches it (the invariant the contract test asserts), and the corpus actually
+        // declares such pairs — so the pattern-comparison path runs on real data and a broken
+        // (always-empty) extractor can't hide behind a corpus that never pairs. The edge/network-access
+        // `vwip` specs declare 14 such pairs, so the floor is 2. Count pairs with a same-indent
+        // detector independent of the extractor's shape comparison.
+        let mut uuid_examples = 0usize;
+        for api in APIS {
+            assert!(
+                uuid_pattern_examples_malformed(api.body).is_empty(),
+                "{}: every example beside a same-indent strict UUID `pattern` must match it",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            let is_key = |l: &str, name: &str, val: Option<&str>| {
+                l.trim_start().split_once(':').is_some_and(|(k, v)| {
+                    k.trim() == name
+                        && val.is_none_or(|want| {
+                            v.split('#')
+                                .next()
+                                .unwrap_or(v)
+                                .trim()
+                                .trim_matches('"')
+                                .trim_matches('\'')
+                                == want
+                        })
+                })
+            };
+            for (i, l) in lines.iter().enumerate() {
+                if !is_key(l, "example", None) {
+                    continue;
+                }
+                if l.trim_start()
+                    .split_once(':')
+                    .map(|(_, v)| v.split('#').next().unwrap_or(v).trim().is_empty())
+                    .unwrap_or(true)
+                {
+                    continue;
+                }
+                let c = indent(l);
+                let lo = i.saturating_sub(6);
+                let hi = (i + 6).min(lines.len());
+                let has_uuid = (lo..hi).any(|j| {
+                    j != i
+                        && indent(lines[j]) == c
+                        && is_key(lines[j], "pattern", Some(UUID_PATTERN))
+                });
+                if has_uuid {
+                    uuid_examples += 1;
+                }
+            }
+        }
+        assert!(
+            uuid_examples >= 2,
+            "expected the corpus's example + same-indent strict UUID `pattern` pairs, got {uuid_examples}"
+        );
+    }
+
     /// True when `s` is a well-formed RFC 3339 `date-time` string — the concrete
     /// syntax OpenAPI's `format: date-time` names (JSON Schema's `date-time` is
     /// RFC 3339 §5.6). Shape-only and lenient on the calendar (it range-checks each
