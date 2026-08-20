@@ -5669,6 +5669,40 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-20 — Contract-test harness: added a **no-CR/LF-`pattern` example-conformance** contract
+  test (`src/registry.rs` `every_no_crlf_pattern_example_conforms_to_the_no_crlf_pattern`) — where a
+  mounted spec declares an inline `example` beside a **same-indent** `pattern: '^[^\r\n]*$'` (the
+  Application Endpoint Registration `applicationProviderName` field, a single-line provider name),
+  the example MUST match it. `[^\r\n]` is a **negated character class** admitting every character
+  except the two line terminators (the empty string is legal; other control chars pass), so
+  `^[^\r\n]*$` matches iff the value contains no `\r` and no `\n` anywhere — i.e. stays on one line;
+  an `example` is a sample instance, so a single-line field's sample carrying an embedded terminator
+  is a self-contradictory schema whose own validator rejects the sample it advertises. The
+  **twentieth member of the `pattern`-conformance family** after E.164/IMEI/ICCID/32-hex/name/MAC/
+  token/result-code/bounded-any-char/geohash/app-name/TAC/region/DNS-label/sink-URL/UUID/DPV-purpose/
+  no-semicolon/IMEISV, and the **second over a negated character class** (after no-semicolon `^[^;]*$`)
+  — but the first whose exclusion set is the line terminators, a single-line constraint: no-semicolon
+  is keyed on `^[^;]*$` and *admits* `\r`/`\n` (excludes only `;`), and bounded-any-char
+  (`^[\s\S]{0,256}$`) admits every char bound only by length, so a terminator-bearing example is the
+  fault neither can catch. Since an inline YAML scalar ends at its line, a `\n` can never sit inside
+  one; the representable violator is a lone `\r` (which `str::lines()` does not treat as a boundary),
+  so the guard catches a CR smuggled into a single-line example. New pure `matches_no_crlf_pattern`
+  (`!s.contains('\r') && !s.contains('\n')` — exactly faithful to `^[^\r\n]*$`; no regex/YAML dep) +
+  `no_crlf_pattern_examples_malformed` extractor cloning `no_semicolon_pattern_examples_malformed`'s
+  down-then-up dedent-bounded same-indent scoping, keyed on `NO_CRLF_PATTERN` — the same-indent scan
+  steps over deeper-indented lines, so a folded `description: >-`→`pattern`→`example` shape pairs
+  correctly. Unit-covered (`no_crlf_pattern_example_extraction_rules`: matcher clears empty / spaced /
+  tab-bearing / other-punctuation values and rejects an embedded `\r` / `\n` / CRLF; two embedded-`\r`
+  values and a pattern-below value flagged in document order; a no-`pattern` sibling, a
+  result-code-pattern sibling, a nested-`example` payload, a cross-property split, and a
+  block-opening `example:` property all cleared; ≥1-pair non-vacuous floor — Application Endpoint
+  Registration is the only mounted spec with a `^[^\r\n]*$` field carrying an inline example). Surveyed
+  the corpus first: 1 example+no-CR/LF-`pattern` pair (application-endpoint-registration
+  `applicationProviderName`, `Acme Corp`) → 0 drift; a live guard that fires the moment a spec adds a
+  terminator-bearing single-line example. Test-side only — no request/response/behaviour change, so
+  no vendored-spec edits; the matcher, extractor and both tests live in the `#[cfg(test)]` module, so
+  nothing ships in the binary. `cargo test` 2814 green (was 2812; +2), `cargo build --release` green,
+  no new deps. — binary (release): 5.1M (5,323,160 B; unchanged).
 - 2026-08-20 — Contract-test harness: added a **16-digit IMEISV-`pattern` example-conformance**
   contract test (`src/registry.rs` `every_imeisv_pattern_example_conforms_to_the_imeisv_pattern`)
   — where a mounted spec declares an inline `example` beside a **same-indent**

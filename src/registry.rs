@@ -31960,6 +31960,376 @@ components:
         );
     }
 
+    const NO_CRLF_PATTERN: &str = r"^[^\r\n]*$";
+
+    /// True when `s` matches the no-CR/LF `pattern` `^[^\r\n]*$` exactly: a string of zero or more
+    /// characters, none of which is a carriage return (`\r`) or a line feed (`\n`). Like
+    /// `matches_no_semicolon_pattern` the class is *negated* — it admits every character except the
+    /// two line terminators (the empty string is legal; every printable character, and every other
+    /// control character, is allowed) — so its only constraint is that the value stays on a single
+    /// line. `^[^\r\n]*$` therefore matches a string iff that string contains no `\r` and no `\n`
+    /// anywhere, which `!s.contains('\r') && !s.contains('\n')` captures exactly for every input.
+    /// Hand-rolled (no regex dep), mirroring the other matchers' shape-only stance so a legitimately
+    /// shaped value is never a false positive; the one fault it catches is an embedded line
+    /// terminator (the application-endpoint-registration `applicationProviderName` field, whose name
+    /// must be a single line).
+    fn matches_no_crlf_pattern(s: &str) -> bool {
+        !s.contains('\r') && !s.contains('\n')
+    }
+
+    /// The 1-based line numbers, in document order, of every `example:` keyword whose inline scalar
+    /// value sits in a Schema Object declaring a *same-indent* no-CR/LF `pattern` sibling
+    /// (`^[^\r\n]*$`) yet contains a carriage return or line feed, without a YAML dep. The no-CR/LF
+    /// twin of `no_semicolon_pattern_examples_malformed`: same scoping, keyed on `NO_CRLF_PATTERN`.
+    ///
+    /// In OpenAPI 3.0.x (JSON Schema) an `example` is a sample *instance* of the schema, so a field
+    /// constrained by `pattern` MUST carry an example the pattern accepts. A single-line field's
+    /// example carrying an embedded line terminator advertises a sample the schema's own validator
+    /// rejects, so a Redoc/Swagger prefill and a codegen client's generated sample carry a value no
+    /// field bound by this pattern can legally hold. This pattern carries no `format` sibling, so
+    /// these examples are otherwise beyond the `format`-example family's reach.
+    ///
+    /// Because an inline YAML scalar ends at its line, a line feed (`\n`) cannot appear inside one at
+    /// all; the terminator that *can* is a lone carriage return (`\r`), which `str::lines()` does not
+    /// treat as a line boundary — so the guard catches a CR embedded in a single-line example, the
+    /// only line terminator an inline scalar can smuggle in.
+    ///
+    /// Scoping mirrors `no_semicolon_pattern_examples_malformed` exactly: only an `example` carrying
+    /// an inline scalar (a block/object example opens no inline value and is skipped) with a
+    /// same-indent `pattern` sibling *equal to* `NO_CRLF_PATTERN` in the same Schema Object is
+    /// inspected — the sibling is scanned at the example's own indent, down through the object's
+    /// block then up, dedent-bounded, so a nested or following object's `pattern` never pairs. The
+    /// same-indent scan steps over any intervening deeper-indented lines, so a folded
+    /// `description: >-` block followed by `pattern` → `example` pairs correctly. An `example:`
+    /// nested inside an outer `example:`/`examples:` payload (sample data, not a schema keyword) is
+    /// skipped. Only the no-CR/LF pattern is matched; other patterns are out of scope.
+    fn no_crlf_pattern_examples_malformed(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let raw_inline = |l: &str, name: &str| -> Option<String> {
+            let (k, v) = l.trim_start().split_once(':')?;
+            if k.trim() != name {
+                return None;
+            }
+            let v = v.split('#').next().unwrap_or(v).trim();
+            if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            }
+        };
+        // Whether a same-indent `pattern:` sibling of line `i` (indent `c`) in the same Schema
+        // Object equals the no-CR/LF pattern: scan down through the object's block then up,
+        // dedent-bounded so a nested or following object's `pattern` never pairs.
+        let sibling_is_no_crlf_pattern = |i: usize, c: usize| -> bool {
+            let is_no_crlf_pattern = |l: &str| -> bool {
+                raw_inline(l, "pattern")
+                    .map(|v| v.trim_matches('"').trim_matches('\'') == NO_CRLF_PATTERN)
+                    .unwrap_or(false)
+            };
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_no_crlf_pattern(l) {
+                    return true;
+                }
+                j += 1;
+            }
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_no_crlf_pattern(l) {
+                    return true;
+                }
+            }
+            false
+        };
+        // True when line `i` (indent `c`) sits inside an outer `example:`/`examples:` payload —
+        // some enclosing container key up the indent ladder is `example`/`examples` — so an inner
+        // `example` key there is sample data, not a schema keyword.
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some(raw) = raw_inline(line, "example") else {
+                continue;
+            };
+            let c = indent(line);
+            if inside_example(i, c) {
+                continue;
+            }
+            if !sibling_is_no_crlf_pattern(i, c) {
+                continue;
+            }
+            let value = raw.trim_matches('"').trim_matches('\'');
+            if !matches_no_crlf_pattern(value) {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_no_crlf_pattern_example_conforms_to_the_no_crlf_pattern() {
+        // Contract-harness invariant (OpenAPI 3.0.x / JSON-Schema structural rule): where a Schema
+        // Object declares an inline `example` beside a same-indent no-CR/LF `pattern` (`^[^\r\n]*$`,
+        // the application-endpoint-registration `applicationProviderName` field's pattern), the
+        // example MUST match that pattern. An `example` is a sample *instance* of the schema, so a
+        // single-line field's sample carrying an embedded line terminator is a self-contradictory
+        // schema whose own validator rejects the sample it advertises, and a Redoc/Swagger prefill
+        // and a codegen client's generated sample then carry a value no field bound by this pattern
+        // can legally hold.
+        //
+        // The twentieth member of the `pattern`-conformance family after E.164 / IMEI / ICCID /
+        // 32-hex / name / MAC / token / result-code / bounded-any-char / geohash / app-name / TAC /
+        // region / DNS-label / sink-URL / UUID / DPV-purpose / no-semicolon / IMEISV, and the
+        // *second* over a negated character class (after no-semicolon `^[^;]*$`) — but the first
+        // whose exclusion set is the two line terminators, i.e. a single-line constraint. The
+        // no-semicolon member is keyed on `^[^;]*$`, which *admits* `\r`/`\n` (its class excludes
+        // only `;`), and the bounded-any-char member (`^[\s\S]{0,256}$`) admits every character
+        // bound only by length — so a line-terminator-bearing example is the fault neither can
+        // catch. Like the IMEI / ICCID / no-semicolon patterns it carries no `format` sibling, so its
+        // examples are beyond the `format`-example family's reach; a general regex-engine test would
+        // need a new dependency (declined on binary-size grounds), so a concrete hand-validated
+        // matcher is checked. Verified true across all mounted specs before asserting (Application
+        // Endpoint Registration declares one such example+pattern pair — the `applicationProviderName`
+        // field).
+        for api in APIS {
+            let offenders = no_crlf_pattern_examples_malformed(api.body);
+            assert!(
+                offenders.is_empty(),
+                "{} spec declares an `example` beside a same-indent no-CR/LF \
+                 `pattern: '^[^\\r\\n]*$'` that contains a line terminator (a sample the pattern's \
+                 own validator would reject) at `example:` line(s): {:?}",
+                api.name,
+                offenders
+            );
+        }
+    }
+
+    #[test]
+    fn no_crlf_pattern_example_extraction_rules() {
+        // Unit-cover `matches_no_crlf_pattern` and `no_crlf_pattern_examples_malformed` so the
+        // contract test above can't pass vacuously and its detection is pinned.
+        //
+        // Shape check: the empty string and single-line values (letters, spaces, other punctuation,
+        // and other control characters such as a tab) pass; any value carrying a carriage return or
+        // line feed — lone, embedded, or in combination — fails (the class excludes only `\r`/`\n`).
+        assert!(matches_no_crlf_pattern("Acme Corp"));
+        assert!(matches_no_crlf_pattern("")); // empty is legal
+        assert!(matches_no_crlf_pattern("a-b_c.d/e:f;g")); // every non-terminator char fine
+        assert!(matches_no_crlf_pattern("tab\there")); // a tab is not a line terminator
+        assert!(!matches_no_crlf_pattern("a\rb")); // embedded carriage return
+        assert!(!matches_no_crlf_pattern("a\nb")); // embedded line feed
+        assert!(!matches_no_crlf_pattern("a\r\nb")); // CRLF pair
+
+        // Extractor: two single-line values (one across an intervening folded `description: >-`
+        // block then a same-indent `pattern`, mirroring the corpus's folded shape; one plain) pass;
+        // two values with an embedded carriage return are flagged; a bad value whose `pattern` is
+        // declared *below* it is still paired (down-scan) and flagged; a value with no `pattern`
+        // sibling and one whose sibling is a *different* pattern (the result-code `^B[0-9]{6}$`) are
+        // skipped; an inner `example` inside an outer `example:` payload is skipped; an example in
+        // one property never pairs with a following property's `pattern` across the dedent; and a
+        // property literally named `example` (opening a block) is skipped. A line feed cannot sit in
+        // an inline scalar (it would end the line), so the representable violator is the lone `\r`.
+        let body = format!(
+            "openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    GoodFolded:
+      type: string
+      description: >-
+        A single-line provider name; line terminators are disallowed, so the
+        value stays on one line.
+      pattern: '{p}'
+      example: Acme Corporation
+    GoodPlain:
+      type: string
+      pattern: '{p}'
+      example: Acme Corp
+    BadEmbedded:
+      type: string
+      pattern: '{p}'
+      example: line1\rline2
+    BadEmbeddedTwo:
+      type: string
+      pattern: '{p}'
+      example: a\rb\rc
+    PatternBelow:
+      type: string
+      example: p\rq
+      pattern: '{p}'
+    NoPattern:
+      type: string
+      example: a\rb
+    OtherPattern:
+      type: string
+      pattern: '^B[0-9]{{6}}$'
+      example: a\rb
+    InExample:
+      type: object
+      example:
+        pattern: '{p}'
+        example: a\rb
+    Split:
+      type: object
+      properties:
+        a:
+          example: a\rb
+        b:
+          type: string
+          pattern: '{p}'
+    NamedExample:
+      type: object
+      properties:
+        example:
+          type: string
+          pattern: '{p}'
+",
+            p = NO_CRLF_PATTERN
+        );
+        // Flagged, in document order: BadEmbedded.example (an embedded `\r` beside a same-indent
+        // no-CR/LF `pattern`), BadEmbeddedTwo.example (two embedded `\r`), and PatternBelow.example
+        // (bad value, no-CR/LF `pattern` a line below — down-scan pairs it). Not flagged:
+        // GoodFolded/GoodPlain (single-line, the former across an intervening folded `>-`
+        // description proving the same-indent scan steps over the deeper continuation lines);
+        // NoPattern (no `pattern` sibling); OtherPattern (sibling is the result-code pattern, not
+        // no-CR/LF — a CR value there is out of scope); InExample's inner `example` (inside the outer
+        // `example:` payload); Split.a.example (its only no-CR/LF `pattern` is in the following
+        // property past a dedent); and NamedExample's `example:` property opening a block (no inline
+        // value).
+        let flagged = no_crlf_pattern_examples_malformed(&body);
+        let flagged_props: Vec<&str> = flagged
+            .iter()
+            .map(|&n| {
+                // Walk up to the nearest schema-name line (indent 4) for a stable label.
+                let lines: Vec<&str> = body.lines().collect();
+                let mut k = n - 1;
+                loop {
+                    let l = lines[k];
+                    let ind = l.len() - l.trim_start().len();
+                    if ind == 4 && l.trim_end().ends_with(':') {
+                        break l.trim().trim_end_matches(':');
+                    }
+                    if k == 0 {
+                        break "";
+                    }
+                    k -= 1;
+                }
+            })
+            .collect();
+        assert_eq!(
+            flagged_props,
+            vec!["BadEmbedded", "BadEmbeddedTwo", "PatternBelow"]
+        );
+
+        // Non-vacuous floor: across every registered spec every `example` beside a same-indent
+        // no-CR/LF `pattern` matches it (the invariant the contract test asserts), and the corpus
+        // actually declares such a pair — so the matcher path runs on real data and a broken
+        // (always-empty) extractor can't hide behind a corpus that never pairs. Application Endpoint
+        // Registration is the only mounted spec with a `^[^\r\n]*$` field carrying an inline example
+        // (`applicationProviderName`), so the floor is one; count pairs with a same-indent detector
+        // independent of the extractor's matcher.
+        let mut no_crlf_examples = 0usize;
+        for api in APIS {
+            assert!(
+                no_crlf_pattern_examples_malformed(api.body).is_empty(),
+                "{}: every example beside a same-indent no-CR/LF `pattern` must match it",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            let is_key = |l: &str, name: &str, val: Option<&str>| {
+                l.trim_start().split_once(':').is_some_and(|(k, v)| {
+                    k.trim() == name
+                        && val.is_none_or(|want| {
+                            v.split('#')
+                                .next()
+                                .unwrap_or(v)
+                                .trim()
+                                .trim_matches('"')
+                                .trim_matches('\'')
+                                == want
+                        })
+                })
+            };
+            for (i, l) in lines.iter().enumerate() {
+                if !is_key(l, "example", None) {
+                    continue;
+                }
+                if l.trim_start()
+                    .split_once(':')
+                    .map(|(_, v)| v.split('#').next().unwrap_or(v).trim().is_empty())
+                    .unwrap_or(true)
+                {
+                    continue;
+                }
+                let c = indent(l);
+                let lo = i.saturating_sub(6);
+                let hi = (i + 6).min(lines.len());
+                let has_no_crlf = (lo..hi).any(|j| {
+                    j != i
+                        && indent(lines[j]) == c
+                        && is_key(lines[j], "pattern", Some(NO_CRLF_PATTERN))
+                });
+                if has_no_crlf {
+                    no_crlf_examples += 1;
+                }
+            }
+        }
+        assert!(
+            no_crlf_examples >= 1,
+            "expected the corpus's example + same-indent no-CR/LF `pattern` pair, got {no_crlf_examples}"
+        );
+    }
+
     /// True when `s` is a well-formed RFC 3339 `date-time` string — the concrete
     /// syntax OpenAPI's `format: date-time` names (JSON Schema's `date-time` is
     /// RFC 3339 §5.6). Shape-only and lenient on the calendar (it range-checks each
