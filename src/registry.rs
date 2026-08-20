@@ -34633,6 +34633,457 @@ components:
         );
     }
 
+    // NB: written as it appears *raw in the YAML source* (single-quoted, so `\d`/`\.` are
+    // literal `\d`/`\.` — YAML single-quoted scalars carry no backslash escapes), because
+    // `raw_inline("pattern")` returns the source substring after stripping only the outer
+    // quotes — no YAML-escape decoding — and this constant is compared to it verbatim,
+    // mirroring how every other `_PATTERN` constant is authored.
+    const SEMVER_PATTERN: &str = r"^v?\d+\.\d+(?:\.\d+)?(?:[-+][0-9A-Za-z.-]+)?$";
+
+    /// True when `s` matches the semver `pattern`
+    /// `^v?\d+\.\d+(?:\.\d+)?(?:[-+][0-9A-Za-z.-]+)?$` exactly — a
+    /// **shape-only** semver acceptor (the numeric parts are non-empty ASCII digit runs,
+    /// no leading-zero check; the pre-release / build-metadata is any non-empty run of
+    /// `[0-9A-Za-z.-]`, no dotted-identifier structure enforced) so a legitimately
+    /// shaped version string is never a false positive. Grammar mirrors the pattern:
+    /// (1) an optional leading lowercase `v` (case-sensitive — `V` is rejected);
+    /// (2) `MAJOR.MINOR` — two non-empty ASCII-digit runs separated by exactly one `.`;
+    /// (3) an OPTIONAL `.PATCH` — a third non-empty ASCII-digit run after another `.`;
+    /// (4) an OPTIONAL suffix — a single `-` or `+` followed by 1+ characters from
+    /// `[0-9A-Za-z.-]`. Hand-rolled (no regex dep) mirroring `matches_wpa_password_pattern`'s
+    /// shape-only stance. The corpus uses this pattern only for a KubernetesClusterInfo
+    /// `version` (`1.29.4`), so a Kubernetes-tagged sample line (`v1.29.4-eks.1`) also
+    /// passes, matching what the JSON-Schema `pattern` accepts.
+    fn matches_semver_pattern(s: &str) -> bool {
+        // Optional leading lowercase `v` (the pattern's `v?`; capital `V` is not
+        // permitted, matching the case-sensitive regex).
+        let rest = s.strip_prefix('v').unwrap_or(s);
+        // Split off the optional pre-release/build-metadata suffix at the FIRST `-` or
+        // `+`. Everything before is the numeric version core; the tail (if any) is the
+        // suffix (leading `-`/`+` still attached).
+        let (core, suffix) = match rest.find(|c: char| c == '-' || c == '+') {
+            Some(i) => (&rest[..i], Some(&rest[i..])),
+            None => (rest, None),
+        };
+        // Core: 2 or 3 dot-separated non-empty ASCII-digit runs (the mandatory
+        // `\d+\.\d+` and the optional `(?:\.\d+)?`).
+        let parts: Vec<&str> = core.split('.').collect();
+        if !(2..=3).contains(&parts.len()) {
+            return false;
+        }
+        if !parts
+            .iter()
+            .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
+        {
+            return false;
+        }
+        // Suffix (if present): leading `-`/`+` (already established by `find`) then 1+
+        // characters from `[0-9A-Za-z.-]`. The `+` quantifier forbids an empty tail.
+        if let Some(suf) = suffix {
+            let tail = &suf[1..];
+            if tail.is_empty() {
+                return false;
+            }
+            if !tail
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
+            {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// The 1-based line numbers, in document order, of every `example:` keyword whose inline
+    /// scalar value sits in a Schema Object declaring a *same-indent* semver `pattern` sibling
+    /// (`^v?\d+\.\d+(?:\.\d+)?(?:[-+][0-9A-Za-z.-]+)?$`) yet is not a well-formed semver
+    /// (`[v?]MAJOR.MINOR[.PATCH][{-,+}<pre-release/build>]`), without a YAML dep. The semver twin
+    /// of `wpa_password_pattern_examples_malformed`: same scoping, keyed on `SEMVER_PATTERN`
+    /// instead of `WPA_PASSWORD_PATTERN`.
+    ///
+    /// In OpenAPI 3.0.x (JSON Schema) an `example` is a sample *instance* of the schema, so a
+    /// field constrained by `pattern` MUST carry an example the pattern accepts. A semver
+    /// example that is a bare integer / a two-part `1.2` — wait, `1.2` is actually valid
+    /// (MAJOR.MINOR only, since PATCH is optional). A truly invalid example is a four-part
+    /// `1.2.3.4`, a non-numeric part `0.4.x`, an empty part `1..0`, an uppercase `V` prefix,
+    /// an empty pre-release suffix `1.0.0-`, or a suffix carrying a character outside
+    /// `[0-9A-Za-z.-]` — each is a sample the schema's own validator rejects, so a Redoc/Swagger
+    /// prefill and a codegen client's generated sample carry a value the field can never
+    /// legally hold. Like the WPA-password / SSID / hex / token / MAC patterns the semver
+    /// pattern carries no `format` sibling (there is no OpenAPI `semver` format), so these
+    /// examples are beyond the `format`-example family's reach; the `every_info_version_is_a_
+    /// well_formed_semver` test guards `info.version` specifically but never reads a `pattern`
+    /// sibling of an inline example.
+    ///
+    /// Scoping mirrors `wpa_password_pattern_examples_malformed` exactly: only an `example`
+    /// carrying an inline scalar (a block/object example opens no inline value and is skipped)
+    /// with a same-indent `pattern` sibling *equal to* `SEMVER_PATTERN` in the same Schema
+    /// Object is inspected — the sibling is scanned at the example's own indent, down through
+    /// the object's block then up, dedent-bounded, so a nested or following object's `pattern`
+    /// never pairs. The same-indent scan steps over any intervening same-indent non-`pattern`
+    /// siblings (the corpus's `maxLength: 64` and single-line `description`), so the corpus's
+    /// `type`→`maxLength`→`pattern`→`description`→`example` shape pairs correctly. An
+    /// `example:` nested inside an outer `example:`/`examples:` payload (sample data, not a
+    /// schema keyword) is skipped.
+    fn semver_pattern_examples_malformed(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let raw_inline = |l: &str, name: &str| -> Option<String> {
+            let (k, v) = l.trim_start().split_once(':')?;
+            if k.trim() != name {
+                return None;
+            }
+            let v = v.split('#').next().unwrap_or(v).trim();
+            if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            }
+        };
+        // Whether a same-indent `pattern:` sibling of line `i` (indent `c`) in the same
+        // Schema Object equals the semver pattern: scan down through the object's block
+        // then up, dedent-bounded so a nested or following object's `pattern` never pairs.
+        let sibling_is_semver_pattern = |i: usize, c: usize| -> bool {
+            let is_semver_pattern = |l: &str| -> bool {
+                raw_inline(l, "pattern")
+                    .map(|v| v.trim_matches('"').trim_matches('\'') == SEMVER_PATTERN)
+                    .unwrap_or(false)
+            };
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_semver_pattern(l) {
+                    return true;
+                }
+                j += 1;
+            }
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_semver_pattern(l) {
+                    return true;
+                }
+            }
+            false
+        };
+        // True when line `i` (indent `c`) sits inside an outer `example:`/`examples:`
+        // payload — some enclosing container key up the indent ladder is
+        // `example`/`examples` — so an inner `example` key there is sample data, not a
+        // schema keyword.
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some(raw) = raw_inline(line, "example") else {
+                continue;
+            };
+            let c = indent(line);
+            if inside_example(i, c) {
+                continue;
+            }
+            if !sibling_is_semver_pattern(i, c) {
+                continue;
+            }
+            let value = raw.trim_matches('"').trim_matches('\'');
+            if !matches_semver_pattern(value) {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_semver_pattern_example_conforms_to_the_semver_pattern() {
+        // Contract-harness invariant (OpenAPI 3.0.x / JSON-Schema structural rule): where a
+        // Schema Object declares an inline `example` beside a same-indent semver `pattern`
+        // (`^v?\d+\.\d+(?:\.\d+)?(?:[-+][0-9A-Za-z.-]+)?$`, the shape a Kubernetes / semver
+        // version string takes — the `KubernetesClusterInfo.version` field uses this pattern
+        // verbatim), the example MUST match that pattern. An `example` is a sample *instance*
+        // of the schema, so a `1.2.3.4` (four-part) / `0.4.x` (non-numeric) / `1..0` (empty
+        // part) / `V1.0.0` (uppercase v) / `1.0.0-` (empty suffix) / `1.0.0-rc!1` (suffix
+        // outside `[0-9A-Za-z.-]`) is a self-contradictory schema whose own validator rejects
+        // the sample it advertises, so a Redoc/Swagger prefill and a codegen client's
+        // generated sample carry a value no field constrained by this pattern can legally hold.
+        //
+        // The twenty-seventh member of the `pattern`-conformance family after E.164 / IMEI /
+        // ICCID / 32-hex / name / MAC / token / result-code / bounded-any-char (256-wide) /
+        // geohash / app-name / TAC / region / DNS-label / sink-URL / UUID / DPV-purpose /
+        // no-semicolon / IMEISV / no-CR/LF / OTP-template / 16-hex / 4-hex / bounded-any-char
+        // (512-wide) / SSID / WPA-password, and the **first over a semver-shaped alphabet**:
+        // no earlier member expresses (a) an optional single-character prefix (`v?`), (b) a
+        // *two-to-three*-part dot-separated ranged repetition (semver's optional PATCH), or
+        // (c) an optional two-alternative suffix separator (`-` or `+`) followed by a bounded
+        // free-run of `[0-9A-Za-z.-]`. So a four-part `1.2.3.4` (over the top-level part cap)
+        // or an empty pre-release `1.0.0-` (below the suffix's `+` floor) is the fault only
+        // this member can catch. Like the WPA / SSID / hex / token / MAC / bounded-any-char
+        // patterns it carries no `format` sibling (there is no OpenAPI `semver` format), so
+        // its examples are beyond the `format`-example family's reach; a general regex-engine
+        // test would need a new dependency (declined on binary-size grounds), so a concrete
+        // hand-validated shape is matched. `every_info_version_is_a_well_formed_semver` guards
+        // `info.version` specifically but never reads a same-indent `pattern` sibling of an
+        // inline example elsewhere in the spec. Verified true across all mounted specs before
+        // asserting (Edge Application Management declares one such example+pattern pair — the
+        // `KubernetesClusterInfo.version` field, `1.29.4`, a three-part semver).
+        for api in APIS {
+            let offenders = semver_pattern_examples_malformed(api.body);
+            assert!(
+                offenders.is_empty(),
+                "{} spec declares an `example` beside a same-indent semver \
+                 `pattern: '^v?\\d+\\.\\d+(?:\\.\\d+)?(?:[-+][0-9A-Za-z.-]+)?$'` that does \
+                 not match that pattern (a sample the pattern's own validator would reject) \
+                 at `example:` line(s): {:?}",
+                api.name,
+                offenders
+            );
+        }
+    }
+
+    #[test]
+    fn semver_pattern_example_extraction_rules() {
+        // Unit-cover `matches_semver_pattern` and `semver_pattern_examples_malformed`
+        // so the contract test above can't pass vacuously and its detection is pinned.
+        //
+        // Shape check: a plain three-part `MAJOR.MINOR.PATCH`, a two-part `MAJOR.MINOR`, a
+        // pre-release / build-metadata suffix (`-alpha`, `-rc.1`, `+build.7`), a leading `v`
+        // prefix, a Kubernetes-tagged tail (`v1.29.4-eks.1` — the corpus pattern's real target)
+        // and a multi-digit part (`10.20.30`) all pass; a bare integer (missing `.MINOR`), a
+        // four-part `1.2.3.4`, a non-numeric part (`0.4.x`), an empty part (`1..0`), an
+        // uppercase `V` prefix, an empty pre-release / build-metadata (`1.0.0-`), a suffix
+        // character outside `[0-9A-Za-z.-]` (`1.0.0-rc!1`) and the empty string all fail.
+        assert!(matches_semver_pattern("1.29.4")); // corpus example
+        assert!(matches_semver_pattern("v1.29.4")); // optional `v?` prefix
+        assert!(matches_semver_pattern("v1.29.4-eks.1")); // Kubernetes tag
+        assert!(matches_semver_pattern("0.0.1"));
+        assert!(matches_semver_pattern("10.20.30"));
+        assert!(matches_semver_pattern("1.0.0-alpha"));
+        assert!(matches_semver_pattern("1.0.0-rc.1"));
+        assert!(matches_semver_pattern("1.0.0+build.7"));
+        assert!(matches_semver_pattern("1.2")); // PATCH optional
+        assert!(!matches_semver_pattern("")); // empty
+        assert!(!matches_semver_pattern("1")); // missing `.MINOR`
+        assert!(!matches_semver_pattern("1.2.3.4")); // four-part → over the cap
+        assert!(!matches_semver_pattern("0.4.x")); // non-numeric part
+        assert!(!matches_semver_pattern("1..0")); // empty inner part
+        assert!(!matches_semver_pattern("V1.0.0")); // uppercase V — case-sensitive
+        assert!(!matches_semver_pattern("1.0.0-")); // empty pre-release suffix
+        assert!(!matches_semver_pattern("1.0.0-rc!1")); // `!` outside `[0-9A-Za-z.-]`
+
+        // Extractor: a valid quoted and a valid unquoted semver value pass — the first across
+        // an intervening same-indent `maxLength: 64` and single-line `description` sibling
+        // (mirroring the corpus's `type`→`maxLength`→`pattern`→`description`→`example`
+        // shape), proving the same-indent scan steps over them. Various malformed samples are
+        // flagged in document order; a value with no `pattern` sibling and one whose sibling is
+        // a *different* pattern (the WPA-password `^[\x20-\x7E]{8,63}$` — same overall syntax
+        // as a regex but a wholly different structure) are skipped; an inner `example` inside
+        // an outer `example:` payload is skipped; an example in one property never pairs with
+        // a following property's `pattern` across the dedent; and a property literally named
+        // `example` (opening a block) is skipped.
+        let body = format!(
+            "openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    GoodShape:
+      type: string
+      maxLength: 64
+      pattern: '{p}'
+      description: Kubernetes version of the cluster.
+      example: 1.29.4
+    GoodQuotedPrefix:
+      type: string
+      pattern: '{p}'
+      example: \"v1.29.4-eks.1\"
+    FourPart:
+      type: string
+      pattern: '{p}'
+      example: 1.2.3.4
+    NonNumeric:
+      type: string
+      pattern: '{p}'
+      example: 0.4.x
+    UpperV:
+      type: string
+      pattern: '{p}'
+      example: V1.0.0
+    EmptySuffix:
+      type: string
+      pattern: '{p}'
+      example: 1.0.0-
+    PatternBelow:
+      type: string
+      example: 1.2.3.4
+      pattern: '{p}'
+    NoPattern:
+      type: string
+      example: 1.2.3.4
+    OtherPattern:
+      type: string
+      pattern: \"{wpa}\"
+      example: 1.2.3.4
+    InExample:
+      type: object
+      example:
+        pattern: '{p}'
+        example: 1.2.3.4
+    Split:
+      type: object
+      properties:
+        a:
+          example: 1.2.3.4
+        b:
+          type: string
+          pattern: '{p}'
+    NamedExample:
+      type: object
+      properties:
+        example:
+          type: string
+          pattern: '{p}'
+",
+            p = SEMVER_PATTERN,
+            wpa = r"^[\\x20-\\x7E]{8,63}$",
+        );
+        // Flagged, in document order: FourPart.example (4 parts, over the top-level cap);
+        // NonNumeric.example (`x` isn't a digit); UpperV.example (case-sensitive `v?`);
+        // EmptySuffix.example (`+` quantifier forbids an empty tail); PatternBelow.example
+        // (4-part with `pattern` a line below — down-scan pairs it). Not flagged: GoodShape /
+        // GoodQuotedPrefix (both valid; the former across an intervening maxLength+description,
+        // proving the same-indent scan steps over them); NoPattern (no `pattern` sibling);
+        // OtherPattern (sibling is the WPA-password pattern, not semver — its 5-char value is
+        // out of scope here); InExample's inner `example` (inside the outer `example:`
+        // payload); Split.a.example (its only semver `pattern` is in the following property
+        // past a dedent); and NamedExample's `example:` property opening a block (no inline
+        // value).
+        let flagged = semver_pattern_examples_malformed(&body);
+        let flagged_props: Vec<&str> = flagged
+            .iter()
+            .map(|&n| {
+                let lines: Vec<&str> = body.lines().collect();
+                let mut k = n - 1;
+                loop {
+                    let l = lines[k];
+                    let ind = l.len() - l.trim_start().len();
+                    if ind == 4 && l.trim_end().ends_with(':') {
+                        break l.trim().trim_end_matches(':');
+                    }
+                    if k == 0 {
+                        break "";
+                    }
+                    k -= 1;
+                }
+            })
+            .collect();
+        assert_eq!(
+            flagged_props,
+            vec!["FourPart", "NonNumeric", "UpperV", "EmptySuffix", "PatternBelow"]
+        );
+
+        // Non-vacuous floor: across every registered spec every `example` beside a same-indent
+        // semver `pattern` matches it (the invariant the contract test asserts), and the
+        // corpus actually declares such a pair — so the pattern-comparison path runs on real
+        // data and a broken (always-empty) extractor can't hide behind a corpus that never
+        // pairs. Edge Application Management is the only mounted spec with a semver-shaped
+        // `pattern`, so the floor is one; count pairs with a same-indent detector independent
+        // of the extractor's shape comparison.
+        let mut semver_examples = 0usize;
+        for api in APIS {
+            assert!(
+                semver_pattern_examples_malformed(api.body).is_empty(),
+                "{}: every example beside a same-indent semver `pattern` must match it",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            let is_key = |l: &str, name: &str, val: Option<&str>| {
+                l.trim_start().split_once(':').is_some_and(|(k, v)| {
+                    k.trim() == name
+                        && val.is_none_or(|want| {
+                            v.split('#')
+                                .next()
+                                .unwrap_or(v)
+                                .trim()
+                                .trim_matches('"')
+                                .trim_matches('\'')
+                                == want
+                        })
+                })
+            };
+            for (i, l) in lines.iter().enumerate() {
+                if !is_key(l, "example", None) {
+                    continue;
+                }
+                if l.trim_start()
+                    .split_once(':')
+                    .map(|(_, v)| v.split('#').next().unwrap_or(v).trim().is_empty())
+                    .unwrap_or(true)
+                {
+                    continue;
+                }
+                let c = indent(l);
+                let lo = i.saturating_sub(8);
+                let hi = (i + 8).min(lines.len());
+                let has_semver_pattern = (lo..hi).any(|j| {
+                    j != i
+                        && indent(lines[j]) == c
+                        && is_key(lines[j], "pattern", Some(SEMVER_PATTERN))
+                });
+                if has_semver_pattern {
+                    semver_examples += 1;
+                }
+            }
+        }
+        assert!(
+            semver_examples >= 1,
+            "expected the corpus's example + same-indent semver `pattern` pair, got {semver_examples}"
+        );
+    }
+
     /// True when `s` is a well-formed RFC 3339 `date-time` string — the concrete
     /// syntax OpenAPI's `format: date-time` names (JSON Schema's `date-time` is
     /// RFC 3339 §5.6). Shape-only and lenient on the calendar (it range-checks each

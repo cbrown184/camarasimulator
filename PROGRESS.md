@@ -5669,6 +5669,53 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-20 — Contract-test harness: added a **semver-`pattern` example-conformance** contract test
+  (`src/registry.rs` `every_semver_pattern_example_conforms_to_the_semver_pattern`) — where a mounted
+  spec declares an inline `example` beside a **same-indent** `pattern:
+  '^v?\d+\.\d+(?:\.\d+)?(?:[-+][0-9A-Za-z.-]+)?$'` (the semver / Kubernetes-cluster-version shape —
+  the edge-application-management `KubernetesClusterInfo.version` field uses this pattern verbatim),
+  the example MUST match it. A semver example that is a four-part `1.2.3.4` (over the top-level part
+  cap), a non-numeric part `0.4.x`, an empty inner part `1..0`, an uppercase `V1.0.0` prefix (the
+  regex is case-sensitive), an empty pre-release/build suffix `1.0.0-` (the `+` quantifier forbids
+  it), or a suffix carrying a character outside `[0-9A-Za-z.-]` (`1.0.0-rc!1`) is a
+  self-contradictory schema whose own validator rejects the sample it advertises, so a Redoc/Swagger
+  prefill and a codegen client's generated sample carry a value the field can never legally hold.
+  The **twenty-seventh member of the `pattern`-conformance family** after E.164/IMEI/ICCID/32-hex/
+  name/MAC/token/result-code/bounded-any-char (256-wide)/geohash/app-name/TAC/region/DNS-label/
+  sink-URL/UUID/DPV-purpose/no-semicolon/IMEISV/no-CR/LF/OTP-template/16-hex/4-hex/bounded-any-char
+  (512-wide)/SSID/WPA-password, and the **first over a semver-shaped alphabet**: no earlier member
+  expresses (a) an optional single-character prefix (`v?`), (b) a *two-to-three*-part dot-separated
+  ranged repetition (the optional PATCH), or (c) an optional two-alternative suffix separator
+  (`-`/`+`) followed by a bounded free-run of `[0-9A-Za-z.-]`. So a four-part `1.2.3.4` (over the
+  top-level part cap), an uppercase-`V` prefix, an empty pre-release `1.0.0-` (below the `+` floor)
+  is the fault only this member can catch. Carries **no `format` sibling** (there is no OpenAPI
+  `semver` format), so beyond the `format`-example family's reach; `every_info_version_is_a_
+  well_formed_semver` guards `info.version` specifically but never reads a same-indent `pattern`
+  sibling of an inline example elsewhere. New pure `matches_semver_pattern` (case-sensitive `v?`
+  prefix; 2- or 3-part non-empty ASCII-digit run split at the FIRST `-`/`+` to isolate the
+  version-core from an optional suffix whose 1+ tail chars are `is_ascii_alphanumeric` or `.`/`-`;
+  no regex/YAML dep) + `semver_pattern_examples_malformed` extractor cloning
+  `wpa_password_pattern_examples_malformed`'s down-then-up dedent-bounded same-indent scoping,
+  keyed on `SEMVER_PATTERN` (written raw in the single-quoted YAML source: single backslashes
+  before `d`/`.`, so raw-string comparison against the corpus pattern is verbatim). The same-indent
+  scan steps over the corpus's intervening `maxLength: 64` and `description`, so the corpus's
+  `type`→`maxLength`→`pattern`→`description`→`example` shape pairs correctly. Unit-covered
+  (`semver_pattern_example_extraction_rules`: matcher accepts corpus `1.29.4` / `v1.29.4` /
+  `v1.29.4-eks.1` (Kubernetes tag) / `0.0.1` / `10.20.30` / `1.0.0-alpha` / `1.0.0-rc.1` /
+  `1.0.0+build.7` / two-part `1.2` and rejects empty / `1` / `1.2.3.4` / `0.4.x` / `1..0` /
+  `V1.0.0` / `1.0.0-` / `1.0.0-rc!1`; a four-part, non-numeric, uppercase-V, empty-suffix, and a
+  four-part `PatternBelow` (pattern one line below — down-scan pairs it) flagged in document
+  order; a Good case across an intervening `maxLength`+`description`, a valid quoted-prefix
+  case, a no-`pattern` sibling, a WPA-password sibling (different structure) with a semver value
+  out of scope, a nested-`example` payload, a cross-property split, and a block-opening
+  `example:` property all cleared; ≥1-pair non-vacuous floor — Edge Application Management is the
+  only mounted spec with a semver `pattern`). Surveyed the corpus first: 1 example+semver-`pattern`
+  pair (edge-application-management `KubernetesClusterInfo.version`, `1.29.4` — three-part semver)
+  → 0 drift; a live guard that fires the moment a spec adds a semver-shape violation. Test-side
+  only — no request/response/behaviour change, so no vendored-spec edits; the matcher, extractor
+  and both tests live in the `#[cfg(test)]` module, so nothing ships in the binary. `cargo test`
+  2828 green (was 2826; +2), `cargo build --release` green, no new deps. — binary (release): 5.1M
+  (5,323,160 B; unchanged).
 - 2026-08-20 — Contract-test harness: added a **WPA-Personal-password-`pattern` example-conformance**
   contract test (`src/registry.rs` `every_wpa_password_pattern_example_conforms_to_the_wpa_password_pattern`)
   — where a mounted spec declares an inline `example` beside a **same-indent** `pattern:
