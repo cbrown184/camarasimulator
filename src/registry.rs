@@ -33075,6 +33075,379 @@ components:
         );
     }
 
+    const HEX4_PATTERN: &str = r"^[0-9a-fA-F]{4}$";
+
+    /// True when `s` matches the 4-hex `pattern` `^[0-9a-fA-F]{4}$` exactly: exactly 4 ASCII
+    /// hexadecimal digits (`0-9`/`a-f`/`A-F`), nothing else. Hand-rolled (no regex dep) mirroring
+    /// `matches_hex16_pattern`'s shape-only stance, so a legitimately shaped value is never a false
+    /// positive; the accepted alphabet is the hex digits (via `u8::is_ascii_hexdigit`) and the
+    /// length is fixed at 4. A 4-hex value is a 16-bit identifier such as the network-access
+    /// Thread `panId` (a 4-hex-digit Thread PAN ID) — a quarter the width of the 16-hex
+    /// `extendedPanId` and an eighth the width of the 32-hex `networkKey`/`eId`, and, being hex,
+    /// an alphabet the fixed-length *decimal*-digit runs (IMEI/ICCID/TAC/IMEISV) cannot express.
+    fn matches_hex4_pattern(s: &str) -> bool {
+        let b = s.as_bytes();
+        b.len() == 4 && b.iter().all(u8::is_ascii_hexdigit)
+    }
+
+    /// The 1-based line numbers, in document order, of every `example:` keyword whose inline scalar
+    /// value sits in a Schema Object declaring a *same-indent* `pattern: '^[0-9a-fA-F]{4}$'`
+    /// sibling yet is not 4 ASCII hex digits, without a YAML dep. The 4-hex twin of
+    /// `hex16_pattern_examples_malformed`: same scoping, keyed on `HEX4_PATTERN` instead of
+    /// `HEX16_PATTERN`.
+    ///
+    /// In OpenAPI 3.0.x (JSON Schema) an `example` is a sample *instance* of the schema, so a field
+    /// constrained by `pattern` MUST carry an example the pattern accepts. A 4-hex example that is
+    /// not exactly 4 hex digits — a digit dropped or added, or a non-hex character (`g`–`z`) — is a
+    /// sample the schema's own validator rejects, so a Redoc/Swagger prefill and a codegen client's
+    /// generated sample carry a value the field can never legally hold. Like the 32-hex / 16-hex /
+    /// IMEI / ICCID patterns the 4-hex pattern carries no `format` sibling, so these examples are
+    /// otherwise beyond the `format`-example family's reach.
+    ///
+    /// Scoping mirrors `hex16_pattern_examples_malformed` exactly: only an `example` carrying an
+    /// inline scalar (a block/object example opens no inline value and is skipped) with a same-indent
+    /// `pattern` sibling *equal to* `HEX4_PATTERN` in the same Schema Object is inspected — the
+    /// sibling is scanned at the example's own indent, down through the object's block then up,
+    /// dedent-bounded, so a nested or following object's `pattern` never pairs. The same-indent scan
+    /// steps over any intervening same-indent non-`pattern` siblings (the corpus's `maxLength: 4`
+    /// and single-line `description`), so the corpus's `pattern`→`maxLength`→`description`→`example`
+    /// shape pairs correctly. An `example:` nested inside an outer `example:`/`examples:` payload
+    /// (sample data, not a schema keyword) is skipped. Only the 4-hex pattern is matched; other
+    /// patterns — including the 16-hex (`^[0-9a-fA-F]{16}$`) and 32-hex (`^[A-Fa-f0-9]{32}$`) — are
+    /// out of scope.
+    fn hex4_pattern_examples_malformed(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let raw_inline = |l: &str, name: &str| -> Option<String> {
+            let (k, v) = l.trim_start().split_once(':')?;
+            if k.trim() != name {
+                return None;
+            }
+            let v = v.split('#').next().unwrap_or(v).trim();
+            if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            }
+        };
+        // Whether a same-indent `pattern:` sibling of line `i` (indent `c`) in the same Schema
+        // Object equals the 4-hex pattern: scan down through the object's block then up,
+        // dedent-bounded so a nested or following object's `pattern` never pairs.
+        let sibling_is_hex4_pattern = |i: usize, c: usize| -> bool {
+            let is_hex4_pattern = |l: &str| -> bool {
+                raw_inline(l, "pattern")
+                    .map(|v| v.trim_matches('"').trim_matches('\'') == HEX4_PATTERN)
+                    .unwrap_or(false)
+            };
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_hex4_pattern(l) {
+                    return true;
+                }
+                j += 1;
+            }
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_hex4_pattern(l) {
+                    return true;
+                }
+            }
+            false
+        };
+        // True when line `i` (indent `c`) sits inside an outer `example:`/`examples:` payload —
+        // some enclosing container key up the indent ladder is `example`/`examples` — so an inner
+        // `example` key there is sample data, not a schema keyword.
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some(raw) = raw_inline(line, "example") else {
+                continue;
+            };
+            let c = indent(line);
+            if inside_example(i, c) {
+                continue;
+            }
+            if !sibling_is_hex4_pattern(i, c) {
+                continue;
+            }
+            let value = raw.trim_matches('"').trim_matches('\'');
+            if !matches_hex4_pattern(value) {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_hex4_pattern_example_conforms_to_the_hex4_pattern() {
+        // Contract-harness invariant (OpenAPI 3.0.x / JSON-Schema structural rule): where a Schema
+        // Object declares an inline `example` beside a same-indent `pattern: '^[0-9a-fA-F]{4}$'`
+        // (the network-access Thread `panId` field — a 4-hex-digit Thread PAN ID / 16-bit
+        // identifier), the example MUST match that pattern. An `example` is a sample *instance* of
+        // the schema, so a value the `pattern` rejects — a hex digit dropped or added, or a non-hex
+        // character — is a self-contradictory schema whose own validator rejects the sample it
+        // advertises, so a Redoc/Swagger prefill and a codegen client's generated sample carry a
+        // value no field constrained by this pattern can legally hold.
+        //
+        // The twenty-third member of the `pattern`-conformance family after E.164 / IMEI / ICCID /
+        // 32-hex / name / MAC / token / result-code / bounded-any-char / geohash / app-name / TAC /
+        // region / DNS-label / sink-URL / UUID / DPV-purpose / no-semicolon / IMEISV / no-CR/LF /
+        // OTP-template / 16-hex, and the *third fixed-length hex-digit run* after 32-hex and 16-hex
+        // — the first pinning exactly 4 hex digits. Each family member is keyed on the exact
+        // pattern string, so neither the 32-hex member (keyed on `is_hex32_pattern`, length 32)
+        // nor the 16-hex member (keyed on `HEX16_PATTERN`, length 16) pairs with
+        // `^[0-9a-fA-F]{4}$`, and — crucially — a 4-hex value beside this pattern is the fault
+        // neither the length-32 hex nor the length-16 hex member can catch (a 3-/5-char value or an
+        // embedded non-hex character all pass the shared alphabet check yet fail the length pin at
+        // 4). Like the 32-hex / 16-hex / IMEI / ICCID patterns it carries no `format` sibling, so
+        // its examples are beyond the `format`-example family's reach; a general regex-engine test
+        // would need a new dependency (declined on binary-size grounds), so a concrete
+        // hand-validated shape is matched. Verified true across all mounted specs before asserting
+        // (Network Access Domains declares one such example+pattern pair — the `panId` field).
+        for api in APIS {
+            let offenders = hex4_pattern_examples_malformed(api.body);
+            assert!(
+                offenders.is_empty(),
+                "{} spec declares an `example` beside a same-indent 4-hex \
+                 `pattern: '^[0-9a-fA-F]{{4}}$'` that does not match that pattern (a sample the \
+                 pattern's own validator would reject) at `example:` line(s): {:?}",
+                api.name,
+                offenders
+            );
+        }
+    }
+
+    #[test]
+    fn hex4_pattern_example_extraction_rules() {
+        // Unit-cover `matches_hex4_pattern` and `hex4_pattern_examples_malformed` so the contract
+        // test above can't pass vacuously and its detection is pinned.
+        //
+        // Shape check: exactly 4 hex digits (lower, upper, or mixed) passes; 3 or 5 hex digits, an
+        // embedded non-hex character (`g`), and an empty string all fail.
+        assert!(matches_hex4_pattern("d63e")); // 4 hex (the corpus example)
+        assert!(matches_hex4_pattern("D63E")); // 4 hex (upper)
+        assert!(matches_hex4_pattern("0000")); // 4 hex (all zero — also 4 decimal)
+        assert!(matches_hex4_pattern("aBcD")); // 4 hex (mixed case)
+        assert!(!matches_hex4_pattern("d63")); // 3 hex — too short
+        assert!(!matches_hex4_pattern("d63e0")); // 5 hex — too long
+        assert!(!matches_hex4_pattern("d63g")); // 4 chars but `g` is not hex
+        assert!(!matches_hex4_pattern("")); // empty
+
+        // Extractor: a valid quoted and a valid unquoted 4-hex value pass — the first across an
+        // intervening same-indent `maxLength: 4` and single-line `description` sibling, mirroring
+        // the corpus's `pattern`→`maxLength`→`description`→`example` shape and proving the
+        // same-indent scan steps over both. A 3-hex, a 5-hex, and a non-hex value are flagged; a
+        // bad value whose `pattern` is declared *below* it is still paired (down-scan) and flagged;
+        // a value with no `pattern` sibling and one whose sibling is a *different* pattern (the
+        // 16-hex `^[0-9a-fA-F]{16}$` — same alphabet, different length) are skipped; an inner
+        // `example` inside an outer `example:` payload is skipped; an example in one property never
+        // pairs with a following property's `pattern` across the dedent; and a property literally
+        // named `example` (opening a block) is skipped.
+        let body = format!(
+            "openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    GoodShape:
+      type: string
+      pattern: '{p}'
+      maxLength: 4
+      description: The PAN ID (4 hex digits).
+      example: \"d63e\"
+    GoodUnquoted:
+      type: string
+      pattern: '{p}'
+      example: D63E
+    TooShort:
+      type: string
+      pattern: '{p}'
+      example: \"d63\"
+    TooLong:
+      type: string
+      pattern: '{p}'
+      example: \"d63e0\"
+    NonHex:
+      type: string
+      pattern: '{p}'
+      example: \"d63g\"
+    PatternBelow:
+      type: string
+      example: \"nope\"
+      pattern: '{p}'
+    NoPattern:
+      type: string
+      example: \"d63e-but-no-pattern\"
+    OtherPattern:
+      type: string
+      pattern: '{hex16}'
+      example: \"d63e8e3e495ebbc3\"
+    InExample:
+      type: object
+      example:
+        pattern: '{p}'
+        example: \"bad\"
+    Split:
+      type: object
+      properties:
+        a:
+          example: \"bad\"
+        b:
+          type: string
+          pattern: '{p}'
+    NamedExample:
+      type: object
+      properties:
+        example:
+          type: string
+          pattern: '{p}'
+",
+            p = HEX4_PATTERN,
+            hex16 = HEX16_PATTERN
+        );
+        // Flagged, in document order: TooShort.example (3 hex), TooLong.example (5 hex),
+        // NonHex.example (an embedded `g`), and PatternBelow.example (value `nope` with its 4-hex
+        // `pattern` a line below — down-scan pairs it). Not flagged: GoodShape/GoodUnquoted (valid
+        // 4-hex; the former across an intervening same-indent `maxLength: 4` and single-line
+        // `description`, proving the same-indent scan steps over both); NoPattern (no `pattern`
+        // sibling); OtherPattern (sibling is the 16-hex pattern, not 4-hex — a 16-hex value there
+        // is out of scope, and shares 4-hex's alphabet but not its length);
+        // InExample's inner `example` (inside the outer `example:` payload); Split.a.example (its
+        // only 4-hex `pattern` is in the following property past a dedent); and NamedExample's
+        // `example:` property opening a block (no inline value).
+        let flagged = hex4_pattern_examples_malformed(&body);
+        let flagged_props: Vec<&str> = flagged
+            .iter()
+            .map(|&n| {
+                // Walk up to the nearest schema-name line (indent 4) for a stable label.
+                let lines: Vec<&str> = body.lines().collect();
+                let mut k = n - 1;
+                loop {
+                    let l = lines[k];
+                    let ind = l.len() - l.trim_start().len();
+                    if ind == 4 && l.trim_end().ends_with(':') {
+                        break l.trim().trim_end_matches(':');
+                    }
+                    if k == 0 {
+                        break "";
+                    }
+                    k -= 1;
+                }
+            })
+            .collect();
+        assert_eq!(
+            flagged_props,
+            vec!["TooShort", "TooLong", "NonHex", "PatternBelow"]
+        );
+
+        // Non-vacuous floor: across every registered spec every `example` beside a same-indent
+        // 4-hex `pattern` matches it (the invariant the contract test asserts), and the corpus
+        // actually declares such a pair — so the pattern-comparison path runs on real data and a
+        // broken (always-empty) extractor can't hide behind a corpus that never pairs. Network
+        // Access Domains is the only mounted spec with a `^[0-9a-fA-F]{4}$` field (`panId`), so
+        // the floor is one; count pairs with a same-indent detector independent of the extractor's
+        // shape comparison.
+        let mut hex4_examples = 0usize;
+        for api in APIS {
+            assert!(
+                hex4_pattern_examples_malformed(api.body).is_empty(),
+                "{}: every example beside a same-indent 4-hex `pattern` must match it",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            let is_key = |l: &str, name: &str, val: Option<&str>| {
+                l.trim_start().split_once(':').is_some_and(|(k, v)| {
+                    k.trim() == name
+                        && val.is_none_or(|want| {
+                            v.split('#')
+                                .next()
+                                .unwrap_or(v)
+                                .trim()
+                                .trim_matches('"')
+                                .trim_matches('\'')
+                                == want
+                        })
+                })
+            };
+            for (i, l) in lines.iter().enumerate() {
+                if !is_key(l, "example", None) {
+                    continue;
+                }
+                if l.trim_start()
+                    .split_once(':')
+                    .map(|(_, v)| v.split('#').next().unwrap_or(v).trim().is_empty())
+                    .unwrap_or(true)
+                {
+                    continue;
+                }
+                let c = indent(l);
+                let lo = i.saturating_sub(6);
+                let hi = (i + 6).min(lines.len());
+                let has_hex4_pattern = (lo..hi).any(|j| {
+                    j != i
+                        && indent(lines[j]) == c
+                        && is_key(lines[j], "pattern", Some(HEX4_PATTERN))
+                });
+                if has_hex4_pattern {
+                    hex4_examples += 1;
+                }
+            }
+        }
+        assert!(
+            hex4_examples >= 1,
+            "expected the corpus's example + same-indent 4-hex `pattern` pair, got {hex4_examples}"
+        );
+    }
+
     /// True when `s` is a well-formed RFC 3339 `date-time` string — the concrete
     /// syntax OpenAPI's `format: date-time` names (JSON Schema's `date-time` is
     /// RFC 3339 §5.6). Shape-only and lenient on the calendar (it range-checks each
