@@ -5669,6 +5669,51 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-20 — Contract-test harness: added a **SSID-`pattern` example-conformance** contract test
+  (`src/registry.rs` `every_ssid_pattern_example_conforms_to_the_ssid_pattern`) — where a mounted
+  spec declares an inline `example` beside a **same-indent** `pattern: "^(?! )[\x20-\x7E]{2,32}(?<! )$"`
+  (the network-access-domains WiFi WPA-Personal / WPA-Enterprise `AccessDetail.ssid` field — the 802.11
+  SSID rule: 2–32 printable ASCII characters, no leading/trailing space), the example MUST match it.
+  An SSID example that is empty / one character / over 32 characters, or that leads or trails with a
+  space, or that carries a non-printable ASCII character (control char / DEL / non-ASCII UTF-8 scalar)
+  is a self-contradictory schema whose own validator rejects the sample it advertises, so a Redoc/
+  Swagger prefill and a codegen client's generated sample carry a value the field can never legally
+  hold. The **twenty-fifth member of the `pattern`-conformance family** after E.164/IMEI/ICCID/32-hex/
+  name/MAC/token/result-code/bounded-any-char (256-wide)/geohash/app-name/TAC/region/DNS-label/
+  sink-URL/UUID/DPV-purpose/no-semicolon/IMEISV/no-CR/LF/OTP-template/16-hex/4-hex/bounded-any-char
+  (512-wide), and the **first over a printable-ASCII alphabet + bounded length range + a
+  no-leading/trailing-space rule**: the printable-ASCII class is neither the digit-only
+  (IMEI/ICCID/IMEISV/TAC), hex-only (32-hex/16-hex/4-hex), alphanumeric-with-punctuation
+  (name/app-name/token), nor the free-text `[\s\S]` (256/512) alphabets any earlier member owns; the
+  `{2,32}` range is a genuine bounded range with a non-empty floor and a 32-char ceiling; and the
+  negative-lookarounds around a leading/trailing space are structure no earlier member expresses.
+  So a value with a leading or trailing space (yet all-printable and in range), or a lone character
+  (below the floor), or an over-32-char value (above the ceiling but under the 63-char WPA-password
+  sibling), is the fault only this member can catch. Carries **no `format` sibling** (there is no
+  OpenAPI `ssid` format), so beyond the `format`-example family's reach. New pure
+  `matches_ssid_pattern` (2..=32 Unicode scalars, each in `'\x20'..='\x7E'`, first + last byte
+  not `b' '`; no regex/YAML dep) + `ssid_pattern_examples_malformed` extractor cloning
+  `hex4_pattern_examples_malformed`'s down-then-up dedent-bounded same-indent scoping, keyed on
+  `SSID_PATTERN` (written as it appears raw in the double-quoted YAML source: two literal
+  backslashes before each `x`, so raw-string comparison against the corpus pattern is verbatim). The
+  same-indent scan steps over the corpus's intervening `minLength: 2` + `maxLength: 32` + single-line
+  `description` siblings, so the `pattern`→`minLength`→`maxLength`→`description`→`example` shape
+  pairs correctly. Unit-covered (`ssid_pattern_example_extraction_rules`: matcher accepts corpus
+  `my-ssid` / 2-char floor / 32-char ceiling / internal-space `Home Network 2G` / full printable
+  range and rejects empty / 1-char / 33-char / leading-space / trailing-space / embedded control /
+  DEL / non-ASCII `café`; a 1-char, 33-char, leading-space, and a 1-char `PatternBelow` (pattern one
+  line below — down-scan pairs it) flagged in document order; a Good case across an intervening
+  `minLength`+`maxLength`+`description`, plus a no-`pattern` sibling, a WPA-password sibling
+  (`^[\x20-\x7E]{8,63}$` — same alphabet, wider length, no space rule) with a leading/trailing-space
+  value (out of scope here), a nested-`example` payload, a cross-property split, and a block-opening
+  `example:` property all cleared; ≥2-pair non-vacuous floor — Network Access Domains is the only
+  mounted spec with SSID fields, and it declares both WPA-Personal and WPA-Enterprise). Surveyed the
+  corpus first: 2 example+SSID-`pattern` pairs (network-access-domains WPA-Personal + WPA-Enterprise
+  `AccessDetail.ssid`, both `my-ssid` at 7 chars) → 0 drift; a live guard that fires the moment a
+  spec adds an out-of-range or leading/trailing-space SSID example. Test-side only — no request/
+  response/behaviour change, so no vendored-spec edits; the matcher, extractor and both tests live
+  in the `#[cfg(test)]` module, so nothing ships in the binary. `cargo test` 2824 green (was 2822;
+  +2), `cargo build --release` green, no new deps. — binary (release): 5.1M (5,323,160 B; unchanged).
 - 2026-08-20 — Contract-test harness: added a **512-wide bounded-any-char-`pattern` example-conformance**
   contract test (`src/registry.rs` `every_text512_pattern_example_conforms_to_the_text512_pattern`) —
   where a mounted spec declares an inline `example` beside a **same-indent** `pattern: '^[\s\S]{0,512}$'`

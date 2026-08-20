@@ -33810,6 +33810,425 @@ components:
         );
     }
 
+    // NB: written as it appears *raw in the YAML source* (double-quoted, so `\\` is a literal
+    // backslash before `x`), because `raw_inline("pattern")` returns the source substring after
+    // stripping only the outer quotes — no YAML-escape decoding — and this constant is compared
+    // to it verbatim, mirroring how every other `_PATTERN` constant is authored.
+    const SSID_PATTERN: &str = r"^(?! )[\\x20-\\x7E]{2,32}(?<! )$";
+
+    /// True when `s` matches the SSID `pattern` `^(?! )[\x20-\x7E]{2,32}(?<! )$` exactly: 2 to 32
+    /// ASCII printable characters (`0x20`–`0x7E`) with no leading or trailing space (the two
+    /// negative-lookarounds). The pattern is written in the vendored spec with the `\x20`/`\x7E`
+    /// escapes intact (the doubled backslash is YAML string quoting), so the ceiling is the
+    /// standard 802.11 SSID range (2–32 printable ASCII, trimmed). Hand-rolled (no regex dep)
+    /// mirroring `matches_hex4_pattern`'s shape-only stance so a legitimately shaped SSID is
+    /// never a false positive: the accepted alphabet is `0x20`–`0x7E`, the length range is
+    /// enforced on Unicode scalars (per JSON Schema, `pattern` length applies to scalar values —
+    /// a UTF-8 multi-byte char would already fail the ASCII-printable class, so the two agree),
+    /// and the first / last characters must both be `!` (`0x21`) or higher (i.e. not a space).
+    /// An SSID is the caller-visible network name — the write-only WPA `password` is a separate
+    /// `^[\x20-\x7E]{8,63}$` pattern with no leading/trailing-space rule (kept in its own family
+    /// member if the corpus ever pairs it with an inline example).
+    fn matches_ssid_pattern(s: &str) -> bool {
+        let n = s.chars().count();
+        if !(2..=32).contains(&n) {
+            return false;
+        }
+        if !s.chars().all(|c| ('\x20'..='\x7E').contains(&c)) {
+            return false;
+        }
+        // No leading / trailing space (the negative-lookarounds).
+        let bytes = s.as_bytes();
+        if bytes.first() == Some(&b' ') || bytes.last() == Some(&b' ') {
+            return false;
+        }
+        true
+    }
+
+    /// The 1-based line numbers, in document order, of every `example:` keyword whose inline
+    /// scalar value sits in a Schema Object declaring a *same-indent* SSID `pattern` sibling
+    /// (`^(?! )[\x20-\x7E]{2,32}(?<! )$`) yet is not a well-formed SSID (2–32 printable ASCII, no
+    /// leading/trailing space), without a YAML dep. The SSID twin of
+    /// `hex4_pattern_examples_malformed`: same scoping, keyed on `SSID_PATTERN` instead of
+    /// `HEX4_PATTERN`.
+    ///
+    /// In OpenAPI 3.0.x (JSON Schema) an `example` is a sample *instance* of the schema, so a
+    /// field constrained by `pattern` MUST carry an example the pattern accepts. An SSID example
+    /// that is empty / one character / over 32 characters, or that leads/trails with a space, or
+    /// that contains a non-printable ASCII character (control char / non-ASCII UTF-8 scalar) is a
+    /// sample the schema's own validator rejects, so a Redoc/Swagger prefill and a codegen
+    /// client's generated sample carry a value the field can never legally hold. Like the
+    /// hex/token/MAC patterns the SSID pattern carries no `format` sibling (there is no OpenAPI
+    /// `ssid` format), so these examples are beyond the `format`-example family's reach.
+    ///
+    /// Scoping mirrors `hex4_pattern_examples_malformed` exactly: only an `example` carrying an
+    /// inline scalar (a block/object example opens no inline value and is skipped) with a
+    /// same-indent `pattern` sibling *equal to* `SSID_PATTERN` in the same Schema Object is
+    /// inspected — the sibling is scanned at the example's own indent, down through the object's
+    /// block then up, dedent-bounded, so a nested or following object's `pattern` never pairs.
+    /// The same-indent scan steps over any intervening same-indent non-`pattern` siblings (the
+    /// corpus's `minLength: 2` / `maxLength: 32` / single-line `description`), so the corpus's
+    /// `pattern`→`minLength`→`maxLength`→`description`→`example` shape pairs correctly. An
+    /// `example:` nested inside an outer `example:`/`examples:` payload (sample data, not a
+    /// schema keyword) is skipped. Only the SSID pattern is matched; other patterns — including
+    /// the WPA password pattern `^[\x20-\x7E]{8,63}$` (same printable-ASCII alphabet, wider
+    /// length range, no leading/trailing-space rule) — are out of scope.
+    fn ssid_pattern_examples_malformed(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let raw_inline = |l: &str, name: &str| -> Option<String> {
+            let (k, v) = l.trim_start().split_once(':')?;
+            if k.trim() != name {
+                return None;
+            }
+            let v = v.split('#').next().unwrap_or(v).trim();
+            if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            }
+        };
+        // Whether a same-indent `pattern:` sibling of line `i` (indent `c`) in the same Schema
+        // Object equals the SSID pattern: scan down through the object's block then up,
+        // dedent-bounded so a nested or following object's `pattern` never pairs.
+        let sibling_is_ssid_pattern = |i: usize, c: usize| -> bool {
+            let is_ssid_pattern = |l: &str| -> bool {
+                raw_inline(l, "pattern")
+                    .map(|v| v.trim_matches('"').trim_matches('\'') == SSID_PATTERN)
+                    .unwrap_or(false)
+            };
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_ssid_pattern(l) {
+                    return true;
+                }
+                j += 1;
+            }
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_ssid_pattern(l) {
+                    return true;
+                }
+            }
+            false
+        };
+        // True when line `i` (indent `c`) sits inside an outer `example:`/`examples:` payload —
+        // some enclosing container key up the indent ladder is `example`/`examples` — so an
+        // inner `example` key there is sample data, not a schema keyword.
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some(raw) = raw_inline(line, "example") else {
+                continue;
+            };
+            let c = indent(line);
+            if inside_example(i, c) {
+                continue;
+            }
+            if !sibling_is_ssid_pattern(i, c) {
+                continue;
+            }
+            let value = raw.trim_matches('"').trim_matches('\'');
+            if !matches_ssid_pattern(value) {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_ssid_pattern_example_conforms_to_the_ssid_pattern() {
+        // Contract-harness invariant (OpenAPI 3.0.x / JSON-Schema structural rule): where a
+        // Schema Object declares an inline `example` beside a same-indent SSID `pattern`
+        // (`^(?! )[\x20-\x7E]{2,32}(?<! )$`, the 802.11 SSID rule the network-access-domains
+        // WiFi WPA-Personal / WPA-Enterprise `AccessDetail.ssid` field uses), the example MUST
+        // match that pattern. An `example` is a sample *instance* of the schema, so an SSID
+        // value that is empty / one character / over 32 characters, or that leads/trails with a
+        // space, or that contains a non-printable ASCII character is a self-contradictory schema
+        // whose own validator rejects the sample it advertises, so a Redoc/Swagger prefill and a
+        // codegen client's generated sample then carry a value no field constrained by this
+        // pattern can legally hold.
+        //
+        // The twenty-fifth member of the `pattern`-conformance family after E.164 / IMEI /
+        // ICCID / 32-hex / name / MAC / token / result-code / bounded-any-char (256-wide) /
+        // geohash / app-name / TAC / region / DNS-label / sink-URL / UUID / DPV-purpose /
+        // no-semicolon / IMEISV / no-CR/LF / OTP-template / 16-hex / 4-hex / bounded-any-char
+        // (512-wide), and the *first* over a printable-ASCII alphabet + length range + a
+        // no-leading/trailing-space rule: the printable-ASCII class is neither the digit-only
+        // (IMEI/ICCID/IMEISV/TAC), hex-only (32-hex/16-hex/4-hex), alphanumeric-with-punctuation
+        // (name/app-name/token), nor the free-text `[\s\S]` (256/512) alphabets any earlier
+        // member owns; the `{2,32}` range is a genuine bounded range with a non-empty floor
+        // *and* a 32-char ceiling (neither the 1..=64 token nor the 1..=12 geohash — the closest
+        // shape neighbours — expresses it); and the negative-lookarounds around a leading /
+        // trailing space are structure no earlier member expresses at all. So a value with a
+        // leading or trailing space (yet all-printable and in range), or a lone character (below
+        // the floor), or an over-32-char value (above the ceiling but under the 63-char WPA
+        // password sibling), is the fault only this member can catch. Like the hex / token /
+        // MAC / result-code / name / bounded-any-char patterns it carries no `format` sibling
+        // (there is no OpenAPI `ssid` format), so its examples are beyond the `format`-example
+        // family's reach; a general regex-engine test would need a new dependency (declined on
+        // binary-size grounds), so a concrete hand-validated shape is matched. Verified true
+        // across all mounted specs before asserting (Network Access Domains declares two such
+        // example+pattern pairs — the WPA-Personal and WPA-Enterprise `ssid` fields, both
+        // `"my-ssid"`, 7 printable ASCII characters trimmed of spaces).
+        for api in APIS {
+            let offenders = ssid_pattern_examples_malformed(api.body);
+            assert!(
+                offenders.is_empty(),
+                "{} spec declares an `example` beside a same-indent SSID \
+                 `pattern: '^(?! )[\\x20-\\x7E]{{2,32}}(?<! )$'` that does not match that \
+                 pattern (a sample the pattern's own validator would reject) at `example:` \
+                 line(s): {:?}",
+                api.name,
+                offenders
+            );
+        }
+    }
+
+    #[test]
+    fn ssid_pattern_example_extraction_rules() {
+        // Unit-cover `matches_ssid_pattern` and `ssid_pattern_examples_malformed` so the
+        // contract test above can't pass vacuously and its detection is pinned.
+        //
+        // Shape check: 2..=32 printable-ASCII chars with no leading/trailing space pass;
+        // one-char and 33-char values fail the length bounds; a leading and a trailing space
+        // fail the negative-lookarounds; a control char (`\x1F`) and a DEL (`\x7F`) and a
+        // non-ASCII UTF-8 scalar fail the printable-ASCII class; an empty string fails the
+        // non-empty floor.
+        assert!(matches_ssid_pattern("my-ssid")); // corpus example
+        assert!(matches_ssid_pattern("Wi")); // 2 chars — floor
+        assert!(matches_ssid_pattern(&"a".repeat(32))); // 32 chars — ceiling (inclusive)
+        assert!(matches_ssid_pattern("Home Network 2G")); // internal spaces are fine
+        assert!(matches_ssid_pattern("!\"#")); // full printable range from `0x21`
+        assert!(!matches_ssid_pattern("")); // empty
+        assert!(!matches_ssid_pattern("a")); // 1 char — below the floor
+        assert!(!matches_ssid_pattern(&"a".repeat(33))); // 33 chars — over the ceiling
+        assert!(!matches_ssid_pattern(" leader")); // leading space
+        assert!(!matches_ssid_pattern("trailer ")); // trailing space
+        assert!(!matches_ssid_pattern("bad\x1Ffield")); // embedded control char
+        assert!(!matches_ssid_pattern("del\x7F")); // DEL is above the printable ceiling
+        assert!(!matches_ssid_pattern("café")); // non-ASCII UTF-8 scalar
+
+        // Extractor: a valid quoted and a valid unquoted SSID value pass — the first across an
+        // intervening same-indent `minLength: 2` / `maxLength: 32` and single-line `description`
+        // sibling, mirroring the corpus's `pattern`→`minLength`→`maxLength`→`description`→
+        // `example` shape and proving the same-indent scan steps over all three. A 1-char, a
+        // 33-char, a leading-space, and a control-char value are flagged; a bad value whose
+        // `pattern` is declared *below* it is still paired (down-scan) and flagged; a value
+        // with no `pattern` sibling and one whose sibling is a *different* pattern (the WPA
+        // password `^[\x20-\x7E]{8,63}$` — same printable-ASCII alphabet, wider length, no
+        // leading/trailing-space rule) are skipped; an inner `example` inside an outer
+        // `example:` payload is skipped; an example in one property never pairs with a
+        // following property's `pattern` across the dedent; and a property literally named
+        // `example` (opening a block) is skipped.
+        let over32 = "a".repeat(33);
+        let body = format!(
+            "openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    GoodShape:
+      type: string
+      pattern: \"{p}\"
+      minLength: 2
+      maxLength: 32
+      description: SSID (2-32 printable ASCII characters, no leading/trailing space).
+      example: \"my-ssid\"
+    GoodUnquoted:
+      type: string
+      pattern: \"{p}\"
+      example: HomeWiFi
+    TooShort:
+      type: string
+      pattern: \"{p}\"
+      example: \"a\"
+    TooLong:
+      type: string
+      pattern: \"{p}\"
+      example: \"{over32}\"
+    LeadingSpace:
+      type: string
+      pattern: \"{p}\"
+      example: \" leader\"
+    PatternBelow:
+      type: string
+      example: \"a\"
+      pattern: \"{p}\"
+    NoPattern:
+      type: string
+      example: \"a\"
+    OtherPattern:
+      type: string
+      pattern: \"{wpa}\"
+      example: \" hunter2 password \"
+    InExample:
+      type: object
+      example:
+        pattern: \"{p}\"
+        example: \" bad \"
+    Split:
+      type: object
+      properties:
+        a:
+          example: \" bad \"
+        b:
+          type: string
+          pattern: \"{p}\"
+    NamedExample:
+      type: object
+      properties:
+        example:
+          type: string
+          pattern: \"{p}\"
+",
+            p = SSID_PATTERN,
+            wpa = r"^[\\x20-\\x7E]{8,63}$",
+            over32 = over32
+        );
+        // Flagged, in document order: TooShort.example (1 char, below the floor); TooLong.example
+        // (33 chars, above the ceiling); LeadingSpace.example (leading space); and PatternBelow's
+        // 1-char example (SSID `pattern` a line below — down-scan pairs it). Not flagged:
+        // GoodShape/GoodUnquoted (valid; the former across an intervening minLength+maxLength+
+        // description, proving the same-indent scan steps over all three); NoPattern (no `pattern`
+        // sibling); OtherPattern (sibling is the WPA-password pattern, not SSID — a
+        // leading/trailing-space value there is out of scope, and same alphabet but wider length
+        // and no space rule); InExample's inner `example` (inside the outer `example:` payload);
+        // Split.a.example (its only SSID `pattern` is in the following property past a dedent);
+        // and NamedExample's `example:` property opening a block (no inline value).
+        let flagged = ssid_pattern_examples_malformed(&body);
+        let flagged_props: Vec<&str> = flagged
+            .iter()
+            .map(|&n| {
+                // Walk up to the nearest schema-name line (indent 4) for a stable label.
+                let lines: Vec<&str> = body.lines().collect();
+                let mut k = n - 1;
+                loop {
+                    let l = lines[k];
+                    let ind = l.len() - l.trim_start().len();
+                    if ind == 4 && l.trim_end().ends_with(':') {
+                        break l.trim().trim_end_matches(':');
+                    }
+                    if k == 0 {
+                        break "";
+                    }
+                    k -= 1;
+                }
+            })
+            .collect();
+        assert_eq!(
+            flagged_props,
+            vec!["TooShort", "TooLong", "LeadingSpace", "PatternBelow"]
+        );
+
+        // Non-vacuous floor: across every registered spec every `example` beside a same-indent
+        // SSID `pattern` matches it (the invariant the contract test asserts), and the corpus
+        // actually declares such a pair — so the pattern-comparison path runs on real data and
+        // a broken (always-empty) extractor can't hide behind a corpus that never pairs. Network
+        // Access Domains is the only mounted spec with SSID fields (WPA-Personal +
+        // WPA-Enterprise), so the floor is two; count pairs with a same-indent detector
+        // independent of the extractor's shape comparison.
+        let mut ssid_examples = 0usize;
+        for api in APIS {
+            assert!(
+                ssid_pattern_examples_malformed(api.body).is_empty(),
+                "{}: every example beside a same-indent SSID `pattern` must match it",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            let is_key = |l: &str, name: &str, val: Option<&str>| {
+                l.trim_start().split_once(':').is_some_and(|(k, v)| {
+                    k.trim() == name
+                        && val.is_none_or(|want| {
+                            v.split('#')
+                                .next()
+                                .unwrap_or(v)
+                                .trim()
+                                .trim_matches('"')
+                                .trim_matches('\'')
+                                == want
+                        })
+                })
+            };
+            for (i, l) in lines.iter().enumerate() {
+                if !is_key(l, "example", None) {
+                    continue;
+                }
+                if l.trim_start()
+                    .split_once(':')
+                    .map(|(_, v)| v.split('#').next().unwrap_or(v).trim().is_empty())
+                    .unwrap_or(true)
+                {
+                    continue;
+                }
+                let c = indent(l);
+                let lo = i.saturating_sub(8);
+                let hi = (i + 8).min(lines.len());
+                let has_ssid_pattern = (lo..hi).any(|j| {
+                    j != i
+                        && indent(lines[j]) == c
+                        && is_key(lines[j], "pattern", Some(SSID_PATTERN))
+                });
+                if has_ssid_pattern {
+                    ssid_examples += 1;
+                }
+            }
+        }
+        assert!(
+            ssid_examples >= 2,
+            "expected the corpus's two example + same-indent SSID `pattern` pairs, got {ssid_examples}"
+        );
+    }
+
     /// True when `s` is a well-formed RFC 3339 `date-time` string — the concrete
     /// syntax OpenAPI's `format: date-time` names (JSON Schema's `date-time` is
     /// RFC 3339 §5.6). Shape-only and lenient on the calendar (it range-checks each
