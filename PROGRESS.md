@@ -5669,6 +5669,52 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-20 — Contract-test harness: added an **email-`pattern` example-conformance** contract test
+  (`src/registry.rs` `every_email_pattern_example_conforms_to_the_email_pattern`) — where a mounted
+  spec declares an inline `example` beside a **same-indent** `pattern:
+  "^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$"` (the sponsored-data `SponsorId` field's
+  `local@domain.tld` shape — sponsor onboarding identifiers), the example MUST match it. An email
+  example with no `@` (`acme.example.com`), a second `@` (`a@b@x.com`), an empty local part
+  (`@sponsor.example.com`), a domain with no dotted TLD (`acme@localhost`), an empty host before the
+  TLD dot (`acme@.com`), a one-character TLD (`acme@x.c` — below the `{2,}` floor), a digit inside the
+  TLD run (`acme@x.c0m` — the greedy `[a-zA-Z]{2,}$` claims the maximal trailing letter run, so a
+  digit shortens it below the floor), or a trailing dot (`acme@sponsor.example.com.` → empty TLD) is
+  a self-contradictory schema whose own validator rejects the sample it advertises, so a Redoc/Swagger
+  prefill and a codegen client's generated sample carry a value the field can never legally hold. The
+  **twenty-eighth member of the `pattern`-conformance family** after E.164/IMEI/ICCID/32-hex/name/MAC/
+  token/result-code/bounded-any-char (256-wide)/geohash/app-name/TAC/region/DNS-label/sink-URL/UUID/
+  DPV-purpose/no-semicolon/IMEISV/no-CR/LF/OTP-template/16-hex/4-hex/bounded-any-char (512-wide)/SSID/
+  WPA-password/semver, and the **first over an `@`-separated local-part/domain/TLD structure**: no
+  earlier member splits its input on a literal separator into two class-constrained runs and anchors
+  a final `\.[a-zA-Z]{2,}` TLD. So a domain with no dotted TLD, a one-character TLD, or a missing
+  `@` is the fault only this member can catch. Carries **no `format` sibling** (the `SponsorId`
+  field is `type: string` with only `pattern` + `example` — no `format: email`, though a `format:
+  email` twin exists elsewhere in the corpus and is guarded by the earlier `format`-example family),
+  so beyond the `format`-example family's reach for this specific `pattern`-bearing declaration. New
+  pure `matches_email_pattern` (splits at the FIRST `@` and rejects a second `@` in the domain since
+  neither character class admits `@`; local part 1+ chars from `[a-zA-Z0-9._%+-]`; domain then
+  `rsplit_once('.')` — non-empty host in `[a-zA-Z0-9.-]`, then a maximal trailing all-ASCII-letter
+  TLD run of length ≥ 2; no regex/YAML dep) + `email_pattern_examples_malformed` extractor cloning
+  `semver_pattern_examples_malformed`'s down-then-up dedent-bounded same-indent scoping, keyed on
+  `EMAIL_PATTERN` (written raw in the double-quoted YAML source: `\\.` — a double backslash — so
+  raw-string comparison against the corpus pattern is verbatim, mirroring how the SSID/WPA-password
+  double-quoted patterns are authored). Unit-covered (`email_pattern_example_extraction_rules`:
+  matcher accepts corpus `acme@sponsor.example.com` / punctuation-exercising `user.name+tag@mail.co`
+  / minimal `a@b.cd` / multi-label `first.last@sub.domain.example.org` / digit-bearing labels
+  `dev1@host9.net` and rejects empty / no-`@` / second-`@` / empty local / spaced local /
+  no-dotted-TLD `acme@localhost` / empty host `acme@.com` / 1-char TLD `acme@x.c` / digit-in-TLD
+  `acme@x.c0m` / trailing-dot; a no-`@`, 1-char-TLD, empty-local, trailing-dot, and a no-`@`
+  `PatternBelow` (pattern one line below — down-scan pairs it) flagged in document order; a Good
+  case across an intervening `description`, an IMEI-pattern sibling (a wholly different
+  digit-count structure) with a non-matching value out of scope, a nested-`example` payload, a
+  cross-property split, and a block-opening `example:` property all cleared; ≥1-pair non-vacuous
+  floor — Sponsored Data is the only mounted spec with a `SponsorId`-shape email `pattern`).
+  Surveyed the corpus first: 1 example+email-`pattern` pair (sponsored-data `SponsorId`,
+  `acme@sponsor.example.com`) → 0 drift; a live guard that fires the moment a spec adds a
+  malformed email example. Test-side only — no request/response/behaviour change, so no
+  vendored-spec edits; the matcher, extractor and both tests live in the `#[cfg(test)]` module,
+  so nothing ships in the binary. `cargo test` 2830 green (was 2828; +2), `cargo build --release`
+  green, no new deps. — binary (release): 5.1M (5,323,160 B; unchanged).
 - 2026-08-20 — Contract-test harness: added a **semver-`pattern` example-conformance** contract test
   (`src/registry.rs` `every_semver_pattern_example_conforms_to_the_semver_pattern`) — where a mounted
   spec declares an inline `example` beside a **same-indent** `pattern:
