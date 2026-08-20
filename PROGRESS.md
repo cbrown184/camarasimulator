@@ -5669,6 +5669,38 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-20 — Contract-test harness: added a **DPV-purpose-`pattern` example-conformance**
+  contract test (`src/registry.rs` `every_dpv_purpose_pattern_example_conforms_to_the_dpv_purpose_pattern`)
+  — where a mounted spec declares an inline `example` beside a **same-indent**
+  `pattern: '^dpv:[a-zA-Z0-9]+$'` (the Consent Info `purpose` field's `dpv:<Purpose>` token from the
+  W3C Data Privacy Vocabulary — the purpose-scope grammar `auth::purpose` validates), the example
+  MUST match it. An `example` is a sample instance, so a purpose sample missing its `dpv:` sentinel,
+  or carrying a non-alphanumeric char in its suffix, is a self-contradictory schema whose own
+  validator rejects the sample it advertises. The **seventeenth member of the `pattern`-conformance
+  family** after E.164/IMEI/ICCID/32-hex/name/MAC/token/result-code/bounded-any-char/geohash/
+  app-name/TAC/region/DNS-label/sink-URL/UUID, and the **first over a fixed literal `dpv:` sentinel
+  (letters + a colon) then a variable-length alphanumeric run**: the result-code member
+  (`^B[0-9]{6}$`) is nearest — a fixed literal prefix then a bounded run — but its prefix is a single
+  letter and its run is digit-only and fixed-length, so it can't express a four-char prefix that
+  itself contains a colon nor an unbounded mixed-alphanumeric suffix (a missing prefix / a colon or
+  hyphen in the suffix is the fault it can't catch). Carries **no `format` sibling**, so these
+  examples are beyond the `format`-example family's reach. New pure `matches_dpv_purpose_pattern`
+  (`strip_prefix("dpv:")` then a non-empty all-`is_ascii_alphanumeric` suffix; no regex/YAML dep) +
+  `dpv_purpose_pattern_examples_malformed` extractor cloning `text256_pattern_examples_malformed`'s
+  down-then-up dedent-bounded same-indent scoping, keyed on `DPV_PURPOSE_PATTERN` — the same-indent
+  scan steps over deeper-indented lines, so the corpus's folded `description: >-`→`pattern`→`example`
+  shape pairs correctly. Unit-covered (`dpv_purpose_pattern_example_extraction_rules`: matcher clears
+  canonical + short tokens and rejects a missing sentinel / mis-cased prefix / empty suffix / colon /
+  hyphen / dot suffix; a no-prefix value, a colon-in-suffix value, and a pattern-below value flagged
+  in document order; a no-`pattern` sibling, a result-code-pattern sibling, a nested-`example`
+  payload, a cross-property split, and a block-opening `example:` property all cleared; ≥1-pair
+  non-vacuous floor — Consent Info is the only mounted spec with a `dpv:<Purpose>` field). Surveyed
+  the corpus first: 1 example+dpv-`pattern` pair (consent-info `purpose`,
+  `dpv:FraudPreventionAndDetection`) → 0 drift; a live guard that fires the moment a spec adds a
+  malformed purpose example. Test-side only — no request/response/behaviour change, so no
+  vendored-spec edits; the matcher, extractor and both tests live in the `#[cfg(test)]` module, so
+  nothing ships in the binary. `cargo test` 2808 green (was 2806; +2), `cargo build --release` green,
+  no new deps. — binary (release): 5.1M (5,323,160 B; unchanged).
 - 2026-08-20 — Contract-test harness: added a **bounded-any-char-`pattern` example-conformance**
   contract test (`src/registry.rs` `every_text256_pattern_example_conforms_to_the_text256_pattern`)
   — where a mounted spec declares an inline `example` beside a **same-indent**
