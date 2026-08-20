@@ -29748,6 +29748,369 @@ components:
         );
     }
 
+    const HTTP_URL_PATTERN: &str = r"^https?:\/\/.+$";
+
+    /// True when `s` matches the sink-URL `pattern` `^https?:\/\/.+$` exactly: the literal scheme
+    /// `http://` or `https://` (the `https?` alternation) followed by at least one further character
+    /// (the `.+` tail; an `example` is a single inline scalar, so no newline is in play and `.` here
+    /// matches any byte). Hand-rolled (no regex dep) mirroring `matches_region_pattern`'s shape-only
+    /// stance, so a legitimately shaped callback URL is never a false positive. Unlike every prior
+    /// family member — bare digit runs (IMEI/ICCID/TAC), the 32-hex run, the alphanumeric classes
+    /// (name/token/region/DNS-label/app-name), the fixed literal-prefix digit run (result-code), and
+    /// the geohash/MAC alphabets — this pattern anchors a *scheme literal* and then admits an
+    /// arbitrary non-empty tail, a shape no character-class or length check can express.
+    fn matches_http_url_pattern(s: &str) -> bool {
+        s.strip_prefix("https://")
+            .or_else(|| s.strip_prefix("http://"))
+            .is_some_and(|rest| !rest.is_empty())
+    }
+
+    /// The 1-based line numbers, in document order, of every `example:` keyword whose inline scalar
+    /// value sits in a Schema Object declaring a *same-indent* sink-URL `pattern` `^https?:\/\/.+$`
+    /// sibling yet does not match that pattern, without a YAML dep. The sink-URL twin of
+    /// `region_pattern_examples_malformed`: same scoping, keyed on `HTTP_URL_PATTERN` instead of
+    /// `REGION_PATTERN`.
+    ///
+    /// In OpenAPI 3.0.x (JSON Schema) an `example` is a sample *instance* of the schema, so a field
+    /// constrained by `pattern` MUST carry an example the pattern accepts. A `sink` example that is
+    /// not an `http(s)://` URL — a bare host, a wrong scheme (`ftp://`), or an empty tail (`https://`
+    /// alone) — advertises a sample the schema's own validator rejects, so a Redoc/Swagger prefill
+    /// and a codegen client's generated sample carry a value the field can never legally hold.
+    /// `^https?:\/\/.+$` is the QoS-family notification `sink` pattern; unlike the UUID patterns which
+    /// sit beside a `format: uri`/`format: uuid` already guarded, this exact string carries only a
+    /// `format: uri` sibling (a *format*, whose example check `every_uri_format_example_is_a_well_formed_uri`
+    /// accepts any absolute URI — e.g. an `ftp://` or `mailto:` URI — so the http(s)-only narrowing
+    /// the `pattern` imposes is beyond its reach), leaving these examples otherwise unchecked against
+    /// the scheme constraint.
+    ///
+    /// Scoping mirrors `region_pattern_examples_malformed` exactly: only an `example` carrying an
+    /// inline scalar (a block/object example opens no inline value and is skipped) with a same-indent
+    /// `pattern` sibling *equal to* `HTTP_URL_PATTERN` in the same Schema Object is inspected — the
+    /// sibling is scanned at the example's own indent, down through the object's block then up,
+    /// dedent-bounded, so a nested or following object's `pattern` never pairs, and an intervening
+    /// `format`/`maxLength`/`description` sibling at the same indent is stepped over (the corpus's
+    /// `sink` property has a `format`/`description` block between its declared keys). In particular the
+    /// stricter `^https://.+$` (https-only) sink pattern some specs use is a *different* string and
+    /// never pairs. An `example:` nested inside an outer `example:`/`examples:` payload (sample data,
+    /// not a schema keyword) is skipped. Only the `^https?:\/\/.+$` pattern is matched.
+    fn http_url_pattern_examples_malformed(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let raw_inline = |l: &str, name: &str| -> Option<String> {
+            let (k, v) = l.trim_start().split_once(':')?;
+            if k.trim() != name {
+                return None;
+            }
+            let v = v.split('#').next().unwrap_or(v).trim();
+            if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            }
+        };
+        // Whether a same-indent `pattern:` sibling of line `i` (indent `c`) in the same Schema
+        // Object equals the sink-URL pattern: scan down through the object's block then up,
+        // dedent-bounded so a nested or following object's `pattern` never pairs.
+        let sibling_is_http_url_pattern = |i: usize, c: usize| -> bool {
+            let is_http_url_pattern = |l: &str| -> bool {
+                raw_inline(l, "pattern")
+                    .map(|v| v.trim_matches('"').trim_matches('\'') == HTTP_URL_PATTERN)
+                    .unwrap_or(false)
+            };
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_http_url_pattern(l) {
+                    return true;
+                }
+                j += 1;
+            }
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_http_url_pattern(l) {
+                    return true;
+                }
+            }
+            false
+        };
+        // True when line `i` (indent `c`) sits inside an outer `example:`/`examples:` payload —
+        // some enclosing container key up the indent ladder is `example`/`examples` — so an
+        // inner `example` key there is sample data, not a schema keyword.
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some(raw) = raw_inline(line, "example") else {
+                continue;
+            };
+            let c = indent(line);
+            if inside_example(i, c) {
+                continue;
+            }
+            if !sibling_is_http_url_pattern(i, c) {
+                continue;
+            }
+            let value = raw.trim_matches('"').trim_matches('\'');
+            if !matches_http_url_pattern(value) {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_http_url_pattern_example_conforms_to_the_http_url_pattern() {
+        // Contract-harness invariant (OpenAPI 3.0.x / JSON-Schema structural rule): where a Schema
+        // Object declares an inline `example` beside a same-indent sink-URL `pattern`
+        // (`^https?:\/\/.+$`, the QoS-family notification `sink` pattern), the example MUST match that
+        // pattern. An `example` is a sample *instance* of the schema, so a value the `pattern` rejects
+        // — a bare host, a non-`http(s)` scheme, or the scheme with an empty tail — is a
+        // self-contradictory schema whose own validator rejects the sample it advertises, so a
+        // Redoc/Swagger prefill and a codegen client's generated sample carry a value no field
+        // constrained by this pattern can legally hold.
+        //
+        // The fourteenth member of the `pattern`-conformance family after E.164 / IMEI / ICCID /
+        // 32-hex / name / MAC / token / result-code / geohash / app-name / TAC / region / DNS-label,
+        // and the first over a *scheme-anchored* form: every prior member is a character class or a
+        // fixed/ranged-length run, whereas this pattern pins the literal scheme `http://` or
+        // `https://` then admits an arbitrary non-empty tail, a shape no character-class, length, or
+        // fixed-prefix-digit check can express (each family member is keyed on the exact pattern
+        // string, so the stricter https-only `^https://.+$` sink pattern never pairs). The `sink`
+        // property does carry a `format: uri` sibling, but `every_uri_format_example_is_a_well_formed_uri`
+        // accepts any absolute URI (an `ftp://` or `mailto:` URI included), so the http(s)-only
+        // narrowing the `pattern` imposes is beyond the format-example family's reach; a general
+        // regex-engine test would need a new dependency (declined on binary-size grounds), so a
+        // concrete hand-validated shape is matched. Verified true across all mounted specs before
+        // asserting (QoS Provisioning and QoS Booking each declare one such example+pattern pair,
+        // both a conforming `https://…` sink URL).
+        for api in APIS {
+            let offenders = http_url_pattern_examples_malformed(api.body);
+            assert!(
+                offenders.is_empty(),
+                "{} spec declares an `example` beside a same-indent sink-URL \
+                 `pattern: '^https?:\\/\\/.+$'` that does not match that pattern (a sample the \
+                 pattern's own validator would reject) at `example:` line(s): {:?}",
+                api.name,
+                offenders
+            );
+        }
+    }
+
+    #[test]
+    fn http_url_pattern_example_extraction_rules() {
+        // Unit-cover `matches_http_url_pattern` and `http_url_pattern_examples_malformed` so the
+        // contract test above can't pass vacuously and its detection is pinned.
+        //
+        // Shape check: an `https://` and an `http://` URL with a non-empty tail pass; a wrong scheme
+        // (`ftp://`), a bare host with no scheme, either scheme with an *empty* tail (`https://` /
+        // `http://` alone — the `.+` requires at least one character), and an empty string all fail.
+        // The scheme anchor and the non-empty tail are the whole point of `^https?:\/\/.+$`.
+        assert!(matches_http_url_pattern("https://app.example.com/cb"));
+        assert!(matches_http_url_pattern("http://localhost:9090/hook"));
+        assert!(matches_http_url_pattern("https://a")); // shortest legal tail — one char
+        assert!(!matches_http_url_pattern("ftp://host/x")); // wrong scheme
+        assert!(!matches_http_url_pattern("example.com/x")); // no scheme
+        assert!(!matches_http_url_pattern("https://")); // empty tail
+        assert!(!matches_http_url_pattern("http://")); // empty tail
+        assert!(!matches_http_url_pattern("")); // empty
+
+        // Extractor: two valid sink URLs (one across an intervening `format` + `description` block —
+        // the corpus's `sink` shape — and one adjacent `http://`) pass; a wrong-scheme, a
+        // no-scheme, and an empty-tail value are flagged; a bad value whose `pattern` is declared
+        // *below* it is still paired (down-scan) and flagged; a value with no `pattern` sibling and
+        // one whose sibling is the *different* stricter `^https://.+$` pattern are skipped; an inner
+        // `example` inside an outer `example:` payload is skipped; an example in one property never
+        // pairs with a following property's `pattern` across the dedent; and a property literally
+        // named `example` (opening a block) is skipped.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    GoodBlockDesc:
+      type: string
+      pattern: '^https?:\\/\\/.+$'
+      format: uri
+      description: >-
+        the callback sink
+      example: \"https://app.example.com/cb\"
+    GoodAdjacentHttp:
+      type: string
+      pattern: '^https?:\\/\\/.+$'
+      example: \"http://localhost:9090/hook\"
+    WrongScheme:
+      type: string
+      pattern: '^https?:\\/\\/.+$'
+      example: \"ftp://host/x\"
+    NoScheme:
+      type: string
+      pattern: '^https?:\\/\\/.+$'
+      example: \"example.com/x\"
+    EmptyTail:
+      type: string
+      pattern: '^https?:\\/\\/.+$'
+      example: \"https://\"
+    PatternBelow:
+      type: string
+      example: \"not a url\"
+      pattern: '^https?:\\/\\/.+$'
+    NoPattern:
+      type: string
+      example: \"bare-host\"
+    HttpsOnlyPattern:
+      type: string
+      pattern: '^https://.+$'
+      example: \"ftp://skipped\"
+    InExample:
+      type: object
+      example:
+        pattern: '^https?:\\/\\/.+$'
+        example: \"bad thing\"
+    Split:
+      type: object
+      properties:
+        a:
+          example: \"not a url\"
+        b:
+          type: string
+          pattern: '^https?:\\/\\/.+$'
+    NamedExample:
+      type: object
+      properties:
+        example:
+          type: string
+          pattern: '^https?:\\/\\/.+$'
+";
+        // Flagged, in document order: WrongScheme.example (`ftp://host/x`), NoScheme.example
+        // (`example.com/x`), EmptyTail.example (`https://`), and PatternBelow.example (value
+        // `not a url`, sink `pattern` a line below — down-scan pairs it). Not flagged: GoodBlockDesc/
+        // GoodAdjacentHttp (valid, one across an intervening format/description block); NoPattern (no
+        // `pattern` sibling); HttpsOnlyPattern (sibling is the stricter `^https://.+$`, not this exact
+        // string — an `ftp://` value the http(s) matcher would also reject, proving exact-pattern
+        // keying); InExample's inner `example` (inside the outer `example:` payload); Split.a.example
+        // (its only sink `pattern` is in the following property past a dedent); and NamedExample's
+        // `example:` property opening a block (no inline value).
+        let flagged = http_url_pattern_examples_malformed(body);
+        let flagged_vals: Vec<&str> = flagged
+            .iter()
+            .map(|&n| body.lines().nth(n - 1).unwrap().trim())
+            .collect();
+        assert_eq!(
+            flagged_vals,
+            vec![
+                "example: \"ftp://host/x\"",
+                "example: \"example.com/x\"",
+                "example: \"https://\"",
+                "example: \"not a url\"",
+            ]
+        );
+
+        // Non-vacuous floor: across every registered spec every `example` beside a same-indent
+        // sink-URL `pattern` matches it (the invariant the contract test asserts), and the corpus
+        // actually declares such pairs — so the pattern-comparison path runs on real data and a
+        // broken (always-empty) extractor can't hide behind a corpus that never pairs. QoS
+        // Provisioning and QoS Booking each declare one `sink` example+pattern pair, so the floor is
+        // 2. Count pairs with a same-indent detector independent of the extractor's shape comparison.
+        let mut http_url_examples = 0usize;
+        for api in APIS {
+            assert!(
+                http_url_pattern_examples_malformed(api.body).is_empty(),
+                "{}: every example beside a same-indent sink-URL `pattern` must match it",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            let is_key = |l: &str, name: &str, val: Option<&str>| {
+                l.trim_start().split_once(':').is_some_and(|(k, v)| {
+                    k.trim() == name
+                        && val.is_none_or(|want| {
+                            v.split('#')
+                                .next()
+                                .unwrap_or(v)
+                                .trim()
+                                .trim_matches('"')
+                                .trim_matches('\'')
+                                == want
+                        })
+                })
+            };
+            for (i, l) in lines.iter().enumerate() {
+                if !is_key(l, "example", None) {
+                    continue;
+                }
+                if l.trim_start()
+                    .split_once(':')
+                    .map(|(_, v)| v.split('#').next().unwrap_or(v).trim().is_empty())
+                    .unwrap_or(true)
+                {
+                    continue;
+                }
+                let c = indent(l);
+                let lo = i.saturating_sub(6);
+                let hi = (i + 6).min(lines.len());
+                let has_http_url = (lo..hi).any(|j| {
+                    j != i
+                        && indent(lines[j]) == c
+                        && is_key(lines[j], "pattern", Some(HTTP_URL_PATTERN))
+                });
+                if has_http_url {
+                    http_url_examples += 1;
+                }
+            }
+        }
+        assert!(
+            http_url_examples >= 2,
+            "expected the corpus's example + same-indent sink-URL `pattern` pairs, got {http_url_examples}"
+        );
+    }
+
     /// True when `s` is a well-formed RFC 3339 `date-time` string — the concrete
     /// syntax OpenAPI's `format: date-time` names (JSON Schema's `date-time` is
     /// RFC 3339 §5.6). Shape-only and lenient on the calendar (it range-checks each

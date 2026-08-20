@@ -5669,6 +5669,41 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-20 — Contract-test harness: added a **sink-URL-`pattern` example-conformance**
+  contract test (`src/registry.rs` `every_http_url_pattern_example_conforms_to_the_http_url_pattern`)
+  — where a mounted spec declares an inline `example` beside a **same-indent**
+  `pattern: '^https?:\/\/.+$'` (the QoS-family notification `sink` pattern, used verbatim by QoS
+  Provisioning `v0.3` and QoS Booking `vwip`), the example MUST be a `http://` or `https://` URL with
+  a non-empty tail. An `example` is a sample instance of the schema, so a `sink` value the pattern
+  rejects (a bare host, a wrong scheme like `ftp://`, or the scheme alone with an empty tail) is a
+  self-contradictory schema whose own validator rejects the sample it advertises. The **fourteenth
+  member of the `pattern`-conformance family** after E.164/IMEI/ICCID/32-hex/name/MAC/token/
+  result-code/geohash/app-name/TAC/region/DNS-label, and the **first over a scheme-anchored form**:
+  every prior member is a character class or a fixed/ranged-length run, whereas this pattern pins the
+  literal scheme `http://`/`https://` then admits an arbitrary non-empty tail — a shape no
+  character-class, length, or fixed-prefix-digit check can express (each family member is keyed on the
+  exact pattern string, so the stricter https-only `^https://.+$` sink pattern some specs use never
+  pairs). The `sink` property does carry a `format: uri` sibling, but the format-example family's
+  `every_uri_format_example_is_a_well_formed_uri` accepts any absolute URI (an `ftp://`/`mailto:` URI
+  included), so the http(s)-only narrowing the `pattern` imposes was previously unchecked. New pure
+  `matches_http_url_pattern` (strip an `https://`/`http://` prefix; require a non-empty remainder; no
+  regex/YAML dep) + `http_url_pattern_examples_malformed` extractor (cloning
+  `region_pattern_examples_malformed`'s down-then-up dedent-bounded scoping, keyed on
+  `HTTP_URL_PATTERN`, stepping over the intervening `format`/`description` block the corpus's `sink`
+  property carries), unit-covered (`http_url_pattern_example_extraction_rules`: the matcher clears an
+  `https://`/`http://` URL and a one-char tail and rejects a wrong scheme, a no-scheme host, either
+  scheme with an empty tail, and an empty value; a wrong-scheme, a no-scheme, an empty-tail, and a
+  pattern-below example flagged in document order; valid URLs across an intervening format/description
+  block and adjacent, a no-`pattern` sibling, a stricter-`^https://.+$`-pattern sibling (`ftp://`
+  value skipped — proves exact-pattern keying), a nested-`example` payload, a cross-property split,
+  and a property literally named `example` all cleared; ≥2-pair non-vacuous floor). Surveyed the
+  corpus first: 2 example+sink-`pattern` pairs (QoS Provisioning + QoS Booking `sink`,
+  `https://application-server.example.com/notifications`), both well-formed → 0 drift; a live guard
+  that fires the moment a spec adds a non-http(s) sink example. Test-side only — no
+  request/response/behaviour change, so no vendored-spec edits; the matcher, extractor and both tests
+  live in the `#[cfg(test)]` module, so nothing ships in the binary. `cargo test` 2802 green (was
+  2800; +2), `cargo build --release` green, no new deps. — binary (release): 5.1M (5,323,160 B;
+  unchanged).
 - 2026-08-20 — Contract-test harness: added a **DNS-label-`pattern` example-conformance**
   contract test (`src/registry.rs` `every_dns_label_pattern_example_conforms_to_the_dns_label_pattern`)
   — where a mounted spec declares an inline `example` beside a **same-indent**
