@@ -5669,6 +5669,39 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-20 — Contract-test harness: added an **OTP-template-`pattern` example-conformance** contract
+  test (`src/registry.rs` `every_otp_template_pattern_example_conforms_to_the_otp_template_pattern`) —
+  where a mounted spec declares an inline `example` beside a **same-indent** `pattern: '.*\{\{code\}\}.*'`
+  (the One Time Password SMS `SendCodeRequest.message` field — the SMS text into which the operator
+  substitutes the generated OTP at the `{{code}}` placeholder), the example MUST match it. The
+  **twenty-first member of the `pattern`-conformance family** and the **first over an *unanchored*
+  pattern**: every prior member (E.164/IMEI/ICCID/32-hex/name/MAC/token/result-code/bounded-any-char/
+  geohash/app-name/TAC/region/DNS-label/sink-URL/UUID/DPV-purpose/no-semicolon/IMEISV/no-CR/LF) is
+  `^…$`-anchored and asserts a full-string shape, whereas `.*\{\{code\}\}.*` carries no anchors, so
+  under JSON Schema's ECMA-262 (`RegExp.prototype.test`, unanchored) `pattern` semantics it asserts
+  **substring containment** — the literal `{{code}}` appears somewhere — and the surrounding `.*` are
+  inert (each matches zero chars; the substring carries no terminator, so non-dotall `.` is moot). No
+  anchored member can express "contains this literal substring", so a placeholder-less template — a
+  sample into which the operator could never inject the OTP — is the fault none of them can catch.
+  Carries **no `format` sibling**, so beyond the `format`-example family's reach. New pure
+  `matches_otp_template_pattern` (`s.contains("{{code}}")` — exactly faithful; no regex/YAML dep) +
+  `otp_template_pattern_examples_malformed` extractor cloning `no_crlf_pattern_examples_malformed`'s
+  down-then-up dedent-bounded same-indent scoping, keyed on `OTP_TEMPLATE_PATTERN` — the same-indent
+  scan steps over the corpus's intervening folded `description: >-` + `maxLength: 160` siblings, so the
+  `description`→`maxLength`→`pattern`→`example` shape pairs correctly. Unit-covered
+  (`otp_template_pattern_example_extraction_rules`: matcher accepts placeholder-bearing values
+  prefixed/suffixed/embedded and rejects empty / plain / single-brace `{code}` / spaced `{{ code }}` /
+  wrong-case `{{CODE}}`; a placeholder-less value, a single-brace value, and a pattern-below value
+  flagged in document order; a Good case across an intervening folded description + maxLength, plus a
+  no-`pattern` sibling, a result-code-pattern sibling, a nested-`example` payload, a cross-property
+  split, and a block-opening `example:` property all cleared; ≥1-pair non-vacuous floor —
+  one-time-password-sms is the only mounted spec with a `.*\{\{code\}\}.*` field carrying an inline
+  example). Surveyed the corpus first: 1 example+OTP-template-`pattern` pair (one-time-password-sms
+  `message`, `{{code}} is your verification code`) → 0 drift; a live guard that fires the moment a spec
+  adds a placeholder-less SMS-template example. Test-side only — no request/response/behaviour change,
+  so no vendored-spec edits; the matcher, extractor and both tests live in the `#[cfg(test)]` module,
+  so nothing ships in the binary. `cargo test` 2816 green (was 2814; +2), `cargo build --release`
+  green, no new deps. — binary (release): 5.1M (5,323,160 B; unchanged).
 - 2026-08-20 — Contract-test harness: added a **no-CR/LF-`pattern` example-conformance** contract
   test (`src/registry.rs` `every_no_crlf_pattern_example_conforms_to_the_no_crlf_pattern`) — where a
   mounted spec declares an inline `example` beside a **same-indent** `pattern: '^[^\r\n]*$'` (the

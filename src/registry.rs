@@ -32330,6 +32330,379 @@ components:
         );
     }
 
+    const OTP_TEMPLATE_PATTERN: &str = r".*\{\{code\}\}.*";
+
+    /// True when `s` matches the OTP-template `pattern` `.*\{\{code\}\}.*` — i.e. it contains the
+    /// literal `{{code}}` placeholder somewhere. Unlike every other member of this family the
+    /// pattern carries **no `^`/`$` anchors**: JSON Schema `pattern` (ECMA-262
+    /// `RegExp.prototype.test`) is unanchored, so `.*\{\{code\}\}.*` matches a string iff the
+    /// literal substring `{{code}}` appears anywhere in it — the surrounding `.*` are inert (each
+    /// can always match zero characters, and even under a non-dotall `.` the substring itself
+    /// carries no terminator). `s.contains("{{code}}")` is therefore exactly faithful for every
+    /// input. Hand-rolled (no regex dep), mirroring the other matchers' shape-only stance so a
+    /// legitimately shaped value is never a false positive; the one fault it catches is a
+    /// `message` example that drops the `{{code}}` placeholder the operator substitutes the
+    /// generated OTP into (the one-time-password-sms `SendCodeRequest.message` field).
+    fn matches_otp_template_pattern(s: &str) -> bool {
+        s.contains("{{code}}")
+    }
+
+    /// The 1-based line numbers, in document order, of every `example:` keyword whose inline scalar
+    /// value sits in a Schema Object declaring a *same-indent* OTP-template `pattern` sibling
+    /// (`.*\{\{code\}\}.*`) yet does **not** contain the literal `{{code}}` placeholder, without a
+    /// YAML dep. The OTP-template twin of `no_crlf_pattern_examples_malformed`: same scoping, keyed
+    /// on `OTP_TEMPLATE_PATTERN`.
+    ///
+    /// In OpenAPI 3.0.x (JSON Schema) an `example` is a sample *instance* of the schema, so a field
+    /// constrained by `pattern` MUST carry an example the pattern accepts. An SMS-template example
+    /// missing the `{{code}}` placeholder advertises a sample the schema's own validator rejects, so
+    /// a Redoc/Swagger prefill and a codegen client's generated sample carry a template into which
+    /// the operator could never inject the OTP. This pattern carries no `format` sibling, so these
+    /// examples are otherwise beyond the `format`-example family's reach.
+    ///
+    /// The pattern is **unanchored** — the only member of the family without `^`/`$` — so it
+    /// asserts substring containment, not a full-string shape (see `matches_otp_template_pattern`).
+    ///
+    /// Scoping mirrors `no_crlf_pattern_examples_malformed` exactly: only an `example` carrying an
+    /// inline scalar (a block/object example opens no inline value and is skipped) with a same-indent
+    /// `pattern` sibling *equal to* `OTP_TEMPLATE_PATTERN` in the same Schema Object is inspected —
+    /// the sibling is scanned at the example's own indent, down through the object's block then up,
+    /// dedent-bounded, so a nested or following object's `pattern` never pairs. The same-indent scan
+    /// steps over any intervening deeper-indented lines, so a folded `description: >-` block (then
+    /// `maxLength`, then `pattern`) followed by `example` pairs correctly — the corpus's own shape.
+    /// An `example:` nested inside an outer `example:`/`examples:` payload (sample data, not a schema
+    /// keyword) is skipped. Only the OTP-template pattern is matched; other patterns are out of scope.
+    fn otp_template_pattern_examples_malformed(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let raw_inline = |l: &str, name: &str| -> Option<String> {
+            let (k, v) = l.trim_start().split_once(':')?;
+            if k.trim() != name {
+                return None;
+            }
+            let v = v.split('#').next().unwrap_or(v).trim();
+            if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            }
+        };
+        // Whether a same-indent `pattern:` sibling of line `i` (indent `c`) in the same Schema
+        // Object equals the OTP-template pattern: scan down through the object's block then up,
+        // dedent-bounded so a nested or following object's `pattern` never pairs.
+        let sibling_is_otp_template_pattern = |i: usize, c: usize| -> bool {
+            let is_otp_template_pattern = |l: &str| -> bool {
+                raw_inline(l, "pattern")
+                    .map(|v| v.trim_matches('"').trim_matches('\'') == OTP_TEMPLATE_PATTERN)
+                    .unwrap_or(false)
+            };
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_otp_template_pattern(l) {
+                    return true;
+                }
+                j += 1;
+            }
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_otp_template_pattern(l) {
+                    return true;
+                }
+            }
+            false
+        };
+        // True when line `i` (indent `c`) sits inside an outer `example:`/`examples:` payload —
+        // some enclosing container key up the indent ladder is `example`/`examples` — so an inner
+        // `example` key there is sample data, not a schema keyword.
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some(raw) = raw_inline(line, "example") else {
+                continue;
+            };
+            let c = indent(line);
+            if inside_example(i, c) {
+                continue;
+            }
+            if !sibling_is_otp_template_pattern(i, c) {
+                continue;
+            }
+            let value = raw.trim_matches('"').trim_matches('\'');
+            if !matches_otp_template_pattern(value) {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_otp_template_pattern_example_conforms_to_the_otp_template_pattern() {
+        // Contract-harness invariant (OpenAPI 3.0.x / JSON-Schema structural rule): where a Schema
+        // Object declares an inline `example` beside a same-indent OTP-template `pattern`
+        // (`.*\{\{code\}\}.*`, the one-time-password-sms `SendCodeRequest.message` field's pattern),
+        // the example MUST match that pattern. An `example` is a sample *instance* of the schema, so
+        // an SMS-template example that drops the `{{code}}` placeholder is a self-contradictory
+        // schema whose own validator rejects the sample it advertises, and a Redoc/Swagger prefill
+        // and a codegen client's generated sample then carry a template into which the operator
+        // could never inject the generated OTP.
+        //
+        // The twenty-first member of the `pattern`-conformance family after E.164 / IMEI / ICCID /
+        // 32-hex / name / MAC / token / result-code / bounded-any-char / geohash / app-name / TAC /
+        // region / DNS-label / sink-URL / UUID / DPV-purpose / no-semicolon / IMEISV / no-CR/LF, and
+        // the **first over an unanchored pattern**: every prior member is `^…$`-anchored and asserts
+        // a full-string shape, whereas `.*\{\{code\}\}.*` carries no anchors, so under JSON Schema's
+        // ECMA-262 (unanchored) `pattern` semantics it asserts *substring containment* — the literal
+        // `{{code}}` appears somewhere. No anchored member can express "contains this literal
+        // substring", so a placeholder-less template is the fault none of them can catch. Like the
+        // IMEI / ICCID / no-semicolon / no-CR/LF patterns it carries no `format` sibling, so its
+        // examples are beyond the `format`-example family's reach; a general regex-engine test would
+        // need a new dependency (declined on binary-size grounds), so a concrete hand-validated
+        // matcher is checked. Verified true across all mounted specs before asserting
+        // (one-time-password-sms declares one such example+pattern pair — the `message` field).
+        for api in APIS {
+            let offenders = otp_template_pattern_examples_malformed(api.body);
+            assert!(
+                offenders.is_empty(),
+                "{} spec declares an `example` beside a same-indent OTP-template `pattern` \
+                 (`.*\\{{\\{{code\\}}\\}}.*`) that omits the code placeholder (a sample the \
+                 pattern's own validator would reject) at `example:` line(s): {:?}",
+                api.name,
+                offenders
+            );
+        }
+    }
+
+    #[test]
+    fn otp_template_pattern_example_extraction_rules() {
+        // Unit-cover `matches_otp_template_pattern` and `otp_template_pattern_examples_malformed` so
+        // the contract test above can't pass vacuously and its detection is pinned.
+        //
+        // Shape check: any value containing the literal `{{code}}` substring (alone, prefixed,
+        // suffixed, or embedded) passes; a value without it — empty, ordinary text, a single-brace
+        // `{code}`, a spaced `{{ code }}`, or an uppercase `{{CODE}}` — fails (the pattern is a
+        // literal substring, case- and whitespace-sensitive).
+        let ph = "{{code}}";
+        assert!(matches_otp_template_pattern(ph));
+        assert!(matches_otp_template_pattern(&format!("Your code is {ph} now")));
+        assert!(matches_otp_template_pattern(&format!("{ph} is your verification code")));
+        assert!(!matches_otp_template_pattern("")); // empty
+        assert!(!matches_otp_template_pattern("your verification code")); // no placeholder
+        assert!(!matches_otp_template_pattern("code is {code}")); // single braces
+        assert!(!matches_otp_template_pattern("code is {{ code }}")); // spaced braces
+        assert!(!matches_otp_template_pattern("code is {{CODE}}")); // wrong case
+
+        // Extractor: two placeholder-bearing values (one across an intervening folded
+        // `description: >-` block then `maxLength` then a same-indent `pattern`, mirroring the
+        // corpus's shape; one plain) pass; two values missing the placeholder are flagged; a bad
+        // value whose `pattern` is declared *below* it is still paired (down-scan) and flagged; a
+        // value with no `pattern` sibling and one whose sibling is a *different* pattern (the
+        // result-code `^B[0-9]{6}$`) are skipped; an inner `example` inside an outer `example:`
+        // payload is skipped; an example in one property never pairs with a following property's
+        // `pattern` across the dedent; and a property literally named `example` (opening a block) is
+        // skipped.
+        let body = format!(
+            "openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    GoodFolded:
+      type: string
+      description: >-
+        The SMS text. Must contain the placeholder, which the operator replaces
+        with the generated OTP.
+      maxLength: 160
+      pattern: '{p}'
+      example: {c} is your verification code
+    GoodPlain:
+      type: string
+      pattern: '{p}'
+      example: Your code is {c}
+    BadMissing:
+      type: string
+      pattern: '{p}'
+      example: your verification code
+    BadSingleBrace:
+      type: string
+      pattern: '{p}'
+      example: code is {{code}}
+    PatternBelow:
+      type: string
+      example: no placeholder at all
+      pattern: '{p}'
+    NoPattern:
+      type: string
+      example: plain text
+    OtherPattern:
+      type: string
+      pattern: '^B[0-9]{{6}}$'
+      example: plain text
+    InExample:
+      type: object
+      example:
+        pattern: '{p}'
+        example: plain text
+    Split:
+      type: object
+      properties:
+        a:
+          example: plain text
+        b:
+          type: string
+          pattern: '{p}'
+    NamedExample:
+      type: object
+      properties:
+        example:
+          type: string
+          pattern: '{p}'
+",
+            p = OTP_TEMPLATE_PATTERN,
+            c = ph
+        );
+        // Flagged, in document order: BadMissing.example (no placeholder beside a same-indent
+        // OTP-template `pattern`), BadSingleBrace.example (`{code}` — single braces, not `{{code}}`),
+        // and PatternBelow.example (no placeholder, OTP-template `pattern` a line below — down-scan
+        // pairs it). Not flagged: GoodFolded/GoodPlain (carry `{{code}}`, the former across an
+        // intervening folded `>-` description + `maxLength` proving the same-indent scan steps over
+        // the deeper lines); NoPattern (no `pattern` sibling); OtherPattern (sibling is the
+        // result-code pattern, not OTP-template — a placeholder-less value there is out of scope);
+        // InExample's inner `example` (inside the outer `example:` payload); Split.a.example (its
+        // only OTP-template `pattern` is in the following property past a dedent); and NamedExample's
+        // `example:` property opening a block (no inline value).
+        let flagged = otp_template_pattern_examples_malformed(&body);
+        let flagged_props: Vec<&str> = flagged
+            .iter()
+            .map(|&n| {
+                // Walk up to the nearest schema-name line (indent 4) for a stable label.
+                let lines: Vec<&str> = body.lines().collect();
+                let mut k = n - 1;
+                loop {
+                    let l = lines[k];
+                    let ind = l.len() - l.trim_start().len();
+                    if ind == 4 && l.trim_end().ends_with(':') {
+                        break l.trim().trim_end_matches(':');
+                    }
+                    if k == 0 {
+                        break "";
+                    }
+                    k -= 1;
+                }
+            })
+            .collect();
+        assert_eq!(
+            flagged_props,
+            vec!["BadMissing", "BadSingleBrace", "PatternBelow"]
+        );
+
+        // Non-vacuous floor: across every registered spec every `example` beside a same-indent
+        // OTP-template `pattern` matches it (the invariant the contract test asserts), and the corpus
+        // actually declares such a pair — so the matcher path runs on real data and a broken
+        // (always-empty) extractor can't hide behind a corpus that never pairs. One-time-password-sms
+        // is the only mounted spec with a `.*\{\{code\}\}.*` field carrying an inline example (the
+        // `message` field), so the floor is one; count pairs with a same-indent detector independent
+        // of the extractor's matcher.
+        let mut otp_template_examples = 0usize;
+        for api in APIS {
+            assert!(
+                otp_template_pattern_examples_malformed(api.body).is_empty(),
+                "{}: every example beside a same-indent OTP-template `pattern` must match it",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            let is_key = |l: &str, name: &str, val: Option<&str>| {
+                l.trim_start().split_once(':').is_some_and(|(k, v)| {
+                    k.trim() == name
+                        && val.is_none_or(|want| {
+                            v.split('#')
+                                .next()
+                                .unwrap_or(v)
+                                .trim()
+                                .trim_matches('"')
+                                .trim_matches('\'')
+                                == want
+                        })
+                })
+            };
+            for (i, l) in lines.iter().enumerate() {
+                if !is_key(l, "example", None) {
+                    continue;
+                }
+                if l.trim_start()
+                    .split_once(':')
+                    .map(|(_, v)| v.split('#').next().unwrap_or(v).trim().is_empty())
+                    .unwrap_or(true)
+                {
+                    continue;
+                }
+                let c = indent(l);
+                let lo = i.saturating_sub(6);
+                let hi = (i + 6).min(lines.len());
+                let has_otp_template = (lo..hi).any(|j| {
+                    j != i
+                        && indent(lines[j]) == c
+                        && is_key(lines[j], "pattern", Some(OTP_TEMPLATE_PATTERN))
+                });
+                if has_otp_template {
+                    otp_template_examples += 1;
+                }
+            }
+        }
+        assert!(
+            otp_template_examples >= 1,
+            "expected the corpus's example + same-indent OTP-template `pattern` pair, got {otp_template_examples}"
+        );
+    }
+
     /// True when `s` is a well-formed RFC 3339 `date-time` string — the concrete
     /// syntax OpenAPI's `format: date-time` names (JSON Schema's `date-time` is
     /// RFC 3339 §5.6). Shape-only and lenient on the calendar (it range-checks each
