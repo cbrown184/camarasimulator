@@ -36777,6 +36777,354 @@ components:
         );
     }
 
+    const CLIENT_ID_PATTERN: &str = r"^[a-zA-Z0-9_\-]{1,128}$";
+
+    /// True when `s` matches the client-id `pattern` `^[a-zA-Z0-9_\-]{1,128}$` exactly: between
+    /// 1 and 128 characters, each an ASCII letter, digit, underscore, or hyphen, and nothing
+    /// else. Hand-rolled (no regex dep), the 128-ceiling twin of `matches_token_pattern`.
+    ///
+    /// This is the eSIM Remote Management `clientId` pattern. It shares the token pattern's
+    /// alphabet — letters, digits, `_`, `-`, and (unlike the *name* pattern `^[a-zA-Z0-9_.-]+$`)
+    /// **no dot** — but a **wider ranged length**: the `{1,128}` quantifier doubles the token
+    /// pattern's `{1,64}` ceiling. Both a non-empty floor and a 128-character ceiling are part
+    /// of the pattern itself. All admitted characters are ASCII, so the byte length equals the
+    /// character count; a multibyte character fails the character-class test regardless.
+    fn matches_client_id_pattern(s: &str) -> bool {
+        (1..=128).contains(&s.len())
+            && s.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
+    }
+
+    /// The 1-based line numbers, in document order, of every `example:` keyword whose inline
+    /// scalar value sits in a Schema Object declaring a *same-indent*
+    /// `pattern: '^[a-zA-Z0-9_\-]{1,128}$'` sibling yet does not match that client-id pattern,
+    /// without a YAML dep. The 128-ceiling twin of `token_pattern_examples_malformed`: same
+    /// scoping, keyed on `CLIENT_ID_PATTERN` instead of `TOKEN_PATTERN`.
+    ///
+    /// In OpenAPI 3.0.x (JSON Schema) an `example` is a sample *instance* of the schema, so a
+    /// field constrained by `pattern` MUST carry an example the pattern accepts. A client-id
+    /// example that includes a forbidden character (a space, a dot, a slash) or runs past the
+    /// 128-character ceiling advertises a sample the schema's own validator rejects, so a
+    /// Redoc/Swagger prefill and a codegen client's generated sample carry a value the field
+    /// can never legally hold. `^[a-zA-Z0-9_\-]{1,128}$` is the eSIM Remote Management
+    /// `clientId` pattern, and — like the token/IMEI/ICCID/name patterns — it carries no
+    /// `format` sibling, so these examples are otherwise unchecked.
+    ///
+    /// Scoping mirrors `token_pattern_examples_malformed` exactly: only an `example` carrying an
+    /// inline scalar (a block/object example opens no inline value and is skipped) with a
+    /// same-indent `pattern` sibling *equal to* `CLIENT_ID_PATTERN` in the same Schema Object is
+    /// inspected — the sibling is scanned at the example's own indent, down through the object's
+    /// block then up, dedent-bounded, so a nested or following object's `pattern` never pairs.
+    /// The token pattern `^[a-zA-Z0-9_\-]{1,64}$` (same alphabet, *half* the ceiling) is a
+    /// *different* pattern string and never pairs, so the 64- and 128-bounded fields stay
+    /// distinct. An `example:` nested inside an outer `example:`/`examples:` payload (sample
+    /// data, not a schema keyword) is skipped. Only the client-id pattern is matched; other
+    /// patterns are out of scope.
+    fn client_id_pattern_examples_malformed(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let raw_inline = |l: &str, name: &str| -> Option<String> {
+            let (k, v) = l.trim_start().split_once(':')?;
+            if k.trim() != name {
+                return None;
+            }
+            let v = v.split('#').next().unwrap_or(v).trim();
+            if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            }
+        };
+        // Whether a same-indent `pattern:` sibling of line `i` (indent `c`) in the same
+        // Schema Object equals the client-id pattern: scan down through the object's block
+        // then up, dedent-bounded so a nested or following object's `pattern` never pairs.
+        let sibling_is_client_id_pattern = |i: usize, c: usize| -> bool {
+            let is_client_id_pattern = |l: &str| -> bool {
+                raw_inline(l, "pattern")
+                    .map(|v| v.trim_matches('"').trim_matches('\'') == CLIENT_ID_PATTERN)
+                    .unwrap_or(false)
+            };
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_client_id_pattern(l) {
+                    return true;
+                }
+                j += 1;
+            }
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_client_id_pattern(l) {
+                    return true;
+                }
+            }
+            false
+        };
+        // True when line `i` (indent `c`) sits inside an outer `example:`/`examples:`
+        // payload — some enclosing container key up the indent ladder is
+        // `example`/`examples` — so an inner `example` key there is sample data, not a
+        // schema keyword.
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some(raw) = raw_inline(line, "example") else {
+                continue;
+            };
+            let c = indent(line);
+            if inside_example(i, c) {
+                continue;
+            }
+            if !sibling_is_client_id_pattern(i, c) {
+                continue;
+            }
+            let value = raw.trim_matches('"').trim_matches('\'');
+            if !matches_client_id_pattern(value) {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_client_id_pattern_example_conforms_to_the_client_id_pattern() {
+        // Contract-harness invariant (OpenAPI 3.0.x / JSON-Schema structural rule): where a
+        // Schema Object declares an inline `example` beside a same-indent
+        // `pattern: '^[a-zA-Z0-9_\-]{1,128}$'` (the eSIM Remote Management `clientId` pattern),
+        // the example MUST match that pattern. An `example` is a sample *instance* of the
+        // schema, so a value the `pattern` rejects — a client id carrying a space, a dot, a
+        // slash, or running past 128 characters — is a self-contradictory schema whose own
+        // validator rejects the sample it advertises, so a Redoc/Swagger prefill and a codegen
+        // client's generated sample carry a value no field constrained by this pattern can hold.
+        //
+        // The thirty-second member of the `pattern`-conformance family after E.164 / IMEI /
+        // ICCID / 32-hex / name / MAC / token / result-code / bounded-any-char (256) / geohash /
+        // app-name / TAC / region / DNS-label / sink-URL / UUID / DPV-purpose / no-semicolon /
+        // IMEISV / no-CR / LF / OTP-template / 16-hex / 4-hex / bounded-any-char (512) / SSID /
+        // WPA-password / semver / email / full-date / campaign-id / correlator, and the **128-
+        // ceiling twin of the token member**: it shares the token pattern's mixed
+        // alphanumeric-plus-`_-` alphabet (dot-forbidding) but doubles the `{1,64}` ceiling to
+        // `{1,128}`, so a value 65–128 characters long — legal here, rejected by the token
+        // member — is the fault only this member can catch, and the token member's own value is
+        // never mistaken for it (the two pattern strings differ, so they never cross-pair). Like
+        // the token pattern it carries no `format` sibling, so its examples are beyond the
+        // `format`-example family's reach; a general regex-engine test would need a new
+        // dependency (declined on binary-size grounds), so a concrete hand-validated shape is
+        // matched. Verified true across all mounted specs before asserting (the two eSIM
+        // `clientId` example+pattern pairs, each a conforming client id).
+        for api in APIS {
+            let offenders = client_id_pattern_examples_malformed(api.body);
+            assert!(
+                offenders.is_empty(),
+                "{} spec declares an `example` beside a same-indent client-id \
+                 `pattern: '^[a-zA-Z0-9_\\-]{{1,128}}$'` that does not match that pattern (a \
+                 sample the pattern's own validator would reject) at `example:` line(s): {:?}",
+                api.name,
+                offenders
+            );
+        }
+    }
+
+    #[test]
+    fn client_id_pattern_example_extraction_rules() {
+        // Unit-cover `matches_client_id_pattern` and `client_id_pattern_examples_malformed` so
+        // the contract test above can't pass vacuously and its detection is pinned.
+        //
+        // Shape check: an all-letter id, an id mixing every allowed class member (letters,
+        // digits, `_`, `-`), a single character, and a 128-character id all pass; a space, a
+        // dot (allowed by the *name* pattern but not this one), a slash, an empty string, and a
+        // 129-character id (past the range ceiling) all fail. The doubled 128 ceiling — accepting
+        // a 128-char id the token member (`{1,64}`) would reject at 65 — is what sets this
+        // pattern apart from the token pattern.
+        assert!(matches_client_id_pattern("csim-esim-client-01"));
+        assert!(matches_client_id_pattern("task_ID-123"));
+        assert!(matches_client_id_pattern("a"));
+        assert!(matches_client_id_pattern(&"a".repeat(128)));
+        assert!(!matches_client_id_pattern("has space"));
+        assert!(!matches_client_id_pattern("a.b"));
+        assert!(!matches_client_id_pattern("a/b"));
+        assert!(!matches_client_id_pattern(""));
+        assert!(!matches_client_id_pattern(&"a".repeat(129)));
+
+        // Extractor: a valid quoted id and a valid unquoted id (each beside a same-indent
+        // client-id `pattern`) pass; a space-bearing and a dot-bearing value are flagged; a bad
+        // value whose `pattern` is declared *below* it is still paired (down-scan) and flagged;
+        // a value with no `pattern` sibling and one whose sibling is the *token* pattern
+        // `^[a-zA-Z0-9_\-]{1,64}$` (same alphabet, half the ceiling — a *different* pattern
+        // string) are skipped, proving the 64- and 128-bounded fields never cross-pair; an inner
+        // `example` inside an outer `example:` payload is skipped; an example in one property
+        // never pairs with a following property's `pattern` across the dedent; and a property
+        // literally named `example` (opening a block) is skipped.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    GoodQuoted:
+      type: string
+      pattern: '^[a-zA-Z0-9_\\-]{1,128}$'
+      example: \"csim-esim-client-01\"
+    GoodUnquoted:
+      type: string
+      pattern: '^[a-zA-Z0-9_\\-]{1,128}$'
+      example: task_ID-123
+    HasSpace:
+      type: string
+      pattern: '^[a-zA-Z0-9_\\-]{1,128}$'
+      example: \"has space\"
+    HasDot:
+      type: string
+      pattern: '^[a-zA-Z0-9_\\-]{1,128}$'
+      example: \"a.b\"
+    PatternBelow:
+      type: string
+      example: \"bad value\"
+      pattern: '^[a-zA-Z0-9_\\-]{1,128}$'
+    NoPattern:
+      type: string
+      example: \"no pattern here\"
+    OtherPattern:
+      type: string
+      pattern: '^[a-zA-Z0-9_\\-]{1,64}$'
+      example: \"a.b\"
+    InExample:
+      type: object
+      example:
+        pattern: '^[a-zA-Z0-9_\\-]{1,128}$'
+        example: \"bad thing\"
+    Split:
+      type: object
+      properties:
+        a:
+          example: \"bad value\"
+        b:
+          type: string
+          pattern: '^[a-zA-Z0-9_\\-]{1,128}$'
+    NamedExample:
+      type: object
+      properties:
+        example:
+          type: string
+          pattern: '^[a-zA-Z0-9_\\-]{1,128}$'
+";
+        // Flagged, in document order: HasSpace.example (line 25, a space), HasDot.example
+        // (line 29, a dot — legal in a *name* but not a client id), and PatternBelow.example
+        // (line 32, value `bad value` with a space, its client-id `pattern` a line below —
+        // down-scan pairs it). Not flagged: GoodQuoted/GoodUnquoted (valid ids); NoPattern (no
+        // `pattern` sibling); OtherPattern (sibling is the *token* pattern `{1,64}`, a different
+        // string — its `a.b` example, invalid under the client-id pattern too, is never inspected
+        // here, proving the 64- and 128-bounded patterns never cross-pair); InExample's inner
+        // `example: \"bad thing\"` (sits inside the outer `example:` payload); Split.a.example,
+        // whose only client-id `pattern` is in the following property Split.b past a dedent; and
+        // NamedExample's `example:` property opening a block (no inline value).
+        assert_eq!(client_id_pattern_examples_malformed(body), vec![25, 29, 32]);
+
+        // Non-vacuous floor: across every registered spec every `example` beside a same-indent
+        // client-id `pattern` matches it (the invariant the contract test asserts), and the
+        // corpus actually declares two such pairs (the eSIM `clientId` fields) — so the
+        // pattern-comparison path runs on real data and a broken (always-empty) extractor can't
+        // hide behind a corpus that never pairs an example with the client-id pattern. Count
+        // pairs with a same-indent detector independent of the extractor's shape comparison.
+        let mut client_id_examples = 0usize;
+        for api in APIS {
+            assert!(
+                client_id_pattern_examples_malformed(api.body).is_empty(),
+                "{}: every example beside a same-indent client-id `pattern` must match it",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            let is_key = |l: &str, name: &str, val: Option<&str>| {
+                l.trim_start().split_once(':').is_some_and(|(k, v)| {
+                    k.trim() == name
+                        && val.is_none_or(|want| {
+                            v.split('#')
+                                .next()
+                                .unwrap_or(v)
+                                .trim()
+                                .trim_matches('"')
+                                .trim_matches('\'')
+                                == want
+                        })
+                })
+            };
+            for (i, l) in lines.iter().enumerate() {
+                if !is_key(l, "example", None) {
+                    continue;
+                }
+                if l.trim_start()
+                    .split_once(':')
+                    .map(|(_, v)| v.split('#').next().unwrap_or(v).trim().is_empty())
+                    .unwrap_or(true)
+                {
+                    continue;
+                }
+                let c = indent(l);
+                let lo = i.saturating_sub(6);
+                let hi = (i + 6).min(lines.len());
+                let has_client_id_pattern = (lo..hi).any(|j| {
+                    j != i
+                        && indent(lines[j]) == c
+                        && is_key(lines[j], "pattern", Some(CLIENT_ID_PATTERN))
+                });
+                if has_client_id_pattern {
+                    client_id_examples += 1;
+                }
+            }
+        }
+        assert!(
+            client_id_examples >= 2,
+            "expected the two eSIM `clientId` example + same-indent client-id `pattern` pairs, got {client_id_examples}"
+        );
+    }
+
     /// True when `s` is a well-formed RFC 3339 `date-time` string — the concrete
     /// syntax OpenAPI's `format: date-time` names (JSON Schema's `date-time` is
     /// RFC 3339 §5.6). Shape-only and lenient on the calendar (it range-checks each

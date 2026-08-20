@@ -564,6 +564,7 @@ components:
           pattern: '^[a-zA-Z0-9_\-]{1,128}$'
           maxLength: 128
           description: Client identifier. Accepted for fidelity.
+          example: csim-esim-client-01
         data:
           $ref: "#/components/schemas/EidProfileListReq"
 
@@ -666,6 +667,7 @@ components:
           pattern: '^[a-zA-Z0-9_\-]{1,128}$'
           maxLength: 128
           description: Client identifier. Accepted for fidelity.
+          example: csim-esim-client-02
         data:
           $ref: "#/components/schemas/ProfileResultQueryReq"
 

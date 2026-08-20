@@ -5669,6 +5669,40 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-20 — Contract-test harness: added a **client-id (`^[a-zA-Z0-9_\-]{1,128}$`)-`pattern`
+  example-conformance** contract test (`src/registry.rs`
+  `every_client_id_pattern_example_conforms_to_the_client_id_pattern`) — where a mounted spec
+  declares an inline `example` beside a **same-indent** `pattern: '^[a-zA-Z0-9_\-]{1,128}$'` (the
+  eSIM Remote Management `clientId` field's shape — a client identifier, 1–128 chars of
+  letters/digits/`_`/`-`), the example MUST match it. A client-id example bearing a forbidden
+  character (space, dot, slash) or longer than 128 chars is a self-contradictory schema whose own
+  validator rejects the sample it advertises, so a Redoc/Swagger prefill and a codegen client's
+  generated sample carry a value the field can never legally hold. The **thirty-second member of
+  the `pattern`-conformance family** and the **128-ceiling twin of the token member**: it shares
+  the token pattern's dot-forbidding alphanumeric-plus-`_-` alphabet but doubles the `{1,64}`
+  ceiling to `{1,128}`, so a value 65–128 chars long — legal here, rejected by the token member —
+  is the fault only this member can catch, and the two pattern strings differ so they never
+  cross-pair (the 64- and 128-bounded fields stay distinct). Carries **no `format` sibling**
+  (`clientId` is `type: string` with only `pattern`/`maxLength`/`description`), so it is beyond
+  the `format`-example family's reach. **Spec doc improvement** in the same pass (mirroring the
+  email/byte passes): the two eSIM `clientId` fields carried the pattern but no example, so a guard
+  would have been vacuous — added a conforming `example` to each (`csim-esim-client-01` /
+  `csim-esim-client-02`), giving the member a real 2-pair corpus floor. New pure
+  `matches_client_id_pattern` (byte-length 1..=128; every byte `is_ascii_alphanumeric` or `_`/`-`;
+  no regex/YAML dep) + `client_id_pattern_examples_malformed` extractor cloning
+  `token_pattern_examples_malformed`'s down-then-up dedent-bounded same-indent scoping, keyed on
+  `CLIENT_ID_PATTERN`. Unit-covered (`client_id_pattern_example_extraction_rules`: matcher accepts
+  corpus value / mixed-class id / single char / 128-char ceiling and rejects 129-char / space /
+  dot / slash / empty; a space, dot, and pattern-below `bad value` flagged in document order; a
+  Good case across intervening siblings, a no-`pattern` sibling, a **token-`{1,64}`**-`pattern`
+  sibling out of scope proving the 64/128 patterns never cross-pair, a nested-`example` payload, a
+  cross-property split, and a block-opening `example:` property all cleared; ≥2-pair non-vacuous
+  floor — the two eSIM `clientId` fields). Surveyed the corpus first: 2 example+client-id-`pattern`
+  pairs after the spec edit → 0 drift; a live guard that fires the moment a spec adds a malformed
+  client-id example. Spec change (two `example` lines added to esim-remote-management vwip); the
+  matcher, extractor and both tests live in the `#[cfg(test)]` module, so no runtime behaviour
+  change. `cargo test` 2838 green (was 2836; +2), `cargo build --release` green, no new deps. —
+  binary (release): 5.1M (5,323,160 B; unchanged).
 - 2026-08-20 — Contract-test harness: added a **correlator (bounded restricted-alphabet)-`pattern`
   example-conformance** contract test (`src/registry.rs`
   `every_correlator_pattern_example_conforms_to_the_correlator_pattern`) — where a mounted spec
