@@ -34229,6 +34229,410 @@ components:
         );
     }
 
+    // NB: written as it appears *raw in the YAML source* (double-quoted, so `\\` is a literal
+    // backslash before `x`), because `raw_inline("pattern")` returns the source substring after
+    // stripping only the outer quotes — no YAML-escape decoding — and this constant is compared
+    // to it verbatim, mirroring how every other `_PATTERN` constant is authored.
+    const WPA_PASSWORD_PATTERN: &str = r"^[\\x20-\\x7E]{8,63}$";
+
+    /// True when `s` matches the WPA-Personal password `pattern` `^[\x20-\x7E]{8,63}$` exactly: 8
+    /// to 63 ASCII printable characters (`0x20`–`0x7E`), with **no** leading/trailing-space rule
+    /// (a space is `0x20`, inside the class, and the pattern carries no lookarounds — so a
+    /// password may legally begin or end with a space). The pattern is written in the vendored
+    /// spec with the `\x20`/`\x7E` escapes intact (the doubled backslash is YAML string quoting),
+    /// so the range is the standard IEEE 802.11i WPA-Personal pre-shared-key range (8–63 printable
+    /// ASCII). Hand-rolled (no regex dep) mirroring `matches_ssid_pattern`'s shape-only stance so a
+    /// legitimately shaped password is never a false positive: the accepted alphabet is `0x20`–
+    /// `0x7E` and the length range is enforced on Unicode scalars (per JSON Schema, `pattern`
+    /// length applies to scalar values — a UTF-8 multi-byte char would already fail the
+    /// ASCII-printable class, so the two agree).
+    ///
+    /// The write-only WPA `password` is a *separate* field from the caller-visible network name
+    /// (the SSID `^(?! )[\x20-\x7E]{2,32}(?<! )$`): same printable-ASCII alphabet, but a wider
+    /// `{8,63}` range and — crucially — no leading/trailing-space rule, so a leading/trailing-space
+    /// value is legal here yet rejected by the SSID member. Kept in its own family member.
+    fn matches_wpa_password_pattern(s: &str) -> bool {
+        let n = s.chars().count();
+        if !(8..=63).contains(&n) {
+            return false;
+        }
+        s.chars().all(|c| ('\x20'..='\x7E').contains(&c))
+    }
+
+    /// The 1-based line numbers, in document order, of every `example:` keyword whose inline
+    /// scalar value sits in a Schema Object declaring a *same-indent* WPA-Personal password
+    /// `pattern` sibling (`^[\x20-\x7E]{8,63}$`) yet is not a well-formed WPA password (8–63
+    /// printable ASCII), without a YAML dep. The WPA-password twin of
+    /// `ssid_pattern_examples_malformed`: same scoping, keyed on `WPA_PASSWORD_PATTERN` instead of
+    /// `SSID_PATTERN`.
+    ///
+    /// In OpenAPI 3.0.x (JSON Schema) an `example` is a sample *instance* of the schema, so a
+    /// field constrained by `pattern` MUST carry an example the pattern accepts. A WPA-password
+    /// example that is under 8 characters / over 63 characters, or that contains a non-printable
+    /// ASCII character (control char / non-ASCII UTF-8 scalar), is a sample the schema's own
+    /// validator rejects, so a Redoc/Swagger prefill and a codegen client's generated sample carry
+    /// a value the field can never legally hold. Like the SSID/hex/token/MAC patterns it carries
+    /// no `format` sibling (there is no OpenAPI `wpa-password` format), so these examples are
+    /// beyond the `format`-example family's reach.
+    ///
+    /// Scoping mirrors `ssid_pattern_examples_malformed` exactly: only an `example` carrying an
+    /// inline scalar (a block/object example opens no inline value and is skipped) with a
+    /// same-indent `pattern` sibling *equal to* `WPA_PASSWORD_PATTERN` in the same Schema Object is
+    /// inspected — the sibling is scanned at the example's own indent, down through the object's
+    /// block then up, dedent-bounded, so a nested or following object's `pattern` never pairs. The
+    /// same-indent scan steps over any intervening same-indent non-`pattern` siblings (the corpus's
+    /// `minLength: 8` / `maxLength: 255` / a `description: |` block scalar whose continuation lines
+    /// are more deeply indented), so the corpus's `minLength`→`maxLength`→`pattern`→`description`→
+    /// `example` shape pairs correctly. An `example:` nested inside an outer `example:`/`examples:`
+    /// payload (sample data, not a schema keyword) is skipped. Only the WPA-password pattern is
+    /// matched; other patterns — including the SSID pattern `^(?! )[\x20-\x7E]{2,32}(?<! )$` (same
+    /// printable-ASCII alphabet, narrower length range, a leading/trailing-space rule) — are out
+    /// of scope.
+    fn wpa_password_pattern_examples_malformed(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let raw_inline = |l: &str, name: &str| -> Option<String> {
+            let (k, v) = l.trim_start().split_once(':')?;
+            if k.trim() != name {
+                return None;
+            }
+            let v = v.split('#').next().unwrap_or(v).trim();
+            if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            }
+        };
+        // Whether a same-indent `pattern:` sibling of line `i` (indent `c`) in the same Schema
+        // Object equals the WPA-password pattern: scan down through the object's block then up,
+        // dedent-bounded so a nested or following object's `pattern` never pairs.
+        let sibling_is_wpa_pattern = |i: usize, c: usize| -> bool {
+            let is_wpa_pattern = |l: &str| -> bool {
+                raw_inline(l, "pattern")
+                    .map(|v| v.trim_matches('"').trim_matches('\'') == WPA_PASSWORD_PATTERN)
+                    .unwrap_or(false)
+            };
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_wpa_pattern(l) {
+                    return true;
+                }
+                j += 1;
+            }
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_wpa_pattern(l) {
+                    return true;
+                }
+            }
+            false
+        };
+        // True when line `i` (indent `c`) sits inside an outer `example:`/`examples:` payload —
+        // some enclosing container key up the indent ladder is `example`/`examples` — so an
+        // inner `example` key there is sample data, not a schema keyword.
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some(raw) = raw_inline(line, "example") else {
+                continue;
+            };
+            let c = indent(line);
+            if inside_example(i, c) {
+                continue;
+            }
+            if !sibling_is_wpa_pattern(i, c) {
+                continue;
+            }
+            let value = raw.trim_matches('"').trim_matches('\'');
+            if !matches_wpa_password_pattern(value) {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_wpa_password_pattern_example_conforms_to_the_wpa_password_pattern() {
+        // Contract-harness invariant (OpenAPI 3.0.x / JSON-Schema structural rule): where a
+        // Schema Object declares an inline `example` beside a same-indent WPA-Personal password
+        // `pattern` (`^[\x20-\x7E]{8,63}$`, the IEEE 802.11i pre-shared-key rule the
+        // network-access-domains `WpaPersonalDetail.password` field uses), the example MUST match
+        // that pattern. An `example` is a sample *instance* of the schema, so a password value
+        // under 8 / over 63 characters, or one carrying a non-printable ASCII character, is a
+        // self-contradictory schema whose own validator rejects the sample it advertises, so a
+        // Redoc/Swagger prefill and a codegen client's generated sample then carry a value no
+        // field constrained by this pattern can legally hold.
+        //
+        // The twenty-sixth member of the `pattern`-conformance family after E.164 / IMEI / ICCID /
+        // 32-hex / name / MAC / token / result-code / bounded-any-char (256-wide) / geohash /
+        // app-name / TAC / region / DNS-label / sink-URL / UUID / DPV-purpose / no-semicolon /
+        // IMEISV / no-CR/LF / OTP-template / 16-hex / 4-hex / bounded-any-char (512-wide) / SSID,
+        // and the *second* over a printable-ASCII alphabet + bounded length range after SSID — but
+        // the first with **no** leading/trailing-space rule. It is distinct from SSID on two axes:
+        // the range is `{8,63}` (an 8-char floor and a 63-char ceiling, neither shared with SSID's
+        // `{2,32}`), and the absence of the negative-lookarounds means a leading/trailing-space
+        // value is *legal* here yet rejected by the SSID member. So a 7-char value (below this
+        // floor but above SSID's), a value in `(32, 63]` (above SSID's ceiling but under this
+        // one), or a 64-char value (above this ceiling), is the fault only this member can catch;
+        // and a leading/trailing-space password that SSID would reject must NOT be flagged here.
+        // Like the SSID / hex / token / MAC / bounded-any-char patterns it carries no `format`
+        // sibling (there is no OpenAPI `wpa-password` format), so its examples are beyond the
+        // `format`-example family's reach; a general regex-engine test would need a new dependency
+        // (declined on binary-size grounds), so a concrete hand-validated shape is matched.
+        // Verified true across all mounted specs before asserting (Network Access Domains declares
+        // one such example+pattern pair — the WPA-Personal `password` field, `"my-password"`, 11
+        // printable ASCII characters).
+        for api in APIS {
+            let offenders = wpa_password_pattern_examples_malformed(api.body);
+            assert!(
+                offenders.is_empty(),
+                "{} spec declares an `example` beside a same-indent WPA-password \
+                 `pattern: '^[\\x20-\\x7E]{{8,63}}$'` that does not match that pattern (a sample \
+                 the pattern's own validator would reject) at `example:` line(s): {:?}",
+                api.name,
+                offenders
+            );
+        }
+    }
+
+    #[test]
+    fn wpa_password_pattern_example_extraction_rules() {
+        // Unit-cover `matches_wpa_password_pattern` and `wpa_password_pattern_examples_malformed`
+        // so the contract test above can't pass vacuously and its detection is pinned.
+        //
+        // Shape check: 8..=63 printable-ASCII chars pass — including values with leading, trailing
+        // and internal spaces (there is no space rule here, unlike SSID); a 7-char value fails the
+        // floor and a 64-char value fails the ceiling; a control char (`\x1F`), a DEL (`\x7F`) and
+        // a non-ASCII UTF-8 scalar fail the printable-ASCII class; an empty string fails the floor.
+        assert!(matches_wpa_password_pattern("my-password")); // corpus example (11 chars)
+        assert!(matches_wpa_password_pattern("hunter22")); // 8 chars — floor
+        assert!(matches_wpa_password_pattern(&"a".repeat(63))); // 63 chars — ceiling (inclusive)
+        assert!(matches_wpa_password_pattern(" hunter2 ")); // leading+trailing space are fine here
+        assert!(matches_wpa_password_pattern("pass word key")); // internal spaces are fine
+        assert!(matches_wpa_password_pattern("!\"#$%^&*")); // full printable range from `0x20`
+        assert!(!matches_wpa_password_pattern("")); // empty
+        assert!(!matches_wpa_password_pattern("hunter1")); // 7 chars — below the floor
+        assert!(!matches_wpa_password_pattern(&"a".repeat(64))); // 64 chars — over the ceiling
+        assert!(!matches_wpa_password_pattern("bad\x1Ffield")); // embedded control char
+        assert!(!matches_wpa_password_pattern("delpass\x7F")); // DEL is above the printable ceiling
+        assert!(!matches_wpa_password_pattern("cafépassword")); // non-ASCII UTF-8 scalar
+
+        // Extractor: a valid quoted and a valid unquoted password value pass — the first across an
+        // intervening same-indent `minLength: 8` / `maxLength: 255` and single-line `description`
+        // sibling, proving the same-indent scan steps over them. A leading/trailing-space value in
+        // range is *valid* here (no space rule) and must NOT be flagged, distinguishing this member
+        // from SSID. A 7-char and a 64-char value are flagged; a 7-char value whose `pattern` is
+        // declared *below* it is still paired (down-scan) and flagged; a value with no `pattern`
+        // sibling and one whose sibling is a *different* pattern (the SSID `^(?! )[\x20-\x7E]{2,32}
+        // (?<! )$` — same printable-ASCII alphabet, narrower length, with a space rule) are skipped;
+        // an inner `example` inside an outer `example:` payload is skipped; an example in one
+        // property never pairs with a following property's `pattern` across the dedent; and a
+        // property literally named `example` (opening a block) is skipped.
+        let over63 = "a".repeat(64);
+        let body = format!(
+            "openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    GoodShape:
+      type: string
+      minLength: 8
+      maxLength: 255
+      pattern: \"{p}\"
+      description: The pre-shared key for the WPA Personal Wi-Fi network.
+      example: \"my-password\"
+    GoodUnquoted:
+      type: string
+      pattern: \"{p}\"
+      example: hunter2pass
+    WithSpaces:
+      type: string
+      pattern: \"{p}\"
+      example: \" leading and trailing \"
+    TooShort:
+      type: string
+      pattern: \"{p}\"
+      example: \"hunter1\"
+    TooLong:
+      type: string
+      pattern: \"{p}\"
+      example: \"{over63}\"
+    PatternBelow:
+      type: string
+      example: \"hunter1\"
+      pattern: \"{p}\"
+    NoPattern:
+      type: string
+      example: \"hunter1\"
+    OtherPattern:
+      type: string
+      pattern: \"{ssid}\"
+      example: \"a\"
+    InExample:
+      type: object
+      example:
+        pattern: \"{p}\"
+        example: \"short\"
+    Split:
+      type: object
+      properties:
+        a:
+          example: \"short\"
+        b:
+          type: string
+          pattern: \"{p}\"
+    NamedExample:
+      type: object
+      properties:
+        example:
+          type: string
+          pattern: \"{p}\"
+",
+            p = WPA_PASSWORD_PATTERN,
+            ssid = r"^(?! )[\\x20-\\x7E]{2,32}(?<! )$",
+            over63 = over63
+        );
+        // Flagged, in document order: TooShort.example (7 chars, below the floor); TooLong.example
+        // (64 chars, above the ceiling); and PatternBelow's 7-char example (WPA `pattern` a line
+        // below — down-scan pairs it). Not flagged: GoodShape/GoodUnquoted (valid; the former
+        // across an intervening minLength+maxLength+description, proving the same-indent scan steps
+        // over all three); WithSpaces (leading+trailing spaces yet 8–63 printable — legal here,
+        // the SSID-vs-WPA discriminator); NoPattern (no `pattern` sibling); OtherPattern (sibling
+        // is the SSID pattern, not WPA-password — its 1-char value is out of scope here); InExample's
+        // inner `example` (inside the outer `example:` payload); Split.a.example (its only WPA
+        // `pattern` is in the following property past a dedent); and NamedExample's `example:`
+        // property opening a block (no inline value).
+        let flagged = wpa_password_pattern_examples_malformed(&body);
+        let flagged_props: Vec<&str> = flagged
+            .iter()
+            .map(|&n| {
+                // Walk up to the nearest schema-name line (indent 4) for a stable label.
+                let lines: Vec<&str> = body.lines().collect();
+                let mut k = n - 1;
+                loop {
+                    let l = lines[k];
+                    let ind = l.len() - l.trim_start().len();
+                    if ind == 4 && l.trim_end().ends_with(':') {
+                        break l.trim().trim_end_matches(':');
+                    }
+                    if k == 0 {
+                        break "";
+                    }
+                    k -= 1;
+                }
+            })
+            .collect();
+        assert_eq!(flagged_props, vec!["TooShort", "TooLong", "PatternBelow"]);
+
+        // Non-vacuous floor: across every registered spec every `example` beside a same-indent
+        // WPA-password `pattern` matches it (the invariant the contract test asserts), and the
+        // corpus actually declares such a pair — so the pattern-comparison path runs on real data
+        // and a broken (always-empty) extractor can't hide behind a corpus that never pairs.
+        // Network Access Domains is the only mounted spec with a WPA-Personal `password` field, so
+        // the floor is one; count pairs with a same-indent detector independent of the extractor's
+        // shape comparison.
+        let mut wpa_examples = 0usize;
+        for api in APIS {
+            assert!(
+                wpa_password_pattern_examples_malformed(api.body).is_empty(),
+                "{}: every example beside a same-indent WPA-password `pattern` must match it",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            let is_key = |l: &str, name: &str, val: Option<&str>| {
+                l.trim_start().split_once(':').is_some_and(|(k, v)| {
+                    k.trim() == name
+                        && val.is_none_or(|want| {
+                            v.split('#')
+                                .next()
+                                .unwrap_or(v)
+                                .trim()
+                                .trim_matches('"')
+                                .trim_matches('\'')
+                                == want
+                        })
+                })
+            };
+            for (i, l) in lines.iter().enumerate() {
+                if !is_key(l, "example", None) {
+                    continue;
+                }
+                if l.trim_start()
+                    .split_once(':')
+                    .map(|(_, v)| v.split('#').next().unwrap_or(v).trim().is_empty())
+                    .unwrap_or(true)
+                {
+                    continue;
+                }
+                let c = indent(l);
+                let lo = i.saturating_sub(8);
+                let hi = (i + 8).min(lines.len());
+                let has_wpa_pattern = (lo..hi).any(|j| {
+                    j != i
+                        && indent(lines[j]) == c
+                        && is_key(lines[j], "pattern", Some(WPA_PASSWORD_PATTERN))
+                });
+                if has_wpa_pattern {
+                    wpa_examples += 1;
+                }
+            }
+        }
+        assert!(
+            wpa_examples >= 1,
+            "expected the corpus's example + same-indent WPA-password `pattern` pair, got {wpa_examples}"
+        );
+    }
+
     /// True when `s` is a well-formed RFC 3339 `date-time` string — the concrete
     /// syntax OpenAPI's `format: date-time` names (JSON Schema's `date-time` is
     /// RFC 3339 §5.6). Shape-only and lenient on the calendar (it range-checks each

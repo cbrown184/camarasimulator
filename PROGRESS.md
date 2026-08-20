@@ -5669,6 +5669,48 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-20 — Contract-test harness: added a **WPA-Personal-password-`pattern` example-conformance**
+  contract test (`src/registry.rs` `every_wpa_password_pattern_example_conforms_to_the_wpa_password_pattern`)
+  — where a mounted spec declares an inline `example` beside a **same-indent** `pattern:
+  "^[\x20-\x7E]{8,63}$"` (the network-access-domains `WpaPersonalDetail.password` field — the IEEE
+  802.11i WPA-Personal pre-shared-key rule: 8–63 printable ASCII characters), the example MUST match
+  it. A WPA-password example that is under 8 / over 63 characters, or that carries a non-printable
+  ASCII character (control char / DEL / non-ASCII UTF-8 scalar), is a self-contradictory schema whose
+  own validator rejects the sample it advertises, so a Redoc/Swagger prefill and a codegen client's
+  generated sample carry a value the field can never legally hold. The **twenty-sixth member of the
+  `pattern`-conformance family** after E.164/IMEI/ICCID/32-hex/name/MAC/token/result-code/
+  bounded-any-char (256-wide)/geohash/app-name/TAC/region/DNS-label/sink-URL/UUID/DPV-purpose/
+  no-semicolon/IMEISV/no-CR/LF/OTP-template/16-hex/4-hex/bounded-any-char (512-wide)/SSID, and the
+  **second over a printable-ASCII alphabet + bounded length range** after SSID — but the *first* with
+  **no** leading/trailing-space rule. Distinct from SSID on two axes: the range is `{8,63}` (an 8-char
+  floor + 63-char ceiling, neither shared with SSID's `{2,32}`), and the absence of the negative
+  lookarounds means a leading/trailing-space value is *legal* here yet rejected by the SSID member. So
+  a 7-char value (below this floor but above SSID's), a value in `(32, 63]` (above SSID's ceiling but
+  under this one), or a 64-char value (above this ceiling) is the fault only this member can catch; and
+  a leading/trailing-space password that SSID rejects must NOT be flagged here. Carries **no `format`
+  sibling** (there is no OpenAPI `wpa-password` format), so beyond the `format`-example family's reach.
+  New pure `matches_wpa_password_pattern` (8..=63 Unicode scalars, each in `'\x20'..='\x7E'`; no regex/
+  YAML dep) + `wpa_password_pattern_examples_malformed` extractor cloning `ssid_pattern_examples_
+  malformed`'s down-then-up dedent-bounded same-indent scoping, keyed on `WPA_PASSWORD_PATTERN` (written
+  as it appears raw in the double-quoted YAML source: two literal backslashes before each `x`, so
+  raw-string comparison against the corpus pattern is verbatim). The same-indent scan steps over the
+  corpus's intervening `minLength: 8` + `maxLength: 255` + a `description: |` block scalar (continuation
+  lines more deeply indented), so the `minLength`→`maxLength`→`pattern`→`description`→`example` shape
+  pairs correctly. Unit-covered (`wpa_password_pattern_example_extraction_rules`: matcher accepts corpus
+  `my-password` / 8-char floor / 63-char ceiling / leading+trailing-space / internal-space / full
+  printable range and rejects empty / 7-char / 64-char / embedded control / DEL / non-ASCII `café…`; a
+  7-char, 64-char, and a 7-char `PatternBelow` (pattern one line below — down-scan pairs it) flagged in
+  document order; a Good case across an intervening `minLength`+`maxLength`+`description`, a leading/
+  trailing-space in-range value (legal — the SSID-vs-WPA discriminator), a no-`pattern` sibling, an SSID
+  sibling (same alphabet, narrower length, space rule) with a 1-char value out of scope, a nested-`example`
+  payload, a cross-property split, and a block-opening `example:` property all cleared; ≥1-pair
+  non-vacuous floor — Network Access Domains is the only mounted spec with a WPA-Personal `password`).
+  Surveyed the corpus first: 1 example+WPA-password-`pattern` pair (network-access-domains
+  `WpaPersonalDetail.password`, `my-password` at 11 chars) → 0 drift; a live guard that fires the moment
+  a spec adds an out-of-range or non-printable WPA-password example. Test-side only — no request/response/
+  behaviour change, so no vendored-spec edits; the matcher, extractor and both tests live in the
+  `#[cfg(test)]` module, so nothing ships in the binary. `cargo test` 2826 green (was 2824; +2),
+  `cargo build --release` green, no new deps. — binary (release): 5.1M (5,323,160 B; unchanged).
 - 2026-08-20 — Contract-test harness: added a **SSID-`pattern` example-conformance** contract test
   (`src/registry.rs` `every_ssid_pattern_example_conforms_to_the_ssid_pattern`) — where a mounted
   spec declares an inline `example` beside a **same-indent** `pattern: "^(?! )[\x20-\x7E]{2,32}(?<! )$"`
