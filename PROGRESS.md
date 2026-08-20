@@ -5669,6 +5669,45 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-20 — Contract-test harness: added a **DNS-label-`pattern` example-conformance**
+  contract test (`src/registry.rs` `every_dns_label_pattern_example_conforms_to_the_dns_label_pattern`)
+  — where a mounted spec declares an inline `example` beside a **same-indent**
+  `pattern: '^[A-Za-z0-9]([A-Za-z0-9-]{0,53}[A-Za-z0-9])?$'` (the Application Endpoint Registration
+  `EdgeCloudZone` name/provider/region pattern), the example MUST be a 1–55-char run of ASCII
+  letters/digits/hyphens whose **first and last** characters are alphanumeric (no boundary hyphen).
+  An `example` is a sample instance of the schema, so a label the pattern rejects (a leading/trailing
+  hyphen, an underscore, a dot, a space, a value past the 55-char cap, or a placeholder) is a
+  self-contradictory schema whose own validator rejects the sample it advertises. The **thirteenth
+  member of the `pattern`-conformance family** after E.164/IMEI/ICCID/32-hex/name/MAC/token/
+  result-code/geohash/app-name/TAC/region-name, and the **first over an anchored alphabet with an
+  intrinsic length cap**: the closest sibling, the region pattern `^[A-Za-z0-9-]+$`, admits a boundary
+  hyphen this class forbids and is unbounded (its ceiling is a separate `maxLength`), so a
+  leading/trailing-hyphen label example is a fault the region matcher can't catch (each family member
+  is keyed on the exact pattern string, so the two never pair); the app-name pattern
+  `^[A-Za-z][A-Za-z0-9_]{1,63}$` requires a leading *letter*, admits `_`, and forbids `-`, a different
+  class again. The 55-char ceiling is intrinsic to the pattern (head + `{0,53}` + tail), looser
+  `maxLength: 64` guarded separately by `every_example_respects_its_string_length_bounds`, so this
+  member can't be expressed by any fixed-/ranged-length check. Carries no `format` sibling, so these
+  examples were previously unchecked. New pure `matches_dns_label_pattern` (1..=55 bytes; each ASCII
+  alphanumeric or `-`; first & last alphanumeric; no regex/YAML dep) + `dns_label_pattern_examples_
+  malformed` extractor (cloning `region_pattern_examples_malformed`'s down-then-up dedent-bounded
+  scoping, keyed on `DNS_LABEL_PATTERN`, stepping over the intervening `maxLength`/`description` block
+  the corpus properties carry between `pattern` and `example`), unit-covered
+  (`dns_label_pattern_example_extraction_rules`: the matcher clears `us-east-1`/`zone-us-east-1`/a
+  1-char/a 2-char/a 55-char label and rejects a 56-char, a leading-hyphen, a trailing-hyphen, an
+  underscore, a dot, a space, and an empty value; a leading-hyphen, a trailing-hyphen, an underscore,
+  and a pattern-below example flagged in document order; valid labels across an intervening
+  maxLength/description block, an adjacent pair, a no-`pattern` sibling, a **region-pattern** sibling
+  (`-region` skipped — proves exact-pattern keying), a nested-`example` payload, a cross-property
+  split, and a property literally named `example` all cleared; ≥2-pair non-vacuous floor). **Spec-doc
+  improvement in the same pass: the three `EdgeCloudZone` fields carried the pattern but no `example`,
+  so this pass added conforming examples (`zone-us-east-1` / `Acme-Edge` / `us-east-1`) to
+  `specs/application-endpoint-registration/vwip/openapi.yaml`, giving the guard a 3-pair non-vacuous
+  corpus → 0 drift; a live guard that fires the moment a spec adds a mis-shaped DNS-label example.**
+  The matcher, extractor and both tests live in the `#[cfg(test)]` module, so nothing ships in the
+  binary; the only shipped change is the three spec example lines (absorbed in section padding).
+  `cargo test` 2800 green (was 2798; +2), `cargo build --release` green, no new deps. — binary
+  (release): 5.1M (5,323,160 B; unchanged).
 - 2026-08-20 — Contract-test harness: added a **region-name-`pattern` example-conformance**
   contract test (`src/registry.rs`
   `every_region_pattern_example_conforms_to_the_region_pattern`) — where a mounted spec declares

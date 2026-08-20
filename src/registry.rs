@@ -29366,6 +29366,388 @@ components:
         );
     }
 
+    const DNS_LABEL_PATTERN: &str = r"^[A-Za-z0-9]([A-Za-z0-9-]{0,53}[A-Za-z0-9])?$";
+
+    /// True when `s` matches the DNS-label `pattern`
+    /// `^[A-Za-z0-9]([A-Za-z0-9-]{0,53}[A-Za-z0-9])?$` exactly: 1–55 characters, each an ASCII
+    /// letter, digit, or hyphen, whose **first and last** characters are alphanumeric (no boundary
+    /// hyphen). Hand-rolled (no regex dep) mirroring `matches_region_pattern`'s shape-only stance, so
+    /// a legitimately shaped label is never a false positive. Unlike the region pattern
+    /// `^[A-Za-z0-9-]+$` — which admits a leading/trailing hyphen and is unbounded — this pattern
+    /// pins **both** ends to an alphanumeric and caps the length at 55 in the pattern itself (a
+    /// leading char, then `{0,53}` inner chars, then a trailing char), so neither an
+    /// `every_example_respects_its_string_length_bounds` `maxLength` check nor the region matcher can
+    /// express it.
+    fn matches_dns_label_pattern(s: &str) -> bool {
+        let b = s.as_bytes();
+        // Non-ASCII bytes fail the class check below, so byte length equals character count here.
+        if b.is_empty() || b.len() > 55 {
+            return false;
+        }
+        if !b.iter().all(|&c| c.is_ascii_alphanumeric() || c == b'-') {
+            return false;
+        }
+        b[0].is_ascii_alphanumeric() && b[b.len() - 1].is_ascii_alphanumeric()
+    }
+
+    /// The 1-based line numbers, in document order, of every `example:` keyword whose inline scalar
+    /// value sits in a Schema Object declaring a *same-indent* DNS-label `pattern`
+    /// `^[A-Za-z0-9]([A-Za-z0-9-]{0,53}[A-Za-z0-9])?$` sibling yet does not match that pattern,
+    /// without a YAML dep. The DNS-label twin of `region_pattern_examples_malformed`: same scoping,
+    /// keyed on `DNS_LABEL_PATTERN` instead of `REGION_PATTERN`.
+    ///
+    /// In OpenAPI 3.0.x (JSON Schema) an `example` is a sample *instance* of the schema, so a field
+    /// constrained by `pattern` MUST carry an example the pattern accepts. A label example carrying a
+    /// boundary hyphen (`-x` / `x-`), an underscore, a dot, a space, or a value past the 55-char cap
+    /// advertises a sample the schema's own validator rejects, so a Redoc/Swagger prefill and a
+    /// codegen client's generated sample carry a value the field can never legally hold.
+    /// `^[A-Za-z0-9]([A-Za-z0-9-]{0,53}[A-Za-z0-9])?$` is the Application Endpoint Registration
+    /// `EdgeCloudZone` name/provider/region pattern, and — like the region/name patterns, unlike the
+    /// UUID patterns which sit beside a `format: uuid` already guarded by
+    /// `every_uuid_format_example_is_a_well_formed_uuid` — it carries no `format`, so these examples
+    /// are otherwise unchecked.
+    ///
+    /// Scoping mirrors `region_pattern_examples_malformed` exactly: only an `example` carrying an
+    /// inline scalar (a block/object example opens no inline value and is skipped) with a same-indent
+    /// `pattern` sibling *equal to* `DNS_LABEL_PATTERN` in the same Schema Object is inspected — the
+    /// sibling is scanned at the example's own indent, down through the object's block then up,
+    /// dedent-bounded, so a nested or following object's `pattern` never pairs, and an intervening
+    /// `maxLength`/`description` sibling at the same indent is stepped over (the corpus's
+    /// `EdgeCloudZone` properties carry a `maxLength` then a `description` between `pattern` and
+    /// `example`). In particular the region pattern `^[A-Za-z0-9-]+$` — which admits a boundary
+    /// hyphen this class forbids — is a *different* pattern and never pairs. An `example:` nested
+    /// inside an outer `example:`/`examples:` payload (sample data, not a schema keyword) is skipped.
+    /// Only the DNS-label pattern is matched.
+    fn dns_label_pattern_examples_malformed(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let raw_inline = |l: &str, name: &str| -> Option<String> {
+            let (k, v) = l.trim_start().split_once(':')?;
+            if k.trim() != name {
+                return None;
+            }
+            let v = v.split('#').next().unwrap_or(v).trim();
+            if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            }
+        };
+        // Whether a same-indent `pattern:` sibling of line `i` (indent `c`) in the same Schema
+        // Object equals the DNS-label pattern: scan down through the object's block then up,
+        // dedent-bounded so a nested or following object's `pattern` never pairs.
+        let sibling_is_dns_label_pattern = |i: usize, c: usize| -> bool {
+            let is_dns_label_pattern = |l: &str| -> bool {
+                raw_inline(l, "pattern")
+                    .map(|v| v.trim_matches('"').trim_matches('\'') == DNS_LABEL_PATTERN)
+                    .unwrap_or(false)
+            };
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_dns_label_pattern(l) {
+                    return true;
+                }
+                j += 1;
+            }
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_dns_label_pattern(l) {
+                    return true;
+                }
+            }
+            false
+        };
+        // True when line `i` (indent `c`) sits inside an outer `example:`/`examples:` payload —
+        // some enclosing container key up the indent ladder is `example`/`examples` — so an
+        // inner `example` key there is sample data, not a schema keyword.
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some(raw) = raw_inline(line, "example") else {
+                continue;
+            };
+            let c = indent(line);
+            if inside_example(i, c) {
+                continue;
+            }
+            if !sibling_is_dns_label_pattern(i, c) {
+                continue;
+            }
+            let value = raw.trim_matches('"').trim_matches('\'');
+            if !matches_dns_label_pattern(value) {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_dns_label_pattern_example_conforms_to_the_dns_label_pattern() {
+        // Contract-harness invariant (OpenAPI 3.0.x / JSON-Schema structural rule): where a Schema
+        // Object declares an inline `example` beside a same-indent DNS-label `pattern`
+        // (`^[A-Za-z0-9]([A-Za-z0-9-]{0,53}[A-Za-z0-9])?$`, the Application Endpoint Registration
+        // `EdgeCloudZone` name/provider/region pattern), the example MUST match that pattern. An
+        // `example` is a sample *instance* of the schema, so a value the `pattern` rejects — a label
+        // with a leading/trailing hyphen, an underscore, a dot, a space, or more than 55 characters —
+        // is a self-contradictory schema whose own validator rejects the sample it advertises, so a
+        // Redoc/Swagger prefill and a codegen client's generated sample carry a value no field
+        // constrained by this pattern can legally hold.
+        //
+        // The thirteenth member of the `pattern`-conformance family after E.164 / IMEI / ICCID /
+        // 32-hex / name / MAC / token / result-code / geohash / app-name / TAC / region-name, and the
+        // first over an **anchored** alphabet — the leading and trailing characters must both be
+        // alphanumeric (no boundary hyphen) and the length is capped at 55 by the pattern itself (a
+        // head char, `{0,53}` inner chars, a tail char). The closest sibling, the region pattern
+        // `^[A-Za-z0-9-]+$`, admits a boundary hyphen this class forbids and is unbounded, so a label
+        // example with a leading/trailing hyphen is a fault the region matcher cannot catch (each
+        // family member is keyed on the exact pattern string, so the two never pair); the app-name
+        // pattern `^[A-Za-z][A-Za-z0-9_]{1,63}$` requires a leading *letter*, admits `_`, and forbids
+        // `-`, so it too is a different class. The 55-char ceiling is intrinsic to the pattern — the
+        // accompanying `maxLength: 64` is looser and guarded separately by
+        // `every_example_respects_its_string_length_bounds` — so this member cannot be expressed by
+        // any fixed- or ranged-length check. Like the region/name patterns it carries no `format`
+        // sibling, so its examples are beyond the `format`-example family's reach; a general
+        // regex-engine test would need a new dependency (declined on binary-size grounds), so a
+        // concrete hand-validated shape is matched. Verified true across all mounted specs before
+        // asserting (Application Endpoint Registration declares three such example+pattern pairs,
+        // every one a conforming label — `zone-us-east-1` / `Acme-Edge` / `us-east-1`).
+        for api in APIS {
+            let offenders = dns_label_pattern_examples_malformed(api.body);
+            assert!(
+                offenders.is_empty(),
+                "{} spec declares an `example` beside a same-indent DNS-label \
+                 `pattern: '^[A-Za-z0-9]([A-Za-z0-9-]{{0,53}}[A-Za-z0-9])?$'` that does not match \
+                 that pattern (a sample the pattern's own validator would reject) at `example:` \
+                 line(s): {:?}",
+                api.name,
+                offenders
+            );
+        }
+    }
+
+    #[test]
+    fn dns_label_pattern_example_extraction_rules() {
+        // Unit-cover `matches_dns_label_pattern` and `dns_label_pattern_examples_malformed` so the
+        // contract test above can't pass vacuously and its detection is pinned.
+        //
+        // Shape check: the corpus labels `us-east-1` / `zone-us-east-1`, a single character, a
+        // two-char label, and a 55-char label (the pattern's ceiling) all pass; a 56-char label, a
+        // leading-hyphen (`-bad`) and a trailing-hyphen (`bad-`) label — both admitted by the region
+        // pattern but not this one — an underscore (`us_east`), a dot (`v1.2`), a space, and an empty
+        // string all fail. The anchored ends and the 55-char cap are the whole point of the pattern.
+        assert!(matches_dns_label_pattern("us-east-1"));
+        assert!(matches_dns_label_pattern("zone-us-east-1"));
+        assert!(matches_dns_label_pattern("a"));
+        assert!(matches_dns_label_pattern("A1"));
+        assert!(matches_dns_label_pattern(&"a".repeat(55))); // pattern ceiling (head + 53 + tail)
+        assert!(!matches_dns_label_pattern(&"a".repeat(56))); // one over the ceiling
+        assert!(!matches_dns_label_pattern("-bad")); // leading hyphen — a region char, not a boundary
+        assert!(!matches_dns_label_pattern("bad-")); // trailing hyphen
+        assert!(!matches_dns_label_pattern("us_east")); // underscore — an app-name char, not this one
+        assert!(!matches_dns_label_pattern("v1.2")); // dot
+        assert!(!matches_dns_label_pattern("us east")); // space
+        assert!(!matches_dns_label_pattern("")); // empty
+
+        // Extractor: two valid labels (one across an intervening `maxLength` + `description` block —
+        // the corpus's property shape — and one adjacent) pass; a leading-hyphen, trailing-hyphen,
+        // and underscore value are flagged; a bad value whose `pattern` is declared *below* it is
+        // still paired (down-scan) and flagged; a value with no `pattern` sibling and one whose
+        // sibling is the *different* region pattern `^[A-Za-z0-9-]+$` (which admits a boundary hyphen)
+        // are skipped; an inner `example` inside an outer `example:` payload is skipped; an example in
+        // one property never pairs with a following property's `pattern` across the dedent; and a
+        // property literally named `example` (opening a block) is skipped.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    GoodBlockDesc:
+      type: string
+      pattern: '^[A-Za-z0-9]([A-Za-z0-9-]{0,53}[A-Za-z0-9])?$'
+      maxLength: 64
+      description: >-
+        the edge cloud zone name
+      example: zone-us-east-1
+    GoodAdjacent:
+      type: string
+      pattern: '^[A-Za-z0-9]([A-Za-z0-9-]{0,53}[A-Za-z0-9])?$'
+      example: us-east-1
+    LeadingHyphen:
+      type: string
+      pattern: '^[A-Za-z0-9]([A-Za-z0-9-]{0,53}[A-Za-z0-9])?$'
+      example: \"-bad\"
+    TrailingHyphen:
+      type: string
+      pattern: '^[A-Za-z0-9]([A-Za-z0-9-]{0,53}[A-Za-z0-9])?$'
+      example: \"bad-\"
+    HasUnderscore:
+      type: string
+      pattern: '^[A-Za-z0-9]([A-Za-z0-9-]{0,53}[A-Za-z0-9])?$'
+      example: \"us_east\"
+    PatternBelow:
+      type: string
+      example: \"-bad\"
+      pattern: '^[A-Za-z0-9]([A-Za-z0-9-]{0,53}[A-Za-z0-9])?$'
+    NoPattern:
+      type: string
+      example: \"-no-pattern-\"
+    RegionPattern:
+      type: string
+      pattern: '^[A-Za-z0-9-]+$'
+      example: \"-region\"
+    InExample:
+      type: object
+      example:
+        pattern: '^[A-Za-z0-9]([A-Za-z0-9-]{0,53}[A-Za-z0-9])?$'
+        example: \"-bad thing\"
+    Split:
+      type: object
+      properties:
+        a:
+          example: \"-bad\"
+        b:
+          type: string
+          pattern: '^[A-Za-z0-9]([A-Za-z0-9-]{0,53}[A-Za-z0-9])?$'
+    NamedExample:
+      type: object
+      properties:
+        example:
+          type: string
+          pattern: '^[A-Za-z0-9]([A-Za-z0-9-]{0,53}[A-Za-z0-9])?$'
+";
+        // Flagged, in document order: LeadingHyphen.example (`-bad`), TrailingHyphen.example
+        // (`bad-`), HasUnderscore.example (`us_east`), and PatternBelow.example (value `-bad`, label
+        // `pattern` a line below — down-scan pairs it). Not flagged: GoodBlockDesc/GoodAdjacent
+        // (valid, one across an intervening maxLength/description block); NoPattern (no `pattern`
+        // sibling); RegionPattern (sibling is the region pattern `^[A-Za-z0-9-]+$`, not the DNS-label
+        // pattern — a leading-hyphen value the DNS-label matcher would reject, proving exact-pattern
+        // keying); InExample's inner `example` (inside the outer `example:` payload); Split.a.example
+        // (its only DNS-label `pattern` is in the following property past a dedent); and
+        // NamedExample's `example:` property opening a block (no inline value).
+        let flagged = dns_label_pattern_examples_malformed(body);
+        let flagged_vals: Vec<&str> = flagged
+            .iter()
+            .map(|&n| body.lines().nth(n - 1).unwrap().trim())
+            .collect();
+        assert_eq!(
+            flagged_vals,
+            vec![
+                "example: \"-bad\"",
+                "example: \"bad-\"",
+                "example: \"us_east\"",
+                "example: \"-bad\"",
+            ]
+        );
+
+        // Non-vacuous floor: across every registered spec every `example` beside a same-indent
+        // DNS-label `pattern` matches it (the invariant the contract test asserts), and the corpus
+        // actually declares such pairs — so the pattern-comparison path runs on real data and a
+        // broken (always-empty) extractor can't hide behind a corpus that never pairs. Only
+        // Application Endpoint Registration declares this pattern (three `EdgeCloudZone` schemas), so
+        // the floor is 2. Count pairs with a same-indent detector independent of the extractor's
+        // shape comparison.
+        let mut dns_label_examples = 0usize;
+        for api in APIS {
+            assert!(
+                dns_label_pattern_examples_malformed(api.body).is_empty(),
+                "{}: every example beside a same-indent DNS-label `pattern` must match it",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            let is_key = |l: &str, name: &str, val: Option<&str>| {
+                l.trim_start().split_once(':').is_some_and(|(k, v)| {
+                    k.trim() == name
+                        && val.is_none_or(|want| {
+                            v.split('#')
+                                .next()
+                                .unwrap_or(v)
+                                .trim()
+                                .trim_matches('"')
+                                .trim_matches('\'')
+                                == want
+                        })
+                })
+            };
+            for (i, l) in lines.iter().enumerate() {
+                if !is_key(l, "example", None) {
+                    continue;
+                }
+                if l.trim_start()
+                    .split_once(':')
+                    .map(|(_, v)| v.split('#').next().unwrap_or(v).trim().is_empty())
+                    .unwrap_or(true)
+                {
+                    continue;
+                }
+                let c = indent(l);
+                let lo = i.saturating_sub(6);
+                let hi = (i + 6).min(lines.len());
+                let has_dns_label = (lo..hi).any(|j| {
+                    j != i
+                        && indent(lines[j]) == c
+                        && is_key(lines[j], "pattern", Some(DNS_LABEL_PATTERN))
+                });
+                if has_dns_label {
+                    dns_label_examples += 1;
+                }
+            }
+        }
+        assert!(
+            dns_label_examples >= 2,
+            "expected the corpus's example + same-indent DNS-label `pattern` pairs, got {dns_label_examples}"
+        );
+    }
+
     /// True when `s` is a well-formed RFC 3339 `date-time` string — the concrete
     /// syntax OpenAPI's `format: date-time` names (JSON Schema's `date-time` is
     /// RFC 3339 §5.6). Shape-only and lenient on the calendar (it range-checks each

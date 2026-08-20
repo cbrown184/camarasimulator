@@ -667,16 +667,19 @@ components:
           maxLength: 64
           pattern: '^[A-Za-z0-9]([A-Za-z0-9-]{0,53}[A-Za-z0-9])?$'
           description: The Edge Cloud Zone name.
+          example: zone-us-east-1
         edgeCloudProvider:
           type: string
           maxLength: 64
           pattern: '^[A-Za-z0-9]([A-Za-z0-9-]{0,53}[A-Za-z0-9])?$'
           description: The Edge Cloud Provider.
+          example: Acme-Edge
         edgeCloudRegion:
           type: string
           maxLength: 64
           pattern: '^[A-Za-z0-9]([A-Za-z0-9-]{0,53}[A-Za-z0-9])?$'
           description: The Edge Cloud Region.
+          example: us-east-1
         edgeCloudZoneStatus:
           type: string
           enum:
