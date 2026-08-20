@@ -5669,6 +5669,46 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-20 — Contract-test harness: added a **correlator (bounded restricted-alphabet)-`pattern`
+  example-conformance** contract test (`src/registry.rs`
+  `every_correlator_pattern_example_conforms_to_the_correlator_pattern`) — where a mounted spec
+  declares an inline `example` beside a **same-indent** `pattern:
+  ^[a-zA-Z0-9-_:;.\/<>{}]{0,256}$` (the iot-sim-fraud-prevention `XCorrelator` field's shape — an
+  `x-correlator` request/response header value, 0–256 chars of a fixed alphanumeric-plus-ten-
+  punctuation alphabet), the example MUST match it. A correlator example bearing a character outside
+  the restricted set (a space, `@`, `#`, `,`, `!`, a backslash — the `\/` in the class is an escaped
+  slash, so `/` is admitted but `\` is not) or longer than 256 chars is a self-contradictory schema
+  whose own validator rejects the sample it advertises, so a Redoc/Swagger prefill and a codegen
+  client's generated sample carry a value the field can never legally hold. The **thirty-first
+  member of the `pattern`-conformance family** after E.164/IMEI/ICCID/32-hex/name/MAC/token/
+  result-code/bounded-any-char (256)/geohash/app-name/TAC/region/DNS-label/sink-URL/UUID/DPV-purpose/
+  no-semicolon/IMEISV/no-CR/LF/OTP-template/16-hex/4-hex/bounded-any-char (512)/SSID/WPA-password/
+  semver/email/full-date/campaign-id, and the **first over a bounded *positive restricted* ASCII
+  alphabet**: the nearest neighbours are the two `[\s\S]{0,N}` members (bounded-any-char, 256/512)
+  and no-semicolon (`[^;]*$`) — each a universal-or-complement class that admits the space/`@`/`#`/`,`
+  this alphabet forbids — so a character outside the restricted set, legal under those members, is
+  the fault only this member can catch. Carries **no `format` sibling** (`XCorrelator` is
+  `type: string` with only `description` + `example` + `pattern`), so it is beyond the
+  `format`-example family's reach. New pure `matches_correlator_pattern` (byte-length ≤ 256; every
+  byte `is_ascii_alphanumeric` or one of `- _ : ; . / < > { }`; empty string accepted at the zero
+  floor; no regex/YAML dep) + `correlator_pattern_examples_malformed` extractor cloning
+  `campaign_id_pattern_examples_malformed`'s down-then-up dedent-bounded same-indent scoping, keyed
+  on `CORRELATOR_PATTERN` (authored raw = the corpus's **unquoted** pattern text, so `trim_matches`
+  is a no-op). The corpus authors `example` **above** the `pattern`, so the down-scan pairs them.
+  Unit-covered (`correlator_pattern_example_extraction_rules`: matcher accepts corpus value /
+  punctuation sweep / brace marks / empty / 256-char ceiling and rejects 257-char / space / `@` /
+  `#` / `,` / `!` / backslash / non-ASCII; a space, `@`, and comma `PatternBelow` flagged in document
+  order; a Good case across an intervening `description`, a quoted good value, a no-`pattern` sibling,
+  an any-char-bounded-`pattern` sibling out of scope proving the restricted and universal bounded
+  patterns never cross-pair, a nested-`example` payload, a cross-property split, and a block-opening
+  `example:` property all cleared; ≥1-pair non-vacuous floor — iot-sim-fraud-prevention is the only
+  mounted spec with this restricted-alphabet `pattern`). Surveyed the corpus first: 1
+  example+correlator-`pattern` pair (iot-sim-fraud-prevention `XCorrelator`,
+  `123e4567-e89b-12d3-a456-426614174000`) → 0 drift; a live guard that fires the moment a spec adds a
+  malformed correlator example. Test-side only — no request/response/behaviour change, so no
+  vendored-spec edits; the matcher, extractor and both tests live in the `#[cfg(test)]` module, so
+  nothing ships in the binary. `cargo test` 2836 green (was 2834; +2), `cargo build --release` green,
+  no new deps. — binary (release): 5.1M (5,323,160 B; unchanged).
 - 2026-08-20 — Contract-test harness: added a **campaign-id (`UUID@domain`)-`pattern`
   example-conformance** contract test (`src/registry.rs`
   `every_campaign_id_pattern_example_conforms_to_the_campaign_id_pattern`) — where a mounted spec

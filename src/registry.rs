@@ -36390,6 +36390,393 @@ components:
         );
     }
 
+    // NB: written as it appears *raw in the YAML source* (unquoted, so `\/` is authored as a
+    // literal backslash-slash and every brace is a literal), because `raw_inline("pattern")`
+    // returns the source substring after the colon (no YAML-escape decoding) and this constant is
+    // compared to it verbatim. The iot-sim-fraud-prevention `XCorrelator` field carries this
+    // pattern unquoted, so the extractor's `trim_matches('"'/'\'')` is a no-op on it (mirroring
+    // how the other unquoted corpus patterns are handled).
+    const CORRELATOR_PATTERN: &str = r"^[a-zA-Z0-9-_:;.\/<>{}]{0,256}$";
+
+    /// True when `s` matches the correlator `pattern` `^[a-zA-Z0-9-_:;.\/<>{}]{0,256}$` exactly —
+    /// the bounded correlation-id shape the iot-sim-fraud-prevention `XCorrelator` field (an
+    /// `x-correlator` request/response header value) uses. **Shape-only**: 0–256 characters, each
+    /// drawn from the class `[a-zA-Z0-9-_:;.\/<>{}]` — an ASCII letter/digit or one of the ten
+    /// punctuation marks `- _ : ; . / < > { }` (the `\/` in the pattern is an escaped slash, so
+    /// the slash is admitted but a backslash is not). The empty string matches (`{0,256}` has a
+    /// zero floor). Any other byte (a space, `@`, `#`, `,`, `!`, a backslash, a non-ASCII byte) or
+    /// a length past 256 is a reject. Hand-rolled, no regex dep — every accepted byte is
+    /// single-byte ASCII, so the byte-length check equals the pattern's character count.
+    fn matches_correlator_pattern(s: &str) -> bool {
+        s.len() <= 256
+            && s.bytes().all(|b| {
+                b.is_ascii_alphanumeric()
+                    || matches!(
+                        b,
+                        b'-' | b'_' | b':' | b';' | b'.' | b'/' | b'<' | b'>' | b'{' | b'}'
+                    )
+            })
+    }
+
+    /// The 1-based line numbers, in document order, of every `example:` keyword whose inline
+    /// scalar value sits in a Schema Object declaring a *same-indent* correlator `pattern` sibling
+    /// (`^[a-zA-Z0-9-_:;.\/<>{}]{0,256}$`) yet is not a value that pattern accepts, without a YAML
+    /// dep. The bounded-restricted-alphabet twin of `campaign_id_pattern_examples_malformed`: same
+    /// scoping, keyed on `CORRELATOR_PATTERN`.
+    ///
+    /// In OpenAPI 3.0.x (JSON Schema) an `example` is a sample *instance* of the schema, so a
+    /// field constrained by `pattern` MUST carry an example the pattern accepts. A correlator
+    /// example with a character outside the restricted alphabet (a space, `@`, `#`, `,`, …) or
+    /// longer than 256 characters is a sample the schema's own validator rejects, so a
+    /// Redoc/Swagger prefill and a codegen client's generated sample carry a value the field can
+    /// never legally hold. The `XCorrelator` field carries **no `format` sibling** (it is
+    /// `type: string` with only `description` + `example` + `pattern`), so these examples are
+    /// beyond the `format`-example family's reach.
+    ///
+    /// Scoping mirrors `campaign_id_pattern_examples_malformed` exactly: only an `example`
+    /// carrying an inline scalar (a block/object example opens no inline value and is skipped) with
+    /// a same-indent `pattern` sibling *equal to* `CORRELATOR_PATTERN` in the same Schema Object is
+    /// inspected — the sibling is scanned at the example's own indent, down through the object's
+    /// block then up, dedent-bounded, so a nested or following object's `pattern` never pairs, and
+    /// the closely-related any-char bounded `pattern` `^[\s\S]{0,256}$` (which admits characters
+    /// this alphabet forbids) never cross-pairs. An `example:` nested inside an outer
+    /// `example:`/`examples:` payload is skipped.
+    fn correlator_pattern_examples_malformed(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let raw_inline = |l: &str, name: &str| -> Option<String> {
+            let (k, v) = l.trim_start().split_once(':')?;
+            if k.trim() != name {
+                return None;
+            }
+            let v = v.split('#').next().unwrap_or(v).trim();
+            if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            }
+        };
+        // Whether a same-indent `pattern:` sibling of line `i` (indent `c`) in the same Schema
+        // Object equals the correlator pattern: scan down through the object's block then up,
+        // dedent-bounded so a nested or following object's `pattern` never pairs.
+        let sibling_is_correlator_pattern = |i: usize, c: usize| -> bool {
+            let is_correlator_pattern = |l: &str| -> bool {
+                raw_inline(l, "pattern")
+                    .map(|v| v.trim_matches('"').trim_matches('\'') == CORRELATOR_PATTERN)
+                    .unwrap_or(false)
+            };
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_correlator_pattern(l) {
+                    return true;
+                }
+                j += 1;
+            }
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_correlator_pattern(l) {
+                    return true;
+                }
+            }
+            false
+        };
+        // True when line `i` (indent `c`) sits inside an outer `example:`/`examples:` payload —
+        // some enclosing container key up the indent ladder is `example`/`examples` — so an inner
+        // `example` key there is sample data, not a schema keyword.
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some(raw) = raw_inline(line, "example") else {
+                continue;
+            };
+            let c = indent(line);
+            if inside_example(i, c) {
+                continue;
+            }
+            if !sibling_is_correlator_pattern(i, c) {
+                continue;
+            }
+            let value = raw.trim_matches('"').trim_matches('\'');
+            if !matches_correlator_pattern(value) {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_correlator_pattern_example_conforms_to_the_correlator_pattern() {
+        // Contract-harness invariant (OpenAPI 3.0.x / JSON-Schema structural rule): where a Schema
+        // Object declares an inline `example` beside a same-indent correlator `pattern`
+        // (`^[a-zA-Z0-9-_:;.\/<>{}]{0,256}$`, the bounded correlation-id shape the
+        // iot-sim-fraud-prevention `XCorrelator` field — an `x-correlator` header value — uses
+        // verbatim), the example MUST match that pattern. An `example` is a sample *instance* of
+        // the schema, so a value with a character outside the restricted alphabet (a space, `@`,
+        // `#`, `,`, …) or longer than 256 characters is a self-contradictory schema whose own
+        // validator rejects the sample it advertises, so a Redoc/Swagger prefill and a codegen
+        // client's generated sample carry a value no field constrained by this pattern can hold.
+        //
+        // The thirty-first member of the `pattern`-conformance family after E.164 / IMEI / ICCID /
+        // 32-hex / name / MAC / token / result-code / bounded-any-char (256-wide) / geohash /
+        // app-name / TAC / region / DNS-label / sink-URL / UUID / DPV-purpose / no-semicolon /
+        // IMEISV / no-CR/LF / OTP-template / 16-hex / 4-hex / bounded-any-char (512-wide) / SSID /
+        // WPA-password / semver / email / full-date / campaign-id, and the **first over a bounded
+        // *positive restricted* ASCII alphabet** (a fixed alphanumeric-plus-ten-punctuation class
+        // with a 0–256 length window). The nearest neighbours are the two `[\s\S]{0,N}` members
+        // (bounded-any-char, 256- and 512-wide) and no-semicolon (`[^;]*$`): each is a *universal
+        // or complement* class that admits the space / `@` / `#` / `,` this alphabet forbids, so a
+        // character outside the restricted set — legal under those members — is the fault only
+        // this member can catch. Like those members the `XCorrelator` field carries no `format`
+        // sibling (`type: string` with only `description` + `example` + `pattern`), so its
+        // examples are beyond the `format`-example family's reach; a general regex-engine test
+        // would need a new dependency (declined on binary-size grounds), so a concrete
+        // hand-validated shape is matched. Verified true across all mounted specs before asserting
+        // (iot-sim-fraud-prevention declares one such example+pattern pair — the `XCorrelator`
+        // field, `123e4567-e89b-12d3-a456-426614174000`).
+        for api in APIS {
+            let offenders = correlator_pattern_examples_malformed(api.body);
+            assert!(
+                offenders.is_empty(),
+                "{} spec declares an `example` beside a same-indent correlator \
+                 `pattern` (a bounded `[a-zA-Z0-9-_:;.\\/<>{{}}]{{0,256}}` alphabet) that does not \
+                 match that pattern (a sample the pattern's own validator would reject) at \
+                 `example:` line(s): {:?}",
+                api.name,
+                offenders
+            );
+        }
+    }
+
+    #[test]
+    fn correlator_pattern_example_extraction_rules() {
+        // Unit-cover `matches_correlator_pattern` and `correlator_pattern_examples_malformed` so
+        // the contract test above can't pass vacuously and its detection is pinned.
+        //
+        // Shape check: the corpus value, a punctuation sweep exercising eight of the ten allowed
+        // marks, a value with the two brace marks (covered only here — braces can't ride through
+        // the `format!` synthetic body), the empty string (zero floor), and a 256-char value (the
+        // ceiling) all pass; a 257-char value, and values bearing a space / `@` / `#` / `,` / `!`
+        // / a backslash / a non-ASCII byte all fail.
+        assert!(matches_correlator_pattern(
+            "123e4567-e89b-12d3-a456-426614174000"
+        )); // corpus example
+        assert!(matches_correlator_pattern("req:1;a-b.c/d_2<e>")); // punctuation sweep
+        assert!(matches_correlator_pattern("a{b}c")); // brace marks
+        assert!(matches_correlator_pattern("")); // empty (zero floor)
+        assert!(matches_correlator_pattern(&"a".repeat(256))); // at the 256 ceiling
+        assert!(!matches_correlator_pattern(&"a".repeat(257))); // past the ceiling
+        assert!(!matches_correlator_pattern("abc def")); // space not in class
+        assert!(!matches_correlator_pattern("req@1")); // `@` not in class
+        assert!(!matches_correlator_pattern("a#b")); // `#` not in class
+        assert!(!matches_correlator_pattern("a,b")); // `,` not in class
+        assert!(!matches_correlator_pattern("a!b")); // `!` not in class
+        assert!(!matches_correlator_pattern(r"a\b")); // backslash not in class (`\/` admits `/` only)
+        assert!(!matches_correlator_pattern("café")); // non-ASCII byte
+
+        // Extractor: a valid unquoted and a valid quoted correlator value pass — the first across
+        // an intervening same-indent `description` sibling (mirroring the corpus's
+        // `type`→`pattern`→`description`→`example` shape), proving the same-indent scan steps over
+        // it. Malformed samples are flagged in document order; a value with no `pattern` sibling
+        // and one whose sibling is the *closely-related* any-char bounded `pattern` `^[\s\S]{0,256}$`
+        // (which admits a space) are skipped, proving the restricted and universal bounded patterns
+        // never cross-pair; an inner `example` inside an outer `example:` payload is skipped; an
+        // example in one property never pairs with a following property's `pattern` across the
+        // dedent; and a property literally named `example` (opening a block) is skipped.
+        let body = format!(
+            "openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    GoodShape:
+      type: string
+      pattern: {p}
+      description: Correlation id for the request.
+      example: 123e4567-e89b-12d3-a456-426614174000
+    GoodQuoted:
+      type: string
+      pattern: {p}
+      example: \"req:1;a-b.c/d_2<e>\"
+    HasSpace:
+      type: string
+      pattern: {p}
+      example: abc def
+    HasAt:
+      type: string
+      pattern: {p}
+      example: req@1
+    PatternBelow:
+      type: string
+      example: a,b
+      pattern: {p}
+    NoPattern:
+      type: string
+      example: abc def
+    OtherPattern:
+      type: string
+      pattern: {t}
+      example: has space here
+    InExample:
+      type: object
+      example:
+        pattern: {p}
+        example: abc def
+    Split:
+      type: object
+      properties:
+        a:
+          example: abc def
+        b:
+          type: string
+          pattern: {p}
+    NamedExample:
+      type: object
+      properties:
+        example:
+          type: string
+          pattern: {p}
+",
+            p = CORRELATOR_PATTERN,
+            t = TEXT256_PATTERN,
+        );
+        // Flagged, in document order: HasSpace.example (a space); HasAt.example (an `@`);
+        // PatternBelow.example (a comma, with `pattern` a line below — down-scan pairs it). Not
+        // flagged: GoodShape / GoodQuoted (both valid; the former across an intervening
+        // description, proving the same-indent scan steps over it); NoPattern (no `pattern`
+        // sibling); OtherPattern (sibling is the any-char bounded pattern, not the correlator
+        // pattern — its space-bearing value is out of scope here, proving the two never
+        // cross-pair); InExample's inner `example` (inside the outer `example:` payload);
+        // Split.a.example (its only correlator `pattern` is in the following property past a
+        // dedent); and NamedExample's `example:` property opening a block (no inline value).
+        let flagged = correlator_pattern_examples_malformed(&body);
+        let flagged_props: Vec<&str> = flagged
+            .iter()
+            .map(|&n| {
+                let lines: Vec<&str> = body.lines().collect();
+                let mut k = n - 1;
+                loop {
+                    let l = lines[k];
+                    let ind = l.len() - l.trim_start().len();
+                    if ind == 4 && l.trim_end().ends_with(':') {
+                        break l.trim().trim_end_matches(':');
+                    }
+                    if k == 0 {
+                        break "";
+                    }
+                    k -= 1;
+                }
+            })
+            .collect();
+        assert_eq!(flagged_props, vec!["HasSpace", "HasAt", "PatternBelow"]);
+
+        // Non-vacuous floor: across every registered spec every `example` beside a same-indent
+        // correlator `pattern` matches it (the invariant the contract test asserts), and the
+        // corpus actually declares such a pair — so the pattern-comparison path runs on real data
+        // and a broken (always-empty) extractor can't hide behind a corpus that never pairs.
+        // iot-sim-fraud-prevention is the only mounted spec with this restricted-alphabet
+        // `pattern`, so the floor is one; count pairs with a same-indent detector independent of
+        // the extractor's shape comparison.
+        let mut correlator_examples = 0usize;
+        for api in APIS {
+            assert!(
+                correlator_pattern_examples_malformed(api.body).is_empty(),
+                "{}: every example beside a same-indent correlator `pattern` must match it",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            let is_key = |l: &str, name: &str, val: Option<&str>| {
+                l.trim_start().split_once(':').is_some_and(|(k, v)| {
+                    k.trim() == name
+                        && val.is_none_or(|want| {
+                            v.split('#')
+                                .next()
+                                .unwrap_or(v)
+                                .trim()
+                                .trim_matches('"')
+                                .trim_matches('\'')
+                                == want
+                        })
+                })
+            };
+            for (i, l) in lines.iter().enumerate() {
+                if !is_key(l, "example", None) {
+                    continue;
+                }
+                if l.trim_start()
+                    .split_once(':')
+                    .map(|(_, v)| v.split('#').next().unwrap_or(v).trim().is_empty())
+                    .unwrap_or(true)
+                {
+                    continue;
+                }
+                let c = indent(l);
+                let lo = i.saturating_sub(8);
+                let hi = (i + 8).min(lines.len());
+                let has_correlator_pattern = (lo..hi).any(|j| {
+                    j != i
+                        && indent(lines[j]) == c
+                        && is_key(lines[j], "pattern", Some(CORRELATOR_PATTERN))
+                });
+                if has_correlator_pattern {
+                    correlator_examples += 1;
+                }
+            }
+        }
+        assert!(
+            correlator_examples >= 1,
+            "expected the corpus's example + same-indent correlator `pattern` pair, got {correlator_examples}"
+        );
+    }
+
     /// True when `s` is a well-formed RFC 3339 `date-time` string — the concrete
     /// syntax OpenAPI's `format: date-time` names (JSON Schema's `date-time` is
     /// RFC 3339 §5.6). Shape-only and lenient on the calendar (it range-checks each
