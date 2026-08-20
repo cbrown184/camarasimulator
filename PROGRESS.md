@@ -5669,6 +5669,40 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-20 — Contract-test harness: added a **16-digit IMEISV-`pattern` example-conformance**
+  contract test (`src/registry.rs` `every_imeisv_pattern_example_conforms_to_the_imeisv_pattern`)
+  — where a mounted spec declares an inline `example` beside a **same-indent**
+  `pattern: '^[0-9]{16}$'` (the Device Identifier `imeisv` field — an IMEI's 14-digit body plus a
+  2-digit software-version suffix), the example MUST match it. An `example` is a sample instance,
+  so an IMEISV sample that is not exactly 16 digits — a digit dropped/added, or a 15-digit IMEI
+  pasted into the 16-digit field — is a self-contradictory schema whose own validator rejects the
+  sample it advertises. The **nineteenth member of the `pattern`-conformance family** after E.164/
+  IMEI/ICCID/32-hex/name/MAC/token/result-code/bounded-any-char/geohash/app-name/TAC/region/
+  DNS-label/sink-URL/UUID/DPV-purpose/no-semicolon, and the **fourth pure fixed-length
+  decimal-digit run** after IMEI (`^[0-9]{15}$`), ICCID (`^[0-9]{19,20}$`) and TAC (`^[0-9]{8}$`)
+  — the first pinning **exactly 16** digits. Each member is keyed on the exact pattern string, so
+  the 15-digit IMEI and 8-digit TAC members (siblings of `imeisv` in the very same
+  `DeviceIdentifierResult` schema) never pair with `^[0-9]{16}$`: a 15-/17-digit or non-digit
+  value beside the IMEISV pattern is the fault none of those length-specific digit-run members can
+  catch (an IMEISV that is exactly 15 digits passes the IMEI matcher yet is a malformed IMEISV).
+  Carries **no `format` sibling**, so beyond the `format`-example family's reach. New pure
+  `matches_imeisv_pattern` (`len()==16` + all `is_ascii_digit`; no regex/YAML dep) +
+  `imeisv_pattern_examples_malformed` extractor cloning `imei_pattern_examples_malformed`'s
+  down-then-up dedent-bounded same-indent scoping, keyed on `IMEISV_PATTERN` — the same-indent scan
+  steps over the corpus's intervening `maxLength: 16` sibling and folded `description: >-` block, so
+  the `description`→`pattern`→`maxLength`→`example` shape pairs correctly. Unit-covered
+  (`imeisv_pattern_example_extraction_rules`: matcher clears the corpus example + all-zero and
+  rejects a 15-digit bare IMEI / 17-digit / non-digit / empty; a too-short-IMEI, a too-long, a
+  non-digit, and a pattern-below value flagged in document order; a Good case across an intervening
+  folded description + `maxLength`, plus a no-`pattern` sibling, an IMEI-pattern sibling, a
+  nested-`example` payload, a cross-property split, and a block-opening `example:` property all
+  cleared; ≥1-pair non-vacuous floor — Device Identifier is the only mounted spec with a
+  `^[0-9]{16}$` field). Surveyed the corpus first: 1 example+IMEISV-`pattern` pair
+  (device-identifier `imeisv`, `3584710400000100`) → 0 drift; a live guard that fires the moment a
+  spec adds a mis-lengthed IMEISV example. Test-side only — no request/response/behaviour change, so
+  no vendored-spec edits; the matcher, extractor and both tests live in the `#[cfg(test)]` module, so
+  nothing ships in the binary. `cargo test` 2812 green (was 2810; +2), `cargo build --release` green,
+  no new deps. — binary (release): 5.1M (5,323,160 B; unchanged).
 - 2026-08-20 — Contract-test harness: added a **no-semicolon-`pattern` example-conformance**
   contract test (`src/registry.rs` `every_no_semicolon_pattern_example_conforms_to_the_no_semicolon_pattern`)
   — where a mounted spec declares an inline `example` beside a **same-indent** `pattern: '^[^;]*$'`

@@ -31584,6 +31584,382 @@ components:
         );
     }
 
+    const IMEISV_PATTERN: &str = r"^[0-9]{16}$";
+
+    /// True when `s` matches the IMEISV `pattern` `^[0-9]{16}$` exactly: exactly 16 ASCII
+    /// decimal digits, nothing else. Hand-rolled (no regex dep) mirroring
+    /// `matches_imei_pattern`'s shape-only stance, so a legitimately shaped IMEISV is never
+    /// a false positive. An IMEISV is an IMEI's 14-digit body (TAC + serial) plus a 2-digit
+    /// software-version suffix — 16 digits in all — so it is one digit longer than the
+    /// 15-digit IMEI and eight longer than the 8-digit TAC.
+    fn matches_imeisv_pattern(s: &str) -> bool {
+        let b = s.as_bytes();
+        b.len() == 16 && b.iter().all(u8::is_ascii_digit)
+    }
+
+    /// The 1-based line numbers, in document order, of every `example:` keyword whose inline
+    /// scalar value sits in a Schema Object declaring a *same-indent*
+    /// `pattern: '^[0-9]{16}$'` sibling yet does not match that IMEISV pattern, without a
+    /// YAML dep. The IMEISV twin of `imei_pattern_examples_malformed`: same scoping, keyed
+    /// on `IMEISV_PATTERN` instead of `IMEI_PATTERN`.
+    ///
+    /// In OpenAPI 3.0.x (JSON Schema) an `example` is a sample *instance* of the schema, so a
+    /// field constrained by `pattern` MUST carry an example the pattern accepts. An IMEISV
+    /// example that is not exactly 16 digits — a digit dropped or added (e.g. a 15-digit IMEI
+    /// pasted into the IMEISV field), or a placeholder — advertises a sample the schema's own
+    /// validator rejects, so a Redoc/Swagger prefill and a codegen client's generated sample
+    /// carry a value the field can never legally hold. Like the IMEI / ICCID / TAC patterns
+    /// the IMEISV pattern carries no `format` sibling, so these examples are otherwise beyond
+    /// the `format`-example family's reach.
+    ///
+    /// Scoping mirrors `imei_pattern_examples_malformed` exactly: only an `example` carrying
+    /// an inline scalar (a block/object example opens no inline value and is skipped) with a
+    /// same-indent `pattern` sibling *equal to* `IMEISV_PATTERN` in the same Schema Object is
+    /// inspected — the sibling is scanned at the example's own indent, down through the
+    /// object's block then up, dedent-bounded, so a nested or following object's `pattern`
+    /// never pairs. The same-indent scan steps over any intervening deeper-indented lines
+    /// (a folded `description: >-` block) and any same-indent non-`pattern` sibling (the
+    /// corpus's `maxLength: 16`), so the device-identifier `imeisv`'s
+    /// `description`→`pattern`→`maxLength`→`example` shape pairs correctly. An `example:`
+    /// nested inside an outer `example:`/`examples:` payload (sample data, not a schema
+    /// keyword) is skipped. Only the IMEISV pattern is matched; other patterns — including
+    /// the 15-digit IMEI (`^[0-9]{15}$`) and 8-digit TAC (`^[0-9]{8}$`) — are out of scope.
+    fn imeisv_pattern_examples_malformed(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let raw_inline = |l: &str, name: &str| -> Option<String> {
+            let (k, v) = l.trim_start().split_once(':')?;
+            if k.trim() != name {
+                return None;
+            }
+            let v = v.split('#').next().unwrap_or(v).trim();
+            if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            }
+        };
+        // Whether a same-indent `pattern:` sibling of line `i` (indent `c`) in the same
+        // Schema Object equals the IMEISV pattern: scan down through the object's block then
+        // up, dedent-bounded so a nested or following object's `pattern` never pairs.
+        let sibling_is_imeisv_pattern = |i: usize, c: usize| -> bool {
+            let is_imeisv_pattern = |l: &str| -> bool {
+                raw_inline(l, "pattern")
+                    .map(|v| v.trim_matches('"').trim_matches('\'') == IMEISV_PATTERN)
+                    .unwrap_or(false)
+            };
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_imeisv_pattern(l) {
+                    return true;
+                }
+                j += 1;
+            }
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_imeisv_pattern(l) {
+                    return true;
+                }
+            }
+            false
+        };
+        // True when line `i` (indent `c`) sits inside an outer `example:`/`examples:`
+        // payload — some enclosing container key up the indent ladder is
+        // `example`/`examples` — so an inner `example` key there is sample data, not a
+        // schema keyword.
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some(raw) = raw_inline(line, "example") else {
+                continue;
+            };
+            let c = indent(line);
+            if inside_example(i, c) {
+                continue;
+            }
+            if !sibling_is_imeisv_pattern(i, c) {
+                continue;
+            }
+            let value = raw.trim_matches('"').trim_matches('\'');
+            if !matches_imeisv_pattern(value) {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_imeisv_pattern_example_conforms_to_the_imeisv_pattern() {
+        // Contract-harness invariant (OpenAPI 3.0.x / JSON-Schema structural rule): where a
+        // Schema Object declares an inline `example` beside a same-indent
+        // `pattern: '^[0-9]{16}$'` (the IMEISV pattern the CAMARA Device Identifier spec uses
+        // for its `imeisv` field), the example MUST match that pattern. An `example` is a
+        // sample *instance* of the schema, so a value the `pattern` rejects — an IMEISV with a
+        // digit dropped or added, or a 15-digit IMEI pasted into the 16-digit field — is a
+        // self-contradictory schema whose own validator rejects the sample it advertises, so a
+        // Redoc/Swagger prefill and a codegen client's generated sample carry a value no field
+        // constrained by this pattern can legally hold.
+        //
+        // The nineteenth member of the `pattern`-conformance family after E.164 / IMEI /
+        // ICCID / 32-hex / name / MAC / token / result-code / bounded-any-char / geohash /
+        // app-name / TAC / region / DNS-label / sink-URL / UUID / DPV-purpose / no-semicolon,
+        // and the *fourth pure fixed-length decimal-digit run* after IMEI (`^[0-9]{15}$`),
+        // ICCID (`^[0-9]{19,20}$`) and TAC (`^[0-9]{8}$`) — the first pinning exactly 16
+        // digits. Each family member is keyed on the exact pattern string, so the 15-digit
+        // IMEI and 8-digit TAC members (which sit in the very same `DeviceIdentifierResult`
+        // schema as siblings of `imeisv`) never pair with `^[0-9]{16}$`: a 15- or 17-digit or
+        // non-digit value beside the IMEISV pattern is the fault none of those length-specific
+        // digit-run members can catch (an IMEISV that is exactly 15 digits passes the IMEI
+        // matcher yet is a malformed IMEISV). Like the IMEI / ICCID / TAC patterns it carries
+        // no `format` sibling, so its examples are beyond the `format`-example family's reach;
+        // a general regex-engine test would need a new dependency (declined on binary-size
+        // grounds), so a concrete hand-validated shape is matched. Verified true across all
+        // mounted specs before asserting (Device Identifier declares one such example+pattern
+        // pair — the `imeisv` field).
+        for api in APIS {
+            let offenders = imeisv_pattern_examples_malformed(api.body);
+            assert!(
+                offenders.is_empty(),
+                "{} spec declares an `example` beside a same-indent IMEISV \
+                 `pattern: '^[0-9]{{16}}$'` that does not match that pattern (a sample the \
+                 pattern's own validator would reject) at `example:` line(s): {:?}",
+                api.name,
+                offenders
+            );
+        }
+    }
+
+    #[test]
+    fn imeisv_pattern_example_extraction_rules() {
+        // Unit-cover `matches_imeisv_pattern` and `imeisv_pattern_examples_malformed` so the
+        // contract test above can't pass vacuously and its detection is pinned.
+        //
+        // Shape check: exactly 16 decimal digits passes; 15 (a bare IMEI) or 17 digits, an
+        // embedded non-digit, and an empty string all fail.
+        assert!(matches_imeisv_pattern("3584710400000100")); // 16 digits (the corpus example)
+        assert!(matches_imeisv_pattern("0000000000000000")); // 16 digits (all zero)
+        assert!(!matches_imeisv_pattern("358471040000010")); // 15 digits — a bare IMEI, too short
+        assert!(!matches_imeisv_pattern("35847104000001000")); // 17 digits — too long
+        assert!(!matches_imeisv_pattern("358471040000010X")); // non-digit
+        assert!(!matches_imeisv_pattern("")); // empty
+
+        // Extractor: a valid quoted and a valid unquoted IMEISV pass — the first across an
+        // intervening folded `description: >-` block *and* a same-indent `maxLength: 16`
+        // sibling, mirroring the corpus's `description`→`pattern`→`maxLength`→`example` shape
+        // and proving the same-indent scan steps over both. A 15-digit (bare IMEI), a
+        // 17-digit, and a non-digit value are flagged; a bad value whose `pattern` is declared
+        // *below* it is still paired (down-scan) and flagged; a value with no `pattern`
+        // sibling and one whose sibling is a *different* pattern (the 15-digit IMEI) are
+        // skipped; an inner `example` inside an outer `example:` payload is skipped; an example
+        // in one property never pairs with a following property's `pattern` across the dedent;
+        // and a property literally named `example` (opening a block) is skipped.
+        let body = format!(
+            "openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    GoodFolded:
+      type: string
+      description: >-
+        The device's IMEISV — 16 digits: TAC (8) + serial (6) + software
+        version (2).
+      pattern: '{p}'
+      maxLength: 16
+      example: \"3584710400000100\"
+    GoodUnquoted:
+      type: string
+      pattern: '{p}'
+      example: 3584710400000100
+    TooShortImei:
+      type: string
+      pattern: '{p}'
+      example: \"358471040000010\"
+    TooLong:
+      type: string
+      pattern: '{p}'
+      example: \"35847104000001000\"
+    NonDigit:
+      type: string
+      pattern: '{p}'
+      example: \"358471040000010X\"
+    PatternBelow:
+      type: string
+      example: \"nope\"
+      pattern: '{p}'
+    NoPattern:
+      type: string
+      example: \"3584710400000100-but-no-pattern\"
+    OtherPattern:
+      type: string
+      pattern: '{imei}'
+      example: \"358471040000010\"
+    InExample:
+      type: object
+      example:
+        pattern: '{p}'
+        example: \"bad\"
+    Split:
+      type: object
+      properties:
+        a:
+          example: \"bad\"
+        b:
+          type: string
+          pattern: '{p}'
+    NamedExample:
+      type: object
+      properties:
+        example:
+          type: string
+          pattern: '{p}'
+",
+            p = IMEISV_PATTERN,
+            imei = IMEI_PATTERN
+        );
+        // Flagged, in document order: TooShortImei.example (15 digits — a bare IMEI in the
+        // IMEISV field), TooLong.example (17 digits), NonDigit.example (an embedded `X`), and
+        // PatternBelow.example (value `nope` with its IMEISV `pattern` a line below — down-scan
+        // pairs it). Not flagged: GoodFolded/GoodUnquoted (valid 16-digit; the former across an
+        // intervening folded `>-` description and a same-indent `maxLength: 16`, proving the
+        // same-indent scan steps over both); NoPattern (no `pattern` sibling); OtherPattern
+        // (sibling is the 15-digit IMEI pattern, not IMEISV — a 15-digit value there is out of
+        // scope); InExample's inner `example` (inside the outer `example:` payload);
+        // Split.a.example (its only IMEISV `pattern` is in the following property past a
+        // dedent); and NamedExample's `example:` property opening a block (no inline value).
+        let flagged = imeisv_pattern_examples_malformed(&body);
+        let flagged_props: Vec<&str> = flagged
+            .iter()
+            .map(|&n| {
+                // Walk up to the nearest schema-name line (indent 4) for a stable label.
+                let lines: Vec<&str> = body.lines().collect();
+                let mut k = n - 1;
+                loop {
+                    let l = lines[k];
+                    let ind = l.len() - l.trim_start().len();
+                    if ind == 4 && l.trim_end().ends_with(':') {
+                        break l.trim().trim_end_matches(':');
+                    }
+                    if k == 0 {
+                        break "";
+                    }
+                    k -= 1;
+                }
+            })
+            .collect();
+        assert_eq!(
+            flagged_props,
+            vec!["TooShortImei", "TooLong", "NonDigit", "PatternBelow"]
+        );
+
+        // Non-vacuous floor: across every registered spec every `example` beside a same-indent
+        // IMEISV `pattern` matches it (the invariant the contract test asserts), and the corpus
+        // actually declares such a pair — so the pattern-comparison path runs on real data and
+        // a broken (always-empty) extractor can't hide behind a corpus that never pairs. Device
+        // Identifier is the only mounted spec with a `^[0-9]{16}$` field (`imeisv`), so the
+        // floor is one; count pairs with a same-indent detector independent of the extractor's
+        // shape comparison.
+        let mut imeisv_examples = 0usize;
+        for api in APIS {
+            assert!(
+                imeisv_pattern_examples_malformed(api.body).is_empty(),
+                "{}: every example beside a same-indent IMEISV `pattern` must match it",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            let is_key = |l: &str, name: &str, val: Option<&str>| {
+                l.trim_start().split_once(':').is_some_and(|(k, v)| {
+                    k.trim() == name
+                        && val.is_none_or(|want| {
+                            v.split('#')
+                                .next()
+                                .unwrap_or(v)
+                                .trim()
+                                .trim_matches('"')
+                                .trim_matches('\'')
+                                == want
+                        })
+                })
+            };
+            for (i, l) in lines.iter().enumerate() {
+                if !is_key(l, "example", None) {
+                    continue;
+                }
+                if l.trim_start()
+                    .split_once(':')
+                    .map(|(_, v)| v.split('#').next().unwrap_or(v).trim().is_empty())
+                    .unwrap_or(true)
+                {
+                    continue;
+                }
+                let c = indent(l);
+                let lo = i.saturating_sub(6);
+                let hi = (i + 6).min(lines.len());
+                let has_imeisv_pattern = (lo..hi).any(|j| {
+                    j != i
+                        && indent(lines[j]) == c
+                        && is_key(lines[j], "pattern", Some(IMEISV_PATTERN))
+                });
+                if has_imeisv_pattern {
+                    imeisv_examples += 1;
+                }
+            }
+        }
+        assert!(
+            imeisv_examples >= 1,
+            "expected the corpus's example + same-indent IMEISV `pattern` pair, got {imeisv_examples}"
+        );
+    }
+
     /// True when `s` is a well-formed RFC 3339 `date-time` string — the concrete
     /// syntax OpenAPI's `format: date-time` names (JSON Schema's `date-time` is
     /// RFC 3339 §5.6). Shape-only and lenient on the calendar (it range-checks each
