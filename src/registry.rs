@@ -23781,6 +23781,567 @@ components:
         );
     }
 
+    /// The 1-based line numbers, in document order, of every array `example` (an inline
+    /// flow `[...]` or a `- ` block sequence) at least one of whose elements is NOT a
+    /// member of the `enum` its sibling `items` schema declares — without a YAML dep.
+    ///
+    /// In OpenAPI 3.0.x (JSON Schema) an `example` is a sample *instance* of the schema,
+    /// so every element of an array example must satisfy the `items` sub-schema. Where the
+    /// object constrains its elements with `items: { enum: [...] }` (a closed set — e.g. a
+    /// reachability `connectivity` bearer `DATA`/`SMS`, a call-forwarding signal type), an
+    /// example element outside that set is a self-contradictory schema whose own item
+    /// validator rejects the sample it advertises, so a Redoc/Swagger "try it" prefill and
+    /// a codegen client's generated sample carry an element the field can never legally
+    /// hold.
+    ///
+    /// This closes the array-of-enum gap `examples_outside_their_enum` leaves open: that
+    /// test pairs an `example` only with a **same-indent** scalar `enum` sibling and
+    /// explicitly skips a flow/block array example — so an array whose enum sits one level
+    /// down under `items` (the canonical CAMARA shape for an enum-typed array) is never
+    /// checked. `every_array_example_respects_its_item_bounds` guards the same array
+    /// examples' *cardinality* (minItems/maxItems) but never their element *values*, and
+    /// `every_example_matches_its_schema_type` checks an example's JSON type, not enum
+    /// membership. The sibling `items:` and its nested `enum:` are located by the same
+    /// dedent-bounded, down-then-up line scoping those tests use.
+    ///
+    /// Only an array example (inline flow `[...]` or a block sequence whose first child is
+    /// a `- ` item) with a sibling `items` block declaring an `enum` is inspected; a scalar
+    /// example (left to the type test), an `items` with no `enum`, and an `example:` inside
+    /// an outer `example:`/`examples:` payload (sample data, not a schema keyword) are
+    /// skipped. Each element and each enum value is unquoted and stripped of a trailing
+    /// ` # comment` before comparison; an empty/complex element (a block-scalar or nested
+    /// mapping item with no inline scalar) is never flagged.
+    fn array_example_elements_outside_their_item_enum(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        // Unquote a scalar and trim a trailing ` # comment`.
+        let norm = |raw: &str| -> String {
+            let mut v = raw.trim();
+            if let Some(pos) = v.find(" #") {
+                v = v[..pos].trim_end();
+            }
+            let v = v.trim();
+            let unq = v
+                .strip_prefix('"')
+                .and_then(|s| s.strip_suffix('"'))
+                .or_else(|| v.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')))
+                .unwrap_or(v);
+            unq.trim().to_string()
+        };
+        // The values of the enum whose `enum:` key sits at line index `e` (flow or block).
+        let enum_values_at = |e: usize| -> Vec<String> {
+            let line = lines[e];
+            let rest = line.trim_start()["enum:".len()..].trim_start();
+            if rest.starts_with('[') {
+                let mut buf = rest.to_string();
+                let mut k = e;
+                while !buf.contains(']') && k + 1 < lines.len() {
+                    k += 1;
+                    buf.push(' ');
+                    buf.push_str(lines[k].trim());
+                }
+                let open = buf.find('[').map(|x| x + 1).unwrap_or(0);
+                let close = buf.rfind(']').unwrap_or(buf.len());
+                let inner = if close >= open { &buf[open..close] } else { "" };
+                if inner.trim().is_empty() {
+                    Vec::new()
+                } else {
+                    inner.split(',').map(|s| norm(s)).filter(|v| !v.is_empty()).collect()
+                }
+            } else if rest.is_empty() || rest.starts_with('#') {
+                let base = indent(line);
+                let mut values: Vec<String> = Vec::new();
+                let mut first_child_seen = false;
+                let mut j = e + 1;
+                while j < lines.len() {
+                    let l = lines[j];
+                    if l.trim().is_empty() || l.trim_start().starts_with('#') {
+                        j += 1;
+                        continue;
+                    }
+                    if indent(l) <= base {
+                        break;
+                    }
+                    let item = l.trim_start();
+                    if !first_child_seen {
+                        first_child_seen = true;
+                        if !item.starts_with('-') {
+                            break;
+                        }
+                    }
+                    if !item.starts_with('-') {
+                        break;
+                    }
+                    let val = norm(item[1..].trim_start());
+                    if !val.is_empty() {
+                        values.push(val);
+                    }
+                    j += 1;
+                }
+                values
+            } else {
+                Vec::new()
+            }
+        };
+        // True when line `i` (indent `c`) sits inside an outer `example:`/`examples:`
+        // payload — some enclosing container key up the indent ladder is
+        // `example`/`examples` — so an inner `example` key there is sample data.
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        let is_key = |l: &str, name: &str| {
+            l.trim_start()
+                .split_once(':')
+                .is_some_and(|(k, _)| k.trim() == name)
+        };
+        // The item-enum values for the array whose `example:` sits at line `i`, indent `c`:
+        // find a same-indent sibling `items:` (down through the object's block then up,
+        // dedent-bounded so a nested/following object's `items` never pairs), then the first
+        // `enum:` nested inside that `items` block; empty when either is absent.
+        let item_enum = |i: usize, c: usize| -> Vec<String> {
+            let mut items_line: Option<usize> = None;
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_key(l, "items") {
+                    items_line = Some(j);
+                    break;
+                }
+                j += 1;
+            }
+            if items_line.is_none() {
+                let mut k = i;
+                while k > 0 {
+                    k -= 1;
+                    let l = lines[k];
+                    if l.trim().is_empty() {
+                        continue;
+                    }
+                    if indent(l) < c {
+                        break;
+                    }
+                    if indent(l) == c && is_key(l, "items") {
+                        items_line = Some(k);
+                        break;
+                    }
+                }
+            }
+            let Some(il) = items_line else { return Vec::new() };
+            let mut e = il + 1;
+            while e < lines.len() {
+                let l = lines[e];
+                if l.trim().is_empty() {
+                    e += 1;
+                    continue;
+                }
+                if indent(l) <= c {
+                    break;
+                }
+                let t = l.trim_start();
+                if t.starts_with("enum:") && !t.starts_with("enums") {
+                    return enum_values_at(e);
+                }
+                e += 1;
+            }
+            Vec::new()
+        };
+        // The normalized elements of an inline flow sequence whose text starts with `[`
+        // (top-level commas at bracket/brace depth 1, quotes respected); `None` when the
+        // flow never closes on its line (a multi-line flow, left un-inspected).
+        let flow_elems = |v: &str| -> Option<Vec<String>> {
+            let mut depth: i32 = 0;
+            let mut in_s = false;
+            let mut in_d = false;
+            let mut cur = String::new();
+            let mut elems: Vec<String> = Vec::new();
+            for ch in v.chars() {
+                if in_s {
+                    cur.push(ch);
+                    if ch == '\'' {
+                        in_s = false;
+                    }
+                    continue;
+                }
+                if in_d {
+                    cur.push(ch);
+                    if ch == '"' {
+                        in_d = false;
+                    }
+                    continue;
+                }
+                match ch {
+                    '[' | '{' => {
+                        depth += 1;
+                        if depth > 1 {
+                            cur.push(ch);
+                        }
+                    }
+                    ']' | '}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            let e = norm(&cur);
+                            if !e.is_empty() {
+                                elems.push(e);
+                            }
+                            return Some(elems);
+                        }
+                        cur.push(ch);
+                    }
+                    '\'' => {
+                        in_s = true;
+                        cur.push(ch);
+                    }
+                    '"' => {
+                        in_d = true;
+                        cur.push(ch);
+                    }
+                    ',' if depth == 1 => {
+                        let e = norm(&cur);
+                        if !e.is_empty() {
+                            elems.push(e);
+                        }
+                        cur.clear();
+                    }
+                    _ => {
+                        if depth >= 1 {
+                            cur.push(ch);
+                        }
+                    }
+                }
+            }
+            None
+        };
+        // The normalized elements of a block sequence opened by an `example:` at line `i`
+        // (indent `c`): each `- ` item's inline scalar at the first child's indent, bounded
+        // by the dedent that closes the block. `None` when the first non-empty child is not
+        // a sequence item (a property literally named `example`, or an object/block-scalar
+        // example). A complex/empty item (no inline scalar) contributes nothing.
+        let block_elems = |i: usize, c: usize| -> Option<Vec<String>> {
+            let mut child_indent: Option<usize> = None;
+            let mut elems: Vec<String> = Vec::new();
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                let li = indent(l);
+                if li <= c {
+                    break;
+                }
+                let t = l.trim_start();
+                let is_item = t == "-" || t.starts_with("- ");
+                match child_indent {
+                    None => {
+                        if !is_item {
+                            return None;
+                        }
+                        child_indent = Some(li);
+                        let v = norm(t[1..].trim_start());
+                        if !v.is_empty() {
+                            elems.push(v);
+                        }
+                    }
+                    Some(ci) => {
+                        if li == ci && is_item {
+                            let v = norm(t[1..].trim_start());
+                            if !v.is_empty() {
+                                elems.push(v);
+                            }
+                        }
+                    }
+                }
+                j += 1;
+            }
+            child_indent.map(|_| elems)
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some((k, v)) = line.trim_start().split_once(':') else {
+                continue;
+            };
+            if k.trim() != "example" {
+                continue;
+            }
+            let c = indent(line);
+            if inside_example(i, c) {
+                continue;
+            }
+            let enums = item_enum(i, c);
+            if enums.is_empty() {
+                continue;
+            }
+            let inline = v.split('#').next().unwrap_or(v).trim();
+            let elems = if inline.is_empty() {
+                match block_elems(i, c) {
+                    Some(e) => e,
+                    None => continue,
+                }
+            } else if inline.starts_with('[') {
+                match flow_elems(inline) {
+                    Some(e) => e,
+                    None => continue,
+                }
+            } else {
+                continue; // scalar example — not an array (type/other tests' concern)
+            };
+            if elems
+                .iter()
+                .any(|el| !enums.iter().any(|v| v == el))
+            {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_array_example_element_is_a_member_of_its_item_enum() {
+        // Contract-harness invariant (OpenAPI 3.0.x / JSON-Schema structural rule): where
+        // an array Schema Object declares an array `example` and constrains its elements
+        // with `items: { enum: [...] }`, EVERY element of the example MUST be a member of
+        // that item enum. An `example` is a sample instance, so an element outside the
+        // closed set is a value the array's own item validator rejects — a Redoc/Swagger
+        // prefill and a codegen sample carrying an element the field can never hold.
+        //
+        // The array-of-enum complement of `every_example_is_a_member_of_its_enum`, which
+        // pairs an example only with a same-indent *scalar* enum and skips flow/block array
+        // examples: an enum-typed array (a reachability `connectivity` bearer set, a
+        // call-forwarding signal-type set) hides its enum one level down under `items`, so
+        // the scalar test never sees it. Verified true across all mounted specs before
+        // asserting.
+        for api in APIS {
+            let offenders = array_example_elements_outside_their_item_enum(api.body);
+            assert!(
+                offenders.is_empty(),
+                "{} spec declares an array `example` with an element outside its `items` \
+                 `enum` (a sample the item enum's own validator would reject) at `example:` \
+                 line(s): {:?}",
+                api.name,
+                offenders
+            );
+        }
+    }
+
+    #[test]
+    fn array_example_item_enum_extraction_rules() {
+        // Unit-cover `array_example_elements_outside_their_item_enum` so the contract test
+        // above can't pass vacuously and its detection is pinned: an array example whose
+        // every element is in its `items.enum` passes (flow with a block enum, and enum
+        // declared before the example); a flow element outside a flow enum, an example
+        // whose enum sits *below* it under `items`, and a block-sequence example with an
+        // out-of-enum item are flagged in document order; a scalar example, an `items` with
+        // no enum, an example whose only candidate `items` sits in a following property
+        // across the dedent, and a property literally named `example` opening a schema block
+        // are all skipped.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    GoodFlow:
+      type: array
+      items:
+        type: string
+        enum:
+          - DATA
+          - SMS
+      example: [DATA, SMS]
+    BadFlow:
+      type: array
+      items:
+        type: string
+        enum: [DATA, SMS]
+      example: [DATA, WIFI]
+    ExampleFirst:
+      type: array
+      example: [red, teal]
+      items:
+        type: string
+        enum:
+          - red
+          - green
+    BlockBad:
+      type: array
+      items:
+        type: string
+        enum: [a, b]
+      example:
+        - a
+        - c
+    ScalarExample:
+      type: array
+      items:
+        type: string
+        enum: [x, y]
+      example: \"z\"
+    NoItemsEnum:
+      type: array
+      items:
+        type: string
+      example: [free, text]
+    Split:
+      type: object
+      properties:
+        a:
+          example: [q]
+        b:
+          type: array
+          items:
+            type: string
+            enum: [q]
+    NamedExample:
+      type: object
+      properties:
+        example:
+          type: array
+          items:
+            type: string
+            enum: [m]
+";
+        // Flagged, in document order: line 27 (`BadFlow.example: [DATA, WIFI]`, `WIFI` ∉
+        // its `items.enum: [DATA, SMS]`), line 30 (`ExampleFirst.example: [red, teal]`,
+        // `teal` ∉ the `items` block enum `[red, green]` declared below it), and line 41
+        // (`BlockBad.example:` block sequence whose `- c` ∉ `items.enum: [a, b]`). Not
+        // flagged: `GoodFlow` ([DATA, SMS] both in the block enum); `ScalarExample`
+        // (`\"z\"` is a scalar, not an array — the type test's concern); `NoItemsEnum` (its
+        // `items` declares no enum); `Split.a.example: [q]`, whose only candidate `items`
+        // sits in the following property `Split.b` past a dedent, so the two never pair;
+        // and `NamedExample` (an `example:` opening a schema block whose `items` is its
+        // child, not a sibling — a property literally named `example`).
+        assert_eq!(
+            array_example_elements_outside_their_item_enum(body),
+            vec![27, 30, 41]
+        );
+
+        // Non-vacuous floor: across every registered spec every array example whose items
+        // declare an enum has all its elements in that enum (the invariant the contract
+        // test asserts), and the corpus actually declares array example + `items.enum`
+        // pairs — so the membership path runs on real data and a broken (always-empty)
+        // extractor can't hide behind a corpus that never pairs an array example with an
+        // item enum. Count pairs with a sibling-`items`-with-`enum` detector independent of
+        // the extractor's element-membership comparison.
+        let mut item_enum_arrays = 0usize;
+        for api in APIS {
+            assert!(
+                array_example_elements_outside_their_item_enum(api.body).is_empty(),
+                "{}: every array example element must be a member of its items.enum",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            let is_key = |l: &str, name: &str| {
+                l.trim_start()
+                    .split_once(':')
+                    .is_some_and(|(k, _)| k.trim() == name)
+            };
+            for (i, l) in lines.iter().enumerate() {
+                // An array example (inline flow or block sequence), not a scalar/named one.
+                let Some((k, v)) = l.trim_start().split_once(':') else {
+                    continue;
+                };
+                if k.trim() != "example" {
+                    continue;
+                }
+                let inline = v.split('#').next().unwrap_or(v).trim();
+                let is_flow = inline.starts_with('[');
+                let is_block = inline.is_empty()
+                    && lines
+                        .get(i + 1)
+                        .map(|n| n.trim_start().starts_with("- "))
+                        .unwrap_or(false);
+                if !is_flow && !is_block {
+                    continue;
+                }
+                let c = indent(l);
+                // A same-indent sibling `items:` block (down or up, dedent-bounded) that
+                // contains an `enum:` somewhere in its block — presence only.
+                let mut has_item_enum = false;
+                for dir in [1i64, -1] {
+                    let mut j = i as i64 + dir;
+                    while j >= 0 && (j as usize) < lines.len() {
+                        let x = lines[j as usize];
+                        if !x.trim().is_empty() {
+                            if indent(x) < c {
+                                break;
+                            }
+                            if indent(x) == c && is_key(x, "items") {
+                                // scan the items block for an enum
+                                let mut e = j as usize + 1;
+                                while e < lines.len() {
+                                    let y = lines[e];
+                                    if y.trim().is_empty() {
+                                        e += 1;
+                                        continue;
+                                    }
+                                    if indent(y) <= c {
+                                        break;
+                                    }
+                                    if y.trim_start().starts_with("enum:") {
+                                        has_item_enum = true;
+                                        break;
+                                    }
+                                    e += 1;
+                                }
+                                break;
+                            }
+                        }
+                        j += dir;
+                    }
+                    if has_item_enum {
+                        break;
+                    }
+                }
+                if has_item_enum {
+                    item_enum_arrays += 1;
+                }
+            }
+        }
+        assert!(
+            item_enum_arrays >= 2,
+            "expected at least two array example + items.enum pairs across specs, got {item_enum_arrays}"
+        );
+    }
+
     /// The 1-based line numbers, in document order, of every `default:` keyword whose
     /// inline **quoted-string** value has a character length outside a sibling string
     /// bound — `minLength` or `maxLength` — declared in the same Schema Object, without

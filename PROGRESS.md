@@ -5669,6 +5669,39 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-20 — Contract-test harness: added an **array-of-enum example-conformance**
+  contract test (`src/registry.rs`
+  `every_array_example_element_is_a_member_of_its_item_enum`) — where an array Schema
+  Object declares an array `example` (inline flow `[...]` or a `- ` block sequence) and
+  constrains its elements with `items: { enum: [...] }`, EVERY example element MUST be a
+  member of that item enum. An `example` is a sample instance, so an element outside the
+  closed set (a `connectivity` bearer, a call-forwarding signal type) is a value the
+  array's own item validator rejects. This closes the **array-of-enum gap** the scalar
+  `every_example_is_a_member_of_its_enum` leaves open: that test pairs an example only
+  with a **same-indent** scalar `enum` sibling and explicitly skips flow/block array
+  examples, so an enum one level down under `items` (the canonical CAMARA enum-array
+  shape) was never checked; `every_array_example_respects_its_item_bounds` guards the same
+  arrays' *cardinality* (minItems/maxItems) but never element *values*, and
+  `every_example_matches_its_schema_type` checks JSON type, not enum membership. New pure
+  `array_example_elements_outside_their_item_enum` extractor: locates a same-indent sibling
+  `items:` (down-then-up, dedent-bounded, mirroring `array_examples_outside_their_item_bounds`),
+  reads the first `enum:` nested in its block (flow or block list, via the shared
+  `enum_values_at` logic), parses the example's elements (a new `flow_elems` splitting a
+  flow sequence at depth-1 commas with quotes respected, or `block_elems` over `- ` items),
+  unquotes/`#`-strips both sides, and flags any element ∉ the enum — no regex/YAML dep.
+  Unit-covered (`array_example_item_enum_extraction_rules`: a bad flow element, an example
+  whose enum sits below it under `items`, and a block-sequence item ∉ the enum flagged in
+  document order; a good flow with a block enum, a scalar example, an `items` with no enum,
+  a cross-property split past a dedent, and a property literally named `example` all
+  cleared; ≥2-pair non-vacuous floor). **Surveyed the corpus first: 2 array-example +
+  `items.enum` pairs (device-reachability-status `connectivity` `["DATA","SMS"]`,
+  call-forwarding-signal `CallForwardingSignal` `["unconditional","conditional_busy"]`),
+  both conforming → 0 drift; a live guard that fires the moment a spec adds an
+  out-of-enum array-example element.** Test-side only — no request/response/behaviour
+  change, so no vendored-spec edits; the extractor and both tests live in the `#[cfg(test)]`
+  module, so nothing ships in the binary. `cargo test` 2794 green (was 2792; +2),
+  `cargo build --release` green, no new deps. — binary (release): 5.1M (5,323,160 B;
+  unchanged).
 - 2026-08-19 — Contract-test harness: added an **app-name-`pattern` example-conformance**
   contract test (`src/registry.rs`
   `every_app_name_pattern_example_conforms_to_the_app_name_pattern`) — where a mounted spec
