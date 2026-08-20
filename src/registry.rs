@@ -28637,6 +28637,374 @@ components:
         );
     }
 
+    /// The Type Allocation Code `pattern` — a bare run of **exactly eight** ASCII decimal digits
+    /// (`^[0-9]{8}$`), the `tac` field of the Device Identifier `DeviceIdentifier`/`DeviceInfo`
+    /// schemas ("the first 8 digits of the IMEI"). Like the IMEI/ICCID members and unlike a
+    /// `format: uuid` field it carries **no `format` sibling** (there is no OpenAPI format for a
+    /// TAC) — so its examples are otherwise beyond the `format`-example family's reach. The
+    /// **eleventh member of the `pattern`-conformance family** after
+    /// E.164/IMEI/ICCID/32-hex/name/MAC/token/result-code/geohash/app-name, and — though a bare
+    /// digit run like IMEI and ICCID — a **genuinely new length class** that neither sibling can
+    /// express: each member is keyed on the *exact* pattern string, so the IMEI matcher
+    /// (`^[0-9]{15}$`, exactly fifteen) and the ICCID matcher (`^[0-9]{19,20}$`, nineteen or
+    /// twenty) both reject an eight-digit TAC on length, and a TAC example seven digits long, nine
+    /// digits long, or with a non-digit character is a fault none of them is scoped to catch. It
+    /// also reaches past the generic length-bounds family: the `tac` field carries a
+    /// `maxLength: 8` but no `minLength`, so `every_example_respects_its_string_length_bounds`
+    /// never floors a seven-digit example, and it checks character *count*, never digit-ness — both
+    /// of which this pattern pins.
+    const TAC_PATTERN: &str = r"^[0-9]{8}$";
+
+    /// True when `s` matches the TAC `pattern` `^[0-9]{8}$` exactly: eight ASCII decimal digits,
+    /// no more and no fewer, and nothing else. Hand-rolled (no regex dep), faithful to the pattern
+    /// (a fixed length of eight, every byte a digit), mirroring the IMEI/ICCID/result-code matchers'
+    /// shape-only, pattern-faithful stance so a legitimately shaped TAC is never a false positive.
+    fn matches_tac_pattern(s: &str) -> bool {
+        let b = s.as_bytes();
+        b.len() == 8 && b.iter().all(u8::is_ascii_digit)
+    }
+
+    /// The 1-based line numbers, in document order, of every `example:` keyword whose inline scalar
+    /// value sits in a Schema Object declaring a *same-indent* TAC `pattern` sibling yet does not
+    /// match that pattern, without a YAML dep. The TAC twin of
+    /// `result_code_pattern_examples_malformed`: same scoping, keyed on `TAC_PATTERN`.
+    ///
+    /// In OpenAPI 3.0.x (JSON Schema) an `example` is a sample *instance* of the schema, so a field
+    /// constrained by `pattern` MUST carry an example the pattern accepts. A TAC example with too
+    /// few digits, too many digits, a non-digit character, or a placeholder pasted beside the
+    /// pattern advertises a sample the schema's own validator rejects, so a Redoc/Swagger prefill
+    /// and a codegen client's generated sample carry a value the field can never legally hold.
+    /// Unlike the UUID patterns (guarded via their `format: uuid` sibling by
+    /// `every_uuid_format_example_is_a_well_formed_uuid`), the TAC pattern has no `format`, so these
+    /// examples are otherwise unchecked.
+    ///
+    /// Scoping mirrors `result_code_pattern_examples_malformed` exactly: only an `example` carrying
+    /// an inline scalar (a block/object example opens no inline value and is skipped) with a
+    /// same-indent `pattern` sibling *equal to* `TAC_PATTERN` in the same Schema Object is
+    /// inspected — the sibling is scanned at the example's own indent, down through the object's
+    /// block then up, dedent-bounded, so a nested or following object's `pattern` never pairs (an
+    /// intervening `maxLength`/`description` sibling at the same indent is stepped over, as both
+    /// corpus pairs have: `description` then `pattern` then `maxLength` then `example`). An
+    /// `example:` nested inside an outer `example:`/`examples:` payload (sample data, not a schema
+    /// keyword) is skipped. Only the TAC pattern is matched; other digit-run patterns (IMEI,
+    /// ICCID) are out of scope.
+    fn tac_pattern_examples_malformed(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let raw_inline = |l: &str, name: &str| -> Option<String> {
+            let (k, v) = l.trim_start().split_once(':')?;
+            if k.trim() != name {
+                return None;
+            }
+            let v = v.split('#').next().unwrap_or(v).trim();
+            if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            }
+        };
+        // Whether a same-indent `pattern:` sibling of line `i` (indent `c`) in the same Schema
+        // Object equals the TAC pattern: scan down through the object's block then up,
+        // dedent-bounded so a nested or following object's `pattern` never pairs.
+        let sibling_is_tac_pattern = |i: usize, c: usize| -> bool {
+            let is_tac_pattern = |l: &str| -> bool {
+                raw_inline(l, "pattern")
+                    .map(|v| v.trim_matches('"').trim_matches('\'') == TAC_PATTERN)
+                    .unwrap_or(false)
+            };
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_tac_pattern(l) {
+                    return true;
+                }
+                j += 1;
+            }
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_tac_pattern(l) {
+                    return true;
+                }
+            }
+            false
+        };
+        // True when line `i` (indent `c`) sits inside an outer `example:`/`examples:` payload —
+        // some enclosing container key up the indent ladder is `example`/`examples` — so an
+        // inner `example` key there is sample data, not a schema keyword.
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some(raw) = raw_inline(line, "example") else {
+                continue;
+            };
+            let c = indent(line);
+            if inside_example(i, c) {
+                continue;
+            }
+            if !sibling_is_tac_pattern(i, c) {
+                continue;
+            }
+            let value = raw.trim_matches('"').trim_matches('\'');
+            if !matches_tac_pattern(value) {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_tac_pattern_example_conforms_to_the_tac_pattern() {
+        // Contract-harness invariant (OpenAPI 3.0.x / JSON-Schema structural rule): where a Schema
+        // Object declares an inline `example` beside a same-indent Type Allocation Code `pattern`
+        // (`^[0-9]{8}$`, the `tac` field of Device Identifier's device schemas — "the first 8
+        // digits of the IMEI"), the example MUST match that pattern. An `example` is a sample
+        // *instance* of the schema, so a value the `pattern` rejects — a TAC with too few digits,
+        // too many digits, a non-digit character, or a placeholder pasted beside the pattern — is a
+        // self-contradictory schema whose own validator rejects the sample it advertises, so a
+        // Redoc/Swagger prefill and a codegen client's generated sample carry a value no field
+        // constrained by this pattern can legally hold.
+        //
+        // The eleventh member of the `pattern`-conformance family after E.164 / IMEI / ICCID /
+        // 32-hex / name / MAC / token / result-code / geohash / app-name. Though a bare digit run
+        // like IMEI (`^[0-9]{15}$`) and ICCID (`^[0-9]{19,20}$`), it is a genuinely new *length*
+        // class those two cannot express: each family member is keyed on the exact pattern string,
+        // so the IMEI matcher rejects an eight-digit value on length and the ICCID matcher rejects
+        // it likewise — neither is scoped to catch a seven- or nine-digit TAC. It also reaches past
+        // the generic length-bounds family: the `tac` field carries a `maxLength: 8` but no
+        // `minLength`, so `every_example_respects_its_string_length_bounds` never floors a
+        // seven-digit example and checks character count rather than digit-ness — both of which this
+        // pattern pins. Like the IMEI/ICCID patterns the TAC pattern carries no `format` sibling, so
+        // its examples are beyond the `format`-example family's reach; a general regex-engine test
+        // would need a new dependency (declined on binary-size grounds), so a concrete hand-validated
+        // shape is matched. Verified true across all mounted specs before asserting (Device
+        // Identifier declares two such example+pattern pairs, both the well-formed `35847104`).
+        for api in APIS {
+            let offenders = tac_pattern_examples_malformed(api.body);
+            assert!(
+                offenders.is_empty(),
+                "{} spec declares an `example` beside a same-indent Type Allocation Code \
+                 `pattern: '^[0-9]{{8}}$'` that does not match that pattern (a sample the \
+                 pattern's own validator would reject) at `example:` line(s): {:?}",
+                api.name,
+                offenders
+            );
+        }
+    }
+
+    #[test]
+    fn tac_pattern_example_extraction_rules() {
+        // Unit-cover `matches_tac_pattern` and `tac_pattern_examples_malformed` so the contract
+        // test above can't pass vacuously and its detection is pinned.
+        //
+        // Shape check: the corpus TAC `35847104` and another well-formed `00010203` pass; too few
+        // digits (`1234567`), too many digits (`123456789`), a non-digit tail (`3584710X`), a
+        // 15-digit IMEI (`353490069873319` — a longer bare digit run, so length alone must reject
+        // it), and an empty string all fail.
+        assert!(matches_tac_pattern("35847104"));
+        assert!(matches_tac_pattern("00010203"));
+        assert!(!matches_tac_pattern("1234567")); // 7 digits — too few
+        assert!(!matches_tac_pattern("123456789")); // 9 digits — too many
+        assert!(!matches_tac_pattern("3584710X")); // non-digit tail
+        assert!(!matches_tac_pattern("353490069873319")); // 15-digit IMEI — wrong length class
+        assert!(!matches_tac_pattern("")); // empty
+
+        // Extractor: two valid TACs (each beside a same-indent TAC `pattern`, one with an
+        // intervening `description` block and one with an intervening `maxLength` sibling — the two
+        // shapes the corpus actually uses) pass; a too-few-digits, a too-many-digits, and a
+        // non-digit-tail value are flagged; a bad value whose `pattern` is declared *below* it is
+        // still paired (down-scan) and flagged; a value with no `pattern` sibling and one whose
+        // sibling is a *different* digit-run pattern (the IMEI `^[0-9]{15}$`) are skipped; an inner
+        // `example` inside an outer `example:` payload is skipped; an example in one property never
+        // pairs with a following property's `pattern` across the dedent; and a property literally
+        // named `example` (opening a block) is skipped.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    GoodBlockDesc:
+      type: string
+      pattern: '^[0-9]{8}$'
+      description: |
+        a type allocation code
+      example: '35847104'
+    GoodMaxLen:
+      type: string
+      pattern: '^[0-9]{8}$'
+      maxLength: 8
+      example: '00010203'
+    TooFew:
+      type: string
+      pattern: '^[0-9]{8}$'
+      example: '1234567'
+    TooMany:
+      type: string
+      pattern: '^[0-9]{8}$'
+      example: '123456789'
+    NonDigit:
+      type: string
+      pattern: '^[0-9]{8}$'
+      example: '3584710X'
+    PatternBelow:
+      type: string
+      example: 'nope'
+      pattern: '^[0-9]{8}$'
+    NoPattern:
+      type: string
+      example: '35847104-but-no-pattern-here'
+    OtherPattern:
+      type: string
+      pattern: '^[0-9]{15}$'
+      example: '353490069873319'
+    InExample:
+      type: object
+      example:
+        pattern: '^[0-9]{8}$'
+        example: 'bad'
+    Split:
+      type: object
+      properties:
+        a:
+          example: 'bad'
+        b:
+          type: string
+          pattern: '^[0-9]{8}$'
+    NamedExample:
+      type: object
+      properties:
+        example:
+          type: string
+          pattern: '^[0-9]{8}$'
+";
+        // Flagged, in document order: TooFew.example (`1234567`), TooMany.example (`123456789`),
+        // NonDigit.example (`3584710X`), and PatternBelow.example (value `nope`, TAC `pattern` a
+        // line below — down-scan pairs it). Not flagged: GoodBlockDesc/GoodMaxLen (valid, across an
+        // intervening description/maxLength sibling); NoPattern (no `pattern` sibling); OtherPattern
+        // (sibling is the IMEI pattern, not TAC — a 15-digit value the TAC matcher would reject on
+        // length, proving exact-pattern keying); InExample's inner `example` (inside the outer
+        // `example:` payload); Split.a.example (its only TAC `pattern` is in the following property
+        // past a dedent); and NamedExample's `example:` property opening a block (no inline value).
+        let flagged = tac_pattern_examples_malformed(body);
+        let flagged_vals: Vec<&str> = flagged
+            .iter()
+            .map(|&n| body.lines().nth(n - 1).unwrap().trim())
+            .collect();
+        assert_eq!(
+            flagged_vals,
+            vec![
+                "example: '1234567'",
+                "example: '123456789'",
+                "example: '3584710X'",
+                "example: 'nope'",
+            ]
+        );
+
+        // Non-vacuous floor: across every registered spec every `example` beside a same-indent TAC
+        // `pattern` matches it (the invariant the contract test asserts), and the corpus actually
+        // declares such pairs — so the pattern-comparison path runs on real data and a broken
+        // (always-empty) extractor can't hide behind a corpus that never pairs. Only Device
+        // Identifier declares this pattern (two `tac` schemas), so the floor is 2 (not the family's
+        // usual 4). Count pairs with a same-indent detector independent of the extractor's shape
+        // comparison.
+        let mut tac_examples = 0usize;
+        for api in APIS {
+            assert!(
+                tac_pattern_examples_malformed(api.body).is_empty(),
+                "{}: every example beside a same-indent TAC `pattern` must match it",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            let is_key = |l: &str, name: &str, val: Option<&str>| {
+                l.trim_start().split_once(':').is_some_and(|(k, v)| {
+                    k.trim() == name
+                        && val.is_none_or(|want| {
+                            v.split('#')
+                                .next()
+                                .unwrap_or(v)
+                                .trim()
+                                .trim_matches('"')
+                                .trim_matches('\'')
+                                == want
+                        })
+                })
+            };
+            for (i, l) in lines.iter().enumerate() {
+                if !is_key(l, "example", None) {
+                    continue;
+                }
+                if l.trim_start()
+                    .split_once(':')
+                    .map(|(_, v)| v.split('#').next().unwrap_or(v).trim().is_empty())
+                    .unwrap_or(true)
+                {
+                    continue;
+                }
+                let c = indent(l);
+                let lo = i.saturating_sub(6);
+                let hi = (i + 6).min(lines.len());
+                let has_tac = (lo..hi).any(|j| {
+                    j != i && indent(lines[j]) == c && is_key(lines[j], "pattern", Some(TAC_PATTERN))
+                });
+                if has_tac {
+                    tac_examples += 1;
+                }
+            }
+        }
+        assert!(
+            tac_examples >= 2,
+            "expected the corpus's example + same-indent TAC `pattern` pairs, got {tac_examples}"
+        );
+    }
+
     /// True when `s` is a well-formed RFC 3339 `date-time` string — the concrete
     /// syntax OpenAPI's `format: date-time` names (JSON Schema's `date-time` is
     /// RFC 3339 §5.6). Shape-only and lenient on the calendar (it range-checks each

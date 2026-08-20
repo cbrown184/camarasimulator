@@ -5669,6 +5669,39 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-20 — Contract-test harness: added a **TAC-`pattern` example-conformance**
+  contract test (`src/registry.rs` `every_tac_pattern_example_conforms_to_the_tac_pattern`)
+  — where a mounted spec declares an inline `example` beside a **same-indent**
+  `pattern: '^[0-9]{8}$'` (the Type Allocation Code — Device Identifier's `tac` field, "the
+  first 8 digits of the IMEI"), the example MUST be **exactly eight ASCII decimal digits**. An
+  `example` is a sample instance of the schema, so a TAC the pattern rejects (too few digits,
+  too many digits, a non-digit character, or a placeholder pasted beside the pattern) is a
+  self-contradictory schema whose own validator rejects the sample it advertises. The **eleventh
+  member of the `pattern`-conformance family** after E.164/IMEI/ICCID/32-hex/name/MAC/token/
+  result-code/geohash/app-name. Though a bare digit run like IMEI (`^[0-9]{15}$`) and ICCID
+  (`^[0-9]{19,20}$`), it is a genuinely new **length class** neither sibling can express: each
+  member is keyed on the exact pattern string, so the IMEI/ICCID matchers reject an eight-digit
+  value on length and are not scoped to catch a seven- or nine-digit TAC. It also reaches past
+  the generic length-bounds family — the `tac` field carries a `maxLength: 8` but **no**
+  `minLength`, so `every_example_respects_its_string_length_bounds` never floors a seven-digit
+  example and checks character *count*, never digit-ness, both of which this pattern pins.
+  Carries no `format` sibling (there is no OpenAPI `tac` format), so these examples were
+  previously unchecked. New pure `matches_tac_pattern` (8 bytes, each ASCII digit; no regex/YAML
+  dep) + `tac_pattern_examples_malformed` extractor (cloning `result_code_pattern_examples_
+  malformed`'s down-then-up dedent-bounded scoping, keyed on `TAC_PATTERN`, stepping over the
+  intervening `maxLength`/`description` siblings both corpus pairs carry), unit-covered
+  (`tac_pattern_example_extraction_rules`: the matcher clears `35847104`/`00010203` and rejects a
+  7-digit, a 9-digit, a non-digit-tail, a 15-digit IMEI, and an empty value; a too-few, a
+  too-many, a non-digit, and a pattern-below example flagged in document order; valid TACs across
+  an intervening description/maxLength, a no-`pattern` sibling, an IMEI-`pattern` sibling, a
+  nested-`example` payload, a cross-property split, and a property literally named `example` all
+  cleared; ≥2-pair non-vacuous floor). **Surveyed the corpus first: 2 example+TAC-`pattern` pairs
+  (device-identifier v0.3 `DeviceIdentifier`/`DeviceInfo` `tac`), both the well-formed `35847104`
+  → 0 drift; a live guard that fires the moment a spec adds a mis-shaped TAC example.** Test-side
+  only — no request/response/behaviour change, so no vendored-spec edits; the matcher, extractor
+  and both tests live in the `#[cfg(test)]` module, so nothing ships in the binary. `cargo test`
+  2796 green (was 2794; +2), `cargo build --release` green, no new deps. — binary (release): 5.1M
+  (5,323,160 B; unchanged).
 - 2026-08-20 — Contract-test harness: added an **array-of-enum example-conformance**
   contract test (`src/registry.rs`
   `every_array_example_element_is_a_member_of_its_item_enum`) — where an array Schema
