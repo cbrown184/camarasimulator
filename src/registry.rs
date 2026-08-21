@@ -14664,6 +14664,277 @@ components:
         );
     }
 
+    /// Returns the 1-based line number of every `readOnly: true` property keyword
+    /// whose Schema Object *also* declares `writeOnly: true` as a sibling — a
+    /// property marked both read-only and write-only, which OpenAPI 3.0.x forbids.
+    ///
+    /// The 3.0.x Schema Object says a property "MUST NOT be marked as both
+    /// `readOnly` and `writeOnly` being `true`": `readOnly` means the value appears
+    /// only in responses, `writeOnly` only in requests, so asserting both is
+    /// self-contradictory — a codegen/validator tool cannot place the field in
+    /// either direction, and a Redoc reader is shown a field that is at once
+    /// response-only and request-only. (`every_boolean_schema_keyword_carries_a_
+    /// boolean` guards that each keyword *is* a boolean; it never compares the two,
+    /// so this conflict is invisible to it and to every other test.)
+    ///
+    /// Pure and YAML-dep-free, mirroring `schema_bounds_inverted`: for each
+    /// `readOnly: true` at indent `c`, scan its object's block both directions
+    /// (down then up), each bounded by the first line indented *below* `c` (the
+    /// dedent that closes the object), for a `writeOnly: true` sibling at *exactly*
+    /// `c`. Keying on the `readOnly` line reports each conflicting object once. A
+    /// keyword whose value is not exactly `true` (a `false`, or a block opener for a
+    /// property literally named `readOnly`) is not a conflict, and a keyword sitting
+    /// inside an `example:`/`examples:` payload is example data (an enclosing
+    /// `example`/`examples` key up the indent ladder), not a schema keyword — both
+    /// skipped, the example guard mirroring `boolean_keyword_non_boolean_values`.
+    fn schema_read_and_write_only_conflicts(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        // True when line `l` declares boolean keyword `name` with the inline value
+        // `true` (inline comment and surrounding quotes stripped); the `:` must
+        // immediately follow the keyword, so a longer key (`readOnlyFlag:`) misses.
+        let is_true = |l: &str, name: &str| -> bool {
+            let Some((k, v)) = l.trim_start().split_once(':') else {
+                return false;
+            };
+            k.trim() == name
+                && v.split('#')
+                    .next()
+                    .unwrap_or(v)
+                    .trim()
+                    .trim_matches('"')
+                    .trim_matches('\'')
+                    == "true"
+        };
+        // True when line `i` (indent `c`) sits inside an `example:`/`examples:`
+        // payload — some enclosing container key up the indent ladder is
+        // `example`/`examples`. Mirrors `boolean_keyword_non_boolean_values`.
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            if !is_true(line, "readOnly") {
+                continue;
+            }
+            let c = indent(line);
+            if inside_example(i, c) {
+                continue; // example data, not a schema keyword
+            }
+            let mut conflict = false;
+            // Scan down through this object's block for a `writeOnly: true` sibling.
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) < c {
+                    break; // dedented out of this object
+                }
+                if indent(l) == c && is_true(l, "writeOnly") {
+                    conflict = true;
+                    break;
+                }
+                j += 1;
+            }
+            // The `writeOnly` sibling may be declared before the `readOnly`; scan up.
+            if !conflict {
+                let mut k = i;
+                while k > 0 {
+                    k -= 1;
+                    let l = lines[k];
+                    if l.trim().is_empty() {
+                        continue;
+                    }
+                    if indent(l) < c {
+                        break; // reached the key that opened this object
+                    }
+                    if indent(l) == c && is_true(l, "writeOnly") {
+                        conflict = true;
+                        break;
+                    }
+                }
+            }
+            if conflict {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_property_is_not_both_read_and_write_only() {
+        // Contract-harness invariant (OpenAPI 3.0.x Schema Object): a property
+        // "MUST NOT be marked as both `readOnly` and `writeOnly` being `true`".
+        // `readOnly: true` says the value appears only in responses, `writeOnly:
+        // true` only in requests — asserting both is self-contradictory, so a
+        // codegen/validator tool cannot place the field in either direction and a
+        // Redoc reader is shown a field that is at once response-only and
+        // request-only.
+        //
+        // A live hazard in these identity-heavy specs, which mark audit/id fields
+        // `readOnly` and secrets (a WPA `password`, a `deviceCredential`)
+        // `writeOnly`: a field copied from a read-only sibling and then handed a
+        // write-only role — or the reverse — leaves both flags true. Invisible to
+        // every existing test: `every_boolean_schema_keyword_carries_a_boolean`
+        // checks each keyword *is* a boolean but never compares the two, and no
+        // other test reads both. Verified true across all mounted specs before
+        // asserting.
+        for api in APIS {
+            let conflicts = schema_read_and_write_only_conflicts(api.body);
+            assert!(
+                conflicts.is_empty(),
+                "{} spec marks a property both readOnly: true and writeOnly: true \
+                 (OpenAPI forbids both) at line(s): {:?}",
+                api.name,
+                conflicts
+            );
+        }
+    }
+
+    #[test]
+    fn read_write_only_conflict_extraction_rules() {
+        // Unit-cover the `schema_read_and_write_only_conflicts` extractor so the
+        // contract test above can't pass vacuously and its detection is pinned: a
+        // `readOnly: true` is flagged only when a `writeOnly: true` *sibling* (same
+        // object, same indent) is present, whether declared after *or* before it;
+        // a `readOnly` paired with `writeOnly: false` is not a conflict; a
+        // `writeOnly` in a different object — a following sibling schema, or a
+        // nested sub-schema at another indent — is never mistaken for the pair; and
+        // a keyword inside an `example:` payload is example data, not a schema
+        // keyword.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    GoodRead:
+      type: string
+      readOnly: true
+    GoodWrite:
+      type: string
+      writeOnly: true
+    BadAfter:
+      type: string
+      readOnly: true
+      writeOnly: true
+    BadBefore:
+      type: string
+      writeOnly: true
+      readOnly: true
+    Harmless:
+      type: string
+      readOnly: true
+      writeOnly: false
+    Split:
+      type: object
+      properties:
+        a:
+          type: string
+          readOnly: true
+        b:
+          type: string
+          writeOnly: true
+    Example:
+      type: object
+      properties:
+        p:
+          type: string
+          readOnly: true
+      example:
+        readOnly: true
+        writeOnly: true
+";
+        // Flagged, in document order: line 22 (`BadAfter.readOnly` with a
+        // `writeOnly: true` sibling below) and line 27 (`BadBefore.readOnly` with a
+        // `writeOnly: true` sibling above — the write-only declared first). Not
+        // flagged: `GoodRead`/`GoodWrite` (a single flag each); `Harmless`
+        // (`writeOnly: false` is not a conflict); `Split.a.readOnly`, whose only
+        // `writeOnly: true` sits in the following property `Split.b` past a dedent,
+        // so the two never pair; and the `Example` payload's `readOnly: true`
+        // (line 48), which is example data under an enclosing `example:` key, not a
+        // schema keyword.
+        assert_eq!(schema_read_and_write_only_conflicts(body), vec![22, 27]);
+
+        // Non-vacuous floor: across every registered spec no property is both
+        // readOnly and writeOnly (the invariant the contract test asserts), and the
+        // corpus genuinely declares *both* keywords — so the conflict check runs
+        // over real data and a broken (always-empty) extractor can't hide behind a
+        // corpus that uses neither. Count each keyword with a presence-only
+        // detector independent of the extractor's sibling pairing.
+        let mut read_only = 0usize;
+        let mut write_only = 0usize;
+        for api in APIS {
+            assert!(
+                schema_read_and_write_only_conflicts(api.body).is_empty(),
+                "{}: no property may be both readOnly and writeOnly",
+                api.name
+            );
+            for l in api.body.lines() {
+                let t = l.trim_start();
+                let is_true_kw = |kw: &str| -> bool {
+                    t.split_once(':').is_some_and(|(k, v)| {
+                        k.trim() == kw
+                            && v.split('#')
+                                .next()
+                                .unwrap_or(v)
+                                .trim()
+                                .trim_matches('"')
+                                .trim_matches('\'')
+                                == "true"
+                    })
+                };
+                if is_true_kw("readOnly") {
+                    read_only += 1;
+                }
+                if is_true_kw("writeOnly") {
+                    write_only += 1;
+                }
+            }
+        }
+        assert!(
+            read_only >= 10,
+            "expected many readOnly: true properties across specs, got {read_only}"
+        );
+        assert!(
+            write_only >= 1,
+            "expected at least one writeOnly: true property across specs, got {write_only}"
+        );
+    }
+
     /// Returns the 1-based line numbers of length/size/count bound keywords whose
     /// inline scalar value is **not a non-negative integer** — without a YAML dep.
     ///

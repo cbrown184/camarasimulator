@@ -5718,6 +5718,30 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-21 — Contract-test harness: added a **readOnly/writeOnly mutual-exclusion**
+  test (`src/registry.rs` `every_property_is_not_both_read_and_write_only`) — the
+  OpenAPI 3.0.x Schema Object rule that a property "MUST NOT be marked as both
+  `readOnly` and `writeOnly` being `true`". `readOnly` means response-only,
+  `writeOnly` request-only, so both true is self-contradictory — a codegen/validator
+  can place the field in neither direction and Redoc shows a field at once
+  response-only and request-only. A genuinely new dimension: the existing
+  `every_boolean_schema_keyword_carries_a_boolean` guards that each of
+  `readOnly`/`writeOnly` *is* a boolean but never compares the two, and no other test
+  reads both. New pure `schema_read_and_write_only_conflicts` extractor mirroring
+  `schema_bounds_inverted`'s sibling scan (for each `readOnly: true` at indent `c`,
+  scan the object's block down-then-up, dedent-bounded, for a `writeOnly: true`
+  sibling at exactly `c`; keyed on the `readOnly` line so each object reports once),
+  plus the `boolean_keyword_non_boolean_values` `example:`-payload guard so a keyword
+  inside an example is not mistaken for a schema keyword. Surveyed the corpus first:
+  **0** conflicting pairs — 19 `readOnly: true` (audit/id fields) and 2 `writeOnly:
+  true` (WPA `password`, `deviceCredential`) sit on distinct properties — so a live
+  guard that fires the moment a spec marks one property both. Unit-covered
+  (`read_write_only_conflict_extraction_rules`: writeOnly-after and writeOnly-before
+  flagged; single-flag, `writeOnly: false`, a following-property split past a dedent,
+  and an example-payload keyword all cleared; a both-keywords-present corpus floor
+  keeps the check non-vacuous). Test-only (`#[cfg(test)]`), no runtime/spec change.
+  `cargo test` 2860 green (was 2858; +2); `cargo build --release` ok, no new deps.
+  — binary (release): 5.1M (5,323,160 B; unchanged — test-only code).
 - 2026-08-21 — Contract-test harness: added a **parameter-level example
   enum-membership conformance** test (`src/registry.rs`
   `every_parameter_level_example_conforms_to_its_schema_enum`) — a Parameter/Header/
