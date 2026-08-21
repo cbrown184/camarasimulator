@@ -2058,6 +2058,104 @@ mod tests {
         out
     }
 
+    /// The `#/components/headers/<name>@line N (forbidden: …)` label of every Header
+    /// Object a spec defines under `components.headers:` that declares a `name:` or
+    /// an `in:` field at its own child indent.
+    ///
+    /// A Header Object "follows the structure of the Parameter Object" (OpenAPI
+    /// 3.0.x) **with two changes**: `name` MUST NOT be specified (it is given by the
+    /// key of the enclosing `headers:` map) and `in` MUST NOT be specified (its
+    /// location is implicitly `header`). Declaring either is dead documentation at
+    /// best and, at worst, a copy-paste of a request Parameter Object — the
+    /// vendoring hazard when a spec turns an `in: header` request parameter into a
+    /// response Header Object and forgets to strip the two parameter-only fields — a
+    /// Redoc/Swagger/codegen client ignores them while a reader is misled that the
+    /// header takes a name/location input.
+    ///
+    /// The definition-side complement of `component_headers_missing_schema_or_content`
+    /// (a Header Object MUST carry `schema`/`content`) and of
+    /// `header_parameters_with_reserved_names` (a Parameter Object's `in: header`
+    /// name against the reserved set): neither inspects a Header Object for the
+    /// *presence* of the two fields a Header Object MUST NOT carry. Scopes exactly
+    /// like `component_headers_missing_schema_or_content` (top-level `components:` →
+    /// the 2-space `headers:` section → an exact-4-space Header Object key), then
+    /// scans that object's own 6-space direct children for a `name:`/`in:` key; a
+    /// `name`/`in` nested deeper (a `schema` property literally named `name`, an
+    /// example payload) sits below the object's own indent and is never mistaken for
+    /// the header's own field. A `$ref` header entry carries no such fields and so is
+    /// naturally cleared.
+    fn component_headers_declaring_name_or_in(body: &str) -> Vec<String> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let mut out = Vec::new();
+        let mut in_components = false;
+        let mut in_headers = false;
+        for (i, line) in lines.iter().enumerate() {
+            let is_top_level_key =
+                !line.is_empty() && !line.starts_with(char::is_whitespace);
+            if is_top_level_key {
+                in_components = line.trim_end() == "components:";
+                in_headers = false;
+                continue;
+            }
+            if !in_components {
+                continue;
+            }
+            if let Some(rest) = line.strip_prefix("  ") {
+                if !rest.starts_with(char::is_whitespace) {
+                    in_headers = rest.trim_end() == "headers:";
+                    continue;
+                }
+            }
+            if !in_headers {
+                continue;
+            }
+            let Some(rest) = line.strip_prefix("    ") else { continue };
+            if rest.starts_with(char::is_whitespace) {
+                continue;
+            }
+            let Some(name) = rest.trim_end().strip_suffix(':') else { continue };
+            if name.is_empty() || name.contains(char::is_whitespace) {
+                continue;
+            }
+            // Scan the Header Object's own 6-space direct children until it dedents
+            // (indent <= 4) or a blank line closes it, collecting any `name:`/`in:`
+            // key. Deeper lines (a `schema` property named `name`, an example
+            // payload) sit below the object's own indent and are ignored.
+            let mut forbidden: Vec<&str> = Vec::new();
+            for l in &lines[i + 1..] {
+                if l.trim().is_empty() {
+                    break;
+                }
+                let li = indent(l);
+                if li <= 4 {
+                    break;
+                }
+                if li != 6 {
+                    continue;
+                }
+                let t = l.trim_start();
+                if t == "name:" || t.starts_with("name: ") {
+                    if !forbidden.contains(&"name") {
+                        forbidden.push("name");
+                    }
+                } else if t == "in:" || t.starts_with("in: ") {
+                    if !forbidden.contains(&"in") {
+                        forbidden.push("in");
+                    }
+                }
+            }
+            if !forbidden.is_empty() {
+                out.push(format!(
+                    "#/components/headers/{name}@line {} (forbidden: {})",
+                    i + 1,
+                    forbidden.join(", ")
+                ));
+            }
+        }
+        out
+    }
+
     /// Extract the set of security schemes a spec *defines* under
     /// `components.securitySchemes:`, by their scheme name (e.g. `openId`).
     ///
@@ -11906,6 +12004,156 @@ components:
             );
             // Count exact-4-space Header Object keys under a `components.headers`
             // section, mirroring the extractor's scoping.
+            let mut in_components = false;
+            let mut in_headers = false;
+            for line in api.body.lines() {
+                if !line.is_empty() && !line.starts_with(char::is_whitespace) {
+                    in_components = line.trim_end() == "components:";
+                    in_headers = false;
+                    continue;
+                }
+                if !in_components {
+                    continue;
+                }
+                if let Some(rest) = line.strip_prefix("  ") {
+                    if !rest.starts_with(char::is_whitespace) {
+                        in_headers = rest.trim_end() == "headers:";
+                        continue;
+                    }
+                }
+                if !in_headers {
+                    continue;
+                }
+                if let Some(rest) = line.strip_prefix("    ") {
+                    if !rest.starts_with(char::is_whitespace)
+                        && rest.trim_end().ends_with(':')
+                    {
+                        total_headers += 1;
+                    }
+                }
+            }
+        }
+        assert!(
+            total_headers >= 50,
+            "expected many components.headers Header Objects across specs, got {total_headers}"
+        );
+    }
+
+    #[test]
+    fn every_component_header_omits_name_and_in() {
+        // Contract-harness invariant (OpenAPI structural rule): every Header Object a
+        // mounted spec defines under `components.headers:` MUST NOT declare a `name`
+        // or an `in` field. A Header Object "follows the structure of the Parameter
+        // Object" (OpenAPI 3.0.x) *with two changes*: `name` MUST NOT be specified —
+        // it is given by the key of the enclosing `headers:` map — and `in` MUST NOT
+        // be specified — the location is implicitly `header`.
+        //
+        // The presence-side complement of the two existing Header Object checks:
+        // `every_component_header_declares_a_schema_or_content` pins the field a
+        // Header Object MUST carry (`schema`/`content`), and
+        // `no_header_parameter_uses_a_reserved_name` pins a request Parameter Object's
+        // `in: header` name — neither asserts a Header Object OMITS the two
+        // parameter-only fields. The break it catches is a vendoring hazard invisible
+        // to every sibling: a spec that turns an `in: header` request parameter into a
+        // response Header Object and forgets to strip its `name:`/`in:` lines declares
+        // fields a Redoc/Swagger/codegen client silently ignores while a reader is
+        // misled the header takes a name/location input. Verified true across all
+        // mounted specs before asserting (every corpus Header Object is a
+        // `schema`-typed `XCorrelator`, carrying neither field).
+        for api in APIS {
+            let offending = component_headers_declaring_name_or_in(api.body);
+            assert!(
+                offending.is_empty(),
+                "{} spec defines a `components.headers` Header Object declaring a \
+                 `name`/`in` field (an OpenAPI Header Object MUST NOT specify either): \
+                 {:?}",
+                api.name,
+                offending
+            );
+        }
+    }
+
+    #[test]
+    fn component_header_name_and_in_omission_extraction_rules() {
+        // Unit-cover the `component_headers_declaring_name_or_in` extractor so the
+        // contract test above can't pass vacuously and its detection is pinned: a
+        // Header Object under `components.headers` is flagged only when it declares a
+        // `name:` or `in:` key at its own child indent. A well-formed
+        // `schema`/`content`/`$ref` header passes; a `name`/`in` nested deeper (a
+        // `schema` property literally named `name`, an example payload) is NOT the
+        // header's own field and does not trigger; a header carrying both fields is
+        // reported once, listing both in document order.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  headers:
+    XCorrelator:
+      description: echoed
+      required: false
+      schema:
+        type: string
+    NamedHeader:
+      description: mis-vendored from a parameter
+      name: x-correlator
+      schema:
+        type: string
+    InHeader:
+      in: header
+      schema:
+        type: string
+    BothHeader:
+      name: x-thing
+      in: header
+      schema:
+        type: string
+    RefHeader:
+      $ref: '#/components/headers/XCorrelator'
+    NestedNameHeader:
+      description: a schema property happens to be named name
+      schema:
+        type: object
+        properties:
+          name:
+            type: string
+          in:
+            type: string
+";
+        // Flagged: `NamedHeader` (`name:`), `InHeader` (`in:`), `BothHeader`
+        // (both, listed in document order). Cleared: `XCorrelator` (schema only),
+        // `RefHeader` ($ref), and `NestedNameHeader` (its `name:`/`in:` sit at 10
+        // spaces inside a `schema.properties`, below the header's own 6-space
+        // children).
+        assert_eq!(
+            component_headers_declaring_name_or_in(body),
+            vec![
+                "#/components/headers/NamedHeader@line 19 (forbidden: name)".to_string(),
+                "#/components/headers/InHeader@line 24 (forbidden: in)".to_string(),
+                "#/components/headers/BothHeader@line 28 (forbidden: name, in)".to_string(),
+            ]
+        );
+
+        // Non-vacuous floor: across every registered spec, every `components.headers`
+        // Header Object omits `name`/`in` (the invariant the contract test asserts),
+        // and the corpus actually defines many such headers (each spec carries at
+        // least its `XCorrelator`), so a broken extractor can't hide behind an empty
+        // scan.
+        let mut total_headers = 0usize;
+        for api in APIS {
+            assert!(
+                component_headers_declaring_name_or_in(api.body).is_empty(),
+                "{}: every `components.headers` Header Object must omit `name`/`in`",
+                api.name
+            );
             let mut in_components = false;
             let mut in_headers = false;
             for line in api.body.lines() {

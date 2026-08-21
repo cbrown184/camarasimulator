@@ -5731,6 +5731,33 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-21 — Contract-test harness: added a **Header-Object name/in omission** test
+  (`src/registry.rs` `every_component_header_omits_name_and_in`) — every Header Object a
+  spec defines under `components.headers:` MUST NOT declare a `name` or an `in` field.
+  A Header Object "follows the structure of the Parameter Object" (OpenAPI 3.0.x) *with
+  two changes*: `name` MUST NOT be specified (it is the key of the enclosing `headers:`
+  map) and `in` MUST NOT be specified (the location is implicitly `header`). The
+  presence-side complement of the two existing Header-Object guards:
+  `every_component_header_declares_a_schema_or_content` pins the field a Header Object
+  MUST carry, and `no_header_parameter_uses_a_reserved_name` pins a request Parameter
+  Object's `in: header` name — neither asserts a Header Object OMITS the two
+  parameter-only fields. Catches a vendoring hazard invisible to every sibling: a spec
+  turning an `in: header` request parameter into a response Header Object and forgetting
+  to strip its `name:`/`in:` lines. New pure `component_headers_declaring_name_or_in`
+  extractor reuses `component_headers_missing_schema_or_content`'s scoping exactly
+  (top-level `components:` → the 2-space `headers:` section → an exact-4-space Header
+  Object key), then scans the object's own 6-space direct children for a `name:`/`in:`
+  key (a `name`/`in` nested deeper — a `schema` property literally named `name`, an
+  example payload — sits below the object's own indent and is ignored); reports both
+  fields in document order. Surveyed the corpus first: **61** `components.headers` Header
+  Objects, every one the `schema`-typed `XCorrelator`, none declaring `name`/`in` → **0**
+  drift, a live guard that fires the moment a spec pastes a parameter's name/location into
+  a Header Object. Unit-covered (`component_header_name_and_in_omission_extraction_rules`:
+  `name`-only, `in`-only, and both-in-document-order flagged; a schema-only header, a
+  `$ref` header, and a header whose `schema.properties` contains `name`/`in` sub-schemas
+  all cleared; ≥50-header non-vacuous floor). Test-only (`#[cfg(test)]`), no runtime/spec
+  change. `cargo test` 2868 green (was 2866; +2); `cargo build --release` ok, no new deps.
+  — binary (release): 5.1M (5,323,160 B; unchanged — test-only code).
 - 2026-08-21 — Contract-test harness: added a **reserved header-parameter-name** test
   (`src/registry.rs` `no_header_parameter_uses_a_reserved_name`) — the OpenAPI 3.0.x
   Parameter Object rule that when `in` is `"header"` and `name` is `"Accept"`,
