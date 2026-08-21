@@ -3332,6 +3332,31 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - an **`additionalProperties` object-type placement** contract test (`src/registry.rs`
+    `every_additional_properties_sits_on_an_object_type`) asserts that every
+    `additionalProperties:` keyword sits on an object-typed Schema Object — in OpenAPI
+    3.0.x / JSON Schema it constrains the members an `object` instance's `properties`
+    does not name, so on a `type: string`/`array`/numeric schema it is inert (a
+    validator ignores it while a Redoc/codegen reader is misled the field bounds extra
+    members the instance can never carry). Closes the gap `facet_keyword_type_mismatches`
+    names in its own doc — that placement test pins the string/array/object validation
+    facets' enclosing type but **deliberately excludes** `additionalProperties` (its
+    value is polymorphic: a boolean or a nested Schema Object) — and is the placement
+    complement of `every_additional_properties_scalar_is_a_boolean` (which pins the
+    VALUE, never the enclosing type). New pure `additional_properties_off_object_type`
+    extractor flags an `additionalProperties:` (boolean **or** Schema-Object form) whose
+    same-indent sibling `type:` is not `object`; skips one with no sibling `type:` (a
+    valid free-form/typed map on a typeless object schema), one inside an
+    `example`/`examples` payload, and a property literally NAMED `additionalProperties`
+    (nearest shallower ancestor `properties:`); a block-form's own nested `type:` sits
+    deeper, so the same-indent scan never mistakes the subschema's type. Surveyed the
+    corpus first: 71 `additionalProperties` keywords across 15 specs, every one on
+    `type: object` → 0 drift, a live guard the moment one is pasted onto a non-object
+    schema. Unit-covered (`additional_properties_placement_extraction_rules`: a
+    `type: string` boolean-form and a `type: array` schema-form flagged in document
+    order; two `type: object` cases, a typeless free-form map, a property named
+    `additionalProperties`, and an example-payload occurrence all cleared; ≥40-keyword
+    non-vacuous corpus floor). Test-only (`#[cfg(test)]`), no runtime/spec change.
   - a **reserved response-header name** contract test (`src/registry.rs`
     `no_response_header_uses_the_reserved_content_type_name`) asserts that no Response Object
     `headers:` map entry is named `Content-Type` — OpenAPI 3.0.x says a response header of
@@ -5801,6 +5826,45 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 ---
 
 ## Scan journal
+
+- 2026-08-21 — Contract-test harness: added an **`additionalProperties`
+  object-type placement** test (`src/registry.rs`
+  `every_additional_properties_sits_on_an_object_type`) — every
+  `additionalProperties:` keyword MUST sit on an object-typed Schema Object. In
+  OpenAPI 3.0.x / JSON Schema `additionalProperties` constrains the members an
+  `object` instance's `properties` does not name, so on a `type: string`/`array`/
+  numeric schema it is inert: a validator ignores it while a Redoc/Swagger/codegen
+  reader is misled the field bounds extra members the instance can never carry.
+  Closes the gap `facet_keyword_type_mismatches` names in its own doc — that
+  placement test pins the string/array/object *validation* facets' enclosing type
+  but **deliberately excludes** `additionalProperties` because its value is
+  polymorphic (a boolean `false`/`true` OR a nested Schema Object, not an
+  inline-scalar facet); and is the placement complement of
+  `every_additional_properties_scalar_is_a_boolean`, which pins the VALUE, never
+  the enclosing type. Both `additionalProperties` forms are judged here — the
+  enclosing-type check is value-agnostic. New pure
+  `additional_properties_off_object_type` extractor: for each
+  `additionalProperties:` line (boolean or Schema-Object form) it reads the
+  same-indent sibling `type:` scalar (scanned down-then-up, dedent-bounded, so a
+  nested/following object's `type` never pairs) and flags one not equal to
+  `object`. Skipped: an `additionalProperties:` with **no** sibling `type:` (a
+  valid free-form/typed map — `additionalProperties: {type: string}` — on a
+  typeless object schema, so absence of a type is never flagged); one appearing as
+  data inside an `example:`/`examples:` payload; and a property literally NAMED
+  `additionalProperties` (its nearest shallower ancestor key is `properties`). A
+  block-form `additionalProperties:`'s own nested `type:` sits deeper than its
+  indent, so the same-indent scan never mistakes the subschema's type for the
+  enclosing object's. Surveyed the corpus first: **71** `additionalProperties`
+  keywords across **15** specs, every one on `type: object` → **0** drift, a live
+  guard that fires the moment one is pasted onto a non-object schema. Unit-covered
+  (`additional_properties_placement_extraction_rules`: a `type: string`
+  boolean-form and a `type: array` Schema-Object-form flagged in document order;
+  two `type: object` cases, a typeless free-form map, a property named
+  `additionalProperties` under `properties:`, and an example-payload occurrence all
+  cleared; ≥40-keyword non-vacuous corpus floor). Test-only (`#[cfg(test)]`), no
+  runtime/spec change. `cargo test` 2878 green (was 2876; +2); `cargo build
+  --release` ok — binary (release): 5.1M (5,323,160 B; unchanged — test-only code),
+  no new deps.
 
 - 2026-08-21 — Contract-test harness: added a **reserved response-header name**
   test (`src/registry.rs` `no_response_header_uses_the_reserved_content_type_name`) —

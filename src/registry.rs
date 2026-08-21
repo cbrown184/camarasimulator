@@ -56513,4 +56513,263 @@ paths: {}
             "expected ~one server per spec across the corpus, got {total}"
         );
     }
+
+    /// Line numbers (1-based), in document order, of every `additionalProperties:`
+    /// keyword whose enclosing Schema Object is typed as something OTHER than
+    /// `object`.
+    ///
+    /// In OpenAPI 3.0.x / JSON Schema, `additionalProperties` governs the members
+    /// of an OBJECT instance that `properties` does not name — it is meaningful
+    /// only on an object-typed schema. Sat on a `type: string` / `array` / numeric
+    /// schema it is inert: a validator ignores it and a Redoc/Swagger/codegen
+    /// reader is misled that the field constrains extra members the instance can
+    /// never have.
+    ///
+    /// The **placement** sibling of `every_facet_keyword_sits_on_its_required_type`
+    /// (which pins the string/array/object *validation* facets' enclosing type but
+    /// DELIBERATELY EXCLUDES `additionalProperties`, whose value is polymorphic — a
+    /// boolean `false`/`true` OR a nested Schema Object — so it is not an
+    /// inline-scalar facet), and the placement complement of
+    /// `every_additional_properties_scalar_is_a_boolean` (which pins the VALUE,
+    /// never the enclosing type). Both `additionalProperties` forms are judged here
+    /// because the enclosing-type check is value-agnostic.
+    ///
+    /// Flagged: any `additionalProperties:` line — the boolean form (inline
+    /// `false`/`true`) or the Schema-Object form (a block opener) — that has a
+    /// SAME-INDENT sibling `type:` scalar not equal to `object`. Skipped: an
+    /// `additionalProperties:` with NO sibling `type:` (a free-form / typed map —
+    /// `additionalProperties: {type: string}` on a typeless object schema — is
+    /// valid, so absence of a sibling type is never flagged); one appearing as data
+    /// inside an `example:`/`examples:` payload; and a property literally NAMED
+    /// `additionalProperties` (its nearest shallower ancestor key is `properties`),
+    /// which is a data field, not the keyword. A block-form `additionalProperties:`'s
+    /// own nested `type:` sits deeper than its indent, so the same-indent scan never
+    /// mistakes the subschema's type for the enclosing object's.
+    fn additional_properties_off_object_type(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        // The inline scalar of a `type:` key (inline comment + surrounding quotes
+        // stripped), or `None` for any other key / a block opener.
+        let type_scalar = |l: &str| -> Option<String> {
+            let (k, v) = l.trim_start().split_once(':')?;
+            if k.trim() != "type" {
+                return None;
+            }
+            let v = v
+                .split('#')
+                .next()
+                .unwrap_or(v)
+                .trim()
+                .trim_matches('"')
+                .trim_matches('\'');
+            if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            }
+        };
+        // The sibling `type:` scalar in the same object as line `i` (indent `c`):
+        // scan down through the object's block for a same-indent `type`, then up,
+        // dedent-bounded so a nested/following object's `type` never pairs. Mirrors
+        // `facet_keyword_type_mismatches`'s `sibling_type`.
+        let sibling_type = |i: usize, c: usize| -> Option<String> {
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c {
+                    if let Some(v) = type_scalar(l) {
+                        return Some(v);
+                    }
+                }
+                j += 1;
+            }
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c {
+                    if let Some(v) = type_scalar(l) {
+                        return Some(v);
+                    }
+                }
+            }
+            None
+        };
+        // True when line `i` (indent `c`) is a property literally NAMED
+        // `additionalProperties` (its NEAREST shallower ancestor key is
+        // `properties`) or sits inside an `example:`/`examples:` payload (some
+        // enclosing container up the indent ladder is `example`/`examples`).
+        let excluded_context = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut nearest = true;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if nearest && key == "properties" {
+                            return true; // a property NAMED additionalProperties
+                        }
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    nearest = false;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some((k, _)) = line.trim_start().split_once(':') else {
+                continue;
+            };
+            if k.trim() != "additionalProperties" {
+                continue;
+            }
+            let c = indent(line);
+            if excluded_context(i, c) {
+                continue;
+            }
+            if let Some(ty) = sibling_type(i, c) {
+                if ty != "object" {
+                    out.push(i + 1);
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_additional_properties_sits_on_an_object_type() {
+        // Contract-harness invariant (OpenAPI 3.0.x / JSON Schema Schema Object):
+        // `additionalProperties` constrains the members of an OBJECT instance that
+        // `properties` does not name, so it is meaningful ONLY on an object-typed
+        // schema. On a `type: string` / `array` / numeric schema it is inert — a
+        // validator ignores it while a Redoc/Swagger/codegen reader is misled that
+        // the field bounds extra members the instance can never carry.
+        //
+        // Closes the gap `facet_keyword_type_mismatches` names in its own doc: that
+        // placement test pins the string/array/object validation facets' enclosing
+        // type but DELIBERATELY EXCLUDES `additionalProperties` (its value is a
+        // boolean OR a nested Schema Object, not an inline-scalar facet). This is
+        // also the placement complement of
+        // `every_additional_properties_scalar_is_a_boolean`, which pins the VALUE
+        // (`false`/`true`) but never the enclosing type. Verified every mounted spec
+        // sits every `additionalProperties` on `type: object` before asserting.
+        for api in APIS {
+            let bad = additional_properties_off_object_type(api.body);
+            assert!(
+                bad.is_empty(),
+                "{} spec declares `additionalProperties` on a non-object-typed \
+                 schema at line(s): {bad:?} — additionalProperties constrains \
+                 object members only",
+                api.name
+            );
+        }
+    }
+
+    #[test]
+    fn additional_properties_placement_extraction_rules() {
+        // Pin the extractor's flag / skip boundaries so the contract test above
+        // can't pass vacuously and each branch is exercised.
+
+        // A non-object `type` sibling → flagged (both the boolean and the
+        // Schema-Object form); an object `type` sibling → cleared.
+        let mixed = "\
+openapi: 3.0.3
+components:
+  schemas:
+    BadString:
+      type: string
+      additionalProperties: false
+    GoodObject:
+      type: object
+      additionalProperties: false
+    BadArraySchemaForm:
+      type: array
+      additionalProperties:
+        type: string
+    GoodObjectSchemaForm:
+      type: object
+      additionalProperties:
+        type: string
+paths: {}
+";
+        // `BadString.additionalProperties` (line 6) and
+        // `BadArraySchemaForm.additionalProperties` (line 12) flagged in document
+        // order; the two `GoodObject*` cleared. The block-form
+        // `additionalProperties`'s own nested `type: string` (deeper indent) never
+        // pairs as the enclosing type.
+        assert_eq!(additional_properties_off_object_type(mixed), vec![6, 12]);
+
+        // No sibling `type:` at all (a free-form / typed map on a typeless object
+        // schema) → never flagged; a property literally NAMED
+        // `additionalProperties` under `properties:` → never flagged; an
+        // `additionalProperties` inside an `example:` payload → never flagged.
+        let cleared = "\
+openapi: 3.0.3
+components:
+  schemas:
+    FreeFormMap:
+      additionalProperties:
+        type: string
+    NamedProperty:
+      type: object
+      properties:
+        additionalProperties:
+          type: string
+    WithExample:
+      type: string
+      example:
+        additionalProperties: false
+paths: {}
+";
+        assert!(additional_properties_off_object_type(cleared).is_empty());
+
+        // Non-vacuous corpus floor: the mounted specs declare many
+        // `additionalProperties` keywords (every one on `type: object`), so the
+        // extractor runs on real data and flags none. Count the raw keyword lines
+        // (property-name / example uses are negligible) to prove abundance.
+        let mut keyword_lines = 0usize;
+        for api in APIS {
+            assert!(
+                additional_properties_off_object_type(api.body).is_empty(),
+                "{}: every additionalProperties expected on type: object",
+                api.name
+            );
+            keyword_lines += api
+                .body
+                .lines()
+                .filter(|l| l.trim_start().starts_with("additionalProperties:"))
+                .count();
+        }
+        assert!(
+            keyword_lines >= 40,
+            "expected many additionalProperties keywords across the corpus, got {keyword_lines}"
+        );
+    }
 }
