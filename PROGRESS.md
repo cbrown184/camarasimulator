@@ -3332,6 +3332,30 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - a **parameter-level example string-length-bound conformance** contract test
+    (`src/registry.rs` `every_parameter_level_example_conforms_to_its_schema_length_bounds`)
+    asserts that a Parameter/Header/Media-Type-level `example` — one sitting **beside** a
+    same-indent `schema:` block whose **direct** children include `minLength`/`maxLength` — is
+    a string of a length within those bounds. The **string-length companion** of
+    `every_parameter_level_uuid_example_conforms_to_the_uuid_format` /
+    `every_parameter_level_example_conforms_to_its_schema_enum` (same schema-sibling shape,
+    the schema's direct length bounds in place of `format: uuid` / `enum`) and the
+    **out-of-schema companion** of `every_example_respects_its_string_length_bounds`, which
+    needs the bound at the example's own indent: a parameter writes the `example` beside
+    `schema:` and the length bounds as children of that schema, so that family was checked by
+    **no** existing test (the schema-level length extractor needs same-indent bounds; the
+    parameter-level uuid/enum extractors read `format`/`enum`, never length). New pure
+    `parameter_level_examples_outside_their_schema_length_bounds` extractor (reuses the
+    parameter-level `sibling_schema_block` scan + a direct-child `minLength`/`maxLength`
+    integer locator so a nested property's bound on an object-schema parameter never pairs;
+    length measured in Unicode scalars over the value's inner text, inclusive comparison),
+    keyed on the schema-*sibling* shape so it never overlaps the schema-level extractor.
+    Surveyed the corpus first: 10 parameter-level example+length-bound pairs
+    (edge-application-management `region`/`appId`/`appInstanceId`/`appDeploymentId`,
+    network-traffic-analysis `application`, in-home-device-management `ssid`), all within
+    bounds → 0 drift. Unit-covered (too-short/too-long flagged in document order; in-bounds,
+    nested-property-bound, no-schema, schema-internal cleared; ≥3-pair non-vacuous floor).
+    Test-only, no spec change.
   - a **distinct response-status-keys** contract test (`src/registry.rs`
     `every_operation_lists_distinct_response_status_keys`) asserts that within one
     operation's `responses:` object every key is distinct — a YAML mapping's keys MUST be
@@ -5762,6 +5786,45 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 ---
 
 ## Scan journal
+
+- 2026-08-21 — Contract-test harness: added a **parameter-level example
+  string-length-bound conformance** test (`src/registry.rs`
+  `every_parameter_level_example_conforms_to_its_schema_length_bounds`) — a
+  Parameter/Header/Media-Type-level `example` sitting **beside** a same-indent `schema:`
+  block whose **direct** children declare `minLength`/`maxLength` MUST be a string whose
+  length falls within those bounds. In OpenAPI 3.0.x an `example` is a sample instance of
+  its sibling `schema`, so a value shorter than `minLength` or longer than `maxLength` is a
+  sample the schema's own validator rejects — a Redoc/Swagger "try it" prefill of that path/
+  query parameter carries a value the field can never hold. The **string-length companion**
+  of the parameter-level uuid (`…_conforms_to_the_uuid_format`) and enum
+  (`…_conforms_to_its_schema_enum`) "out-of-schema companion" tests (same schema-sibling
+  shape, the schema's direct length bounds in place of `format: uuid` / `enum`) and the
+  **out-of-schema companion** of `every_example_respects_its_string_length_bounds`, whose
+  schema-level extractor needs the bound at the example's **own** indent: a parameter writes
+  the `example` as a sibling of `schema:` and the length bounds as children of that schema,
+  so this shape was seen by no test — the schema-level length extractor pairs a same-indent
+  bound, and the parameter-level uuid/enum extractors read `format`/`enum`, never length.
+  New pure `parameter_level_examples_outside_their_schema_length_bounds` extractor: for each
+  inline-scalar `example` (block/flow openers skipped) with a same-indent `schema:`
+  block-opener sibling (scanned down-then-up, dedent-bounded, so a nested/following object's
+  `schema` never pairs) and a `minLength`/`maxLength` among that block's **direct** children
+  (a bound on a nested sub-schema/object property never pairs, so an object-schema parameter
+  is not mistaken for a bounded scalar), read as a non-negative integer, it measures the
+  value's inner text in Unicode scalars (one matching quote pair stripped) and flags a length
+  strictly below `minLength` or above `maxLength` (inclusive). Keyed strictly on the
+  schema-*sibling* shape, so it never overlaps `examples_outside_their_length_bounds` (which
+  keys on a same-indent bound). Surveyed the corpus first: **10** parameter-level
+  example+length-bound pairs (edge-application-management `region`/`appId`/`appInstanceId`/
+  `appDeploymentId`, network-traffic-analysis `application`, in-home-device-management
+  `ssid`), all within bounds → **0** drift, a live guard that fires the moment a pasted
+  parameter example overshoots its `minLength`/`maxLength`. Unit-covered
+  (`parameter_level_example_length_extraction_rules`: a too-short `ab` (< minLength 4) and a
+  too-long `abcdefgh` (> maxLength 4) flagged in document order; an in-bounds `us-east-1`, a
+  nested-property `minLength` on an object-schema parameter, an example with no sibling
+  `schema:`, and a schema-internal same-indent-`minLength` example all cleared; ≥3-pair
+  non-vacuous floor). Test-only (`#[cfg(test)]`), no runtime/spec change. `cargo test` 2874
+  green (was 2872; +2); `cargo build --release` ok — binary (release): 5.1M (5,323,160 B;
+  unchanged — test-only code), no new deps.
 
 - 2026-08-21 — Contract-test harness: added a **distinct inline-`examples:`-map
   example-name** test (`src/registry.rs` `every_examples_map_lists_distinct_example_names`) —

@@ -29665,6 +29665,384 @@ components:
         );
     }
 
+    /// The 1-based line numbers, in document order, of every **parameter/header-level**
+    /// `example:` keyword — one that sits beside a same-indent `schema:` *block* (a
+    /// Parameter Object, a `components.headers` entry, or a Media-Type Object, whose
+    /// `example` is a sample instance of the sibling `schema`) — whose sibling schema
+    /// declares a direct `minLength`/`maxLength` string bound the example's inline value
+    /// violates, without a YAML dep.
+    ///
+    /// The string-length companion of `parameter_level_uuid_examples_malformed` and
+    /// `parameter_level_examples_outside_their_schema_enum` (same schema-sibling shape, the
+    /// schema's direct `minLength`/`maxLength` in place of its `format: uuid` / `enum`) and
+    /// the out-of-schema companion of `examples_outside_their_length_bounds`, which guards a
+    /// length bound declared *at the example's own indent* (a schema-level example whose
+    /// `minLength`/`maxLength` are its same-indent siblings). A Parameter Object writes the
+    /// `example` as a sibling of `schema:` and the length bounds as children of that schema,
+    /// so a parameter-level example against a `minLength`/`maxLength` was checked by no test:
+    /// the schema-level length extractor needs the bounds at the example's own indent, and
+    /// the parameter-level uuid/enum extractors read `format`/`enum`, never the length
+    /// bounds. CAMARA declares such parameters — the edge-application-management
+    /// `region`/`appId`/`appInstanceId`/`appDeploymentId`, network-traffic-analysis
+    /// `application`, and in-home-device-management `ssid` path & query parameters each carry
+    /// an `example` beside a `schema` with a `minLength` and/or `maxLength`.
+    ///
+    /// In OpenAPI 3.0.x a Parameter/Header Object `example` (and a Media-Type `example`) is a
+    /// sample *instance of that object's `schema`*, so where that schema bounds a string with
+    /// `minLength`/`maxLength` the example MUST fall within the bound; a value shorter than
+    /// `minLength` or longer than `maxLength` is a sample the schema's own validator rejects,
+    /// so a Redoc/Swagger "try it" prefill of that path or query parameter carries a value the
+    /// length bound can never legally hold. `minLength`/`maxLength` count characters, so
+    /// length is measured in Unicode scalar values (`chars().count()`), matching a validator.
+    ///
+    /// Only an `example` carrying an inline scalar (quoted or unquoted; a block-scalar
+    /// `>`/`|` opener and a flow/collection `[`/`{` opener carry no inline string and are
+    /// skipped — a `minLength`/`maxLength`-bounded schema is a string, so its example is a
+    /// plain scalar) that has (a) a same-indent `schema:` **block-opening** sibling in the
+    /// same object (scanned down then up, dedent-bounded, so a nested or following object's
+    /// `schema` never pairs) and (b) a `minLength` and/or `maxLength` among that schema
+    /// block's **direct** children (a bound deeper than the direct-child level — a nested
+    /// sub-schema's or an object property's — never pairs, so an object-schema parameter is
+    /// not mistaken for a bounded scalar), each read only when it is a non-negative-integer
+    /// scalar, is inspected. An `example:` nested inside an outer `example:`/`examples:`
+    /// payload (sample data) is skipped. This keys strictly on the schema-*sibling* shape, so
+    /// it never overlaps `examples_outside_their_length_bounds` (which keys on a same-indent
+    /// `minLength`/`maxLength` sibling — a parameter-level example has none). Length is
+    /// measured on the value's inner text (one matching leading/trailing quote stripped); the
+    /// comparison is inclusive — only a length strictly below `minLength` or strictly above
+    /// `maxLength` is flagged.
+    fn parameter_level_examples_outside_their_schema_length_bounds(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let raw_inline = |l: &str, name: &str| -> Option<String> {
+            let (k, v) = l.trim_start().split_once(':')?;
+            if k.trim() != name {
+                return None;
+            }
+            let v = v.split('#').next().unwrap_or(v).trim();
+            if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            }
+        };
+        // The line index of a same-indent `schema:` *block opener* (a `schema:` key with no
+        // inline value) sibling of line `i` (indent `c`) in the same object: scan down
+        // through the object's block then up, dedent-bounded so a nested or following
+        // object's `schema` never pairs.
+        let sibling_schema_block = |i: usize, c: usize| -> Option<usize> {
+            let is_schema_opener = |l: &str| -> bool {
+                l.trim_start().split_once(':').is_some_and(|(k, v)| {
+                    k.trim() == "schema" && v.split('#').next().unwrap_or(v).trim().is_empty()
+                })
+            };
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_schema_opener(l) {
+                    return Some(j);
+                }
+                j += 1;
+            }
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_schema_opener(l) {
+                    return Some(k);
+                }
+            }
+            None
+        };
+        // The non-negative-integer value of a length bound `key` (`minLength`/`maxLength`)
+        // among the *direct* children of the schema block opened at `sidx` (the first indent
+        // level inside the block), bounded by the dedent that closes the block. A bound
+        // deeper than the direct-child level (a nested sub-schema's) never pairs, so an
+        // object-schema parameter whose property carries a length bound is not mistaken for a
+        // bounded scalar. A quoted or non-integer bound has no length to compare against and
+        // is treated as absent (its own domain is `every_size_bound_is_a_non_negative_integer`).
+        let schema_block_direct_len = |sidx: usize, key: &str| -> Option<usize> {
+            let sc = indent(lines[sidx]);
+            let parse_len = |l: &str| -> Option<usize> {
+                let raw = raw_inline(l, key)?;
+                if raw.starts_with('"') || raw.starts_with('\'') {
+                    return None; // quoted → not a plain integer
+                }
+                raw.parse::<usize>().ok()
+            };
+            let mut child: Option<usize> = None;
+            let mut j = sidx + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                let li = indent(l);
+                if li <= sc {
+                    break;
+                }
+                let ci = *child.get_or_insert(li);
+                if li == ci {
+                    if let Some(n) = parse_len(l) {
+                        return Some(n);
+                    }
+                }
+                j += 1;
+            }
+            None
+        };
+        // True when line `i` (indent `c`) sits inside an outer `example:`/`examples:`
+        // payload — some enclosing container key up the indent ladder is `example`/`examples`,
+        // so an inner `example` key there is sample data, not a schema keyword.
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        // The character count of an inline scalar's inner text (one matching leading and
+        // trailing quote stripped; an unquoted scalar counted as written).
+        let scalar_len = |raw: &str| -> usize {
+            let inner = raw
+                .strip_prefix('"')
+                .and_then(|s| s.strip_suffix('"'))
+                .or_else(|| raw.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')))
+                .unwrap_or(raw);
+            inner.chars().count()
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some(raw) = raw_inline(line, "example") else {
+                continue;
+            };
+            // A block-scalar (`>`/`|`) or flow/collection (`[`/`{`) opener carries no inline
+            // string to measure — skip (a length-bounded schema's example is a plain scalar).
+            if raw.starts_with('>')
+                || raw.starts_with('|')
+                || raw.starts_with('[')
+                || raw.starts_with('{')
+            {
+                continue;
+            }
+            let c = indent(line);
+            if inside_example(i, c) {
+                continue;
+            }
+            let Some(sidx) = sibling_schema_block(i, c) else {
+                continue;
+            };
+            let min = schema_block_direct_len(sidx, "minLength");
+            let max = schema_block_direct_len(sidx, "maxLength");
+            if min.is_none() && max.is_none() {
+                continue;
+            }
+            let len = scalar_len(&raw);
+            let below = min.is_some_and(|m| len < m);
+            let above = max.is_some_and(|m| len > m);
+            if below || above {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_parameter_level_example_conforms_to_its_schema_length_bounds() {
+        // Contract-harness invariant (OpenAPI 3.0.x / JSON-Schema): a Parameter/Header
+        // Object `example` (and a Media-Type Object `example`) is a sample *instance of its
+        // sibling `schema`*, so where that schema bounds a string with `minLength`/`maxLength`
+        // the example MUST fall within the bound — a value shorter than `minLength` or longer
+        // than `maxLength` is a sample the schema's own validator rejects, so a Redoc/Swagger
+        // "try it" prefill of that path or query parameter carries a value the length bound
+        // can never legally hold.
+        //
+        // The string-length companion of `every_parameter_level_uuid_example_conforms_to_the_uuid_format`
+        // and `every_parameter_level_example_conforms_to_its_schema_enum`, and the out-of-schema
+        // companion of `every_example_respects_its_string_length_bounds` (which guards a length
+        // bound at the example's own indent). A parameter writes the `example` beside `schema:`
+        // and the length bounds as children of that schema, so this family of examples was
+        // checked by no existing test — the schema-level length extractor needs the bounds at
+        // the example's own indent, and the parameter-level uuid/enum extractors read
+        // `format`/`enum`, never the length bounds. Verified true across all mounted specs
+        // before asserting.
+        for api in APIS {
+            let offenders = parameter_level_examples_outside_their_schema_length_bounds(api.body);
+            assert!(
+                offenders.is_empty(),
+                "{} spec declares a parameter/header-level `example` beside a `schema` with a \
+                 direct `minLength`/`maxLength` its value violates (a sample the schema's own \
+                 validator would reject) at `example:` line(s): {:?}",
+                api.name,
+                offenders
+            );
+        }
+    }
+
+    #[test]
+    fn parameter_level_example_length_extraction_rules() {
+        // Unit-cover `parameter_level_examples_outside_their_schema_length_bounds` so the
+        // contract test above can't pass vacuously and its detection is pinned.
+        //
+        // A parameter whose `schema` is a length-bounded string and whose sibling `example`
+        // falls within the bound passes; a too-short and a too-long sibling example are each
+        // flagged. A parameter whose length bound is nested in an object property (not a
+        // direct child of the parameter schema) is skipped; one whose `example` has no
+        // sibling `schema:` block is skipped; and a schema-*internal* example (a same-indent
+        // `minLength`/`maxLength`, no sibling `schema:`) is skipped here — it is
+        // `examples_outside_their_length_bounds`'s concern, so the two extractors never
+        // double-count.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      parameters:
+        - name: good
+          in: query
+          schema:
+            type: string
+            minLength: 2
+            maxLength: 16
+          example: us-east-1
+        - name: short
+          in: query
+          schema:
+            type: string
+            minLength: 4
+            maxLength: 64
+          example: ab
+        - name: long
+          in: query
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 4
+          example: abcdefgh
+        - name: obj
+          in: query
+          schema:
+            type: object
+            properties:
+              id:
+                type: string
+                minLength: 40
+          example: short
+        - name: noschema
+          in: query
+          example: whatever
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    Internal:
+      type: string
+      minLength: 40
+      example: tooshort
+";
+        // Flagged, in document order: `short` (`ab` length 2 < minLength 4) and `long`
+        // (`abcdefgh` length 8 > maxLength 4) — each a parameter-level example beside a
+        // `schema` whose direct length bound it violates. Not flagged: `good` (`us-east-1`
+        // length 9, within 2..=16); `obj` (the `minLength` is a nested property, not a direct
+        // child of the parameter schema — so the object example is out of scope); `noschema`
+        // (no sibling `schema:` block); `Internal.example` (a schema-internal example with a
+        // same-indent `minLength` and no sibling `schema:` — the schema-level test's concern,
+        // never this one's).
+        let flagged = parameter_level_examples_outside_their_schema_length_bounds(body);
+        let short_line = body.lines().position(|l| l.trim() == "example: ab").unwrap() + 1;
+        let long_line = body.lines().position(|l| l.contains("example: abcdefgh")).unwrap() + 1;
+        assert_eq!(flagged, vec![short_line, long_line]);
+
+        // The schema-internal `Internal.example` is NOT credited here (no overlap with the
+        // schema-level extractor); nor are the nested-property `obj` or the `noschema` cases.
+        let internal_line = body.lines().position(|l| l.contains("tooshort")).unwrap() + 1;
+        assert!(!flagged.contains(&internal_line));
+        let obj_line = body.lines().position(|l| l.trim() == "example: short").unwrap() + 1;
+        assert!(!flagged.contains(&obj_line));
+
+        // Non-vacuous floor: across every registered spec every parameter/header-level
+        // example beside a length-bounded schema falls within the bound (the invariant), and
+        // the corpus actually declares several such pairs (the region/appId/ssid/application
+        // path & query parameters) — so the length-comparison path runs on real data and a
+        // broken (always-empty) extractor can't hide behind a corpus that never pairs one.
+        // Count pairs with a detector independent of the extractor's comparison.
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let mut param_len_examples = 0usize;
+        for api in APIS {
+            assert!(
+                parameter_level_examples_outside_their_schema_length_bounds(api.body).is_empty(),
+                "{}: every parameter/header-level example beside a length-bounded schema must \
+                 fall within its minLength/maxLength",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            for (i, l) in lines.iter().enumerate() {
+                let t = l.trim_start();
+                let has_inline = t.starts_with("example:")
+                    && t.split_once(':')
+                        .map(|(_, v)| !v.split('#').next().unwrap_or(v).trim().is_empty())
+                        .unwrap_or(false);
+                if !has_inline {
+                    continue;
+                }
+                let c = indent(l);
+                let lo = i.saturating_sub(8);
+                let hi = (i + 8).min(lines.len());
+                let has_schema_sibling =
+                    (lo..hi).any(|j| j != i && indent(lines[j]) == c && lines[j].trim() == "schema:");
+                let has_len_below = (lo..hi).any(|j| {
+                    let tj = lines[j].trim_start();
+                    (tj.starts_with("minLength:") || tj.starts_with("maxLength:"))
+                        && indent(lines[j]) > c
+                });
+                if has_schema_sibling && has_len_below {
+                    param_len_examples += 1;
+                }
+            }
+        }
+        assert!(
+            param_len_examples >= 3,
+            "expected several parameter-level example + length-bounded schema pairs across specs, got {param_len_examples}"
+        );
+    }
+
     /// The 1-based line numbers, in document order, of every parameter/header/media-type
     /// level `example:` — one that sits beside a same-indent `schema:` *block* (a Parameter
     /// Object, a `components.headers` entry, or a Media-Type Object, whose `example` is a
