@@ -4201,6 +4201,186 @@ mod tests {
         out
     }
 
+    /// The status code a scenario case `result:` value names, if it *opens* with
+    /// an explicit three-digit HTTP status (`"400 OUT_OF_RANGE"`, `200 { … }`,
+    /// `'204 No Content'`) — else `None`. One layer of matching surrounding quotes
+    /// is stripped, then the leading token must be three ASCII digits whose first is
+    /// `1`..`5` (an HTTP status class) and which is not the prefix of a longer
+    /// number (a 4th digit → `None`). A prose result (`the canonical CAMARA error
+    /// for that status`), a class-less number (`600 …`), a too-short value, and a
+    /// YAML block-scalar opener (`>-`, `|`) all have no leading status → `None`. No
+    /// YAML/regex dep.
+    fn leading_http_status(value: &str) -> Option<String> {
+        let v = value.trim();
+        let inner = if v.len() >= 2
+            && ((v.starts_with('"') && v.ends_with('"'))
+                || (v.starts_with('\'') && v.ends_with('\'')))
+        {
+            &v[1..v.len() - 1]
+        } else {
+            v
+        };
+        let s = inner.trim_start();
+        let b = s.as_bytes();
+        if b.len() < 3 {
+            return None;
+        }
+        if !(matches!(b[0], b'1'..=b'5') && b[1].is_ascii_digit() && b[2].is_ascii_digit()) {
+            return None;
+        }
+        if b.get(3).is_some_and(u8::is_ascii_digit) {
+            return None;
+        }
+        Some(s[..3].to_string())
+    }
+
+    /// True when an HTTP `status` (a three-digit string) is documented by some key
+    /// in an operation's `responses:` key set — the exact key, an `NXX` wildcard
+    /// range that covers it (`4XX` covers every `4xx`), or the `default` catch-all
+    /// (which documents every otherwise-undeclared status).
+    fn scenario_status_declared(status: &str, keys: &[String]) -> bool {
+        let sb = status.as_bytes();
+        keys.iter().any(|k| {
+            if k == "default" {
+                return true;
+            }
+            let kb = k.as_bytes();
+            kb.len() == 3
+                && matches!(kb[0], b'1'..=b'5')
+                && (0..3).all(|p| kb[p] == b'X' || kb[p] == b'x' || kb[p] == sb[p])
+        })
+    }
+
+    /// Every `x-camarasim-scenarios` case `result:` that opens with an explicit HTTP
+    /// status, paired with whether the enclosing operation's `responses:` object
+    /// *declares* that status — reported as `("<METHOD> <path>: scenario result
+    /// status <NNN>", declared)` in document order, without a YAML dep.
+    ///
+    /// A CamaraSim scenario table (DESIGN §7/§9) documents, per operation, which
+    /// input drives which outcome; a case `result` that names a concrete status
+    /// (`"400 OUT_OF_RANGE"`, `"200 { … }"`) is promising a response the operation
+    /// must actually declare. If the `responses:` object omits that status, the
+    /// human-readable `/docs` page and the served spec disagree: the scenario table
+    /// advertises an outcome the response set — the part a Redoc/Swagger/codegen
+    /// client binds to — never lists, so a caller reading the generated client finds
+    /// no `422`/`409`/… branch the behaviour notes promised. A live edit hazard in
+    /// these scenario-table-heavy specs, where a new error case is added to the
+    /// prose but the matching `$ref` to the shared error response is forgotten.
+    /// (Reserved-suffix cases whose result is prose — "the canonical CAMARA error
+    /// for that status" — name no explicit status and are not judged; those errors
+    /// are the shared `errors.yaml` responses, checked by the error-response family.)
+    ///
+    /// No existing test cross-links the two: the scenario-block family
+    /// (`malformed_scenario_blocks`, `scenario_cases_with_empty_value`,
+    /// `scenario_blocks_missing_description`) inspects a block's own structure and
+    /// prose, never a case value's *status*; the response-key family
+    /// (`responses_with_invalid_status_key`,
+    /// `operations_with_duplicate_response_status_keys`,
+    /// `operations_without_success_response`,
+    /// `operations_missing_camara_auth_error_responses`) inspects the `responses:`
+    /// keys' shape, distinctness, success and auth coverage, never a scenario
+    /// result. This is the join between them.
+    ///
+    /// Scoping mirrors [`responses_with_invalid_status_key`] exactly (a 4-space
+    /// HTTP-verb key under a 2-space `/…` path item beneath top-level `paths:`).
+    /// Within each operation block a single downward pass — bounded by the next line
+    /// indented `<= 4` — collects both the 8-space keys under the 6-space
+    /// `responses:` block *and* the `result:` case values under the 6-space
+    /// `x-camarasim-scenarios:` block (a sibling of `responses:`), so their order in
+    /// the document is irrelevant; each status-opening result is then checked against
+    /// the collected keys via [`scenario_status_declared`]. A `result:` is read only
+    /// while inside the scenarios sub-block, so a schema property literally named
+    /// `result` elsewhere in the operation (a request/response body) is never a case.
+    fn scenario_result_status_declarations(body: &str) -> Vec<(String, bool)> {
+        const METHODS: [&str; 8] =
+            ["get", "put", "post", "delete", "patch", "options", "head", "trace"];
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let mut out = Vec::new();
+        let mut in_paths = false;
+        let mut path: Option<String> = None;
+        for (i, line) in lines.iter().enumerate() {
+            let is_top_level_key =
+                !line.is_empty() && !line.starts_with(char::is_whitespace);
+            if is_top_level_key {
+                in_paths = line.trim_end() == "paths:";
+                path = None;
+                continue;
+            }
+            if !in_paths {
+                continue;
+            }
+            if let Some(rest) = line.strip_prefix("  ") {
+                if !rest.starts_with(char::is_whitespace) && rest.starts_with('/') {
+                    let key = rest.trim_end().strip_suffix(':').unwrap_or(rest.trim_end());
+                    path = Some(key.to_string());
+                    continue;
+                }
+            }
+            let Some(current_path) = path.as_deref() else { continue };
+            if indent(line) != 4 {
+                continue;
+            }
+            let key = line.trim_start();
+            let Some(name) = key.strip_suffix(':') else { continue };
+            if name.contains(char::is_whitespace) || !METHODS.contains(&name) {
+                continue;
+            }
+            // One downward pass over this operation's block collects both the
+            // `responses:` status keys and the scenario `result:` statuses, so their
+            // document order within the operation does not matter.
+            let mut response_keys: Vec<String> = Vec::new();
+            let mut results: Vec<String> = Vec::new();
+            let mut in_responses = false;
+            let mut in_scenarios = false;
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                let li = indent(l);
+                if li <= 4 {
+                    break; // dedented out of this operation
+                }
+                if li == 6 {
+                    let t = l.trim_start();
+                    in_responses = t.strip_suffix(':') == Some("responses");
+                    in_scenarios = t.starts_with("x-camarasim-scenarios:");
+                    j += 1;
+                    continue;
+                }
+                if in_responses && li == 8 {
+                    if let Some(k) = l.trim_start().strip_suffix(':') {
+                        response_keys
+                            .push(k.trim_matches(|c| c == '"' || c == '\'').to_string());
+                    }
+                } else if in_scenarios {
+                    if let Some(v) = l.trim_start().strip_prefix("result:") {
+                        if let Some(status) = leading_http_status(v) {
+                            results.push(status);
+                        }
+                    }
+                }
+                j += 1;
+            }
+            for status in results {
+                let declared = scenario_status_declared(&status, &response_keys);
+                out.push((
+                    format!(
+                        "{} {}: scenario result status {}",
+                        name.to_uppercase(),
+                        current_path,
+                        status
+                    ),
+                    declared,
+                ));
+            }
+        }
+        out
+    }
+
     /// The `METHOD /path` label of every operation a spec declares whose
     /// `responses:` object is present but documents no **success** (`2XX`)
     /// outcome — without a YAML dep.
@@ -10500,6 +10680,150 @@ components:
             total_ops += operation_ids(api.body).len();
         }
         assert!(total_ops >= 100, "expected many operations across specs, got {total_ops}");
+    }
+
+    #[test]
+    fn every_scenario_result_status_is_a_declared_response() {
+        // Contract-harness invariant (DESIGN §7/§9 spec↔scenario consistency): when a
+        // CamaraSim `x-camarasim-scenarios` case documents an outcome by an explicit
+        // HTTP status (`result: "400 OUT_OF_RANGE"`, `result: "200 { … }"`), the
+        // enclosing operation's `responses:` object MUST declare that status. The
+        // scenario table (rendered on the `/docs` page) and the response set (what a
+        // Redoc/Swagger/codegen client binds to) are two descriptions of the same
+        // operation; if a case promises a `422`/`409`/… the responses omit, the two
+        // disagree — the behaviour notes advertise a branch the generated client
+        // never exposes and a validator never expects.
+        //
+        // No sibling test joins the two: the scenario-block family inspects a block's
+        // own structure/prose, the response-key family inspects the `responses:`
+        // keys' shape/distinctness/success/auth coverage — none reads a scenario
+        // result's status against the response set. Verified true across all mounted
+        // specs before asserting.
+        for api in APIS {
+            let missing: Vec<String> = scenario_result_status_declarations(api.body)
+                .into_iter()
+                .filter(|(_, declared)| !declared)
+                .map(|(label, _)| label)
+                .collect();
+            assert!(
+                missing.is_empty(),
+                "{} spec documents scenario result status(es) its operation's \
+                 `responses:` object never declares: {:?}",
+                api.name,
+                missing
+            );
+        }
+    }
+
+    #[test]
+    fn scenario_result_status_declaration_extraction_rules() {
+        // Unit-cover the extractor and its two pure helpers so the contract test
+        // above can't pass vacuously and its parsing/scoping are pinned.
+
+        // `leading_http_status`: a double- or single-quoted status opener and a bare
+        // one are read; prose, a class-less code, a longer number, a too-short value,
+        // and a block-scalar opener all yield None.
+        assert_eq!(leading_http_status("\"400 OUT_OF_RANGE\"").as_deref(), Some("400"));
+        assert_eq!(leading_http_status(" 200 { swapped: true }").as_deref(), Some("200"));
+        assert_eq!(leading_http_status("'204 No Content'").as_deref(), Some("204"));
+        assert_eq!(leading_http_status("the canonical CAMARA error"), None);
+        assert_eq!(leading_http_status("600 not a class"), None);
+        assert_eq!(leading_http_status("2000 devices"), None);
+        assert_eq!(leading_http_status("42"), None);
+        assert_eq!(leading_http_status(">-"), None);
+
+        // `scenario_status_declared`: an exact code, an `NXX` wildcard, and the
+        // `default` catch-all each cover a status; an unrelated exact code does not.
+        let keys = vec!["200".to_string(), "404".to_string()];
+        assert!(scenario_status_declared("200", &keys));
+        assert!(scenario_status_declared("404", &keys));
+        assert!(!scenario_status_declared("422", &keys));
+        assert!(scenario_status_declared("503", &["5XX".to_string()]));
+        assert!(scenario_status_declared("409", &["default".to_string()]));
+
+        // The walker: within one operation, a result covered by an exact response
+        // key and one omitted from the responses are told apart; a prose result names
+        // no status and is skipped; a `result` property inside the request body (not
+        // the scenarios block) is never read as a case; and an `NXX` wildcard in a
+        // second operation covers its result. Order is document order.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    post:
+      operationId: postA
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                result:
+                  type: string
+                  example: 999 not a scenario field
+      responses:
+        '200':
+          description: ok
+        '404':
+          description: not found
+      x-camarasim-scenarios:
+        description: cases
+        cases:
+          - input: happy
+            result: '200 { ok: true }'
+          - input: not found
+            result: '404 NOT_FOUND'
+          - input: teapot
+            result: '422 SERVICE_NOT_APPLICABLE'
+          - input: reserved suffix
+            result: the canonical CAMARA error for that status
+  /b:
+    get:
+      operationId: getB
+      responses:
+        '5XX':
+          description: server error
+      x-camarasim-scenarios:
+        description: cases
+        cases:
+          - input: anything
+            result: '503 UNAVAILABLE'
+";
+        // Flagged (declared = false) only the `422` case, whose status neither `200`
+        // nor `404` declares; `200`/`404` are exact matches, `503` is covered by the
+        // `5XX` wildcard, the prose reserved-suffix case names no status, and the
+        // request-body `result` property is not a scenario case.
+        assert_eq!(
+            scenario_result_status_declarations(body),
+            vec![
+                ("POST /a: scenario result status 200".to_string(), true),
+                ("POST /a: scenario result status 404".to_string(), true),
+                ("POST /a: scenario result status 422".to_string(), false),
+                ("GET /b: scenario result status 503".to_string(), true),
+            ]
+        );
+
+        // Non-vacuous floor: across every registered spec every status-opening
+        // scenario result IS a declared response (the invariant the contract test
+        // asserts), and the corpus carries many such results, so a broken extractor
+        // can't hide behind an empty scan.
+        let mut total = 0usize;
+        for api in APIS {
+            let decls = scenario_result_status_declarations(api.body);
+            assert!(
+                decls.iter().all(|(_, declared)| *declared),
+                "{}: every scenario result status must be a declared response",
+                api.name
+            );
+            total += decls.len();
+        }
+        assert!(
+            total >= 100,
+            "expected many status-opening scenario results across specs, got {total}"
+        );
     }
 
     #[test]

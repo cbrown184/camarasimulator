@@ -3332,6 +3332,35 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - a **scenario-result-status ↔ declared-response** contract test (`src/registry.rs`
+    `every_scenario_result_status_is_a_declared_response`) asserts that when an
+    `x-camarasim-scenarios` case documents an outcome by an explicit HTTP status
+    (`result: "400 OUT_OF_RANGE"`, `result: "200 { … }"`), the enclosing operation's
+    `responses:` object declares that status — the scenario table (on `/docs`) and the
+    response set (what a Redoc/Swagger/codegen client binds to) are two descriptions of
+    one operation, so a case promising a `422`/`409`/… the responses omit advertises a
+    branch the generated client never exposes. The **join** between the two families
+    nothing else crosses: the scenario-block family (`malformed_scenario_blocks`,
+    `scenario_cases_with_empty_value`, `scenario_blocks_missing_description`) reads a
+    block's own structure/prose, never a case value's *status*; the response-key family
+    (`responses_with_invalid_status_key`, `operations_with_duplicate_response_status_keys`,
+    `operations_without_success_response`, `operations_missing_camara_auth_error_responses`)
+    reads the `responses:` keys' shape/distinctness/success/auth coverage, never a
+    scenario result. New pure `scenario_result_status_declarations` extractor (mirrors
+    `responses_with_invalid_status_key`'s path-item/method scoping; one downward pass per
+    operation collects both the 8-space `responses:` keys and the `result:` case values
+    under the 6-space `x-camarasim-scenarios:` block, so their document order is
+    irrelevant) + helpers `leading_http_status` (reads a quoted/bare 3-digit `1`–`5`-class
+    opener; prose / class-less / longer number / block-scalar → None) and
+    `scenario_status_declared` (exact key, `NXX` wildcard, or `default` catch-all covers).
+    A `result:` is read only inside the scenarios sub-block, so a schema property named
+    `result` in a body is never a case. Surveyed the corpus first: **873** status-opening
+    scenario results across the specs, every one a declared response → **0** drift, a live
+    guard the moment a case names a status the responses drop. Unit-covered
+    (`scenario_result_status_declaration_extraction_rules`: quoted/single-quoted/bare
+    openers vs prose/class-less/longer/short/block-scalar; exact/`NXX`/`default` coverage
+    vs an omitted `422`; a request-body `result` property skipped; ≥100-result non-vacuous
+    floor). Test-only (`#[cfg(test)]`), no runtime/spec change.
   - an **`additionalProperties` object-type placement** contract test (`src/registry.rs`
     `every_additional_properties_sits_on_an_object_type`) asserts that every
     `additionalProperties:` keyword sits on an object-typed Schema Object — in OpenAPI
@@ -5826,6 +5855,48 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 ---
 
 ## Scan journal
+
+- 2026-08-21 — Contract-test harness: added a **scenario-result-status ↔
+  declared-response** test (`src/registry.rs`
+  `every_scenario_result_status_is_a_declared_response`) — when an
+  `x-camarasim-scenarios` case documents an outcome by an explicit HTTP status
+  (`result: "400 OUT_OF_RANGE"`, `result: "200 { … }"`), the enclosing operation's
+  `responses:` object MUST declare that status. The scenario table (rendered on the
+  `/docs` page) and the response set (what a Redoc/Swagger/codegen client binds to)
+  are two descriptions of one operation; a case promising a `422`/`409`/… the
+  responses omit advertises a branch the generated client never exposes and a
+  validator never expects — a live edit hazard where a new error case is added to the
+  scenario prose but the matching shared-`errors.yaml` `$ref` is forgotten. The
+  **join** between two families nothing else crosses: the scenario-block family
+  (`malformed_scenario_blocks` / `scenario_cases_with_empty_value` /
+  `scenario_blocks_missing_description`) reads a block's own structure/prose, never a
+  case value's *status*; the response-key family (`responses_with_invalid_status_key`
+  / `operations_with_duplicate_response_status_keys` /
+  `operations_without_success_response` /
+  `operations_missing_camara_auth_error_responses`) reads the `responses:` keys'
+  shape/distinctness/success/auth coverage, never a scenario result. New pure
+  `scenario_result_status_declarations` extractor mirrors
+  `responses_with_invalid_status_key`'s path-item/method scoping; a single downward
+  pass per operation collects both the 8-space keys under the 6-space `responses:`
+  block and the `result:` case values under the 6-space `x-camarasim-scenarios:`
+  block (a sibling of `responses:`), so their document order is irrelevant, then
+  checks each status-opening result against the collected keys. Helpers:
+  `leading_http_status` (strips one quote layer, reads a leading 3-digit
+  `1`–`5`-class token that is not the prefix of a longer number; prose / class-less
+  `600` / longer `2000` / too-short / block-scalar `>-` → None) and
+  `scenario_status_declared` (an exact key, an `NXX` wildcard, or the `default`
+  catch-all covers). A `result:` is read only inside the scenarios sub-block, so a
+  schema property literally named `result` in a request/response body is never a
+  case. Surveyed the corpus first: **873** status-opening scenario results across the
+  specs, every one a declared response → **0** drift, a live guard that fires the
+  moment a case names a status its operation's responses drop. Unit-covered
+  (`scenario_result_status_declaration_extraction_rules`: double-/single-quoted/bare
+  openers vs prose/class-less/longer/short/block-scalar; exact/`NXX`/`default`
+  coverage vs an omitted `422`; a request-body `result` property skipped; the walker's
+  4 cases in document order; ≥100-result non-vacuous floor). Test-only
+  (`#[cfg(test)]`), no runtime/spec change. `cargo test` 2884 green (was 2882; +2);
+  `cargo build --release` ok — binary (release): 5.1M (5,323,160 B; unchanged —
+  test-only code), no new deps.
 
 - 2026-08-21 — Contract-test harness: added a **path-template equivalence** test
   (`src/registry.rs` `no_two_path_keys_are_equivalent_after_template_normalization`)
