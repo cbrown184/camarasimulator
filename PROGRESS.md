@@ -3332,6 +3332,14 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - an **enum-member numeric-range-bound conformance** contract test (`src/registry.rs`
+    `every_enum_value_is_within_its_numeric_bounds`) asserts that where a mounted spec declares
+    an `enum` sequence beside a same-indent `minimum`/`maximum`, every numeric member's value
+    lies within those bounds — the numeric-magnitude sibling of the enum-member string-length
+    test and the enum-value complement of the example/default numeric-bound tests. New pure
+    `enum_values_outside_their_numeric_bounds` extractor (clones the enum-length scoping, reads
+    members/bounds as numbers, inclusive). Corpus: 0 numeric-enum+bound pairs (a live guard);
+    unit-covered with a numeric-member-gated non-vacuous floor. Test-only, no spec change.
   - a **result-code-`pattern` example-conformance** contract test (`src/registry.rs`
     `every_result_code_pattern_example_conforms_to_the_result_code_pattern`) asserts that where a
     mounted spec declares an inline `example` beside a **same-indent** eSIM result-code `pattern`
@@ -5669,6 +5677,41 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-21 — Contract-test harness: added an **enum-member numeric-range-bound
+  conformance** test (`src/registry.rs` `every_enum_value_is_within_its_numeric_bounds`) —
+  where a mounted spec declares an `enum` sequence beside a **same-indent** `minimum`/`maximum`,
+  every **numeric** member's value MUST lie within those bounds. An `enum` fixes the field's
+  permitted value set, so a member below the `minimum` or above the `maximum` is a
+  self-contradictory schema whose own range validator rejects a value the schema itself lists
+  as legal (a client selecting it is handed an unusable value). The **numeric-magnitude sibling
+  of `every_enum_value_respects_its_string_length_bounds`** (which bounds a *string* member's
+  length) and the **enum-value complement of `every_example_is_within_its_numeric_bounds` /
+  `every_default_is_within_its_numeric_bounds`** (which bound one advertised sample / fall-back
+  value) — a genuinely new dimension: no existing test compares an enum member's *magnitude* to
+  its bounds (`every_enum_value_matches_its_schema_type` checks member type,
+  `every_enum_lists_unique_non_empty_values` checks distinctness/non-emptiness, and
+  `every_numeric_bound_is_ordered_low_to_high` checks the two bounds against each other). New
+  pure `enum_values_outside_their_numeric_bounds` extractor cloning
+  `enum_values_outside_their_length_bounds`'s scoping exactly (inline flow `enum: [ … ]` closing
+  on its line, or a block sequence whose first non-blank child is a `- ` item; a same-indent
+  `minimum`/`maximum` sibling scanned down-then-up dedent-bounded via `sibling_num`;
+  `inside_example` guard) but measuring magnitude: only an unquoted numeric member is compared
+  (a quoted/non-numeric member has no magnitude, so a string enum with a stray numeric bound
+  never flags — symmetric to the numeric-enum-with-stray-length-bound skip in the length twin),
+  bounds inclusive (mirroring `examples_outside_their_numeric_bounds`). Surveyed the corpus
+  first: **0** numeric-enum + `minimum`/`maximum` pairs — the 16 enum/bound *proximities* are all
+  string enums (CIRCLE / TRUE / bps / REQUESTED / …) sitting near a *sibling* numeric field's
+  bound, which the dedent-bounded same-object scan correctly does not pair — so a live guard
+  that fires the moment a spec adds an out-of-range numeric enum member. Unit-covered
+  (`enum_numeric_bound_extraction_rules`: a block member below `minimum` and a flow member above
+  `maximum` flagged in document order; a within-bounds block+flow enum, a member equal to a
+  bound (inclusive), a bound declared *below* the enum (down-scan), a string enum with a stray
+  numeric bound, a no-bound enum, an enum inside an outer `example:` payload, a cross-property
+  split across a dedent, and a property literally named `enum:` all cleared; a numeric-member-
+  gated corpus floor confirms 0 genuine pairs, documenting the future-drift posture, mirroring
+  `default_length_bound_extraction_rules`). Test-only (`#[cfg(test)]`), so no runtime behaviour
+  change and no spec change. `cargo test` 2854 green (was 2852; +2), `cargo build --release`
+  green, no new deps. — binary (release): 5.1M (5,323,160 B; unchanged — test-only code).
 - 2026-08-21 — Contract-test harness: added an **array-example element-type
   conformance** test (`src/registry.rs`
   `every_array_example_element_conforms_to_its_item_type`) — where a mounted spec declares

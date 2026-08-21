@@ -23734,6 +23734,453 @@ components:
         );
     }
 
+    /// The 1-based line numbers, in document order, of every `enum:` sequence at least one
+    /// of whose **numeric** members falls outside a same-indent `minimum`/`maximum` bound,
+    /// without a YAML dep. The **enum-value complement of `examples_outside_their_numeric_
+    /// bounds` / `defaults_outside_their_numeric_bounds`** (which bound the single advertised
+    /// sample / fall-back value): those guard one instance's magnitude, this guards every
+    /// permitted value's magnitude.
+    ///
+    /// In OpenAPI 3.0.x (JSON Schema) an `enum` fixes the field's permitted value set and
+    /// `minimum`/`maximum` bound its magnitude, so a numeric member below the `minimum` or
+    /// above the `maximum` is a self-contradictory schema: the schema lists a value its own
+    /// range validator rejects, so a client selecting that member is handed a value the bound
+    /// can never legally hold. This is a genuinely new dimension: `every_enum_value_matches_
+    /// its_schema_type` checks each member's *type*, `every_enum_lists_unique_non_empty_values`
+    /// checks members are distinct and non-empty, `every_enum_value_respects_its_string_length_
+    /// bounds` bounds a *string* member's length, and the numeric-bound test
+    /// (`every_numeric_bound_is_ordered_low_to_high`) compares the two bounds to each other —
+    /// none compares an enum member's *magnitude* to its own bounds.
+    ///
+    /// Scoped exactly like `enum_values_outside_their_length_bounds` (inline flow `enum: [ … ]`
+    /// that closes on its line, or a block sequence whose first non-blank child is a `- ` item;
+    /// a same-indent `minimum`/`maximum` sibling scanned down-then-up dedent-bounded; an `enum`
+    /// inside an outer `example:`/`examples:` payload skipped), but reads members and bounds as
+    /// numbers: only an unquoted numeric member is measured (a quoted or non-numeric member
+    /// carries no magnitude, so a string enum with a stray numeric bound never flags —
+    /// symmetric to the numeric-enum-with-stray-length-bound skip in the length twin), and a
+    /// bound is read only from an unquoted numeric scalar. Bounds are inclusive, mirroring
+    /// `examples_outside_their_numeric_bounds`.
+    fn enum_values_outside_their_numeric_bounds(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        // The inline scalar of a `name:` key (inline comment stripped; surrounding quotes
+        // preserved); `None` when the line is a different key or opens a block. Mirrors
+        // `enum_values_outside_their_length_bounds::raw_inline`.
+        let raw_inline = |l: &str, name: &str| -> Option<String> {
+            let (k, v) = l.trim_start().split_once(':')?;
+            if k.trim() != name {
+                return None;
+            }
+            let v = v.split('#').next().unwrap_or(v).trim();
+            if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            }
+        };
+        // A same-indent numeric bound sibling `key` in the same object as line `i`
+        // (indent `c`): scan down through the object's block then up, dedent-bounded so a
+        // nested or following object's bound never pairs. Returns the parsed number only for
+        // an unquoted numeric scalar (a quoted or non-numeric bound has no magnitude and is
+        // treated as absent). Mirrors `examples_outside_their_numeric_bounds::sibling_num`.
+        let sibling_num = |i: usize, c: usize, key: &str| -> Option<f64> {
+            let parse_num = |l: &str| -> Option<f64> {
+                let raw = raw_inline(l, key)?;
+                if raw.starts_with('"') || raw.starts_with('\'') {
+                    return None; // quoted → not a number
+                }
+                raw.parse::<f64>().ok()
+            };
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c {
+                    if let Some(n) = parse_num(l) {
+                        return Some(n);
+                    }
+                }
+                j += 1;
+            }
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c {
+                    if let Some(n) = parse_num(l) {
+                        return Some(n);
+                    }
+                }
+            }
+            None
+        };
+        // True when line `i` (indent `c`) sits inside an outer `example:`/`examples:`
+        // payload — some enclosing container key up the indent ladder is
+        // `example`/`examples` — so an `enum` key there is sample data, not a schema
+        // keyword. Mirrors `enum_values_outside_their_length_bounds::inside_example`.
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        // The numeric value of an enum member; `None` when the member is not an unquoted
+        // number (a quoted scalar, `true`/`false`/`null`, or a bare non-numeric token carries
+        // no magnitude, so a string enum's stray numeric bound never flags).
+        let member_num = |item: &str| -> Option<f64> {
+            let t = item.trim();
+            if t.starts_with('"') || t.starts_with('\'') {
+                return None;
+            }
+            t.parse::<f64>().ok()
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some((k, v)) = line.trim_start().split_once(':') else {
+                continue;
+            };
+            if k.trim() != "enum" {
+                continue;
+            }
+            let c = indent(line);
+            if inside_example(i, c) {
+                continue;
+            }
+            let inline = v.split('#').next().unwrap_or(v).trim();
+            let mut members: Vec<String> = Vec::new();
+            if inline.starts_with('[') {
+                // Inline flow sequence; only a flow that closes on its own line is parsed.
+                let Some(end) = inline.find(']') else {
+                    continue;
+                };
+                let inner = &inline[1..end];
+                if !inner.trim().is_empty() {
+                    members.extend(inner.split(',').map(|s| s.trim().to_string()));
+                }
+            } else if inline.is_empty() {
+                // Block sequence: `- ` items at indent >= the enum key, stopping at the
+                // first non-item line at indent <= the enum key or any dedent below it. A
+                // block whose first non-blank child is not a `- ` item (a property literally
+                // named `enum`, or a mapping) is not a sequence and yields none.
+                let first_child_is_item = lines[i + 1..]
+                    .iter()
+                    .find(|l| !l.trim().is_empty())
+                    .is_some_and(|l| l.trim_start().starts_with("- "));
+                if !first_child_is_item {
+                    continue;
+                }
+                let mut j = i + 1;
+                while j < lines.len() {
+                    let l = lines[j];
+                    if l.trim().is_empty() {
+                        j += 1;
+                        continue;
+                    }
+                    let li = indent(l);
+                    if li < c {
+                        break;
+                    }
+                    if let Some(item) = l.trim_start().strip_prefix("- ") {
+                        members.push(item.split('#').next().unwrap_or(item).trim().to_string());
+                    } else if li <= c {
+                        break;
+                    }
+                    j += 1;
+                }
+            } else {
+                continue; // an inline scalar enum value is not a sequence
+            }
+            if members.is_empty() {
+                continue;
+            }
+            let min = sibling_num(i, c, "minimum");
+            let max = sibling_num(i, c, "maximum");
+            if min.is_none() && max.is_none() {
+                continue;
+            }
+            let violates = members.iter().any(|m| {
+                member_num(m).is_some_and(|val| {
+                    min.is_some_and(|lo| val < lo) || max.is_some_and(|hi| val > hi)
+                })
+            });
+            if violates {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_enum_value_is_within_its_numeric_bounds() {
+        // Contract-harness invariant (OpenAPI 3.0.x / JSON-Schema structural rule): where a
+        // Schema Object declares an `enum` sequence beside a `minimum` and/or `maximum`,
+        // EVERY numeric member's value MUST lie within those bounds. An `enum` fixes the
+        // field's permitted value set, so a member below the `minimum` or above the `maximum`
+        // is a self-contradictory schema: the schema lists a value its own range validator
+        // rejects, so a client selecting that member is handed a value the bound can never
+        // legally hold.
+        //
+        // The **numeric-magnitude sibling** of `every_enum_value_respects_its_string_length_
+        // bounds` (which bounds a *string* member's length) and the **enum-value complement**
+        // of `every_example_is_within_its_numeric_bounds` /
+        // `every_default_is_within_its_numeric_bounds` (which bound one advertised sample /
+        // fall-back value): those guard one instance's magnitude, this guards every permitted
+        // value's magnitude. No existing test compares an enum member's *magnitude* to its
+        // bounds — `every_enum_value_matches_its_schema_type` checks each member's type,
+        // `every_enum_lists_unique_non_empty_values` checks members are distinct and
+        // non-empty, and `every_numeric_bound_is_ordered_low_to_high` compares the two bounds
+        // to each other, never against a member. Verified true across all mounted specs before
+        // asserting.
+        for api in APIS {
+            let offenders = enum_values_outside_their_numeric_bounds(api.body);
+            assert!(
+                offenders.is_empty(),
+                "{} spec declares an `enum` member whose value falls outside its sibling \
+                 `minimum`/`maximum` bound (a permitted value the bound's own validator would \
+                 reject) at `enum:` line(s): {:?}",
+                api.name,
+                offenders
+            );
+        }
+    }
+
+    #[test]
+    fn enum_numeric_bound_extraction_rules() {
+        // Unit-cover `enum_values_outside_their_numeric_bounds` so the contract test above
+        // can't pass vacuously and its detection is pinned: an enum all of whose numeric
+        // members are within bounds passes (block and flow, and the bound declared above *or*
+        // below); a block enum with a member below a `minimum` and a flow enum with a member
+        // above a `maximum` are flagged in document order; a member equal to a bound passes
+        // (inclusive); a string enum with a stray numeric bound is skipped (strings have no
+        // magnitude); an enum with no numeric-bound sibling is skipped; an `enum:` nested
+        // inside an outer `example:` payload is skipped; an enum in one property never pairs
+        // with a following property's bound across the dedent; and a property literally named
+        // `enum` (opening a mapping) is skipped.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    GoodBlock:
+      type: integer
+      minimum: 1
+      maximum: 8
+      enum:
+        - 2
+        - 5
+    TooLowBlock:
+      type: integer
+      minimum: 4
+      enum:
+        - 2
+        - 6
+    TooHighFlow:
+      type: integer
+      maximum: 3
+      enum: [1, 99]
+    BoundBelow:
+      type: integer
+      enum:
+        - 6
+      minimum: 2
+    EqualBound:
+      type: integer
+      minimum: 3
+      maximum: 3
+      enum:
+        - 3
+    Stringy:
+      type: string
+      minimum: 5
+      enum:
+        - ab
+        - cde
+    NoBound:
+      type: integer
+      enum:
+        - 1
+    InExample:
+      type: object
+      example:
+        minimum: 5
+        enum:
+          - 1
+    Split:
+      type: object
+      properties:
+        a:
+          enum:
+            - 0
+        b:
+          type: integer
+          minimum: 5
+    NamedEnum:
+      type: object
+      properties:
+        enum:
+          type: integer
+          minimum: 5
+";
+        // Flagged, in document order: line 24 (`TooLowBlock.enum` — member `2` < its
+        // `minimum: 4`) and line 30 (`TooHighFlow.enum: [1, 99]` — member `99` > its
+        // `maximum: 3`). Not flagged: `GoodBlock` (both in [1,8]); `BoundBelow` (`6` >= a
+        // `minimum: 2` declared *below* it — down-scan, no max); `EqualBound` (`3` == both
+        // bounds, inclusive); `Stringy` (string members `ab`/`cde` have no magnitude, so the
+        // stray `minimum: 5` never applies); `NoBound` (no numeric-bound sibling); `InExample`
+        // (its `enum` sits inside the outer `example:` payload); `Split.a.enum`, whose only
+        // candidate `minimum: 5` sits in the following property `Split.b` past a dedent, so
+        // the two never pair; and `NamedEnum` (a property literally named `enum:` opening a
+        // schema block, not an enum sequence).
+        assert_eq!(enum_values_outside_their_numeric_bounds(body), vec![24, 30]);
+
+        // The mounted corpus declares no numeric enum paired with a `minimum`/`maximum` bound
+        // (its numeric enums are single-code error `status` sets with no range sibling, and
+        // its bounded numerics carry no enum), so — like the default-length twin — there is
+        // no positive corpus floor to assert; the synthetic body above is what proves the
+        // magnitude-comparison path runs and a broken (always-empty) extractor cannot hide.
+        // Confirm the contract invariant holds across the corpus here too, and that the corpus
+        // indeed pairs no such enum (documenting the future-drift posture).
+        let mut bounded_numeric_enums = 0usize;
+        for api in APIS {
+            assert!(
+                enum_values_outside_their_numeric_bounds(api.body).is_empty(),
+                "{}: every numeric enum member must lie within its sibling minimum/maximum bound",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            let opens_sequence = |i: usize, l: &str| {
+                l.trim_start().split_once(':').is_some_and(|(k, v)| {
+                    if k.trim() != "enum" {
+                        return false;
+                    }
+                    let v = v.split('#').next().unwrap_or(v).trim();
+                    v.starts_with('[')
+                        || (v.is_empty()
+                            && lines
+                                .get(i + 1)
+                                .map(|n| n.trim_start().starts_with("- "))
+                                .unwrap_or(false))
+                })
+            };
+            let is_num_key = |l: &str, name: &str| {
+                l.trim_start().split_once(':').is_some_and(|(k, v)| {
+                    k.trim() == name
+                        && v.split('#')
+                            .next()
+                            .unwrap_or(v)
+                            .trim()
+                            .parse::<f64>()
+                            .is_ok()
+                })
+            };
+            // Whether the enum opened at line `i` (indent `c`) has at least one unquoted
+            // numeric member — only such an enum can meaningfully pair with a numeric bound
+            // (a string enum near a sibling property's `minimum`/`maximum` is not a pair).
+            let is_num_member = |m: &str| {
+                let t = m.trim();
+                !(t.starts_with('"') || t.starts_with('\'')) && t.parse::<f64>().is_ok()
+            };
+            let has_numeric_member = |i: usize, c: usize, l: &str| {
+                let v = l
+                    .trim_start()
+                    .split_once(':')
+                    .map(|(_, v)| v.split('#').next().unwrap_or(v).trim())
+                    .unwrap_or("");
+                if let Some(end) = v.strip_prefix('[').and_then(|_| v.find(']')) {
+                    return v[1..end].split(',').any(is_num_member);
+                }
+                let mut j = i + 1;
+                while j < lines.len() {
+                    let ln = lines[j];
+                    if ln.trim().is_empty() {
+                        j += 1;
+                        continue;
+                    }
+                    if indent(ln) < c {
+                        break;
+                    }
+                    if let Some(item) = ln.trim_start().strip_prefix("- ") {
+                        if is_num_member(item.split('#').next().unwrap_or(item)) {
+                            return true;
+                        }
+                    } else if indent(ln) <= c {
+                        break;
+                    }
+                    j += 1;
+                }
+                false
+            };
+            for (i, l) in lines.iter().enumerate() {
+                if !opens_sequence(i, l) {
+                    continue;
+                }
+                let c = indent(l);
+                if !has_numeric_member(i, c, l) {
+                    continue;
+                }
+                let lo = i.saturating_sub(8);
+                let hi = (i + 8).min(lines.len());
+                let has_bound = (lo..hi).any(|j| {
+                    j != i
+                        && indent(lines[j]) == c
+                        && (is_num_key(lines[j], "minimum") || is_num_key(lines[j], "maximum"))
+                });
+                if has_bound {
+                    bounded_numeric_enums += 1;
+                }
+            }
+        }
+        assert_eq!(
+            bounded_numeric_enums, 0,
+            "expected the mounted corpus to pair no enum with a minimum/maximum bound (numeric \
+             enums are single-code error status sets, bounded numerics carry no enum); found \
+             {bounded_numeric_enums} — if a bounded numeric enum is added, drop this floor and \
+             the every_enum_value_is_within_its_numeric_bounds test now guards it"
+        );
+    }
+
     /// The 1-based line numbers, in document order, of every object-valued `example:`
     /// keyword whose payload omits a top-level property its schema's sibling `required:`
     /// array lists as mandatory — the object-shape member of the example-conformance
