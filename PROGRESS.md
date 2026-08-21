@@ -3332,6 +3332,21 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - a **reserved response-header name** contract test (`src/registry.rs`
+    `no_response_header_uses_the_reserved_content_type_name`) asserts that no Response Object
+    `headers:` map entry is named `Content-Type` — OpenAPI 3.0.x says a response header of
+    that name "SHALL be ignored" (a body's media type is set by the `content:` media-type
+    key), so a `Content-Type` header is dead documentation a Redoc/Swagger/codegen client
+    drops. A new dimension in the response-header family: the x-correlator header tests assert
+    a response *documents* `x-correlator`, none reads a header-map key against a reserved set;
+    distinct too from `no_header_parameter_uses_a_reserved_name` (the *request* Parameter
+    Object's set). New `response_headers_named_content_type` extractor scopes to a `headers:`
+    block under `paths:` whose immediate parent is a status key and whose chain includes
+    `responses:` (so `components.headers` and a schema property named `headers` are out), skips
+    `example`/`examples` payloads, and flags a direct child key equal (case-insensitive) to
+    `content-type`. Corpus: 0 drift (every response header is `x-correlator`; 331 keys).
+    Unit-covered (canonical + case-folded flagged; x-correlator, a nested schema property, an
+    examples-payload header, and a `components.headers` component cleared). Test-only, no spec change.
   - a **parameter-level example string-length-bound conformance** contract test
     (`src/registry.rs` `every_parameter_level_example_conforms_to_its_schema_length_bounds`)
     asserts that a Parameter/Header/Media-Type-level `example` — one sitting **beside** a
@@ -5786,6 +5801,41 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 ---
 
 ## Scan journal
+
+- 2026-08-21 — Contract-test harness: added a **reserved response-header name**
+  test (`src/registry.rs` `no_response_header_uses_the_reserved_content_type_name`) —
+  a Response Object's `headers:` map MUST NOT declare an entry named `Content-Type`.
+  OpenAPI 3.0.x Response Object rule: the map "maps a header name to its definition …
+  If a response header is defined with the name `Content-Type`, it SHALL be ignored" —
+  a response body's media type is carried by the `content:` map's media-type key, so a
+  `Content-Type` header entry is dead documentation a Redoc/Swagger/codegen client
+  silently drops while a reader is misled the header is a distinct, settable output.
+  A new dimension in the response-header family: the two x-correlator header tests
+  (`every_served_success_response_declares_an_x_correlator_header` / `…error…`) assert a
+  response *documents* the `x-correlator` header, never inspecting a header-map key against
+  a reserved set; distinct too from `no_header_parameter_uses_a_reserved_name`, whose rule
+  is the *request* Parameter Object's reserved set (Accept/Content-Type/Authorization,
+  `in: header`) — a Response Object's `headers:` map is a different structure and reserves
+  only `Content-Type`. New pure `response_headers_named_content_type` extractor: scopes to a
+  `headers:` block-opener under `paths:` whose **immediate** parent (nearest shallower key)
+  is a response status key (`'200'`/`'2XX'`/`default`) and whose ancestor chain includes
+  `responses:` — so the `components.headers` definitions section (component-name keys, and
+  outside `paths:`) and a schema property literally named `headers` (parent `properties`,
+  not a status key) are both out of scope, as is any `example`/`examples` payload; a callback
+  response's header map stays in scope (the rule applies identically). Each **direct child**
+  key of the map is a header name; a key equal (one quote pair stripped, ASCII-lowercased) to
+  `content-type` is flagged (a Header Object's nested `schema` property named `Content-Type`
+  sits deeper and is never mistaken for a name). Surveyed the corpus first: **331** response
+  header keys, every one `x-correlator`, none named `Content-Type` → **0** drift, a live guard
+  that fires the moment a spec pastes a `Content-Type` into a response `headers:` map.
+  Unit-covered (`response_header_content_type_extraction_rules`: a canonical `Content-Type`
+  and a case-folded `content-type` (on a `204`) flagged in document order; an `x-correlator`
+  header, a `Content-Type` schema property under `properties`, a `Content-Type` inside an
+  `examples:` payload's literal `headers:` mapping, and a `components.headers` component named
+  `Content-Type` all cleared; ≥100 response-header-key non-vacuous floor). Test-only
+  (`#[cfg(test)]`), no runtime/spec change. `cargo test` 2876 green (was 2874; +2);
+  `cargo build --release` ok — binary (release): 5.1M (5,323,160 B; unchanged — test-only
+  code), no new deps.
 
 - 2026-08-21 — Contract-test harness: added a **parameter-level example
   string-length-bound conformance** test (`src/registry.rs`

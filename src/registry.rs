@@ -4702,6 +4702,134 @@ mod tests {
         })
     }
 
+    /// 1-based line numbers of every Response Object `headers:` map entry whose
+    /// key names the reserved `Content-Type` header (ASCII case-insensitive).
+    ///
+    /// OpenAPI 3.0.x Response Object rule: the `headers:` map "maps a header name
+    /// to its definition. … If a response header is defined with the name
+    /// `Content-Type`, it SHALL be ignored." A response body's media type is
+    /// carried by the `content:` map's media-type key, never a `headers:` entry —
+    /// so a `Content-Type` header is dead documentation a Redoc/Swagger/codegen
+    /// client silently drops while a reader is misled that the header is a
+    /// distinct, settable response output.
+    ///
+    /// Scope is a real Response Object `headers:` map: a `headers:` block-opener
+    /// under `paths:` whose **immediate** parent (the nearest strictly-shallower
+    /// key) is a response status key (`'200'`/`'2XX'`/`default`) and whose
+    /// ancestor chain includes `responses:`. That parent-key gate is the
+    /// substantive scoping: the `components.headers` definitions section (its keys
+    /// are component names, and it lives outside `paths:` anyway) and a schema
+    /// property literally named `headers` (whose parent is `properties`, not a
+    /// status key) are both excluded, as is anything inside an
+    /// `example:`/`examples:` payload. A callback response's `headers:` map stays
+    /// in scope — the Content-Type rule applies to it identically. Each **direct
+    /// child** key of the map is a header name; a key equal (one quote pair
+    /// stripped, ASCII-lowercased) to `content-type` is flagged. A header whose
+    /// Header Object nests a `schema` property literally named `Content-Type` sits
+    /// deeper than the map's own child indent and is never mistaken for a header
+    /// name. Pure and YAML-dep-free.
+    fn response_headers_named_content_type(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+
+        // Bound the top-level `paths:` block: [ps+1, pe) line indices.
+        let Some(ps) = lines
+            .iter()
+            .position(|l| l.trim_end() == "paths:" && !l.starts_with(char::is_whitespace))
+        else {
+            return Vec::new();
+        };
+        let pe = (ps + 1..lines.len())
+            .find(|&i| !lines[i].trim().is_empty() && !lines[i].starts_with(char::is_whitespace))
+            .unwrap_or(lines.len());
+
+        // A response status key: `default`, or a 3-char code of a leading digit
+        // 1–5 then two digits-or-`X` (`200`/`2XX`/`404`).
+        let is_status_key = |k: &str| -> bool {
+            let s = k.trim_matches(|c| c == '"' || c == '\'');
+            s == "default"
+                || (s.len() == 3
+                    && matches!(s.as_bytes()[0], b'1'..=b'5')
+                    && s.as_bytes()[1..]
+                        .iter()
+                        .all(|&c| c.is_ascii_digit() || c == b'X'))
+        };
+
+        let mut out = Vec::new();
+        for i in (ps + 1)..pe {
+            let line = lines[i];
+            if line.trim() != "headers:" {
+                continue;
+            }
+            let c = indent(line);
+
+            // Walk the ancestor chain (nearest key at each strictly-smaller
+            // indent). The immediate parent must be a status key, and a
+            // `responses:` ancestor must appear; an `example`/`examples` ancestor
+            // takes it out of scope (example payloads can contain a literal
+            // `headers:` mapping).
+            let mut level = c;
+            let mut immediate_parent: Option<&str> = None;
+            let mut has_responses = false;
+            let mut excluded = false;
+            let mut k = i;
+            while k > ps && level > 0 {
+                k -= 1;
+                let a = lines[k];
+                if a.trim().is_empty() {
+                    continue;
+                }
+                let ai = indent(a);
+                if ai < level {
+                    level = ai;
+                    let akey = a.trim().strip_suffix(':').unwrap_or("");
+                    if immediate_parent.is_none() {
+                        immediate_parent = Some(akey);
+                    }
+                    match akey {
+                        "responses" => has_responses = true,
+                        "example" | "examples" => {
+                            excluded = true;
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            if excluded || !has_responses || !immediate_parent.is_some_and(is_status_key) {
+                continue;
+            }
+
+            // The map's direct children are header-name keys. Flag one equal to
+            // `content-type` (case-insensitive); deeper lines are the Header
+            // Object's own fields (`schema`/`description`/`$ref`).
+            let mut child_indent = None;
+            let mut j = i + 1;
+            while j < pe {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                let li = indent(l);
+                if li <= c {
+                    break;
+                }
+                let child = *child_indent.get_or_insert(li);
+                if li == child {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let name = key.trim().trim_matches(|q| q == '"' || q == '\'');
+                        if name.eq_ignore_ascii_case("content-type") {
+                            out.push(j + 1);
+                        }
+                    }
+                }
+                j += 1;
+            }
+        }
+        out
+    }
+
     /// The `METHOD /path` label of every operation a spec declares whose
     /// `requestBody` object carries neither a `content` field nor a `$ref` —
     /// without a YAML dep.
@@ -15081,6 +15209,133 @@ paths:
         assert!(
             header_params >= 30,
             "expected many `in: header` parameters across specs, got {header_params}"
+        );
+    }
+
+    #[test]
+    fn no_response_header_uses_the_reserved_content_type_name() {
+        // Contract-harness invariant (OpenAPI 3.0.x Response Object rule): the
+        // `headers:` map of a Response Object "maps a header name to its
+        // definition. … If a response header is defined with the name
+        // `Content-Type`, it SHALL be ignored." The media type of a response body
+        // is carried by the `content:` map's media-type key, so a `Content-Type`
+        // entry in a `headers:` map is dead documentation: a Redoc/Swagger/codegen
+        // client silently drops it while a reader is misled that the header is a
+        // distinct, settable response output.
+        //
+        // A new dimension in the response-header family: the two x-correlator
+        // header tests
+        // (`every_served_success_response_declares_an_x_correlator_header` /
+        // `…error…`) assert a response *documents* the `x-correlator` header, and
+        // `every_shared_error_response_declares_an_x_correlator_header` the same on
+        // the shared model — none inspects a header map key against the reserved
+        // set. It is also distinct from `no_header_parameter_uses_a_reserved_name`,
+        // whose rule is the *request* Parameter Object's reserved set
+        // (Accept/Content-Type/Authorization, `in: header`); a Response Object's
+        // `headers:` map is a different structure and reserves only `Content-Type`.
+        // Verified true across every mounted spec before asserting (every response
+        // header in the corpus is the `x-correlator` tracing header).
+        for api in APIS {
+            let bad = response_headers_named_content_type(api.body);
+            assert!(
+                bad.is_empty(),
+                "{} spec declares a response `headers:` entry named `Content-Type` \
+                 (a response header of that name SHALL be ignored per the OpenAPI \
+                 Response Object — a body's media type is set by the `content:` \
+                 media-type key) at line(s): {:?}",
+                api.name,
+                bad
+            );
+        }
+    }
+
+    #[test]
+    fn response_header_content_type_extraction_rules() {
+        // Unit-cover `response_headers_named_content_type` so the contract test
+        // above can't pass vacuously and its scoping is pinned: a response
+        // `headers:` map entry named `Content-Type` (canonical case) and a second
+        // named `content-type` (case-folded, on a `204`) are flagged; an
+        // `x-correlator` header is not; a `Content-Type` property nested inside a
+        // response *content schema* (parent `properties`, not a status key) is not;
+        // a `Content-Type` inside an `examples:` payload's literal `headers:`
+        // mapping is not; and a `components.headers` component keyed `Content-Type`
+        // (outside `paths:`) is not.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+          headers:
+            Content-Type:
+              schema:
+                type: string
+            x-correlator:
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  Content-Type:
+                    type: string
+              examples:
+                sample:
+                  value:
+                    headers:
+                      Content-Type: ignored
+    delete:
+      operationId: deleteA
+      responses:
+        '204':
+          description: gone
+          headers:
+            content-type:
+              schema:
+                type: string
+components:
+  headers:
+    Content-Type:
+      schema:
+        type: string
+";
+        // Flagged: the `'200'` response header `Content-Type` (line 13) and the
+        // `'204'` response header `content-type` (case-folded, line 37). Not
+        // flagged: `x-correlator` (line 16, not reserved); the schema property
+        // `Content-Type` under `properties` (line 24, parent is `properties`, not
+        // a status key); the `Content-Type` inside the `examples:` payload's
+        // literal `headers:` mapping (line 30, an `examples` ancestor); and the
+        // `components.headers` component `Content-Type` (line 42, outside `paths:`).
+        assert_eq!(response_headers_named_content_type(body), vec![13, 37]);
+
+        // Non-vacuous floor: across every registered spec no response header is
+        // named `Content-Type` (the invariant the contract test asserts), yet the
+        // corpus declares many response headers (every business response echoes
+        // `x-correlator`), so a broken extractor can't hide behind an empty scan.
+        // Count `x-correlator:` header-key lines independently of the extractor.
+        let mut header_keys = 0usize;
+        for api in APIS {
+            assert!(
+                response_headers_named_content_type(api.body).is_empty(),
+                "{}: no response header may be named Content-Type",
+                api.name
+            );
+            header_keys += api
+                .body
+                .lines()
+                .filter(|l| l.trim() == "x-correlator:")
+                .count();
+        }
+        assert!(
+            header_keys >= 100,
+            "expected many response header keys across specs, got {header_keys}"
         );
     }
 
