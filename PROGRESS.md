@@ -5669,6 +5669,36 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-21 — Contract-test harness: added a **`uniqueItems: true` array-example
+  uniqueness** conformance test (`src/registry.rs`
+  `every_array_example_with_unique_items_has_distinct_elements`) — where a mounted spec
+  declares an array `example` beside a **same-indent** `uniqueItems: true`, every element of
+  the example MUST be distinct. A repeated element is a self-contradictory sample whose own
+  uniqueness constraint the schema's validator rejects (a Redoc/codegen prefill carrying an
+  array the field can never hold). The **uniqueness sibling of the array-example family**:
+  `every_array_example_respects_its_item_bounds` guards element *count* (`minItems`/
+  `maxItems`) and `every_array_example_element_is_a_member_of_its_item_enum` guards element
+  *membership* (`items.enum`), but neither ever compares an array example's elements to each
+  other — so a duplicate under `uniqueItems: true` was previously unchecked (distinct from
+  the value dimensions those two cover, so it never cross-covers). New pure
+  `array_examples_with_duplicates_under_unique_items` extractor cloning
+  `array_example_elements_outside_their_item_enum`'s scoping exactly (an `example` whose
+  inline value is a flow `[...]` or that opens a `- ` block sequence; a same-indent
+  `uniqueItems:` sibling *equal to* `true` scanned down-then-up dedent-bounded, so a
+  `uniqueItems: false`/non-`true` value never pairs and a nested/following object's
+  `uniqueItems` never pairs; outer-`example:`-payload / scalar / named-`example` skipped),
+  reusing the shared `flow_elems`/`block_elems` element parsers + a no-dep `has_duplicate`.
+  Surveyed the corpus first: 2 `uniqueItems: true` occurrences — call-forwarding-signal
+  `CallForwardingSignal` (an array example `["unconditional","conditional_busy"]`, distinct →
+  the 1 real pair) and capabilities-and-restrictions `overlayExtends` (no array-level example
+  — its example is on `items`, a deeper indent, so it never pairs) → 0 drift. Unit-covered
+  (`array_example_unique_items_extraction_rules`: a repeated flow element, a repeated block
+  item, and a duplicate whose `uniqueItems: true` sits a line below it flagged in document
+  order; distinct flow/block, `uniqueItems: false`, no-`uniqueItems`, scalar, following-property
+  split, inner-`example`-payload, and named-`example` cleared; ≥1-pair non-vacuous floor — the
+  call-forwarding-signal pair). Test-only (`#[cfg(test)]` module), so no runtime behaviour
+  change and no spec change. `cargo test` 2846 green (was 2844; +2), `cargo build --release`
+  green, no new deps. — binary (release): 5.1M (5,323,160 B; unchanged — test-only code).
 - 2026-08-21 — Contract-test harness: added a **bounded-charset URL
   (`^https?://[a-zA-Z0-9\-._~:/?#\[\]@!$&'()*+,;=]{1,256}$`)-`pattern` example-conformance**
   contract test (`src/registry.rs`

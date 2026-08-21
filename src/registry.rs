@@ -24342,6 +24342,473 @@ components:
         );
     }
 
+    /// The 1-based line numbers, in document order, of every array `example:` keyword that
+    /// sits in an array Schema Object declaring a same-indent `uniqueItems: true` sibling
+    /// yet lists a duplicate element, without a YAML dep. The **uniqueness** sibling of the
+    /// array-example family: `array_examples_outside_their_item_bounds` guards an array
+    /// example's element *count* against `minItems`/`maxItems`, and
+    /// `array_example_elements_outside_their_item_enum` guards each element's *membership*
+    /// in `items.enum`; neither ever compares an array example's elements to each other, so
+    /// an array example that repeats a value under `uniqueItems: true` — a
+    /// self-contradictory sample the schema's own validator rejects — was previously
+    /// unchecked.
+    ///
+    /// In OpenAPI 3.0.x (JSON Schema) an `example` is a sample *instance* of the schema, so
+    /// an array constrained by `uniqueItems: true` MUST carry an example whose elements are
+    /// all distinct. A repeated element advertises a value no such field can hold, so a
+    /// Redoc/Swagger prefill and a codegen client's generated sample carry an array the
+    /// field's own validator rejects at exactly the point a caller reads or builds it.
+    ///
+    /// Scoping mirrors `array_example_elements_outside_their_item_enum` exactly: only an
+    /// `example` whose inline value is a flow sequence (`[...]`) or that opens a block
+    /// sequence (`- ` items) is inspected — a scalar or object example is skipped — and only
+    /// when a same-indent `uniqueItems:` sibling *equal to* `true` sits in the same Schema
+    /// Object, scanned at the example's own indent down through the object's block then up,
+    /// dedent-bounded so a nested or following object's `uniqueItems` never pairs. A
+    /// `uniqueItems: false` (or any non-`true` value) imposes no distinctness constraint and
+    /// never pairs. An `example:` nested inside an outer `example:`/`examples:` payload
+    /// (sample data, not a schema keyword) is skipped. A multi-line flow that never closes on
+    /// its line, and a block whose first non-empty child is not a sequence item, are left
+    /// un-inspected (the shared element extractors return `None`). Elements are compared
+    /// after normalization (surrounding quotes stripped, inline comment removed), matching
+    /// how a validator compares the string instances.
+    fn array_examples_with_duplicates_under_unique_items(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        // Unquote a scalar and trim a trailing ` # comment` (mirrors the item-enum extractor).
+        let norm = |raw: &str| -> String {
+            let mut v = raw.trim();
+            if let Some(pos) = v.find(" #") {
+                v = v[..pos].trim_end();
+            }
+            let v = v.trim();
+            let unq = v
+                .strip_prefix('"')
+                .and_then(|s| s.strip_suffix('"'))
+                .or_else(|| v.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')))
+                .unwrap_or(v);
+            unq.trim().to_string()
+        };
+        // True when line `i` (indent `c`) sits inside an outer `example:`/`examples:`
+        // payload — some enclosing container key up the indent ladder is
+        // `example`/`examples` — so an inner `example` key there is sample data.
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        // Whether a same-indent `uniqueItems:` sibling of line `i` (indent `c`) in the same
+        // Schema Object holds the literal `true`: scan down through the object's block then
+        // up, dedent-bounded so a nested or following object's `uniqueItems` never pairs.
+        let sibling_unique_items_true = |i: usize, c: usize| -> bool {
+            let is_unique_true = |l: &str| -> bool {
+                l.trim_start().split_once(':').is_some_and(|(k, v)| {
+                    k.trim() == "uniqueItems"
+                        && v.split('#').next().unwrap_or(v).trim() == "true"
+                })
+            };
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_unique_true(l) {
+                    return true;
+                }
+                j += 1;
+            }
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_unique_true(l) {
+                    return true;
+                }
+            }
+            false
+        };
+        // The normalized elements of an inline flow sequence whose text starts with `[`
+        // (top-level commas at bracket/brace depth 1, quotes respected); `None` when the
+        // flow never closes on its line (a multi-line flow, left un-inspected).
+        let flow_elems = |v: &str| -> Option<Vec<String>> {
+            let mut depth: i32 = 0;
+            let mut in_s = false;
+            let mut in_d = false;
+            let mut cur = String::new();
+            let mut elems: Vec<String> = Vec::new();
+            for ch in v.chars() {
+                if in_s {
+                    cur.push(ch);
+                    if ch == '\'' {
+                        in_s = false;
+                    }
+                    continue;
+                }
+                if in_d {
+                    cur.push(ch);
+                    if ch == '"' {
+                        in_d = false;
+                    }
+                    continue;
+                }
+                match ch {
+                    '[' | '{' => {
+                        depth += 1;
+                        if depth > 1 {
+                            cur.push(ch);
+                        }
+                    }
+                    ']' | '}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            let e = norm(&cur);
+                            if !e.is_empty() {
+                                elems.push(e);
+                            }
+                            return Some(elems);
+                        }
+                        cur.push(ch);
+                    }
+                    '\'' => {
+                        in_s = true;
+                        cur.push(ch);
+                    }
+                    '"' => {
+                        in_d = true;
+                        cur.push(ch);
+                    }
+                    ',' if depth == 1 => {
+                        let e = norm(&cur);
+                        if !e.is_empty() {
+                            elems.push(e);
+                        }
+                        cur.clear();
+                    }
+                    _ => {
+                        if depth >= 1 {
+                            cur.push(ch);
+                        }
+                    }
+                }
+            }
+            None
+        };
+        // The normalized elements of a block sequence opened by an `example:` at line `i`
+        // (indent `c`): each `- ` item's inline scalar at the first child's indent, bounded
+        // by the dedent that closes the block. `None` when the first non-empty child is not
+        // a sequence item. A complex/empty item (no inline scalar) contributes nothing.
+        let block_elems = |i: usize, c: usize| -> Option<Vec<String>> {
+            let mut child_indent: Option<usize> = None;
+            let mut elems: Vec<String> = Vec::new();
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                let li = indent(l);
+                if li <= c {
+                    break;
+                }
+                let t = l.trim_start();
+                let is_item = t == "-" || t.starts_with("- ");
+                match child_indent {
+                    None => {
+                        if !is_item {
+                            return None;
+                        }
+                        child_indent = Some(li);
+                        let v = norm(t[1..].trim_start());
+                        if !v.is_empty() {
+                            elems.push(v);
+                        }
+                    }
+                    Some(ci) => {
+                        if li == ci && is_item {
+                            let v = norm(t[1..].trim_start());
+                            if !v.is_empty() {
+                                elems.push(v);
+                            }
+                        }
+                    }
+                }
+                j += 1;
+            }
+            child_indent.map(|_| elems)
+        };
+        // True when `elems` repeats a value (an O(n^2) scan — element lists are tiny).
+        let has_duplicate = |elems: &[String]| -> bool {
+            elems
+                .iter()
+                .enumerate()
+                .any(|(n, e)| elems[..n].iter().any(|p| p == e))
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some((k, v)) = line.trim_start().split_once(':') else {
+                continue;
+            };
+            if k.trim() != "example" {
+                continue;
+            }
+            let c = indent(line);
+            if inside_example(i, c) {
+                continue;
+            }
+            if !sibling_unique_items_true(i, c) {
+                continue;
+            }
+            let inline = v.split('#').next().unwrap_or(v).trim();
+            let elems = if inline.is_empty() {
+                match block_elems(i, c) {
+                    Some(e) => e,
+                    None => continue,
+                }
+            } else if inline.starts_with('[') {
+                match flow_elems(inline) {
+                    Some(e) => e,
+                    None => continue,
+                }
+            } else {
+                continue; // scalar example — not an array (type/other tests' concern)
+            };
+            if has_duplicate(&elems) {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_array_example_with_unique_items_has_distinct_elements() {
+        // Contract-harness invariant (OpenAPI 3.0.x / JSON-Schema structural rule): where an
+        // array Schema Object declares an array `example` beside a same-indent
+        // `uniqueItems: true`, EVERY element of the example MUST be distinct. An `example` is
+        // a sample instance, so a repeated element is a value the array's own uniqueness
+        // constraint rejects — a Redoc/Swagger prefill and a codegen sample carrying an array
+        // the field can never hold.
+        //
+        // The **uniqueness** sibling of the array-example family:
+        // `every_array_example_respects_its_item_bounds` guards an array example's element
+        // *count* against `minItems`/`maxItems`, and
+        // `every_array_example_element_is_a_member_of_its_item_enum` guards each element's
+        // *membership* in `items.enum` — but neither ever compares an array example's elements
+        // to each other, so a duplicate under `uniqueItems: true` (a call-forwarding
+        // signal-type set that repeats a signal) slips past both. Verified true across all
+        // mounted specs before asserting.
+        for api in APIS {
+            let offenders = array_examples_with_duplicates_under_unique_items(api.body);
+            assert!(
+                offenders.is_empty(),
+                "{} spec declares an array `example` with a duplicate element beside a \
+                 same-indent `uniqueItems: true` (a sample the uniqueness constraint's own \
+                 validator would reject) at `example:` line(s): {:?}",
+                api.name,
+                offenders
+            );
+        }
+    }
+
+    #[test]
+    fn array_example_unique_items_extraction_rules() {
+        // Unit-cover `array_examples_with_duplicates_under_unique_items` so the contract test
+        // above can't pass vacuously and its detection is pinned: an array example whose
+        // elements are all distinct beside `uniqueItems: true` passes (flow and block, and
+        // the constraint declared before *or* after the example); a flow with a repeated
+        // element, a block sequence with a repeated item, and a repeated element whose
+        // `uniqueItems: true` sits *below* it (paired by the down-scan) are flagged in
+        // document order; a duplicate beside `uniqueItems: false`, a duplicate with no
+        // `uniqueItems` sibling, a scalar example, a duplicate whose only `uniqueItems: true`
+        // sits in a following property across the dedent, an inner `example` inside an outer
+        // `example:` payload, and a property literally named `example` are all skipped.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    GoodFlow:
+      type: array
+      uniqueItems: true
+      example: [a, b]
+    GoodBlock:
+      type: array
+      uniqueItems: true
+      example:
+        - a
+        - b
+    DupFlow:
+      type: array
+      uniqueItems: true
+      example: [a, a]
+    DupBlock:
+      type: array
+      uniqueItems: true
+      example:
+        - a
+        - a
+    DupBelow:
+      type: array
+      example: [x, x]
+      uniqueItems: true
+    UniqueFalse:
+      type: array
+      uniqueItems: false
+      example: [a, a]
+    NoUnique:
+      type: array
+      example: [a, a]
+    ScalarExample:
+      type: string
+      uniqueItems: true
+      example: aa
+    Split:
+      type: object
+      properties:
+        a:
+          example: [q, q]
+        b:
+          type: array
+          uniqueItems: true
+          example: [q]
+    InExample:
+      type: object
+      example:
+        uniqueItems: true
+        example: [z, z]
+    NamedExample:
+      type: object
+      properties:
+        example:
+          type: array
+          uniqueItems: true
+";
+        // Flagged, in document order: line 27 (`DupFlow.example: [a, a]`), line 31
+        // (`DupBlock.example:` block sequence repeating `- a`), and line 36
+        // (`DupBelow.example: [x, x]`, its `uniqueItems: true` a line below, paired by the
+        // down-scan). Not flagged: `GoodFlow`/`GoodBlock` (distinct elements); `UniqueFalse`
+        // (`uniqueItems: false` imposes no distinctness); `NoUnique` (no `uniqueItems`
+        // sibling); `ScalarExample` (`aa` is a scalar, not an array); `Split.a.example: [q,
+        // q]`, whose only `uniqueItems: true` sits in the following property `Split.b` past a
+        // dedent, so the two never pair; `InExample`'s inner `example` (inside the outer
+        // `example:` payload); and `NamedExample`'s `example:` opening a schema block (a
+        // property literally named `example`, no inline array value).
+        assert_eq!(
+            array_examples_with_duplicates_under_unique_items(body),
+            vec![27, 31, 36]
+        );
+
+        // Non-vacuous floor: across every registered spec every array example beside a
+        // same-indent `uniqueItems: true` has distinct elements (the invariant the contract
+        // test asserts), and the corpus actually declares such a pair (the Call Forwarding
+        // Signal `CallForwardingSignal` set) — so the duplicate-detection path runs on real
+        // data and a broken (always-empty) extractor can't hide behind a corpus that never
+        // pairs an array example with `uniqueItems: true`. Count pairs with a same-indent
+        // detector independent of the extractor's duplicate comparison.
+        let mut unique_items_arrays = 0usize;
+        for api in APIS {
+            assert!(
+                array_examples_with_duplicates_under_unique_items(api.body).is_empty(),
+                "{}: every array example beside `uniqueItems: true` must have distinct elements",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            for (i, l) in lines.iter().enumerate() {
+                let Some((k, v)) = l.trim_start().split_once(':') else {
+                    continue;
+                };
+                if k.trim() != "example" {
+                    continue;
+                }
+                let inline = v.split('#').next().unwrap_or(v).trim();
+                let is_flow = inline.starts_with('[');
+                let is_block = inline.is_empty()
+                    && lines
+                        .get(i + 1)
+                        .map(|n| n.trim_start().starts_with("- "))
+                        .unwrap_or(false);
+                if !is_flow && !is_block {
+                    continue;
+                }
+                let c = indent(l);
+                let mut has_unique = false;
+                for dir in [1i64, -1] {
+                    let mut j = i as i64 + dir;
+                    while j >= 0 && (j as usize) < lines.len() {
+                        let x = lines[j as usize];
+                        if !x.trim().is_empty() {
+                            if indent(x) < c {
+                                break;
+                            }
+                            if indent(x) == c
+                                && x.trim_start().split_once(':').is_some_and(|(kk, vv)| {
+                                    kk.trim() == "uniqueItems"
+                                        && vv.split('#').next().unwrap_or(vv).trim() == "true"
+                                })
+                            {
+                                has_unique = true;
+                                break;
+                            }
+                        }
+                        j += dir;
+                    }
+                    if has_unique {
+                        break;
+                    }
+                }
+                if has_unique {
+                    unique_items_arrays += 1;
+                }
+            }
+        }
+        assert!(
+            unique_items_arrays >= 1,
+            "expected the Call Forwarding Signal `CallForwardingSignal` array example + \
+             `uniqueItems: true` pair, got {unique_items_arrays}"
+        );
+    }
+
     /// The 1-based line numbers, in document order, of every `default:` keyword whose
     /// inline **quoted-string** value has a character length outside a sibling string
     /// bound — `minLength` or `maxLength` — declared in the same Schema Object, without
