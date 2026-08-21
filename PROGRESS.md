@@ -5731,6 +5731,36 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-21 — Contract-test harness: added a **reserved header-parameter-name** test
+  (`src/registry.rs` `no_header_parameter_uses_a_reserved_name`) — the OpenAPI 3.0.x
+  Parameter Object rule that when `in` is `"header"` and `name` is `"Accept"`,
+  `"Content-Type"`, or `"Authorization"`, "the parameter definition SHALL be ignored".
+  Declaring one is dead documentation: a Redoc/Swagger/codegen client silently drops
+  it while a reader is misled that the header is an honoured input — CAMARA already
+  models content negotiation via the Media Type Object and bearer auth via the shared
+  `camaraOAuth` scheme, so no operation needs to re-declare those headers as
+  parameters. A genuinely new dimension in the parameter family:
+  `every_parameter_declares_a_name` / `_a_valid_location` assert a parameter *has* a
+  name / valid `in`, and `every_parameter_array_lists_distinct_name_location_pairs`
+  asserts the `(name, in)` pair is *unique* — none inspects the *value* of a header
+  parameter's name against the reserved set. New pure
+  `header_parameters_with_reserved_names` extractor reuses
+  `parameter_arrays_with_duplicate_name_location`'s parameter walk exactly (anchor on
+  a block-form `parameters:` opener, read each item's own `name:`/`in:` inline on the
+  `- ` opener or at the item's child indent, ignore the deeper nested subtree so a
+  `schema` property named `name`/`in`/`Authorization` is never mistaken for the
+  parameter's fields; a `$ref` item contributes nothing), then flags a pair whose
+  `in` is `header` and whose `name` folds (RFC 7230 §3.2 case-insensitive) to a
+  reserved name. Surveyed the corpus first: **60** `in: header` parameters, every one
+  the `x-correlator` tracing header → **0** drift — a live guard that fires the moment
+  a spec declares an Accept/Content-Type/Authorization header parameter. Unit-covered
+  (`reserved_header_parameter_extraction_rules`: `Authorization` name-first and
+  `content-type` in-first case-folded flagged in document order; `Accept` under
+  `in: query`, a non-reserved `x-correlator` header, a nested `schema` property named
+  `Authorization`, and a `$ref` item all cleared; ≥30 `in: header` non-vacuous floor).
+  Test-only (`#[cfg(test)]`), no runtime/spec change. `cargo test` 2866 green (was
+  2864; +2); `cargo build --release` ok, no new deps. — binary (release): 5.1M
+  (5,323,160 B; unchanged — test-only code).
 - 2026-08-21 — Contract-test harness: added a **CAMARA auth-error-response** test
   (`src/registry.rs` `every_business_operation_declares_the_camara_auth_error_responses`)
   — every operation a mounted **business** spec declares MUST document *both* the

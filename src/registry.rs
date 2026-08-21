@@ -3318,6 +3318,102 @@ mod tests {
         out
     }
 
+    /// The `parameters@line N: …` label of every Parameter Object a mounted spec
+    /// declares with `in: header` and a `name` that is one of the three request
+    /// headers OpenAPI 3.0.x reserves — `Accept`, `Content-Type`, `Authorization`.
+    ///
+    /// The Parameter Object rule is explicit: "If `in` is `"header"` and the
+    /// `name` field is `"Accept"`, `"Content-Type"` or `"Authorization"`, the
+    /// parameter definition SHALL be ignored." Declaring one is therefore dead
+    /// documentation — a Redoc/Swagger/codegen client silently drops it, while a
+    /// reader is misled into treating the header as an honoured input. CAMARA
+    /// already models content negotiation through the Media Type Object and bearer
+    /// auth through the shared `camaraOAuth` security scheme, so no operation needs
+    /// to re-declare those headers as parameters.
+    ///
+    /// HTTP header names are case-insensitive (RFC 7230 §3.2), so the match folds
+    /// case: `authorization`, `Authorization`, and `AUTHORIZATION` are all the
+    /// reserved name. The parameter walk mirrors
+    /// `parameter_arrays_with_duplicate_name_location` exactly — anchor on a
+    /// block-form `parameters:` opener (empty value), read each item's own
+    /// `name:`/`in:` inline on the `- ` opener or at the item's child indent
+    /// (opener indent + 2), and ignore lines deeper than that child indent so a
+    /// `schema` property literally named `name`/`in`/`Authorization` nested inside
+    /// a parameter is never mistaken for the parameter's own fields. A `$ref` item
+    /// carries neither field inline, so it contributes nothing and is exempt.
+    fn header_parameters_with_reserved_names(body: &str) -> Vec<String> {
+        const RESERVED: [&str; 3] = ["accept", "content-type", "authorization"];
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let unquote = |s: &str| s.trim().trim_matches('"').trim_matches('\'').to_string();
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some(rest) = line.trim_start().strip_prefix("parameters:") else { continue };
+            // Only a block-sequence `parameters:` opener (empty value); skip a flow
+            // list and a `parameters` key carrying an inline schema value.
+            let rest = rest.trim();
+            if !rest.is_empty() && !rest.starts_with('#') {
+                continue;
+            }
+            let params_ind = indent(line);
+            let mut item_ind: Option<usize> = None;
+            // (name, in, 1-based opener line) of the parameter object being read.
+            let mut cur: Option<(Option<String>, Option<String>, usize)> = None;
+            let flush = |cur: &mut Option<(Option<String>, Option<String>, usize)>,
+                         out: &mut Vec<String>| {
+                if let Some((Some(n), Some(iv), ln)) = cur.take() {
+                    let lower = n.to_ascii_lowercase();
+                    if iv.eq_ignore_ascii_case("header") && RESERVED.contains(&lower.as_str()) {
+                        out.push(format!(
+                            "parameters@line {ln}: `in: header` parameter names the reserved \
+                             header `{n}` (a header parameter named Accept/Content-Type/\
+                             Authorization SHALL be ignored)"
+                        ));
+                    }
+                }
+            };
+            for (off, l) in lines[i + 1..].iter().enumerate() {
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li <= params_ind {
+                    break; // dedented out of the parameters block
+                }
+                let bare = l.trim_start();
+                let is_opener = bare.starts_with("- ");
+                if is_opener && item_ind.is_none() {
+                    item_ind = Some(li);
+                }
+                let Some(iind) = item_ind else { continue };
+                if is_opener && li == iind {
+                    flush(&mut cur, &mut out);
+                    let after = &bare[2..];
+                    let mut name = None;
+                    let mut inv = None;
+                    if let Some(v) = after.strip_prefix("name:") {
+                        name = Some(unquote(v));
+                    } else if let Some(v) = after.strip_prefix("in:") {
+                        inv = Some(unquote(v));
+                    }
+                    // 1-based line of this opener: `lines[i + 1 + off]` → i + off + 2.
+                    cur = Some((name, inv, i + off + 2));
+                } else if li == iind + 2 {
+                    if let Some((ref mut name, ref mut inv, _)) = cur {
+                        if let Some(v) = bare.strip_prefix("name:") {
+                            *name = Some(unquote(v));
+                        } else if let Some(v) = bare.strip_prefix("in:") {
+                            *inv = Some(unquote(v));
+                        }
+                    }
+                }
+                // Lines deeper than `iind + 2` are a nested subtree — ignored.
+            }
+            flush(&mut cur, &mut out);
+        }
+        out
+    }
+
     /// Extract the labels (`METHOD /path`) of every operation a spec declares
     /// that is **missing** a `responses:` object — without a YAML dep.
     ///
@@ -14406,6 +14502,124 @@ components:
         assert!(
             param_arrays >= 30,
             "expected many block-form `parameters` arrays across specs, got {param_arrays}"
+        );
+    }
+
+    #[test]
+    fn no_header_parameter_uses_a_reserved_name() {
+        // Contract-harness invariant (OpenAPI 3.0.x Parameter Object rule): a
+        // Parameter Object with `in: header` MUST NOT name one of the three request
+        // headers the spec reserves — `Accept`, `Content-Type`, `Authorization`.
+        // The rule is explicit ("… the parameter definition SHALL be ignored"), so
+        // such a parameter is dead documentation: a Redoc/Swagger/codegen client
+        // silently drops it while a reader is misled that the header is an honoured
+        // input. CAMARA already models content negotiation via the Media Type
+        // Object and bearer auth via the shared `camaraOAuth` scheme, so no
+        // operation needs to re-declare those headers as parameters.
+        //
+        // A new dimension in the parameter family: `every_parameter_declares_a_name`
+        // and `_a_valid_location` assert a parameter *has* a name / a valid `in`,
+        // and `every_parameter_array_lists_distinct_name_location_pairs` asserts the
+        // `(name, in)` pair is unique — none inspects the *value* of a header
+        // parameter's name against the reserved set. Verified true across every
+        // mounted spec before asserting (all 60 `in: header` parameters are the
+        // `x-correlator` tracing header, never a reserved name).
+        for api in APIS {
+            let bad = header_parameters_with_reserved_names(api.body);
+            assert!(
+                bad.is_empty(),
+                "{} spec declares an `in: header` parameter naming a reserved header \
+                 (Accept/Content-Type/Authorization SHALL be ignored per the OpenAPI \
+                 Parameter Object): {:?}",
+                api.name,
+                bad
+            );
+        }
+    }
+
+    #[test]
+    fn reserved_header_parameter_extraction_rules() {
+        // Unit-cover `header_parameters_with_reserved_names` so the contract test
+        // above can't pass vacuously and its detection is pinned: an `in: header`
+        // parameter named `Authorization` (name-first) or `content-type` (in-first,
+        // case-folded) is flagged; the reserved name `Accept` in `in: query` is NOT
+        // (the rule is header-only); a non-reserved header (`x-correlator`) is NOT;
+        // a `schema` property literally named `Authorization` nested inside a
+        // parameter is never mistaken for the parameter's own name; and a `$ref`
+        // item contributes nothing.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      parameters:
+        - name: Authorization
+          in: header
+        - in: header
+          name: content-type
+        - name: Accept
+          in: query
+        - name: x-correlator
+          in: header
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: object
+            properties:
+              Authorization:
+                type: string
+        - $ref: '#/components/parameters/Shared'
+      responses:
+        '200':
+          description: ok
+";
+        // Flagged: the `Authorization`/`header` param (opener at line 10) and the
+        // `content-type`/`header` param (in-first, case-folded, opener at line 12).
+        // Not flagged: `Accept`/`query` (query, not header); `x-correlator`/`header`
+        // (not reserved); the `id`/`path` param whose nested schema property is
+        // literally `Authorization` (deeper than the item's child indent); and the
+        // `$ref` item (no inline name/in).
+        assert_eq!(
+            header_parameters_with_reserved_names(body),
+            vec![
+                "parameters@line 10: `in: header` parameter names the reserved header \
+                 `Authorization` (a header parameter named Accept/Content-Type/Authorization \
+                 SHALL be ignored)"
+                    .to_string(),
+                "parameters@line 12: `in: header` parameter names the reserved header \
+                 `content-type` (a header parameter named Accept/Content-Type/Authorization \
+                 SHALL be ignored)"
+                    .to_string(),
+            ]
+        );
+
+        // Non-vacuous floor: across every registered spec no header parameter names
+        // a reserved header (the invariant the contract test asserts), yet the
+        // corpus actually declares many `in: header` parameters (every business
+        // spec's `x-correlator`), so a broken extractor can't hide behind an empty
+        // scan.
+        let mut header_params = 0usize;
+        for api in APIS {
+            assert!(
+                header_parameters_with_reserved_names(api.body).is_empty(),
+                "{}: no header parameter may name a reserved header",
+                api.name
+            );
+            for line in api.body.lines() {
+                let t = line.trim();
+                if t == "in: header" || t == "- in: header" {
+                    header_params += 1;
+                }
+            }
+        }
+        assert!(
+            header_params >= 30,
+            "expected many `in: header` parameters across specs, got {header_params}"
         );
     }
 
