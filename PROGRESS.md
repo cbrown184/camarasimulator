@@ -5669,6 +5669,50 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-21 — Contract-test harness: added a **bounded-charset URL
+  (`^https?://[a-zA-Z0-9\-._~:/?#\[\]@!$&'()*+,;=]{1,256}$`)-`pattern` example-conformance**
+  contract test (`src/registry.rs`
+  `every_bounded_http_url_pattern_example_conforms_to_the_bounded_http_url_pattern`) — where a
+  mounted spec declares an inline `example` beside a **same-indent** `pattern` equal to this
+  eSIM Remote Management callback-`sink` shape (an `http(s)://` scheme + 1..=256 chars of the
+  RFC 3986 URI set **minus `%`**: unreserved `-._~`, gen-delims `:/?#[]@`, sub-delims
+  `!$&'()*+,;=`, letters, digits), the example MUST match it. A URL example bearing a character
+  outside that set (a space, a `%`, a backtick, any non-ASCII byte), a non-`http(s)` scheme, or
+  a tail longer than 256 chars is a self-contradictory schema whose own validator rejects the
+  sample it advertises. The **bounded-character-set sibling of the two loose sink-URL members**
+  (`^https?:\/\/.+$` and `^https://.+$`): those accept any tail (`.+`), whereas this pins the
+  character set and the 256-char ceiling — so a `%`/space-bearing or 257+-char tail (legal under
+  the loose `.+` members, rejected here) is the fault only this member can catch, and the three
+  pattern strings differ so they never cross-pair. The `sink` field carries **no `format`
+  sibling**, so its example is beyond the `format`-example family's reach and this `pattern`
+  guard is its sole example check. **New wrinkle vs every prior member:** this pattern's class
+  contains a literal **`#`**, which the shared `raw_inline`/`is_key` helpers would truncate via
+  their `split('#')` YAML-comment strip — so both the extractor's `pattern`-sibling detector and
+  the non-vacuous-floor counter compare the **quoted scalar body directly** (a `#` inside quotes
+  is not a comment) instead of routing through those helpers. **Spec doc improvement in the same
+  pass** (mirroring the email/byte/client-id/https-only passes): the two eSIM `sink` fields
+  (`SendProfileReq`/`DownloadProfileReq`) carried the `pattern` but **no `example`**, so a guard
+  would have been vacuous — added a conforming `example: "https://endpoint.example.com/sink"` to
+  each (a valid bounded URL, consistent with the sibling sink-example style), giving the member
+  a real 2-pair corpus floor and giving Redoc/codegen a valid prefill where there was none. New
+  pure `matches_bounded_http_url_pattern` (strip `http(s)://`, non-empty tail ≤256 bytes, every
+  byte in the class; no regex/YAML dep) + `bounded_http_url_pattern_examples_malformed` extractor
+  cloning `client_id_pattern_examples_malformed`'s down-then-up dedent-bounded same-indent
+  scoping, keyed on `BOUNDED_HTTP_URL_PATTERN`. Unit-covered
+  (`bounded_http_url_pattern_example_extraction_rules`: matcher accepts https / http / a 256-char
+  ceiling tail, rejects a 257-char tail / `%` / space / `ftp://` / no-scheme / empty; a `%`,
+  space, `ftp://`, and a pattern-below bad value flagged in document order; a good quoted value
+  across an intervening `maxLength: 256`, a good unquoted value, a no-`pattern` sibling, the loose
+  http-url `^https?:\/\/.+$` sibling out of scope proving the two URL patterns never cross-pair, a
+  nested-`example` payload, a cross-property split, and a block-opening `example:` property all
+  cleared; ≥1-pair non-vacuous floor — the two edited `sink` fields). Surveyed the corpus first:
+  2 `^https?://…{1,256}$` occurrences, 0 with an example → after the spec edit, 2 pairs → 0
+  drift; a live guard that fires the moment a spec adds a malformed bounded URL example. Spec
+  change (two `example` lines added to esim-remote-management vwip); the matcher, extractor and
+  both tests live in the `#[cfg(test)]` module, so no runtime behaviour change. `cargo test` 2844
+  green (was 2842; +2), `cargo build --release` green, no new deps. — binary (release): 5.1M
+  (5,323,160 B; unchanged — the ~110 B of added spec text fits existing `.rodata` alignment
+  padding).
 - 2026-08-21 — Contract-test harness: added a **https-only sink-URL (`^https://.+$`)-`pattern`
   example-conformance** contract test (`src/registry.rs`
   `every_https_url_pattern_example_conforms_to_the_https_url_pattern`) — where a mounted spec

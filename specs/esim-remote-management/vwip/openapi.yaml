@@ -774,6 +774,7 @@ components:
           type: string
           pattern: "^https?://[a-zA-Z0-9\\-._~:/?#\\[\\]@!$&'()*+,;=]{1,256}$"
           maxLength: 256
+          example: "https://endpoint.example.com/sink"
           description: >-
             Callback address for asynchronous notification delivery. Accepted and
             validated (surface form), but delivery is a documented cut.
@@ -925,6 +926,7 @@ components:
           type: string
           pattern: "^https?://[a-zA-Z0-9\\-._~:/?#\\[\\]@!$&'()*+,;=]{1,256}$"
           maxLength: 256
+          example: "https://endpoint.example.com/sink"
           description: >-
             Callback address for asynchronous notification delivery. Accepted and
             validated (surface form), but delivery is a documented cut.

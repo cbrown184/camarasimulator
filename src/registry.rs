@@ -37870,6 +37870,452 @@ components:
         );
     }
 
+    const BOUNDED_HTTP_URL_PATTERN: &str =
+        r"^https?://[a-zA-Z0-9\\-._~:/?#\\[\\]@!$&'()*+,;=]{1,256}$";
+
+    /// True when `s` matches the bounded-charset URL `pattern`
+    /// `^https?://[a-zA-Z0-9\-._~:/?#\[\]@!$&'()*+,;=]{1,256}$` exactly: an `http://` or
+    /// `https://` scheme prefix followed by 1..=256 characters drawn from a fixed URI set —
+    /// the RFC 3986 unreserved marks (`-._~`), gen-delims (`:/?#[]@`) and sub-delims
+    /// (`!$&'()*+,;=`) plus letters and digits, i.e. every ASCII URI character *except* `%`
+    /// (percent-encoding is not admitted). Hand-rolled (no regex dep) mirroring
+    /// `matches_http_url_pattern`'s shape-only stance, but *narrower*: the loose sink-URL
+    /// members accept any tail (`.+`), while this pins the character set and the 256-char
+    /// ceiling — the eSIM Remote Management callback `sink` field's shape.
+    ///
+    /// Note the `pattern`'s `{1,256}` bounds the *character-class run* only, so the accepted
+    /// string is the literal scheme prefix plus 1..=256 class characters. Because every class
+    /// character is a single ASCII byte, a byte-length check equals the character count, and a
+    /// non-ASCII byte fails the class outright.
+    fn matches_bounded_http_url_pattern(s: &str) -> bool {
+        let tail = match s
+            .strip_prefix("https://")
+            .or_else(|| s.strip_prefix("http://"))
+        {
+            Some(t) => t,
+            None => return false,
+        };
+        let b = tail.as_bytes();
+        if b.is_empty() || b.len() > 256 {
+            return false;
+        }
+        // The RFC 3986 reserved + unreserved character set minus `%`, exactly the regex class.
+        let is_url_char = |c: u8| {
+            c.is_ascii_alphanumeric()
+                || matches!(
+                    c,
+                    b'-' | b'.'
+                        | b'_'
+                        | b'~'
+                        | b':'
+                        | b'/'
+                        | b'?'
+                        | b'#'
+                        | b'['
+                        | b']'
+                        | b'@'
+                        | b'!'
+                        | b'$'
+                        | b'&'
+                        | b'\''
+                        | b'('
+                        | b')'
+                        | b'*'
+                        | b'+'
+                        | b','
+                        | b';'
+                        | b'='
+                )
+        };
+        b.iter().all(|&c| is_url_char(c))
+    }
+
+    /// The 1-based line numbers, in document order, of every `example:` keyword whose inline
+    /// scalar value sits in a Schema Object declaring a *same-indent* `pattern` equal to
+    /// `BOUNDED_HTTP_URL_PATTERN` yet does not match that bounded-charset URL pattern, without
+    /// a YAML dep. The bounded-charset-URL sibling of `client_id_pattern_examples_malformed`:
+    /// same scoping, keyed on `BOUNDED_HTTP_URL_PATTERN` instead of `CLIENT_ID_PATTERN`.
+    ///
+    /// In OpenAPI 3.0.x (JSON Schema) an `example` is a sample *instance* of the schema, so a
+    /// field constrained by `pattern` MUST carry an example the pattern accepts. A URL example
+    /// bearing a character outside the fixed URI set (a space, a `%`, a backtick, any non-ASCII
+    /// byte), a non-`http(s)` scheme, or a tail longer than 256 characters advertises a sample
+    /// the schema's own validator rejects, so a Redoc/Swagger prefill and a codegen client's
+    /// generated sample carry a value the field can never legally hold. The `sink` field carries
+    /// no `format` sibling (`type: string` with only `pattern`/`maxLength`/`description`), so its
+    /// example is beyond the `format`-example family's reach — this `pattern` guard is its sole
+    /// example check.
+    ///
+    /// Scoping mirrors `client_id_pattern_examples_malformed` exactly: only an `example`
+    /// carrying an inline scalar (a block/object example opens no inline value and is skipped)
+    /// with a same-indent `pattern` sibling *equal to* `BOUNDED_HTTP_URL_PATTERN` in the same
+    /// Schema Object is inspected — the sibling is scanned at the example's own indent, down
+    /// through the object's block then up, dedent-bounded, so a nested or following object's
+    /// `pattern` never pairs. The two loose sink-URL patterns (`^https?:\/\/.+$` and
+    /// `^https://.+$`) are *different* pattern strings and never pair, so the bounded and loose
+    /// URL members stay distinct. An `example:` nested inside an outer `example:`/`examples:`
+    /// payload (sample data, not a schema keyword) is skipped. Only the bounded-charset URL
+    /// pattern is matched; other patterns are out of scope.
+    fn bounded_http_url_pattern_examples_malformed(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let raw_inline = |l: &str, name: &str| -> Option<String> {
+            let (k, v) = l.trim_start().split_once(':')?;
+            if k.trim() != name {
+                return None;
+            }
+            let v = v.split('#').next().unwrap_or(v).trim();
+            if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            }
+        };
+        // Whether a same-indent `pattern:` sibling of line `i` (indent `c`) in the same
+        // Schema Object equals the bounded-charset URL pattern: scan down through the object's
+        // block then up, dedent-bounded so a nested or following object's `pattern` never pairs.
+        let sibling_is_bounded_url_pattern = |i: usize, c: usize| -> bool {
+            // NB: this pattern's character class contains a literal `#`, so the shared
+            // `raw_inline`/`is_key` helpers (which strip a `#`-comment via `split('#')`) would
+            // truncate it. Compare the quoted scalar body directly instead — the pattern is
+            // always a quoted scalar in the spec, and a `#` inside quotes is not a YAML comment.
+            let is_bounded_url_pattern = |l: &str| -> bool {
+                let Some(v) = l.trim_start().strip_prefix("pattern:") else {
+                    return false;
+                };
+                let v = v.trim();
+                v.strip_prefix('"')
+                    .and_then(|s| s.strip_suffix('"'))
+                    .or_else(|| v.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')))
+                    == Some(BOUNDED_HTTP_URL_PATTERN)
+            };
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_bounded_url_pattern(l) {
+                    return true;
+                }
+                j += 1;
+            }
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_bounded_url_pattern(l) {
+                    return true;
+                }
+            }
+            false
+        };
+        // True when line `i` (indent `c`) sits inside an outer `example:`/`examples:`
+        // payload — some enclosing container key up the indent ladder is
+        // `example`/`examples` — so an inner `example` key there is sample data, not a
+        // schema keyword.
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some(raw) = raw_inline(line, "example") else {
+                continue;
+            };
+            let c = indent(line);
+            if inside_example(i, c) {
+                continue;
+            }
+            if !sibling_is_bounded_url_pattern(i, c) {
+                continue;
+            }
+            let value = raw.trim_matches('"').trim_matches('\'');
+            if !matches_bounded_http_url_pattern(value) {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_bounded_http_url_pattern_example_conforms_to_the_bounded_http_url_pattern() {
+        // Contract-harness invariant (OpenAPI 3.0.x / JSON-Schema structural rule): where a
+        // Schema Object declares an inline `example` beside a same-indent
+        // `pattern: "^https?://[a-zA-Z0-9\-._~:/?#\[\]@!$&'()*+,;=]{1,256}$"` (the eSIM Remote
+        // Management callback `sink` field's bounded-charset URL shape), the example MUST match
+        // that pattern. An `example` is a sample *instance* of the schema, so a value the
+        // `pattern` rejects — a character outside the fixed URI set, a non-`http(s)` scheme, or a
+        // tail longer than 256 characters — is a self-contradictory schema whose own validator
+        // rejects the sample it advertises, so a Redoc/Swagger prefill and a codegen client's
+        // generated sample carry a value no field constrained by this pattern can hold.
+        //
+        // A new member of the `pattern`-conformance family and the **bounded-character-set
+        // sibling of the two loose sink-URL members** (`^https?:\/\/.+$` and `^https://.+$`):
+        // those accept any tail (`.+`) after the scheme, whereas this admits only the RFC 3986
+        // URI character set minus `%` and caps the tail at 256 — so a URL bearing a `%`, a
+        // space, or a 257-plus-character tail (legal under the loose `.+` members, rejected
+        // here) is the fault only this member can catch, and the three pattern strings differ so
+        // they never cross-pair. The `sink` field carries **no `format` sibling**, so its example
+        // is beyond the `format`-example family's reach and this `pattern` guard is its sole
+        // example check; a general regex-engine test would need a new dependency (declined on
+        // binary-size grounds), so a concrete hand-validated shape is matched. Verified true
+        // across all mounted specs before asserting (the two eSIM `sink` example + pattern pairs,
+        // each a conforming `https://` URL).
+        for api in APIS {
+            let offenders = bounded_http_url_pattern_examples_malformed(api.body);
+            assert!(
+                offenders.is_empty(),
+                "{} spec declares an `example` beside a same-indent bounded-charset URL \
+                 `pattern` that does not match that pattern (a sample the pattern's own \
+                 validator would reject) at `example:` line(s): {:?}",
+                api.name,
+                offenders
+            );
+        }
+    }
+
+    #[test]
+    fn bounded_http_url_pattern_example_extraction_rules() {
+        // Unit-cover `matches_bounded_http_url_pattern` and
+        // `bounded_http_url_pattern_examples_malformed` so the contract test above can't pass
+        // vacuously and its detection is pinned.
+        //
+        // Shape check: an `https://` and an `http://` URL over the allowed set pass, including a
+        // tail of exactly 256 characters (the ceiling); a 257-character tail (one over), a bare
+        // `%` (percent-encoding, outside the class), an embedded space, a non-`http(s)` scheme,
+        // a scheme-less value, and the empty string all fail.
+        assert!(matches_bounded_http_url_pattern(
+            "https://endpoint.example.com/sink"
+        ));
+        assert!(matches_bounded_http_url_pattern("http://a"));
+        assert!(matches_bounded_http_url_pattern(&format!(
+            "https://{}",
+            "a".repeat(256)
+        ))); // 256-char tail — the ceiling
+        assert!(!matches_bounded_http_url_pattern(&format!(
+            "https://{}",
+            "a".repeat(257)
+        ))); // 257-char tail — one over
+        assert!(!matches_bounded_http_url_pattern("https://x/a%20b")); // `%` not in the class
+        assert!(!matches_bounded_http_url_pattern("https://bad host")); // space not in the class
+        assert!(!matches_bounded_http_url_pattern("ftp://example.com")); // wrong scheme
+        assert!(!matches_bounded_http_url_pattern("example.com/no-scheme")); // no scheme
+        assert!(!matches_bounded_http_url_pattern("")); // empty
+
+        // Extractor: a valid quoted and a valid unquoted URL pass — the first across an
+        // intervening same-indent `maxLength: 256` sibling, mirroring the corpus's
+        // `pattern`→`maxLength`→`example` shape and proving the same-indent scan steps over it.
+        // A `%`-bearing, a space-bearing, and a wrong-scheme value are flagged; a bad value whose
+        // `pattern` is declared *below* it is still paired (down-scan) and flagged; a value with
+        // no `pattern` sibling and one whose sibling is a *different* pattern (the loose http-url
+        // `^https?:\/\/.+$` — which would *accept* the `%` value) are skipped; an inner `example`
+        // inside an outer `example:` payload is skipped; an example in one property never pairs
+        // with a following property's `pattern` across the dedent; and a property literally named
+        // `example` (opening a block) is skipped.
+        let body = format!(
+            "openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    GoodShape:
+      type: string
+      pattern: \"{p}\"
+      maxLength: 256
+      example: \"https://endpoint.example.com/sink\"
+    GoodUnquoted:
+      type: string
+      pattern: \"{p}\"
+      example: http://a
+    BadPercent:
+      type: string
+      pattern: \"{p}\"
+      example: \"https://x/a%20b\"
+    BadSpace:
+      type: string
+      pattern: \"{p}\"
+      example: \"https://bad host\"
+    BadScheme:
+      type: string
+      pattern: \"{p}\"
+      example: ftp://example.com
+    PatternBelow:
+      type: string
+      example: \"https://x/a%20b\"
+      pattern: \"{p}\"
+    NoPattern:
+      type: string
+      example: \"https://x/a%20b-but-no-pattern\"
+    OtherPattern:
+      type: string
+      pattern: '{http}'
+      example: \"https://x/a%20b\"
+    InExample:
+      type: object
+      example:
+        pattern: \"{p}\"
+        example: \"bad host\"
+    Split:
+      type: object
+      properties:
+        a:
+          example: \"bad host\"
+        b:
+          type: string
+          pattern: \"{p}\"
+    NamedExample:
+      type: object
+      properties:
+        example:
+          type: string
+          pattern: \"{p}\"
+",
+            p = BOUNDED_HTTP_URL_PATTERN,
+            http = HTTP_URL_PATTERN
+        );
+        // Flagged, in document order: BadPercent.example (a `%`), BadSpace.example (a space),
+        // BadScheme.example (`ftp://`), and PatternBelow.example (value `https://x/a%20b` with its
+        // bounded-URL `pattern` a line below — down-scan pairs it). Not flagged:
+        // GoodShape/GoodUnquoted (valid URLs; the former across an intervening same-indent
+        // `maxLength: 256`, proving the same-indent scan steps over it); NoPattern (no `pattern`
+        // sibling); OtherPattern (sibling is the loose http-url pattern, a different string that
+        // would *accept* the `%` value — out of scope, proving the two URL patterns never
+        // cross-pair); InExample's inner `example` (inside the outer `example:` payload);
+        // Split.a.example (its only bounded-URL `pattern` is in the following property past a
+        // dedent); and NamedExample's `example:` property opening a block (no inline value).
+        let flagged = bounded_http_url_pattern_examples_malformed(&body);
+        let flagged_props: Vec<&str> = flagged
+            .iter()
+            .map(|&n| {
+                let lines: Vec<&str> = body.lines().collect();
+                let mut k = n - 1;
+                loop {
+                    let l = lines[k];
+                    let ind = l.len() - l.trim_start().len();
+                    if ind == 4 && l.trim_end().ends_with(':') {
+                        break l.trim().trim_end_matches(':');
+                    }
+                    if k == 0 {
+                        break "";
+                    }
+                    k -= 1;
+                }
+            })
+            .collect();
+        assert_eq!(
+            flagged_props,
+            vec!["BadPercent", "BadSpace", "BadScheme", "PatternBelow"]
+        );
+
+        // Non-vacuous floor: across every registered spec every `example` beside a same-indent
+        // bounded-charset URL `pattern` matches it (the invariant the contract test asserts), and
+        // the corpus actually declares such pairs (the two eSIM Remote Management `sink` fields) —
+        // so the pattern-comparison path runs on real data and a broken (always-empty) extractor
+        // can't hide behind a corpus that never pairs. Count pairs with a same-indent detector
+        // independent of the extractor's shape comparison.
+        let mut bounded_url_examples = 0usize;
+        for api in APIS {
+            assert!(
+                bounded_http_url_pattern_examples_malformed(api.body).is_empty(),
+                "{}: every example beside a same-indent bounded-charset URL `pattern` must match it",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            let is_key = |l: &str, name: &str, val: Option<&str>| {
+                l.trim_start().split_once(':').is_some_and(|(k, v)| {
+                    k.trim() == name
+                        && val.is_none_or(|want| {
+                            v.split('#')
+                                .next()
+                                .unwrap_or(v)
+                                .trim()
+                                .trim_matches('"')
+                                .trim_matches('\'')
+                                == want
+                        })
+                })
+            };
+            for (i, l) in lines.iter().enumerate() {
+                if !is_key(l, "example", None) {
+                    continue;
+                }
+                if l.trim_start()
+                    .split_once(':')
+                    .map(|(_, v)| v.split('#').next().unwrap_or(v).trim().is_empty())
+                    .unwrap_or(true)
+                {
+                    continue;
+                }
+                let c = indent(l);
+                let lo = i.saturating_sub(6);
+                let hi = (i + 6).min(lines.len());
+                // `#`-safe pattern compare (this pattern's class holds a literal `#`, so
+                // `is_key`'s `split('#')` comment-strip would truncate it): compare the quoted
+                // scalar body directly.
+                let line_is_bounded_url_pattern = |l: &str| -> bool {
+                    l.trim_start().strip_prefix("pattern:").is_some_and(|v| {
+                        let v = v.trim();
+                        v.strip_prefix('"')
+                            .and_then(|s| s.strip_suffix('"'))
+                            .or_else(|| v.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')))
+                            == Some(BOUNDED_HTTP_URL_PATTERN)
+                    })
+                };
+                let has_bounded_url_pattern = (lo..hi).any(|j| {
+                    j != i && indent(lines[j]) == c && line_is_bounded_url_pattern(lines[j])
+                });
+                if has_bounded_url_pattern {
+                    bounded_url_examples += 1;
+                }
+            }
+        }
+        assert!(
+            bounded_url_examples >= 1,
+            "expected the eSIM `sink` example + same-indent bounded-charset URL `pattern` pairs, got {bounded_url_examples}"
+        );
+    }
+
     /// True when `s` is a well-formed RFC 3339 `date-time` string — the concrete
     /// syntax OpenAPI's `format: date-time` names (JSON Schema's `date-time` is
     /// RFC 3339 §5.6). Shape-only and lenient on the calendar (it range-checks each
