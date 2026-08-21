@@ -3353,6 +3353,26 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     edge-application-management `appId`/`appInstanceId`/`appDeploymentId`), all valid → 0 drift.
     Unit-covered (good/bad/date-time-format/object-schema/no-schema/schema-internal cases + a
     non-vacuous ≥3 floor). Test-only, no spec change.
+  - a **parameter-level example enum-membership conformance** contract test (`src/registry.rs`
+    `every_parameter_level_example_conforms_to_its_schema_enum`) asserts that a
+    Parameter/Header/Media-Type-level `example` — one sitting **beside** a same-indent `schema:`
+    block whose **direct** child is an `enum:` — is one of that enum's members. The
+    **enum-membership companion** of `every_parameter_level_uuid_example_conforms_to_the_uuid_format`
+    (same schema-sibling shape, `enum` in place of `format: uuid`) and the **out-of-schema
+    companion** of `every_example_is_a_member_of_its_enum`, whose own docstring never flags "an
+    `example` with no sibling enum (a Media Type / Parameter Object example …)": a parameter writes
+    the `example` as a sibling of `schema:` and the `enum` as a child of that schema, so a
+    parameter-level example against a closed enum was checked by **no** test (the schema-level enum
+    extractor needs the `enum` at the example's own indent; the parameter-level uuid extractor reads
+    `format`, never `enum`). New pure `parameter_level_examples_outside_their_schema_enum` extractor
+    (reuses the parameter-level uuid `sibling_schema_block` scan + a direct-child `enum:` locator so
+    a nested property's enum on an object-schema parameter never pairs; enum members parsed/normalized
+    exactly as `examples_outside_their_enum`, flow and block forms), keyed on the schema-*sibling*
+    shape so it never overlaps the schema-level extractor. Surveyed the corpus first: 1 parameter-level
+    example+schema-`enum` pair (in-home-device-management `actionId` path param, enum `[schedule-access]`,
+    example `schedule-access`), valid → 0 drift. Unit-covered (block/flow member good+bad, no-enum,
+    nested-property-enum, no-schema, schema-internal all cleared; ≥1-pair non-vacuous floor).
+    Test-only, no spec change.
   - an **enum-member numeric-range-bound conformance** contract test (`src/registry.rs`
     `every_enum_value_is_within_its_numeric_bounds`) asserts that where a mounted spec declares
     an `enum` sequence beside a same-indent `minimum`/`maximum`, every numeric member's value
@@ -5698,6 +5718,29 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-21 — Contract-test harness: added a **parameter-level example
+  enum-membership conformance** test (`src/registry.rs`
+  `every_parameter_level_example_conforms_to_its_schema_enum`) — a Parameter/Header/
+  Media-Type-level `example` sitting **beside** a same-indent `schema:` block whose **direct**
+  child is an `enum:` MUST be one of that enum's members. The enum-membership companion of
+  yesterday's parameter-level `format: uuid` test (same schema-sibling shape, `enum` for
+  `format: uuid`) and the out-of-schema companion of `every_example_is_a_member_of_its_enum`,
+  which by its own docstring never flags "an `example` with no sibling enum (a Media Type /
+  Parameter Object example …)" — a parameter writes the `example` as a sibling of `schema:` and
+  the `enum` as a child of that schema, so that shape was checked by no test (the schema-level
+  enum extractor needs the `enum` at the example's own indent; the parameter-level uuid
+  extractor reads `format`, never `enum`). New pure
+  `parameter_level_examples_outside_their_schema_enum` extractor (reuses the parameter-level uuid
+  `sibling_schema_block` scan + a direct-child `enum:` locator so a nested property's enum on an
+  object-schema parameter never pairs; enum members parsed/normalized exactly as
+  `examples_outside_their_enum`, flow + block forms), keyed on the schema-*sibling* shape so it
+  never overlaps the schema-level extractor. Surveyed first: 1 parameter-level example+schema-`enum`
+  pair (in-home-device-management `actionId` path param, enum `[schedule-access]`, example
+  `schedule-access`), valid → 0 drift. Unit-covered (block/flow member good+bad, no-enum,
+  nested-property-enum, no-schema, schema-internal all cleared; ≥1-pair non-vacuous floor).
+  Test-only (`#[cfg(test)]`), no runtime/spec change. `cargo test` 2858 green (was 2856; +2);
+  `cargo build --release` ok, no new deps. — binary (release): 5.1M (5,323,160 B; unchanged —
+  test-only code).
 - 2026-08-21 — Contract-test harness: added a **parameter-level `format: uuid`
   example-conformance** test (`src/registry.rs`
   `every_parameter_level_uuid_example_conforms_to_the_uuid_format`) — a Parameter/Header/

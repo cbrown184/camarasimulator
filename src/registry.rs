@@ -27724,6 +27724,432 @@ components:
         );
     }
 
+    /// The 1-based line numbers, in document order, of every **parameter/header-level**
+    /// `example:` keyword — one that sits beside a same-indent `schema:` *block* (a
+    /// Parameter Object, a `components.headers` entry, or a Media-Type Object, whose
+    /// `example` is a sample instance of the sibling `schema`) — whose sibling schema
+    /// declares a direct `enum:` child yet whose value is not one of that enum's members,
+    /// without a YAML dep.
+    ///
+    /// The enum-membership companion of `parameter_level_uuid_examples_malformed` and the
+    /// out-of-schema companion of `examples_outside_their_enum`, which guards an example
+    /// declared *inside* a Schema Object (a same-indent `enum` sibling) and, by its own
+    /// docstring, never flags "an `example` with no sibling enum (a Media Type / Parameter
+    /// Object example …)". A Parameter Object writes the `example` as a sibling of
+    /// `schema:` and the `enum` as a child of that schema, so a parameter-level example
+    /// against a closed enum was checked by no test: the schema-level enum extractor needs
+    /// the `enum` at the example's own indent, and the parameter-level uuid extractor reads
+    /// `format: uuid`, never `enum`.
+    ///
+    /// In OpenAPI 3.0.x a Parameter/Header Object `example` (and a Media-Type `example`)
+    /// is a sample *instance of that object's `schema`*, so where the schema declares an
+    /// `enum` the example MUST be one of its members; an example outside the set is a
+    /// sample the schema's own validator rejects, so a Redoc/Swagger "try it" prefill of
+    /// that path or query parameter carries a value the field can never legally hold.
+    ///
+    /// Only an `example` carrying an inline scalar (quoted or unquoted; a block-scalar
+    /// `>`/`|` opener and a flow/collection `[`/`{` opener carry no inline scalar and are
+    /// skipped) that has (a) a same-indent `schema:` **block-opening** sibling in the same
+    /// object (scanned down then up, dedent-bounded, so a nested or following object's
+    /// `schema` never pairs) and (b) an `enum:` among that schema block's **direct**
+    /// children (an `enum` deeper than the direct-child level — a nested sub-schema's or an
+    /// object property's — never pairs, so an object-schema parameter whose property
+    /// carries an enum is not mistaken for a scalar enum) is inspected. An `example:`
+    /// nested inside an outer `example:`/`examples:` payload (sample data) is skipped. This
+    /// keys strictly on the schema-*sibling* shape, so it never overlaps
+    /// `examples_outside_their_enum` (which keys on a same-indent `enum` sibling — a
+    /// parameter-level example has none). An empty enum admits nothing to compare and is
+    /// skipped.
+    fn parameter_level_examples_outside_their_schema_enum(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        // Unquote a scalar and trim a trailing ` # comment` — the normalization
+        // `examples_outside_their_enum` uses, applied to both the example and each enum
+        // member so the comparison is quote/comment-insensitive on both sides.
+        let norm = |raw: &str| -> String {
+            let mut v = raw.trim();
+            if let Some(pos) = v.find(" #") {
+                v = v[..pos].trim_end();
+            }
+            let v = v.trim();
+            let unq = v
+                .strip_prefix('"')
+                .and_then(|s| s.strip_suffix('"'))
+                .or_else(|| v.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')))
+                .unwrap_or(v);
+            unq.trim().to_string()
+        };
+        // The line index of a same-indent `schema:` *block opener* (a `schema:` key with no
+        // inline value) sibling of line `i` (indent `c`) in the same object: scan down
+        // through the object's block then up, dedent-bounded so a nested or following
+        // object's `schema` never pairs.
+        let sibling_schema_block = |i: usize, c: usize| -> Option<usize> {
+            let is_schema_opener = |l: &str| -> bool {
+                l.trim_start().split_once(':').is_some_and(|(k, v)| {
+                    k.trim() == "schema" && v.split('#').next().unwrap_or(v).trim().is_empty()
+                })
+            };
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_schema_opener(l) {
+                    return Some(j);
+                }
+                j += 1;
+            }
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_schema_opener(l) {
+                    return Some(k);
+                }
+            }
+            None
+        };
+        // The line index of an `enum:` among the schema block's *direct* children (the
+        // first indent level inside the block), bounded by the dedent that closes the
+        // block. An `enum` deeper than the direct-child level never pairs, so an
+        // object-schema parameter whose property carries an enum is not mistaken for it.
+        let schema_block_direct_enum = |sidx: usize| -> Option<usize> {
+            let sc = indent(lines[sidx]);
+            let is_enum_key = |l: &str| -> bool {
+                let t = l.trim_start();
+                t.starts_with("enum:") && !t.starts_with("enums")
+            };
+            let mut child: Option<usize> = None;
+            let mut j = sidx + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                let li = indent(l);
+                if li <= sc {
+                    break;
+                }
+                let ci = *child.get_or_insert(li);
+                if li == ci && is_enum_key(l) {
+                    return Some(j);
+                }
+                j += 1;
+            }
+            None
+        };
+        // The members of the enum whose `enum:` key sits at line index `e` — an inline flow
+        // `[…]` gathered across lines, or a block `- ` sequence at a deeper indent (the
+        // parsing `examples_outside_their_enum` uses, so a member normalizes identically).
+        let enum_values_at = |e: usize| -> Vec<String> {
+            let line = lines[e];
+            let rest = line.trim_start()["enum:".len()..].trim_start();
+            if rest.starts_with('[') {
+                let mut buf = rest.to_string();
+                let mut k = e;
+                while !buf.contains(']') && k + 1 < lines.len() {
+                    k += 1;
+                    buf.push(' ');
+                    buf.push_str(lines[k].trim());
+                }
+                let open = buf.find('[').map(|x| x + 1).unwrap_or(0);
+                let close = buf.rfind(']').unwrap_or(buf.len());
+                let inner = if close >= open { &buf[open..close] } else { "" };
+                if inner.trim().is_empty() {
+                    Vec::new()
+                } else {
+                    inner.split(',').map(|s| norm(s)).filter(|v| !v.is_empty()).collect()
+                }
+            } else if rest.is_empty() || rest.starts_with('#') {
+                let base = indent(line);
+                let mut values: Vec<String> = Vec::new();
+                let mut first_child_seen = false;
+                let mut j = e + 1;
+                while j < lines.len() {
+                    let l = lines[j];
+                    if l.trim().is_empty() || l.trim_start().starts_with('#') {
+                        j += 1;
+                        continue;
+                    }
+                    if indent(l) <= base {
+                        break;
+                    }
+                    let item = l.trim_start();
+                    if !first_child_seen {
+                        first_child_seen = true;
+                        if !item.starts_with('-') {
+                            break;
+                        }
+                    }
+                    if !item.starts_with('-') {
+                        break;
+                    }
+                    let val = norm(item[1..].trim_start());
+                    if !val.is_empty() {
+                        values.push(val);
+                    }
+                    j += 1;
+                }
+                values
+            } else {
+                Vec::new()
+            }
+        };
+        // True when line `i` (indent `c`) sits inside an outer `example:`/`examples:`
+        // payload — some enclosing container key up the indent ladder is
+        // `example`/`examples`, so an inner `example` key there is sample data.
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some((k, v)) = line.trim_start().split_once(':') else {
+                continue;
+            };
+            if k.trim() != "example" {
+                continue;
+            }
+            let rawv = v.trim();
+            // A block-scalar (`>`/`|`) or flow/collection (`[`/`{`) opener carries no inline
+            // scalar to test against a scalar enum — skip (an empty value opens a block too).
+            if rawv.is_empty()
+                || rawv.starts_with('>')
+                || rawv.starts_with('|')
+                || rawv.starts_with('[')
+                || rawv.starts_with('{')
+            {
+                continue;
+            }
+            let c = indent(line);
+            if inside_example(i, c) {
+                continue;
+            }
+            let Some(sidx) = sibling_schema_block(i, c) else {
+                continue;
+            };
+            let Some(eidx) = schema_block_direct_enum(sidx) else {
+                continue;
+            };
+            let members = enum_values_at(eidx);
+            if members.is_empty() {
+                continue;
+            }
+            let value = norm(rawv);
+            if !members.iter().any(|m| m == &value) {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_parameter_level_example_conforms_to_its_schema_enum() {
+        // Contract-harness invariant (OpenAPI 3.0.x / JSON-Schema): a Parameter/Header
+        // Object `example` (and a Media-Type Object `example`) is a sample *instance of its
+        // sibling `schema`*, so where that schema declares an `enum` the example MUST be one
+        // of the enum's members. An example outside the set is a sample the schema's own
+        // validator rejects, so a Redoc/Swagger "try it" prefill of that path or query
+        // parameter carries a value the field can never legally hold.
+        //
+        // The enum-membership companion of
+        // `every_parameter_level_uuid_example_conforms_to_the_uuid_format` (same
+        // schema-sibling shape, `enum` in place of `format: uuid`) and the out-of-schema
+        // companion of `every_example_is_a_member_of_its_enum`, which by its own docstring
+        // never flags "an `example` with no sibling enum (a Media Type / Parameter Object
+        // example …)" — a parameter-level example writes the `example` as a sibling of
+        // `schema:` and the `enum` as a child of that schema, so that shape was checked by
+        // no test (the schema-level enum extractor needs the `enum` at the example's own
+        // indent; the parameter-level uuid extractor reads `format`, never `enum`).
+        // Verified true across all mounted specs before asserting.
+        for api in APIS {
+            let offenders = parameter_level_examples_outside_their_schema_enum(api.body);
+            assert!(
+                offenders.is_empty(),
+                "{} spec declares a parameter/header-level `example` outside its sibling \
+                 `schema`'s `enum` (a value the enum's own validator would reject) at \
+                 line(s): {:?}",
+                api.name,
+                offenders
+            );
+        }
+    }
+
+    #[test]
+    fn parameter_level_example_enum_extraction_rules() {
+        // Unit-cover `parameter_level_examples_outside_their_schema_enum` so the contract
+        // test above can't pass vacuously and its detection is pinned.
+        //
+        // A parameter whose `schema` declares a direct `enum` and whose sibling `example`
+        // is a member passes; a sibling example outside the enum is flagged (both a block
+        // enum and an inline-flow enum). A parameter whose schema has no `enum` is skipped;
+        // one whose `enum` sits on a nested property (not a direct child of the parameter
+        // schema) is skipped (the object example is out of scope); an `example` with no
+        // sibling `schema:` block is skipped; and a schema-*internal* example (a same-indent
+        // `enum`, no sibling `schema:`) is skipped here — it is `examples_outside_their_enum`'s
+        // concern, so the two extractors never double-count.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      parameters:
+        - name: goodblock
+          in: query
+          schema:
+            type: string
+            enum:
+              - asc
+              - desc
+          example: desc
+        - name: badblock
+          in: query
+          schema:
+            type: string
+            enum:
+              - asc
+              - desc
+          example: sideways
+        - name: goodflow
+          in: query
+          schema:
+            type: string
+            enum: [red, green]
+          example: green
+        - name: badflow
+          in: query
+          schema:
+            type: string
+            enum: [red, green]
+          example: blue
+        - name: noenum
+          in: query
+          schema:
+            type: string
+            format: date-time
+          example: not-in-any-enum
+        - name: obj
+          in: query
+          schema:
+            type: object
+            properties:
+              mode:
+                type: string
+                enum: [on, off]
+          example: not-a-member
+        - name: noschema
+          in: query
+          example: not-a-member
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    Internal:
+      type: string
+      enum: [alpha, beta]
+      example: gamma
+";
+        // Flagged, in document order: `badblock`'s `example: sideways` (outside the block
+        // enum `[asc, desc]`) and `badflow`'s `example: blue` (outside the flow enum
+        // `[red, green]`). Not flagged: `goodblock`/`goodflow` (members); `noenum` (schema
+        // has no enum); `obj` (the enum is a nested property, not a direct child of the
+        // parameter schema — its scalar example is out of scope); `noschema` (no sibling
+        // `schema:` block); `Internal.example: gamma` (a schema-internal example with a
+        // same-indent `enum` and no sibling `schema:` — the schema-level test's concern,
+        // never this one's).
+        let flagged = parameter_level_examples_outside_their_schema_enum(body);
+        let bad_block = body.lines().position(|l| l.contains("example: sideways")).unwrap() + 1;
+        let bad_flow = body.lines().position(|l| l.contains("example: blue")).unwrap() + 1;
+        assert_eq!(flagged, vec![bad_block, bad_flow]);
+
+        // The schema-internal `Internal.example: gamma` is NOT credited here (no overlap
+        // with the schema-level extractor, which owns that shape).
+        let internal_line = body.lines().position(|l| l.contains("example: gamma")).unwrap() + 1;
+        assert!(!flagged.contains(&internal_line));
+
+        // Non-vacuous floor: across every registered spec every parameter/header-level
+        // example beside a schema whose direct child is an `enum` is one of that enum's
+        // members (the invariant), and the corpus actually declares such a pair (the
+        // in-home-device-management `actionId` path parameter, whose `enum` is
+        // `[schedule-access]` and whose sibling example is `schedule-access`) — so the
+        // membership-comparison path runs on real data and a broken (always-empty)
+        // extractor can't hide behind a corpus that never pairs one. Count pairs with a
+        // detector independent of the extractor's shape comparison.
+        let mut param_enum_examples = 0usize;
+        for api in APIS {
+            assert!(
+                parameter_level_examples_outside_their_schema_enum(api.body).is_empty(),
+                "{}: every parameter/header-level example beside a schema with a direct \
+                 `enum` must be one of the enum's members",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            for (i, l) in lines.iter().enumerate() {
+                let t = l.trim_start();
+                let has_inline = t.starts_with("example:")
+                    && t.split_once(':')
+                        .map(|(_, v)| !v.split('#').next().unwrap_or(v).trim().is_empty())
+                        .unwrap_or(false);
+                if !has_inline {
+                    continue;
+                }
+                let c = indent(l);
+                let lo = i.saturating_sub(10);
+                let hi = (i + 10).min(lines.len());
+                let has_schema_sibling =
+                    (lo..hi).any(|j| j != i && indent(lines[j]) == c && lines[j].trim() == "schema:");
+                let has_enum_below = (lo..hi)
+                    .any(|j| lines[j].trim_start().starts_with("enum:") && indent(lines[j]) > c);
+                if has_schema_sibling && has_enum_below {
+                    param_enum_examples += 1;
+                }
+            }
+        }
+        assert!(
+            param_enum_examples >= 1,
+            "expected at least one parameter-level example + schema-`enum` pair across specs, got {param_enum_examples}"
+        );
+    }
+
     /// The E.164 phone-number `pattern` the CAMARA specs use verbatim (single-quoted
     /// in YAML as `'^\+[1-9][0-9]{4,14}$'`): a leading `+`, then a first digit `1`–`9`,
     /// then 4–14 more decimal digits — i.e. `+` followed by 5–15 digits, the first
