@@ -30470,6 +30470,367 @@ components:
         );
     }
 
+    const HTTPS_URL_PATTERN: &str = r"^https://.+$";
+
+    /// True when `s` matches the https-only sink `pattern` `^https://.+$` exactly: the literal scheme
+    /// `https://` (no `http://` alternation — unlike `^https?:\/\/.+$`) followed by at least one
+    /// further character (the `.+` tail; an `example` is a single inline scalar, so no newline is in
+    /// play and `.` here matches any byte). Hand-rolled (no regex dep) mirroring
+    /// `matches_http_url_pattern`'s shape-only stance, but *narrower*: it rejects the `http://` scheme
+    /// that matcher accepts, so an `http://` sample — legal under the http-or-https sink pattern —
+    /// is caught here, the exact narrowing this stricter pattern adds.
+    fn matches_https_url_pattern(s: &str) -> bool {
+        s.strip_prefix("https://").is_some_and(|rest| !rest.is_empty())
+    }
+
+    /// The 1-based line numbers, in document order, of every `example:` keyword whose inline scalar
+    /// value sits in a Schema Object declaring a *same-indent* https-only sink `pattern` `^https://.+$`
+    /// sibling yet does not match that pattern, without a YAML dep. The https-only twin of
+    /// `http_url_pattern_examples_malformed`: same scoping, keyed on `HTTPS_URL_PATTERN` instead of
+    /// `HTTP_URL_PATTERN`.
+    ///
+    /// In OpenAPI 3.0.x (JSON Schema) an `example` is a sample *instance* of the schema, so a field
+    /// constrained by `pattern` MUST carry an example the pattern accepts. A `sink` example that is
+    /// not an `https://` URL — a bare host, a wrong scheme (`http://`, `ftp://`), or an empty tail
+    /// (`https://` alone) — advertises a sample the schema's own validator rejects, so a Redoc/Swagger
+    /// prefill and a codegen client's generated sample carry a value the field can never legally hold.
+    /// `^https://.+$` is the dedicated-network / carrier-billing notification `sink` pattern; like the
+    /// http-or-https pattern it sits beside a `format: uri` sibling only (a *format*, whose example
+    /// check `every_uri_format_example_is_a_well_formed_uri` accepts any absolute URI — an `http://` or
+    /// `ftp://` URI included — so the https-only narrowing the `pattern` imposes is beyond its reach),
+    /// leaving these examples otherwise unchecked against the scheme constraint. The
+    /// `http_url_pattern_examples_malformed` family keys on the *different* string `^https?:\/\/.+$`
+    /// (http-or-https) and so accepts an `http://` value; only this member enforces the https-only form.
+    ///
+    /// Scoping mirrors `http_url_pattern_examples_malformed` exactly: only an `example` carrying an
+    /// inline scalar (a block/object example opens no inline value and is skipped) with a same-indent
+    /// `pattern` sibling *equal to* `HTTPS_URL_PATTERN` in the same Schema Object is inspected — the
+    /// sibling is scanned at the example's own indent, down through the object's block then up,
+    /// dedent-bounded, so a nested or following object's `pattern` never pairs, and an intervening
+    /// `format`/`maxLength`/`description` sibling at the same indent is stepped over (the corpus's
+    /// `sink` property has a `format`/`maxLength`/`description` block between its declared keys). In
+    /// particular the http-or-https `^https?:\/\/.+$` sink pattern is a *different* string and never
+    /// pairs. An `example:` nested inside an outer `example:`/`examples:` payload (sample data, not a
+    /// schema keyword) is skipped. Only the `^https://.+$` pattern is matched.
+    fn https_url_pattern_examples_malformed(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let raw_inline = |l: &str, name: &str| -> Option<String> {
+            let (k, v) = l.trim_start().split_once(':')?;
+            if k.trim() != name {
+                return None;
+            }
+            let v = v.split('#').next().unwrap_or(v).trim();
+            if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            }
+        };
+        // Whether a same-indent `pattern:` sibling of line `i` (indent `c`) in the same Schema
+        // Object equals the https-only sink pattern: scan down through the object's block then up,
+        // dedent-bounded so a nested or following object's `pattern` never pairs.
+        let sibling_is_https_url_pattern = |i: usize, c: usize| -> bool {
+            let is_https_url_pattern = |l: &str| -> bool {
+                raw_inline(l, "pattern")
+                    .map(|v| v.trim_matches('"').trim_matches('\'') == HTTPS_URL_PATTERN)
+                    .unwrap_or(false)
+            };
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_https_url_pattern(l) {
+                    return true;
+                }
+                j += 1;
+            }
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_https_url_pattern(l) {
+                    return true;
+                }
+            }
+            false
+        };
+        // True when line `i` (indent `c`) sits inside an outer `example:`/`examples:` payload —
+        // some enclosing container key up the indent ladder is `example`/`examples` — so an
+        // inner `example` key there is sample data, not a schema keyword.
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some(raw) = raw_inline(line, "example") else {
+                continue;
+            };
+            let c = indent(line);
+            if inside_example(i, c) {
+                continue;
+            }
+            if !sibling_is_https_url_pattern(i, c) {
+                continue;
+            }
+            let value = raw.trim_matches('"').trim_matches('\'');
+            if !matches_https_url_pattern(value) {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_https_url_pattern_example_conforms_to_the_https_url_pattern() {
+        // Contract-harness invariant (OpenAPI 3.0.x / JSON-Schema structural rule): where a Schema
+        // Object declares an inline `example` beside a same-indent https-only sink `pattern`
+        // (`^https://.+$`, the dedicated-network / carrier-billing notification `sink` pattern), the
+        // example MUST match that pattern. An `example` is a sample *instance* of the schema, so a
+        // value the `pattern` rejects — a bare host, an `http://`/non-`https` scheme, or `https://`
+        // with an empty tail — is a self-contradictory schema whose own validator rejects the sample
+        // it advertises, so a Redoc/Swagger prefill and a codegen client's generated sample carry a
+        // value no field constrained by this pattern can legally hold.
+        //
+        // The https-only sibling of the sink-URL (`^https?:\/\/.+$`) member: that family keys on the
+        // http-or-https string and so accepts an `http://` value, whereas this pattern pins the literal
+        // `https://` scheme and rejects `http://`, so an `http://` example — legal under the
+        // http-or-https member, rejected here — is the fault only this member can catch, and the two
+        // pattern strings differ so they never cross-pair. The `sink` property does carry a
+        // `format: uri` sibling, but `every_uri_format_example_is_a_well_formed_uri` accepts any
+        // absolute URI (an `http://` or `ftp://` URI included), so the https-only narrowing the
+        // `pattern` imposes is beyond the format-example family's reach; a general regex-engine test
+        // would need a new dependency (declined on binary-size grounds), so a concrete hand-validated
+        // shape is matched. Verified true across all mounted specs before asserting (Carrier Billing,
+        // Dedicated Network, and Dedicated Network Accesses each declare one such example+pattern pair,
+        // all a conforming `https://…` sink URL).
+        for api in APIS {
+            let offenders = https_url_pattern_examples_malformed(api.body);
+            assert!(
+                offenders.is_empty(),
+                "{} spec declares an `example` beside a same-indent https-only sink \
+                 `pattern: '^https://.+$'` that does not match that pattern (a sample the \
+                 pattern's own validator would reject) at `example:` line(s): {:?}",
+                api.name,
+                offenders
+            );
+        }
+    }
+
+    #[test]
+    fn https_url_pattern_example_extraction_rules() {
+        // Unit-cover `matches_https_url_pattern` and `https_url_pattern_examples_malformed` so the
+        // contract test above can't pass vacuously and its detection is pinned.
+        //
+        // Shape check: an `https://` URL with a non-empty tail passes; an `http://` URL (the exact
+        // narrowing over the http-or-https member), a wrong scheme (`ftp://`), a bare host with no
+        // scheme, `https://` with an *empty* tail (the `.+` requires at least one character), and an
+        // empty string all fail. The https-only scheme anchor and the non-empty tail are the whole
+        // point of `^https://.+$`.
+        assert!(matches_https_url_pattern("https://app.example.com/cb"));
+        assert!(matches_https_url_pattern("https://a")); // shortest legal tail — one char
+        assert!(!matches_https_url_pattern("http://localhost:9090/hook")); // http:// rejected (https-only)
+        assert!(!matches_https_url_pattern("ftp://host/x")); // wrong scheme
+        assert!(!matches_https_url_pattern("example.com/x")); // no scheme
+        assert!(!matches_https_url_pattern("https://")); // empty tail
+        assert!(!matches_https_url_pattern("")); // empty
+
+        // Cross-member distinctness: an `http://` value is rejected here but accepted by the
+        // http-or-https member — the fault only this member catches.
+        assert!(matches_http_url_pattern("http://localhost:9090/hook"));
+        assert!(!matches_https_url_pattern("http://localhost:9090/hook"));
+
+        // Extractor: a valid https sink URL across an intervening `format` + `maxLength` +
+        // `description` block (the corpus's `sink` shape) passes; an `http://` (the distinctive
+        // narrowing), a wrong-scheme, and an empty-tail value are flagged; a bad value whose `pattern`
+        // is declared *below* it is still paired (down-scan) and flagged; a value with no `pattern`
+        // sibling and one whose sibling is the *different* http-or-https `^https?:\/\/.+$` pattern are
+        // skipped; an inner `example` inside an outer `example:` payload is skipped; an example in one
+        // property never pairs with a following property's `pattern` across the dedent; and a property
+        // literally named `example` (opening a block) is skipped.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    GoodBlockDesc:
+      type: string
+      pattern: '^https://.+$'
+      format: uri
+      maxLength: 2048
+      description: >-
+        the callback sink
+      example: \"https://app.example.com/cb\"
+    HttpScheme:
+      type: string
+      pattern: '^https://.+$'
+      example: \"http://host/x\"
+    WrongScheme:
+      type: string
+      pattern: '^https://.+$'
+      example: \"ftp://host/x\"
+    EmptyTail:
+      type: string
+      pattern: '^https://.+$'
+      example: \"https://\"
+    PatternBelow:
+      type: string
+      example: \"not a url\"
+      pattern: '^https://.+$'
+    NoPattern:
+      type: string
+      example: \"bare-host\"
+    HttpOrHttpsPattern:
+      type: string
+      pattern: '^https?:\\/\\/.+$'
+      example: \"http://ok\"
+    InExample:
+      type: object
+      example:
+        pattern: '^https://.+$'
+        example: \"bad thing\"
+    Split:
+      type: object
+      properties:
+        a:
+          example: \"not a url\"
+        b:
+          type: string
+          pattern: '^https://.+$'
+    NamedExample:
+      type: object
+      properties:
+        example:
+          type: string
+          pattern: '^https://.+$'
+";
+        // Flagged, in document order: HttpScheme.example (`http://host/x` — the https-only
+        // narrowing), WrongScheme.example (`ftp://host/x`), EmptyTail.example (`https://`), and
+        // PatternBelow.example (value `not a url`, https-only `pattern` a line below — down-scan pairs
+        // it). Not flagged: GoodBlockDesc (valid, across an intervening format/maxLength/description
+        // block); NoPattern (no `pattern` sibling); HttpOrHttpsPattern (sibling is the http-or-https
+        // `^https?:\/\/.+$`, not this exact string — an `http://` value this member would flag, proving
+        // exact-pattern keying); InExample's inner `example` (inside the outer `example:` payload);
+        // Split.a.example (its only sink `pattern` is in the following property past a dedent); and
+        // NamedExample's `example:` property opening a block (no inline value).
+        let flagged = https_url_pattern_examples_malformed(body);
+        let flagged_vals: Vec<&str> = flagged
+            .iter()
+            .map(|&n| body.lines().nth(n - 1).unwrap().trim())
+            .collect();
+        assert_eq!(
+            flagged_vals,
+            vec![
+                "example: \"http://host/x\"",
+                "example: \"ftp://host/x\"",
+                "example: \"https://\"",
+                "example: \"not a url\"",
+            ]
+        );
+
+        // Non-vacuous floor: across every registered spec every `example` beside a same-indent
+        // https-only sink `pattern` matches it (the invariant the contract test asserts), and the
+        // corpus actually declares such pairs — so the pattern-comparison path runs on real data and a
+        // broken (always-empty) extractor can't hide behind a corpus that never pairs. Carrier
+        // Billing, Dedicated Network, and Dedicated Network Accesses each declare one `sink`
+        // example+pattern pair, so the floor is 3. Count pairs with a same-indent detector independent
+        // of the extractor's shape comparison.
+        let mut https_url_examples = 0usize;
+        for api in APIS {
+            assert!(
+                https_url_pattern_examples_malformed(api.body).is_empty(),
+                "{}: every example beside a same-indent https-only sink `pattern` must match it",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            let is_key = |l: &str, name: &str, val: Option<&str>| {
+                l.trim_start().split_once(':').is_some_and(|(k, v)| {
+                    k.trim() == name
+                        && val.is_none_or(|want| {
+                            v.split('#')
+                                .next()
+                                .unwrap_or(v)
+                                .trim()
+                                .trim_matches('"')
+                                .trim_matches('\'')
+                                == want
+                        })
+                })
+            };
+            for (i, l) in lines.iter().enumerate() {
+                if !is_key(l, "example", None) {
+                    continue;
+                }
+                if l.trim_start()
+                    .split_once(':')
+                    .map(|(_, v)| v.split('#').next().unwrap_or(v).trim().is_empty())
+                    .unwrap_or(true)
+                {
+                    continue;
+                }
+                let c = indent(l);
+                let lo = i.saturating_sub(6);
+                let hi = (i + 6).min(lines.len());
+                let has_https_url = (lo..hi).any(|j| {
+                    j != i
+                        && indent(lines[j]) == c
+                        && is_key(lines[j], "pattern", Some(HTTPS_URL_PATTERN))
+                });
+                if has_https_url {
+                    https_url_examples += 1;
+                }
+            }
+        }
+        assert!(
+            https_url_examples >= 3,
+            "expected the corpus's example + same-indent https-only sink `pattern` pairs, got {https_url_examples}"
+        );
+    }
+
     const UUID_PATTERN: &str =
         r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$";
 

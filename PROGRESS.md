@@ -5669,6 +5669,44 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-21 — Contract-test harness: added a **https-only sink-URL (`^https://.+$`)-`pattern`
+  example-conformance** contract test (`src/registry.rs`
+  `every_https_url_pattern_example_conforms_to_the_https_url_pattern`) — where a mounted spec
+  declares an inline `example` beside a **same-indent** `pattern: ^https://.+$` (the
+  dedicated-network / carrier-billing notification `sink` field's https-only shape), the example
+  MUST match it. A sink example bearing an `http://`/`ftp://` scheme, no scheme, or `https://`
+  with an empty tail is a self-contradictory schema whose own validator rejects the sample it
+  advertises. The **https-only sibling of the sink-URL (`^https?:\/\/.+$`) member**: that family
+  keys on the http-or-https string and so *accepts* an `http://` value, whereas this pattern pins
+  the literal `https://` scheme and rejects `http://`, so an `http://` example — legal under the
+  http-or-https member, rejected here — is the fault only this member can catch, and the two
+  pattern strings differ so they never cross-pair (the existing `http_url` member's test already
+  carried an explicitly-skipped `HttpsOnlyPattern` case noting this string was unguarded). The
+  `sink` field carries a `format: uri` sibling only, whose example check
+  (`every_uri_format_example_is_a_well_formed_uri`) accepts any absolute URI (an `http://`/`ftp://`
+  URI included), so the https-only narrowing stays otherwise unchecked. **Spec doc improvement in
+  the same pass** (mirroring the email/byte/client-id passes): the three https-only `sink` fields
+  (carrier-billing `SinkReserve`, dedicated-network + dedicated-network-accesses `Sink`) carried
+  the `pattern` but **no `example`**, so a guard would have been vacuous — added a conforming
+  `example: "https://endpoint.example.com/sink"` to each (a valid https URI ≤ 2048 chars,
+  consistent with the existing sink-example style), giving the member a real 3-pair corpus floor
+  and giving Redoc/codegen a valid prefill where there was none. New pure `matches_https_url_pattern`
+  (strip `https://` prefix, non-empty tail; no regex/YAML dep) + `https_url_pattern_examples_malformed`
+  extractor cloning `http_url_pattern_examples_malformed`'s down-then-up dedent-bounded same-indent
+  scoping, keyed on `HTTPS_URL_PATTERN`. Unit-covered (`https_url_pattern_example_extraction_rules`:
+  matcher accepts https / one-char-tail, rejects http:// / ftp:// / no-scheme / empty-tail / empty;
+  explicit cross-member distinctness vs `matches_http_url_pattern` (http:// accepted there, rejected
+  here); an http://, ftp://, empty-tail, and pattern-below `not a url` flagged in document order
+  across an intervening format/maxLength/description block; a good value, a no-`pattern` sibling, the
+  http-or-https `^https?:\/\/.+$` sibling out of scope proving the two sink patterns never cross-pair,
+  a nested-`example` payload, a cross-property split, and a block-opening `example:` property all
+  cleared; ≥3-pair non-vacuous floor — the three edited sink fields). Surveyed the corpus first: 3
+  `^https://.+$` occurrences, 0 with an example → after the spec edit, 3 pairs → 0 drift; a live guard
+  that fires the moment a spec adds a malformed https-only sink example. Spec change (three `example`
+  lines added); the matcher, extractor and both tests live in the `#[cfg(test)]` module, so no runtime
+  behaviour change. `cargo test` 2842 green (was 2840; +2), `cargo build --release` green, no new deps.
+  — binary (release): 5.1M (5,323,160 B; unchanged — the ~150 B of added spec text fits existing
+  `.rodata` alignment padding).
 - 2026-08-21 — Contract-test harness: added a **version-4 UUID (mixed-case, version nibble
   pinned to `4`)-`pattern` example-conformance** contract test (`src/registry.rs`
   `every_uuid_v4_pattern_example_conforms_to_the_uuid_v4_pattern`) — where a mounted spec

@@ -484,6 +484,7 @@ components:
           format: uri
           maxLength: 2048
           pattern: "^https://.+$"
+          example: "https://endpoint.example.com/sink"
           description: The `https://` address notifications are delivered to.
         sinkCredential:
           $ref: "#/components/schemas/SinkCredential"

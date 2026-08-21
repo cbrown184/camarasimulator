@@ -1746,6 +1746,7 @@ components:
           type: string
           format: uri
           pattern: '^https://.+$'
+          example: "https://endpoint.example.com/sink"
           description: >-
             Optional callback URL for charging notifications. On a successful
             reservation CamaraSim delivers a `payment-reserved` (or, for a `…888`
