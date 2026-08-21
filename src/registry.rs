@@ -28421,6 +28421,440 @@ components:
         );
     }
 
+    /// The 1-based line numbers, in document order, of every parameter/header/media-type
+    /// level `example:` — one that sits beside a same-indent `schema:` *block* (a Parameter
+    /// Object, a `components.headers` entry, or a Media-Type Object, whose `example` is a
+    /// sample instance of the sibling `schema`) — whose sibling schema declares a direct
+    /// scalar `type:` (`string`/`integer`/`number`/`boolean`) that the example's inline
+    /// value contradicts, without a YAML dep.
+    ///
+    /// The base-`type` companion of `parameter_level_uuid_examples_malformed` and
+    /// `parameter_level_examples_outside_their_schema_enum` (same schema-sibling shape,
+    /// the schema's direct `type:` in place of its `format: uuid` / `enum`) and the
+    /// out-of-schema companion of `examples_inconsistent_with_type`, which by its own
+    /// docstring inspects only a *schema-level* example (a same-indent `type:` sibling)
+    /// and, for "a **Media Type Object** or **Parameter Object** `example` (whose siblings
+    /// are `schema`/`examples`, never a same-indent `type`)", "finds no sibling type and is
+    /// skipped". A parameter-level example writes the `example` as a sibling of `schema:`
+    /// and the `type` as a child of that schema, so that shape was checked by no test: the
+    /// schema-level type extractor needs the `type` at the example's own indent, and the
+    /// parameter-level uuid/enum extractors read `format`/`enum`, never the base `type`.
+    ///
+    /// In OpenAPI 3.0.x a Parameter/Header Object `example` (and a Media-Type `example`) is
+    /// a sample *instance of that object's `schema`*, so it MUST conform to the schema's
+    /// scalar `type`: an unquoted `true`/`5` under `type: string` (YAML reads it as a
+    /// boolean/number), a quoted or fractional value under `type: integer`, a non-numeric
+    /// value under `type: number`, a non-boolean under `type: boolean` is a sample the
+    /// schema's own validator rejects, so a Redoc/Swagger "try it" prefill of that path or
+    /// query parameter carries a value the field can never legally hold.
+    ///
+    /// Only an `example` carrying an inline scalar (quoted or unquoted; a block-scalar
+    /// `>`/`|` opener and a flow/collection `[`/`{` opener carry no inline scalar and are
+    /// skipped) that has (a) a same-indent `schema:` **block-opening** sibling in the same
+    /// object (scanned down then up, dedent-bounded, so a nested or following object's
+    /// `schema` never pairs) and (b) a scalar `type:` among that schema block's **direct**
+    /// children (a deeper nested sub-schema's `type` never pairs, so an object-schema
+    /// parameter is not mistaken for a scalar one) is inspected. A `null`/`~` example is
+    /// legal for a nullable schema of any type and is not flagged. An `example:` nested
+    /// inside an outer `example:`/`examples:` payload is skipped. This keys strictly on the
+    /// schema-*sibling* shape, so it never overlaps `examples_inconsistent_with_type` (which
+    /// keys on a same-indent `type` sibling — a parameter-level example has none). Quoting
+    /// is preserved before classification (a quoted value is a YAML string whatever its
+    /// inner text would parse as), sharing `examples_inconsistent_with_type`'s rules.
+    fn parameter_level_examples_inconsistent_with_schema_type(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        // The raw inline value token of a `name:` key (inline comment stripped, quoting
+        // *preserved* so a quoted scalar stays classifiable as a string); `None` when the
+        // line is a different key or opens a block (no inline value).
+        let raw_inline = |l: &str, name: &str| -> Option<String> {
+            let (k, v) = l.trim_start().split_once(':')?;
+            if k.trim() != name {
+                return None;
+            }
+            let v = v.split('#').next().unwrap_or(v).trim();
+            if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            }
+        };
+        // The line index of a same-indent `schema:` *block opener* (a `schema:` key with no
+        // inline value) sibling of line `i` (indent `c`) in the same object: scan down
+        // through the object's block then up, dedent-bounded so a nested or following
+        // object's `schema` never pairs.
+        let sibling_schema_block = |i: usize, c: usize| -> Option<usize> {
+            let is_schema_opener = |l: &str| -> bool {
+                l.trim_start().split_once(':').is_some_and(|(k, v)| {
+                    k.trim() == "schema" && v.split('#').next().unwrap_or(v).trim().is_empty()
+                })
+            };
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_schema_opener(l) {
+                    return Some(j);
+                }
+                j += 1;
+            }
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_schema_opener(l) {
+                    return Some(k);
+                }
+            }
+            None
+        };
+        // The scalar `type:` among the schema block's *direct* children (the first indent
+        // level inside the block), bounded by the dedent that closes the block, when it is
+        // one of `string`/`integer`/`number`/`boolean`. A `type` deeper than the
+        // direct-child level (a nested sub-schema's) never pairs, so an object-schema
+        // parameter is not mistaken for a scalar one; a non-scalar direct `type` (object /
+        // array) yields `None`.
+        let schema_block_direct_scalar_type = |sidx: usize| -> Option<String> {
+            let sc = indent(lines[sidx]);
+            let scalar_type = |l: &str| -> Option<String> {
+                let (k, v) = l.trim_start().split_once(':')?;
+                if k.trim() != "type" {
+                    return None;
+                }
+                let v = v
+                    .split('#')
+                    .next()
+                    .unwrap_or(v)
+                    .trim()
+                    .trim_matches('"')
+                    .trim_matches('\'');
+                if matches!(v, "string" | "integer" | "number" | "boolean") {
+                    Some(v.to_string())
+                } else {
+                    None
+                }
+            };
+            let mut child: Option<usize> = None;
+            let mut j = sidx + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                let li = indent(l);
+                if li <= sc {
+                    break;
+                }
+                let ci = *child.get_or_insert(li);
+                if li == ci {
+                    if let Some(t) = scalar_type(l) {
+                        return Some(t);
+                    }
+                }
+                j += 1;
+            }
+            None
+        };
+        // True when line `i` (indent `c`) sits inside an outer `example:`/`examples:`
+        // payload — some enclosing container key up the indent ladder is
+        // `example`/`examples`, so an inner `example` key there is sample data.
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        // Whether the raw (as-written) example token `raw` contradicts scalar type `ty`.
+        // Quoting is significant: a quoted token is always a YAML string, whatever its inner
+        // text would otherwise parse as. Shares the classification rules of
+        // `examples_inconsistent_with_type::inconsistent`.
+        fn inconsistent(raw: &str, ty: &str) -> bool {
+            let v = raw.trim();
+            if v.is_empty() || v == "null" || v == "~" {
+                return false; // JSON null is legal for a nullable schema of any type
+            }
+            let quoted = v.len() >= 2
+                && ((v.starts_with('"') && v.ends_with('"'))
+                    || (v.starts_with('\'') && v.ends_with('\'')));
+            let is_bool = !quoted
+                && matches!(v, "true" | "false" | "True" | "False" | "TRUE" | "FALSE");
+            let is_int = !quoted && v.parse::<i64>().is_ok();
+            let is_num = !quoted && v.parse::<f64>().is_ok();
+            match ty {
+                "string" => is_bool || is_num, // an unquoted bool/number is not a string
+                "boolean" => !is_bool,
+                "integer" => !is_int,
+                "number" => !is_num,
+                _ => false,
+            }
+        }
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some(raw) = raw_inline(line, "example") else {
+                continue;
+            };
+            // A block-scalar (`>`/`|`) or flow/collection (`[`/`{`) opener carries no inline
+            // scalar to classify — skip.
+            if raw.starts_with('>')
+                || raw.starts_with('|')
+                || raw.starts_with('[')
+                || raw.starts_with('{')
+            {
+                continue;
+            }
+            let c = indent(line);
+            if inside_example(i, c) {
+                continue;
+            }
+            let Some(sidx) = sibling_schema_block(i, c) else {
+                continue;
+            };
+            let Some(ty) = schema_block_direct_scalar_type(sidx) else {
+                continue;
+            };
+            if inconsistent(&raw, &ty) {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_parameter_level_example_conforms_to_its_schema_type() {
+        // Contract-harness invariant (OpenAPI 3.0.x / JSON-Schema): a Parameter/Header
+        // Object `example` (and a Media-Type Object `example`) is a sample *instance of its
+        // sibling `schema`*, so where that schema declares a scalar `type` the example MUST
+        // conform to it — an unquoted `true`/`5` under `type: string`, a quoted or fractional
+        // value under `type: integer`, a non-numeric value under `type: number`, a
+        // non-boolean under `type: boolean` is a sample the schema's own validator rejects,
+        // so a Redoc/Swagger "try it" prefill of that path or query parameter carries a
+        // value the field can never legally hold.
+        //
+        // The base-`type` companion of
+        // `every_parameter_level_uuid_example_conforms_to_the_uuid_format` and
+        // `every_parameter_level_example_conforms_to_its_schema_enum` (same schema-sibling
+        // shape, the schema's direct `type:` in place of its `format: uuid` / `enum`) and the
+        // out-of-schema companion of `every_example_matches_its_schema_type`, which by its
+        // own docstring inspects only a schema-level example and skips a "Media Type /
+        // Parameter Object example (no same-indent `type`)" — a parameter-level example
+        // writes the `example` as a sibling of `schema:` and the `type` as a child of that
+        // schema, so that shape was checked by no test (the schema-level type extractor needs
+        // the `type` at the example's own indent; the parameter-level uuid/enum extractors
+        // read `format`/`enum`, never the base `type`). Verified true across all mounted
+        // specs before asserting.
+        for api in APIS {
+            let offenders = parameter_level_examples_inconsistent_with_schema_type(api.body);
+            assert!(
+                offenders.is_empty(),
+                "{} spec declares a parameter/header-level `example` that contradicts its \
+                 sibling `schema`'s scalar `type` (a value the type's own validator would \
+                 reject) at line(s): {:?}",
+                api.name,
+                offenders
+            );
+        }
+    }
+
+    #[test]
+    fn parameter_level_example_type_extraction_rules() {
+        // Unit-cover `parameter_level_examples_inconsistent_with_schema_type` so the contract
+        // test above can't pass vacuously and its detection is pinned.
+        //
+        // A parameter whose `schema` declares a direct scalar `type` and whose sibling
+        // `example`'s inline value contradicts that type is flagged (an unquoted bool/number
+        // under `type: string`, a quoted/fractional value under `type: integer`, a
+        // non-numeric value under `type: number`, a non-boolean under `type: boolean`); a
+        // conforming example passes. A parameter whose direct `type` is `object`/`array`, or
+        // whose scalar `type` sits on a nested property (not a direct child of the parameter
+        // schema), or with no sibling `schema:` block, or a schema-*internal* example (a
+        // same-indent `type`, no sibling `schema:` — `examples_inconsistent_with_type`'s
+        // concern), and a `null` example are all skipped so the two extractors never
+        // double-count.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      parameters:
+        - name: goodstr
+          in: query
+          schema:
+            type: string
+          example: hello
+        - name: badstrbool
+          in: query
+          schema:
+            type: string
+          example: true
+        - name: goodint
+          in: query
+          schema:
+            type: integer
+          example: 5
+        - name: badintquoted
+          in: query
+          schema:
+            type: integer
+          example: '5'
+        - name: badintfrac
+          in: query
+          schema:
+            type: integer
+          example: 2.5
+        - name: badnum
+          in: query
+          schema:
+            type: number
+          example: notanumber
+        - name: goodbool
+          in: query
+          schema:
+            type: boolean
+          example: false
+        - name: badbool
+          in: query
+          schema:
+            type: boolean
+          example: yes
+        - name: nullex
+          in: query
+          schema:
+            type: integer
+          example: null
+        - name: obj
+          in: query
+          schema:
+            type: object
+            properties:
+              n:
+                type: integer
+          example: not-a-scalar
+        - name: noschema
+          in: query
+          example: true
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    Internal:
+      type: integer
+      example: notanint
+";
+        // Flagged, in document order: `badstrbool`'s `example: true` (an unquoted YAML
+        // boolean under `type: string`), `badintquoted`'s `example: '5'` (a quoted string
+        // under `type: integer`), `badintfrac`'s `example: 2.5` (fractional under
+        // `type: integer`), `badnum`'s `example: notanumber` (not a number), and `badbool`'s
+        // `example: yes` (not a YAML boolean under `type: boolean`). Not flagged:
+        // `goodstr`/`goodint`/`goodbool` (conform); `nullex` (a `null` example is legal for a
+        // nullable schema of any type); `obj` (the direct `type` is `object`, and the scalar
+        // `type: integer` is a nested property — out of scope for a scalar example); `noschema`
+        // (no sibling `schema:` block); `Internal.example: notanint` (a schema-internal example
+        // with a same-indent `type` and no sibling `schema:` — the schema-level test's concern,
+        // never this one's).
+        let flagged = parameter_level_examples_inconsistent_with_schema_type(body);
+        let l = |needle: &str| body.lines().position(|x| x.contains(needle)).unwrap() + 1;
+        assert_eq!(
+            flagged,
+            vec![
+                l("example: true"),
+                l("example: '5'"),
+                l("example: 2.5"),
+                l("example: notanumber"),
+                l("example: yes"),
+            ]
+        );
+
+        // The schema-internal `Internal.example: notanint` is NOT credited here (no overlap
+        // with the schema-level extractor, which owns that shape).
+        let internal_line = l("example: notanint");
+        assert!(!flagged.contains(&internal_line));
+
+        // Non-vacuous floor: across every registered spec every parameter/header-level
+        // example beside a schema whose direct child is a scalar `type` conforms to that type
+        // (the invariant), and the corpus actually declares many such pairs — so the
+        // classification path runs on real data and a broken (always-empty) extractor can't
+        // hide behind a corpus that never pairs one. Count pairs with a detector independent
+        // of the extractor's classification.
+        let mut param_type_examples = 0usize;
+        for api in APIS {
+            assert!(
+                parameter_level_examples_inconsistent_with_schema_type(api.body).is_empty(),
+                "{}: every parameter/header-level example beside a schema with a direct \
+                 scalar `type` must conform to that type",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            let scalar_type_line = |l: &str| {
+                matches!(
+                    l.trim_start(),
+                    "type: string" | "type: integer" | "type: number" | "type: boolean"
+                )
+            };
+            for (i, l) in lines.iter().enumerate() {
+                let t = l.trim_start();
+                let has_inline = t.starts_with("example:")
+                    && t.split_once(':')
+                        .map(|(_, v)| !v.split('#').next().unwrap_or(v).trim().is_empty())
+                        .unwrap_or(false);
+                if !has_inline {
+                    continue;
+                }
+                let c = indent(l);
+                let lo = i.saturating_sub(10);
+                let hi = (i + 10).min(lines.len());
+                let has_schema_sibling =
+                    (lo..hi).any(|j| j != i && indent(lines[j]) == c && lines[j].trim() == "schema:");
+                let has_scalar_type_below =
+                    (lo..hi).any(|j| indent(lines[j]) > c && scalar_type_line(lines[j]));
+                if has_schema_sibling && has_scalar_type_below {
+                    param_type_examples += 1;
+                }
+            }
+        }
+        assert!(
+            param_type_examples >= 5,
+            "expected several parameter-level example + schema scalar-`type` pairs across specs, got {param_type_examples}"
+        );
+    }
+
     /// The E.164 phone-number `pattern` the CAMARA specs use verbatim (single-quoted
     /// in YAML as `'^\+[1-9][0-9]{4,14}$'`): a leading `+`, then a first digit `1`–`9`,
     /// then 4–14 more decimal digits — i.e. `+` followed by 5–15 digits, the first

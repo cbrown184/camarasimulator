@@ -5718,6 +5718,37 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-21 — Contract-test harness: added a **parameter-level example base-`type`
+  conformance** test (`src/registry.rs`
+  `every_parameter_level_example_conforms_to_its_schema_type`) — a Parameter/Header/
+  Media-Type-level `example` sitting **beside** a same-indent `schema:` block whose
+  **direct** child is a scalar `type:` (`string`/`integer`/`number`/`boolean`) MUST conform
+  to that JSON type. The base-`type` companion of the two just-added parameter-level tests
+  (`…uuid_example_conforms_to_the_uuid_format`, `…example_conforms_to_its_schema_enum` — same
+  schema-sibling shape, the schema's direct `type:` in place of its `format: uuid` / `enum`)
+  and the out-of-schema companion of `every_example_matches_its_schema_type`, which by its
+  own docstring inspects only a *schema-level* example (same-indent `type:` sibling) and
+  skips a "Media Type / Parameter Object example (no same-indent `type`)". A parameter-level
+  example writes the `example` as a sibling of `schema:` and the `type` as a child of that
+  schema, so that shape was checked by no test (the schema-level type extractor needs the
+  `type` at the example's own indent; the parameter-level uuid/enum extractors read
+  `format`/`enum`, never the base `type`). New pure
+  `parameter_level_examples_inconsistent_with_schema_type` extractor — reuses the
+  parameter-level `sibling_schema_block`/`inside_example` scan + a new
+  `schema_block_direct_scalar_type` (direct-child scalar `type:` only, so an object/array or
+  nested-property `type` never pairs), quoting **preserved** and classified by the same
+  `inconsistent(raw, ty)` rules as `examples_inconsistent_with_type`; keyed on the
+  schema-*sibling* shape so it never overlaps the schema-level extractor. Surveyed the corpus
+  first: **21** parameter-level example+schema-scalar-`type` pairs (page/perPage/order/…
+  params), all conforming → 0 drift — a live guard that fires the moment a spec adds a
+  type-mismatched parameter example. Unit-covered
+  (`parameter_level_example_type_extraction_rules`: unquoted-bool-under-string, quoted &
+  fractional under integer, non-number under number, non-bool under boolean all flagged in
+  document order; conforming scalars, a `null` example, an object-schema/nested-`type`
+  parameter, a no-`schema` parameter, and a schema-internal example all cleared; ≥5-pair
+  non-vacuous floor). Test-only (`#[cfg(test)]`), no runtime/spec change. `cargo test` 2862
+  green (was 2860; +2); `cargo build --release` ok, no new deps. — binary (release): 5.1M
+  (5,323,160 B; unchanged — test-only code).
 - 2026-08-21 — Contract-test harness: added a **readOnly/writeOnly mutual-exclusion**
   test (`src/registry.rs` `every_property_is_not_both_read_and_write_only`) — the
   OpenAPI 3.0.x Schema Object rule that a property "MUST NOT be marked as both
