@@ -4124,6 +4124,130 @@ mod tests {
         out
     }
 
+    /// The `METHOD /path (missing …)` label of every operation a spec declares whose
+    /// `responses:` object is present but does **not** document both the
+    /// CAMARA-mandated authentication error `401` **and** authorization error `403` —
+    /// without a YAML dep.
+    ///
+    /// Every CAMARA business operation is protected by the shared `camaraOAuth`
+    /// security scheme, so its two auth failures come from the resource-server layer
+    /// on *every* call, independent of the operation's own logic: a missing/invalid
+    /// access token → `401 UNAUTHENTICATED`, a token lacking the endpoint's scope →
+    /// `403 PERMISSION_DENIED`. CamaraSim's `verify::Claims` extractor returns exactly
+    /// these before any handler runs (DESIGN §7/§8), and CAMARA Commonalities mandates
+    /// both on every secured operation — so a vendored operation whose `responses:`
+    /// lists only some of the shared `errors.yaml` `$ref`s (a `401`/`403` block lost in
+    /// the paste that drafts a new operation) advertises a contract a Redoc/Swagger/
+    /// codegen client reads as "cannot fail auth", leaving a caller with no handler for
+    /// the `401`/`403` an unauthenticated or under-scoped call in fact receives.
+    ///
+    /// The **auth-branch refinement** of [`operations_without_client_error_response`]:
+    /// that flags an operation with *no* `4XX` at all but is satisfied by any single
+    /// client error (a lone `400`), so an operation that keeps `400` yet dropped its
+    /// `401`/`403` passes it. No sibling responses test names a *specific* status — the
+    /// success/client-error tests ask only whether *some* `2XX`/`4XX` exists,
+    /// `responses_with_invalid_status_key` that each key is *well-formed*, and the
+    /// x-correlator tests read a response's *headers*, never which codes are present.
+    /// Only an operation that *declares* a `responses:` block is judged (one missing
+    /// the object entirely is [`operations_without_responses`]' concern), so the two
+    /// never double-flag.
+    ///
+    /// Mirrors [`operations_without_client_error_response`]'s scoping exactly (a
+    /// 4-space HTTP-verb key under a 2-space `/…` path item beneath the top-level
+    /// `paths:` block, then the 8-space keys under that operation's 6-space
+    /// `responses:`), reading each 8-space key (quotes trimmed) and asking whether the
+    /// exact tokens `401` and `403` are *both* present; the flag names the missing
+    /// code(s) (`401`, `403`, or `401+403`).
+    fn operations_missing_camara_auth_error_responses(body: &str) -> Vec<String> {
+        const METHODS: [&str; 8] =
+            ["get", "put", "post", "delete", "patch", "options", "head", "trace"];
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let mut out = Vec::new();
+        let mut in_paths = false;
+        let mut path: Option<String> = None;
+        for (i, line) in lines.iter().enumerate() {
+            let is_top_level_key =
+                !line.is_empty() && !line.starts_with(char::is_whitespace);
+            if is_top_level_key {
+                in_paths = line.trim_end() == "paths:";
+                path = None;
+                continue;
+            }
+            if !in_paths {
+                continue;
+            }
+            if let Some(rest) = line.strip_prefix("  ") {
+                if !rest.starts_with(char::is_whitespace) && rest.starts_with('/') {
+                    let key = rest.trim_end().strip_suffix(':').unwrap_or(rest.trim_end());
+                    path = Some(key.to_string());
+                    continue;
+                }
+            }
+            let Some(current_path) = path.as_deref() else { continue };
+            if indent(line) != 4 {
+                continue;
+            }
+            let key = line.trim_start();
+            let Some(name) = key.strip_suffix(':') else { continue };
+            if name.contains(char::is_whitespace) || !METHODS.contains(&name) {
+                continue;
+            }
+            // Within this operation's block, find the 6-space `responses:` key, then
+            // check each 8-space response-entry key under it for `401` and `403`.
+            let mut in_responses = false;
+            let mut saw_responses = false;
+            let mut saw_401 = false;
+            let mut saw_403 = false;
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                let li = indent(l);
+                if li <= 4 {
+                    break; // dedented out of this operation
+                }
+                if li == 6 {
+                    in_responses = l.trim_start().strip_suffix(':') == Some("responses");
+                    if in_responses {
+                        saw_responses = true;
+                    }
+                    j += 1;
+                    continue;
+                }
+                if in_responses && li == 8 {
+                    if let Some(k) = l.trim_start().strip_suffix(':') {
+                        match k.trim_matches(|c| c == '"' || c == '\'') {
+                            "401" => saw_401 = true,
+                            "403" => saw_403 = true,
+                            _ => {}
+                        }
+                    }
+                }
+                j += 1;
+            }
+            if saw_responses && !(saw_401 && saw_403) {
+                let mut missing = Vec::new();
+                if !saw_401 {
+                    missing.push("401");
+                }
+                if !saw_403 {
+                    missing.push("403");
+                }
+                out.push(format!(
+                    "{} {} (missing {})",
+                    name.to_uppercase(),
+                    current_path,
+                    missing.join("+")
+                ));
+            }
+        }
+        out
+    }
+
     /// The 1-based line numbers of every **served** inline success (`2XX`) response a
     /// mounted spec declares under `paths:` that does not document an `x-correlator`
     /// response header.
@@ -9923,6 +10047,135 @@ paths:
             assert!(
                 operations_without_client_error_response(api.body).is_empty(),
                 "{}: every operation's `responses:` must declare a client-error (`4XX`) outcome",
+                api.name
+            );
+            total_ops += operation_ids(api.body).len();
+        }
+        assert!(total_ops >= 100, "expected many operations across specs, got {total_ops}");
+    }
+
+    #[test]
+    fn every_business_operation_declares_the_camara_auth_error_responses() {
+        // Contract-harness invariant (CAMARA Commonalities security contract): every
+        // operation a mounted **business** spec declares is protected by the shared
+        // `camaraOAuth` scheme, so it MUST document both authentication failures the
+        // resource-server layer raises on every call — `401` UNAUTHENTICATED (a
+        // missing/invalid access token) and `403` PERMISSION_DENIED (a token lacking
+        // the endpoint's scope). CamaraSim's `verify::Claims` extractor returns exactly
+        // these before any handler runs (DESIGN §7/§8), so an operation whose vendored
+        // `responses:` lists only some of the shared `errors.yaml` $refs — a `401`/`403`
+        // block lost in the paste that drafts a new operation — advertises a contract a
+        // Redoc/Swagger/codegen client reads as "cannot fail auth", leaving a caller
+        // with no handler for the `401`/`403` an unauthenticated or under-scoped call in
+        // fact receives.
+        //
+        // The auth-branch refinement of `every_operation_declares_a_client_error_response`:
+        // that requires *some* `4XX`, so a lone `400` satisfies it even with `401`/`403`
+        // dropped; this names the two specific codes. No sibling responses test names a
+        // status — the success/client-error tests ask only whether some `2XX`/`4XX`
+        // exists, the status-key test only that each key is well-formed, and the
+        // x-correlator tests read a response's headers, never which codes are present.
+        // Scope is `APIS` — the mounted business specs — so the `auth/openapi.yaml`
+        // OIDC/token spec (whose endpoints issue tokens or serve public metadata and so
+        // are *not* OAuth-protected, legitimately declaring no `403`) is out of scope.
+        // Verified true across all mounted business specs before asserting.
+        for api in APIS {
+            let missing = operations_missing_camara_auth_error_responses(api.body);
+            assert!(
+                missing.is_empty(),
+                "{} spec has operation(s) whose `responses:` omits a CAMARA-mandated \
+                 auth error response (every secured operation returns 401 \
+                 UNAUTHENTICATED and 403 PERMISSION_DENIED): {:?}",
+                api.name,
+                missing
+            );
+        }
+    }
+
+    #[test]
+    fn camara_auth_error_response_extraction_rules() {
+        // Unit-cover `operations_missing_camara_auth_error_responses` so the contract
+        // test above can't pass vacuously and its scoping is pinned: an operation
+        // declaring both `401` and `403` passes; one missing `403` (only `401`) is
+        // flagged naming `403`; one missing both is flagged naming `401+403`; a
+        // `401`-looking key nested under a `requestBody`'s schema (not a response key)
+        // does not count; and an operation with no `responses:` block is left to the
+        // responses-object test.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        \"200\":
+          description: ok
+        \"401\":
+          $ref: \"../../shared/errors.yaml#/components/responses/Unauthenticated\"
+        \"403\":
+          $ref: \"../../shared/errors.yaml#/components/responses/PermissionDenied\"
+    post:
+      operationId: postA
+      responses:
+        \"200\":
+          description: ok
+        \"401\":
+          $ref: \"../../shared/errors.yaml#/components/responses/Unauthenticated\"
+  /b:
+    put:
+      operationId: putB
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                \"401\":
+                  type: string
+      responses:
+        \"200\":
+          description: ok
+        \"400\":
+          $ref: \"../../shared/errors.yaml#/components/responses/InvalidArgument\"
+";
+        // Flagged: `POST /a` (has 401, no 403) and `PUT /b` (a `requestBody` schema
+        // property named `401` is not a response key, and its `responses:` declares
+        // neither 401 nor 403). Not flagged: `GET /a` (both present).
+        assert_eq!(
+            operations_missing_camara_auth_error_responses(body),
+            vec![
+                "POST /a (missing 403)".to_string(),
+                "PUT /b (missing 401+403)".to_string(),
+            ]
+        );
+
+        // An operation with no `responses:` block at all is not flagged here (that is
+        // the responses-object test's concern), so the two never double-flag.
+        let no_responses = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /c:
+    get:
+      operationId: getC
+      summary: no responses object at all
+";
+        assert!(operations_missing_camara_auth_error_responses(no_responses).is_empty());
+
+        // Non-vacuous floor: across every registered business spec, every operation
+        // declares both `401` and `403` (the invariant the contract test asserts), and
+        // the corpus carries many operations, so a broken extractor can't hide behind
+        // an empty scan.
+        let mut total_ops = 0usize;
+        for api in APIS {
+            assert!(
+                operations_missing_camara_auth_error_responses(api.body).is_empty(),
+                "{}: every operation's `responses:` must declare 401 and 403",
                 api.name
             );
             total_ops += operation_ids(api.body).len();

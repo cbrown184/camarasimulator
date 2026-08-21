@@ -3332,6 +3332,19 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - a **CAMARA auth-error-response** contract test (`src/registry.rs`
+    `every_business_operation_declares_the_camara_auth_error_responses`) asserts that every
+    operation a mounted **business** spec declares documents *both* the CAMARA-mandated `401`
+    (UNAUTHENTICATED) and `403` (PERMISSION_DENIED) responses — the resource-server auth
+    failures `verify::Claims` raises on every secured call. The auth-branch refinement of
+    `every_operation_declares_a_client_error_response` (which any single `4XX` satisfies, so a
+    lone `400` passes even with `401`/`403` dropped); no sibling names a specific status. New
+    `operations_missing_camara_auth_error_responses` extractor mirrors
+    `operations_without_client_error_response`'s scoping, flagging an op with a `responses:`
+    block missing `401` and/or `403` (label names the missing code[s]); scope is `APIS`
+    (business specs only — the `auth/openapi.yaml` token/OIDC spec is not OAuth-protected).
+    Corpus: 0 drift (all 60 business specs already declare both on every op). Unit-covered.
+    Test-only, no spec change.
   - a **parameter-level `format: uuid` example-conformance** contract test (`src/registry.rs`
     `every_parameter_level_uuid_example_conforms_to_the_uuid_format`) asserts that a
     Parameter/Header/Media-Type-level `example` — one sitting **beside** a same-indent
@@ -5718,6 +5731,33 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-21 — Contract-test harness: added a **CAMARA auth-error-response** test
+  (`src/registry.rs` `every_business_operation_declares_the_camara_auth_error_responses`)
+  — every operation a mounted **business** spec declares MUST document *both* the
+  CAMARA-mandated `401` (UNAUTHENTICATED) and `403` (PERMISSION_DENIED) responses.
+  Every business op is protected by the shared `camaraOAuth` scheme, so both auth
+  failures come from the resource-server layer (`verify::Claims`) on every call,
+  independent of the op's own logic — CAMARA Commonalities mandates both on every
+  secured operation. The **auth-branch refinement** of
+  `every_operation_declares_a_client_error_response`, which requires only *some* `4XX`
+  (a lone `400` satisfies it even with `401`/`403` dropped); no sibling responses test
+  names a *specific* status. New pure `operations_missing_camara_auth_error_responses`
+  extractor mirroring `operations_without_client_error_response`'s scoping exactly
+  (4-space verb under a 2-space `/…` path under top-level `paths:`, then the 8-space
+  keys under the op's 6-space `responses:`), reading each key (quotes trimmed) and
+  flagging any op declaring a `responses:` block but missing `401` and/or `403` (the
+  label names the missing code[s]); a `401`-named `requestBody`-schema property is not a
+  response key. Scope is `APIS` (business specs only) — the `auth/openapi.yaml`
+  OIDC/token spec is out of scope (its endpoints issue tokens / serve public metadata,
+  so are not OAuth-protected and legitimately declare no `403`). Surveyed the corpus
+  first: all 60 business specs already declare both on every operation (ops == 401 ==
+  403; auth spec 401=2/403=0 as expected) → 0 drift, a live guard that fires the moment
+  a new op drops its auth branch. Unit-covered (`camara_auth_error_response_extraction_rules`:
+  both-present passes; missing-403 flagged naming `403`; missing-both naming `401+403`;
+  a `requestBody`-schema `401` property and a no-`responses:` op cleared; ≥100-op
+  non-vacuous floor). Test-only (`#[cfg(test)]`), no runtime/spec change. `cargo test`
+  2864 green (was 2862; +2); `cargo build --release` ok, no new deps. — binary
+  (release): 5.1M (5,323,160 B; unchanged — test-only code).
 - 2026-08-21 — Contract-test harness: added a **parameter-level example base-`type`
   conformance** test (`src/registry.rs`
   `every_parameter_level_example_conforms_to_its_schema_type`) — a Parameter/Header/
