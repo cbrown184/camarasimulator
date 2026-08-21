@@ -25671,6 +25671,583 @@ components:
         );
     }
 
+    /// The 1-based line numbers, in document order, of every array `example:` keyword one
+    /// of whose elements contradicts the scalar `type:` declared under its sibling
+    /// `items:` block, without a YAML dep. The **element-type** member of the array-example
+    /// family: `array_examples_outside_their_item_bounds` guards an array example's element
+    /// *count* (`minItems`/`maxItems`), `array_example_elements_outside_their_item_enum`
+    /// guards each element's *membership* in `items.enum`, and
+    /// `array_examples_with_duplicates_under_unique_items` guards element *distinctness*
+    /// (`uniqueItems: true`) — but none ever compares an element's JSON *type* against
+    /// `items.type`, so a quoted `"5"` under `items: {type: integer}` (or an unquoted
+    /// number under `items: {type: string}`) was previously unchecked. It is also the
+    /// array-element analogue of `examples_inconsistent_with_type`, which inspects only a
+    /// *scalar* example against the schema's own `type` and skips a flow/block array
+    /// example outright.
+    ///
+    /// In OpenAPI 3.0.x (JSON Schema) an `example` is a sample *instance* of the schema,
+    /// so an array's example elements MUST each conform to the item schema's `type`. An
+    /// element of the wrong JSON type — a quoted or non-numeric element under
+    /// `items: {type: integer}`/`{type: number}`, an unquoted bool/number under
+    /// `items: {type: string}`, a non-boolean under `items: {type: boolean}` — is a
+    /// self-contradictory sample the array's own item validator rejects, so a Redoc/Swagger
+    /// "try it" prefill and a codegen client's generated sample carry an array element the
+    /// field can never legally hold.
+    ///
+    /// Scoping mirrors `array_example_elements_outside_their_item_enum`: only an `example`
+    /// whose inline value is a flow sequence (`[...]` closing on its line) or that opens a
+    /// block sequence (`- ` items) is inspected — a scalar/object example is skipped — and
+    /// only when a same-indent `items:` sibling (scanned down through the object's block
+    /// then up, dedent-bounded, so a nested/following object's `items` never pairs) declares
+    /// a scalar `type:` (`string`/`integer`/`number`/`boolean`) as the **first** `type` in
+    /// its block. An `items` whose first `type` is `object`/`array` (or that carries a
+    /// `$ref` / an inline flow schema, so no block `type` is found) offers no element type
+    /// to check and never pairs — matching the enum member's block-only `items` scan. An
+    /// `example:` inside an outer `example:`/`examples:` payload, and a property literally
+    /// named `example`, are skipped. Unlike the enum/uniqueItems extractors (which unquote
+    /// before comparing) elements are read with their quoting **preserved**: a quoted `"5"`
+    /// is a string whatever its inner text parses as, exactly the distinction
+    /// `items: {type: integer}` turns on. A `null`/`~` element is legal for any nullable
+    /// item type and is never flagged. The `example:` line is flagged once if ANY element
+    /// contradicts the item type.
+    fn array_example_elements_inconsistent_with_item_type(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        // Whether the raw (as-written, quoting-preserved) element token contradicts scalar
+        // item type `ty`. Shares the classification rules of `examples_inconsistent_with_type`.
+        fn inconsistent(raw: &str, ty: &str) -> bool {
+            let v = raw.trim();
+            if v.is_empty() || v == "null" || v == "~" {
+                return false; // JSON null is legal for a nullable item schema of any type
+            }
+            let quoted = v.len() >= 2
+                && ((v.starts_with('"') && v.ends_with('"'))
+                    || (v.starts_with('\'') && v.ends_with('\'')));
+            let is_bool = !quoted
+                && matches!(v, "true" | "false" | "True" | "False" | "TRUE" | "FALSE");
+            let is_int = !quoted && v.parse::<i64>().is_ok();
+            let is_num = !quoted && v.parse::<f64>().is_ok();
+            match ty {
+                "string" => is_bool || is_num, // an unquoted bool/number is not a string
+                "boolean" => !is_bool,
+                "integer" => !is_int,
+                "number" => !is_num,
+                _ => false,
+            }
+        }
+        // True when line `i` (indent `c`) sits inside an outer `example:`/`examples:`
+        // payload — some enclosing container key up the indent ladder is `example`/
+        // `examples`, so an inner `example` key there is sample data.
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        // The scalar element type declared under a same-indent sibling `items:` block of
+        // line `i` (indent `c`): scan down through the object's block for a same-indent
+        // `items:`, then up, dedent-bounded so a nested/following object's `items` never
+        // pairs. The first `type:` key inside the items block decides — a scalar type is
+        // returned, an `object`/`array`/empty (block-opening) type is `None` (so the scan
+        // never descends into a nested sub-schema's `type`), and no block `type` (a `$ref`
+        // or inline-flow items) is `None`.
+        let sibling_item_type = |i: usize, c: usize| -> Option<String> {
+            let scan_items_block = |it: usize| -> Option<String> {
+                let mut e = it + 1;
+                while e < lines.len() {
+                    let y = lines[e];
+                    if y.trim().is_empty() {
+                        e += 1;
+                        continue;
+                    }
+                    if indent(y) <= c {
+                        break; // dedented out of the items block
+                    }
+                    if let Some((k, v)) = y.trim_start().split_once(':') {
+                        if k.trim() == "type" {
+                            let ty = v
+                                .split('#')
+                                .next()
+                                .unwrap_or(v)
+                                .trim()
+                                .trim_matches('"')
+                                .trim_matches('\'');
+                            return if matches!(
+                                ty,
+                                "string" | "integer" | "number" | "boolean"
+                            ) {
+                                Some(ty.to_string())
+                            } else {
+                                None // object/array/empty — no scalar element type to check
+                            };
+                        }
+                    }
+                    e += 1;
+                }
+                None
+            };
+            let is_items = |l: &str| {
+                l.trim_start()
+                    .split_once(':')
+                    .is_some_and(|(k, _)| k.trim() == "items")
+            };
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_items(l) {
+                    return scan_items_block(j);
+                }
+                j += 1;
+            }
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_items(l) {
+                    return scan_items_block(k);
+                }
+            }
+            None
+        };
+        // The raw (quoting-preserved) elements of an inline flow sequence whose text starts
+        // with `[` (top-level commas at bracket/brace depth 1, quotes respected); `None`
+        // when the flow never closes on its line. Mirrors the uniqueItems extractor's
+        // `flow_elems` but keeps each token verbatim (no unquoting) for type classification.
+        let flow_raw_elems = |v: &str| -> Option<Vec<String>> {
+            let mut depth: i32 = 0;
+            let mut in_s = false;
+            let mut in_d = false;
+            let mut cur = String::new();
+            let mut elems: Vec<String> = Vec::new();
+            for ch in v.chars() {
+                if in_s {
+                    cur.push(ch);
+                    if ch == '\'' {
+                        in_s = false;
+                    }
+                    continue;
+                }
+                if in_d {
+                    cur.push(ch);
+                    if ch == '"' {
+                        in_d = false;
+                    }
+                    continue;
+                }
+                match ch {
+                    '[' | '{' => {
+                        depth += 1;
+                        if depth > 1 {
+                            cur.push(ch);
+                        }
+                    }
+                    ']' | '}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            let e = cur.trim().to_string();
+                            if !e.is_empty() {
+                                elems.push(e);
+                            }
+                            return Some(elems);
+                        }
+                        cur.push(ch);
+                    }
+                    '\'' => {
+                        in_s = true;
+                        cur.push(ch);
+                    }
+                    '"' => {
+                        in_d = true;
+                        cur.push(ch);
+                    }
+                    ',' if depth == 1 => {
+                        let e = cur.trim().to_string();
+                        if !e.is_empty() {
+                            elems.push(e);
+                        }
+                        cur.clear();
+                    }
+                    _ => {
+                        if depth >= 1 {
+                            cur.push(ch);
+                        }
+                    }
+                }
+            }
+            None
+        };
+        // The raw (quoting-preserved) elements of a block sequence opened by an `example:`
+        // at line `i` (indent `c`): each `- ` item's inline scalar at the first child's
+        // indent, a trailing ` # comment` stripped, quotes kept, dedent-bounded. `None`
+        // when the first non-empty child is not a sequence item.
+        let block_raw_elems = |i: usize, c: usize| -> Option<Vec<String>> {
+            let strip_comment = |s: &str| -> String {
+                match s.find(" #") {
+                    Some(p) => s[..p].trim_end().to_string(),
+                    None => s.trim_end().to_string(),
+                }
+            };
+            let mut child_indent: Option<usize> = None;
+            let mut elems: Vec<String> = Vec::new();
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                let li = indent(l);
+                if li <= c {
+                    break;
+                }
+                let t = l.trim_start();
+                let is_item = t == "-" || t.starts_with("- ");
+                match child_indent {
+                    None => {
+                        if !is_item {
+                            return None;
+                        }
+                        child_indent = Some(li);
+                        let raw = strip_comment(t[1..].trim_start());
+                        if !raw.is_empty() {
+                            elems.push(raw);
+                        }
+                    }
+                    Some(ci) => {
+                        if li == ci && is_item {
+                            let raw = strip_comment(t[1..].trim_start());
+                            if !raw.is_empty() {
+                                elems.push(raw);
+                            }
+                        }
+                    }
+                }
+                j += 1;
+            }
+            child_indent.map(|_| elems)
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some((k, v)) = line.trim_start().split_once(':') else {
+                continue;
+            };
+            if k.trim() != "example" {
+                continue;
+            }
+            let c = indent(line);
+            if inside_example(i, c) {
+                continue;
+            }
+            let inline = v.split('#').next().unwrap_or(v).trim();
+            let elems = if inline.is_empty() {
+                match block_raw_elems(i, c) {
+                    Some(e) => e,
+                    None => continue,
+                }
+            } else if inline.starts_with('[') {
+                match flow_raw_elems(inline) {
+                    Some(e) => e,
+                    None => continue,
+                }
+            } else {
+                continue; // scalar example — the scalar type test's concern
+            };
+            let Some(ty) = sibling_item_type(i, c) else {
+                continue;
+            };
+            if elems.iter().any(|e| inconsistent(e, &ty)) {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_array_example_element_conforms_to_its_item_type() {
+        // Contract-harness invariant (OpenAPI 3.0.x / JSON-Schema structural rule): where
+        // an array Schema Object declares an array `example` beside a same-indent `items:`
+        // block with a scalar `type:` (`string`/`integer`/`number`/`boolean`), EVERY
+        // element of the example MUST conform to that item type. An `example` is a sample
+        // instance, so an element of the wrong JSON type (a quoted `"5"` under
+        // `items: {type: integer}`, an unquoted number under `items: {type: string}`) is a
+        // value the array's own item validator rejects — a Redoc/Swagger prefill and a
+        // codegen sample carrying an element the field can never hold.
+        //
+        // The **element-type** member of the array-example family:
+        // `every_array_example_respects_its_item_bounds` guards element *count*,
+        // `every_array_example_element_is_a_member_of_its_item_enum` guards element
+        // *membership* in `items.enum`, and
+        // `every_array_example_with_unique_items_has_distinct_elements` guards element
+        // *distinctness* — none ever checks an element's *type*. It is also the array-element
+        // analogue of `every_example_matches_its_schema_type`, which inspects a scalar
+        // example against the schema's own `type` and skips a flow/block array example
+        // (a reachability `connectivity` set, a `ports` array, a roaming `countryName`).
+        // Verified true across all mounted specs before asserting.
+        for api in APIS {
+            let offenders = array_example_elements_inconsistent_with_item_type(api.body);
+            assert!(
+                offenders.is_empty(),
+                "{} spec declares an array `example` with an element contradicting its \
+                 `items` scalar `type:` (a sample the item type's own validator would \
+                 reject) at `example:` line(s): {:?}",
+                api.name,
+                offenders
+            );
+        }
+    }
+
+    #[test]
+    fn array_example_item_type_extraction_rules() {
+        // Unit-cover `array_example_elements_inconsistent_with_item_type` so the contract
+        // test above can't pass vacuously and its detection is pinned: an integer/string
+        // flow example whose elements match `items.type` passes (quoting significant — a
+        // quoted `"a"` is a string); a quoted element under `items: {type: integer}`, an
+        // unquoted number under `items: {type: string}`, a block-sequence item of the wrong
+        // type, and a fractional element whose `items` block sits *below* the example (paired
+        // by the down-scan) are flagged in document order; an `items` with a `$ref` (no block
+        // type), an `items: {type: object}` (non-scalar element type), a scalar example, an
+        // array example with no `items` sibling, an example whose only `items` sits in a
+        // following property across a dedent, an inner `example` inside an outer `example:`
+        // payload, and a property literally named `example` are all skipped.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    GoodInt:
+      type: array
+      items:
+        type: integer
+      example: [1, 2]
+    GoodStr:
+      type: array
+      items:
+        type: string
+      example: [\"a\", \"b\"]
+    BadIntQuoted:
+      type: array
+      items:
+        type: integer
+      example: [\"1\", 2]
+    BadStrNumber:
+      type: array
+      items:
+        type: string
+      example: [5]
+    BadBlock:
+      type: array
+      items:
+        type: integer
+      example:
+        - 1
+        - two
+    ItemsBelow:
+      type: array
+      example: [1.5]
+      items:
+        type: integer
+    RefItems:
+      type: array
+      items:
+        $ref: \"#/components/schemas/GoodInt\"
+      example: [anything]
+    ObjectItems:
+      type: array
+      items:
+        type: object
+      example: [x]
+    ScalarExample:
+      type: integer
+      example: 5
+    NoItems:
+      type: array
+      example: [a, b]
+    Split:
+      type: object
+      properties:
+        a:
+          example: [5]
+        b:
+          type: array
+          items:
+            type: integer
+    InExample:
+      type: object
+      example:
+        items:
+          type: integer
+        example: [x]
+    NamedExample:
+      type: object
+      properties:
+        example:
+          type: array
+          items:
+            type: integer
+";
+        // Flagged, in document order: line 28 (`BadIntQuoted.example: [\"1\", 2]`, the
+        // quoted `\"1\"` is a string, not an integer), line 33 (`BadStrNumber.example: [5]`,
+        // the unquoted `5` is a number, not a string), line 38 (`BadBlock.example:` block
+        // whose `- two` is not an integer) and line 43 (`ItemsBelow.example: [1.5]`, the
+        // fractional `1.5` is not an integer — its `items` block sits below, paired by the
+        // down-scan). Not flagged: `GoodInt`/`GoodStr` (elements match, quoting kept);
+        // `RefItems` (its `items` is a `$ref`, no block scalar `type`); `ObjectItems`
+        // (`items.type: object` is non-scalar); `ScalarExample` (`5` is a scalar, not an
+        // array — the scalar type test's concern); `NoItems` (no `items` sibling);
+        // `Split.a.example: [5]`, whose only candidate `items` sits in the following property
+        // `Split.b` past a dedent, so the two never pair; `InExample`'s inner `example: [x]`
+        // (inside the outer `example:` payload); and `NamedExample`'s `example:` opening a
+        // schema block (a property literally named `example`, no inline array value).
+        assert_eq!(
+            array_example_elements_inconsistent_with_item_type(body),
+            vec![28, 33, 38, 43]
+        );
+
+        // Non-vacuous floor: across every registered spec every array example whose `items`
+        // declares a scalar type has all its elements of that type (the invariant the
+        // contract test asserts), and the corpus actually declares array example +
+        // scalar-`items.type` pairs (the reachability `connectivity` set, the
+        // connectivity-insights `ports` array, roaming `countryName`, the call-forwarding
+        // signal set, consent `scopes`, blockchain `currency`) — so the type-comparison path
+        // runs on real data and a broken (always-empty) extractor can't hide behind a corpus
+        // that never pairs an array example with a scalar item type. Count pairs with a
+        // sibling-`items`-with-scalar-`type` detector independent of the extractor's element
+        // classification.
+        let mut item_typed_arrays = 0usize;
+        for api in APIS {
+            assert!(
+                array_example_elements_inconsistent_with_item_type(api.body).is_empty(),
+                "{}: every array example element must conform to its items.type",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            let is_key = |l: &str, name: &str| {
+                l.trim_start()
+                    .split_once(':')
+                    .is_some_and(|(k, _)| k.trim() == name)
+            };
+            for (i, l) in lines.iter().enumerate() {
+                let Some((k, v)) = l.trim_start().split_once(':') else {
+                    continue;
+                };
+                if k.trim() != "example" {
+                    continue;
+                }
+                let inline = v.split('#').next().unwrap_or(v).trim();
+                let is_flow = inline.starts_with('[');
+                let is_block = inline.is_empty()
+                    && lines
+                        .get(i + 1)
+                        .map(|n| n.trim_start().starts_with("- "))
+                        .unwrap_or(false);
+                if !is_flow && !is_block {
+                    continue;
+                }
+                let c = indent(l);
+                // A same-indent sibling `items:` (down or up, dedent-bounded) whose block's
+                // first `type:` is a scalar — presence only.
+                let mut has_scalar_item_type = false;
+                for dir in [1i64, -1] {
+                    let mut j = i as i64 + dir;
+                    while j >= 0 && (j as usize) < lines.len() {
+                        let x = lines[j as usize];
+                        if !x.trim().is_empty() {
+                            if indent(x) < c {
+                                break;
+                            }
+                            if indent(x) == c && is_key(x, "items") {
+                                let mut e = j as usize + 1;
+                                while e < lines.len() {
+                                    let y = lines[e];
+                                    if y.trim().is_empty() {
+                                        e += 1;
+                                        continue;
+                                    }
+                                    if indent(y) <= c {
+                                        break;
+                                    }
+                                    if let Some((yk, yv)) = y.trim_start().split_once(':') {
+                                        if yk.trim() == "type" {
+                                            let ty = yv
+                                                .split('#')
+                                                .next()
+                                                .unwrap_or(yv)
+                                                .trim()
+                                                .trim_matches('"')
+                                                .trim_matches('\'');
+                                            if matches!(
+                                                ty,
+                                                "string" | "integer" | "number" | "boolean"
+                                            ) {
+                                                has_scalar_item_type = true;
+                                            }
+                                            break;
+                                        }
+                                    }
+                                    e += 1;
+                                }
+                                break;
+                            }
+                        }
+                        j += dir;
+                    }
+                    if has_scalar_item_type {
+                        break;
+                    }
+                }
+                if has_scalar_item_type {
+                    item_typed_arrays += 1;
+                }
+            }
+        }
+        assert!(
+            item_typed_arrays >= 2,
+            "expected at least two array example + scalar items.type pairs across specs, got {item_typed_arrays}"
+        );
+    }
+
     /// The 1-based line numbers, in document order, of every `default:` keyword whose
     /// inline **quoted-string** value has a character length outside a sibling string
     /// bound — `minLength` or `maxLength` — declared in the same Schema Object, without

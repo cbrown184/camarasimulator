@@ -5669,6 +5669,41 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-21 — Contract-test harness: added an **array-example element-type
+  conformance** test (`src/registry.rs`
+  `every_array_example_element_conforms_to_its_item_type`) — where a mounted spec declares
+  an array `example` (flow `[...]` or block `- ` sequence) beside a **same-indent** `items:`
+  block whose first `type:` is a scalar (`string`/`integer`/`number`/`boolean`), EVERY
+  element of the example MUST conform to that item type. An element of the wrong JSON type —
+  a quoted `"5"` under `items: {type: integer}`, an unquoted number/bool under
+  `items: {type: string}` — is a self-contradictory sample the array's own item validator
+  rejects (a Redoc/codegen prefill carrying an element the field can never hold). The
+  **element-type member of the array-example family** after the item-count
+  (`minItems`/`maxItems`), item-enum-membership, and `uniqueItems` distinctness members:
+  those guard an element's *count*, *value set*, and *distinctness*, this guards its *JSON
+  type* — a genuinely new dimension. Also the array-element analogue of
+  `every_example_matches_its_schema_type`, which inspects only a *scalar* example against
+  the schema's own `type` and skips flow/block array examples outright. New pure
+  `array_example_elements_inconsistent_with_item_type` extractor: scopes exactly like the
+  item-enum member (flow/block array example, same-indent sibling `items:` scanned
+  down-then-up dedent-bounded, `inside_example`/named-`example` skipped) but reads elements
+  with quoting **preserved** (unlike the enum/uniqueItems extractors, which unquote) so a
+  quoted `"5"` classifies as a string — exactly the distinction `items.type` turns on —
+  reusing `examples_inconsistent_with_type`'s classifier. The items block's **first**
+  `type:` decides: a scalar type pairs, an `object`/`array`/`$ref`/inline-flow items yields
+  no element type (never descends into a nested sub-schema). Surveyed the corpus first: 8
+  array example + scalar-`items.type` pairs (reachability `connectivity`,
+  connectivity-insights `ports`, roaming `countryName`, call-forwarding signal set, consent
+  `scopes`, blockchain `currency` ×2, geofencing subscription types) → 0 drift; a live guard
+  that fires the moment a spec adds a mistyped array element. Unit-covered
+  (`array_example_item_type_extraction_rules`: a quoted-int, an unquoted-number-under-string,
+  a wrong-type block item, and a fractional-under-integer whose `items` sits *below* it
+  (down-scan) flagged in document order; matching int/string flow examples, a `$ref` items,
+  an `object` items, a scalar example, a no-`items` array, a following-property split, an
+  inner-`example` payload, and a named-`example` all cleared; ≥2-pair non-vacuous floor via
+  an independent detector). Test-only (`#[cfg(test)]`), so no runtime behaviour change and no
+  spec change. `cargo test` 2852 green (was 2850; +2), `cargo build --release` green, no new
+  deps. — binary (release): 5.1M (5,323,160 B; unchanged — test-only code).
 - 2026-08-21 — Contract-test harness: added an **object-example `required`-property
   conformance** test (`src/registry.rs`
   `every_object_example_lists_its_required_properties`) — where a mounted spec declares an
