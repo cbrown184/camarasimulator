@@ -5669,6 +5669,40 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-21 — Contract-test harness: added an **object-example `required`-property
+  conformance** test (`src/registry.rs`
+  `every_object_example_lists_its_required_properties`) — where a mounted spec declares an
+  object-valued `example` beside a **same-indent** `required:` block-sequence, the example
+  object MUST contain every property that array lists as mandatory. An `example` is a sample
+  *instance* of the schema, so an object omitting a required property is a self-contradictory
+  schema whose own validator rejects the sample it advertises (a Redoc/codegen prefill
+  carrying an object the field can never hold). The **object-shape member of the
+  example-conformance family** after the string-length / numeric-range / array-item-bound
+  members: those guard the *value* an example carries, this guards its *property set* — a
+  genuinely new dimension. No existing test compares an example object's members to
+  `required`: `every_example_matches_its_schema_type` checks the example's type and
+  `every_required_entry_names_a_declared_property` checks `required` against `properties`,
+  never against the `example`. New pure `object_examples_missing_required_properties`
+  extractor: a block-form `example:` (empty inline value) whose first non-blank child is a
+  mapping `key:` (not a `- ` item / scalar) and that has a same-indent `required:`
+  block-sequence sibling (scanned down-then-up dedent-bounded via `read_required_seq` /
+  `required_siblings`, so a `required: true` scalar flag and a nested/following object's
+  `required` never pair); it compares the required members to the example's *top-level* keys
+  (deeper keys ignored — a nested object's required members are that sub-schema's concern,
+  unreachable across a `$ref`) and reuses the family's `inside_example` guard so an example
+  nested in an outer `example:` payload is skipped. Surveyed the corpus first: the only 2
+  object-example+`required` pairs are the Quality-on-Demand and Carrier-Billing `CloudEvent`
+  examples (each lists all of `id`/`source`/`specversion`/`type`/`time`/`data`) → 0 drift; a
+  live guard that fires the moment a spec adds an object example missing a required property.
+  Unit-covered (`object_example_required_extraction_rules`: a missing-member example (required
+  above) and a missing-member example (required *below*, down-scan) flagged in document order;
+  a complete object example, a scalar example, a `- ` sequence example, a no-`required` object,
+  an `example:` nested inside an outer `example:` payload (its inner `required:` never pairs),
+  and a nested-object example whose deeper keys are ignored all cleared; ≥1-pair non-vacuous
+  floor via an independent detector — the QoD/Carrier-Billing CloudEvent pairs). Test-only
+  (`#[cfg(test)]`), so no runtime behaviour change and no spec change. `cargo test` 2850 green
+  (was 2848; +2), `cargo build --release` green, no new deps. — binary (release): 5.1M
+  (5,323,160 B; unchanged — test-only code).
 - 2026-08-21 — Contract-test harness: added an **enum-member string-length-bound
   conformance** test (`src/registry.rs`
   `every_enum_value_respects_its_string_length_bounds`) — where a mounted spec declares an

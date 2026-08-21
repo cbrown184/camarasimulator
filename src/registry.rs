@@ -23734,6 +23734,450 @@ components:
         );
     }
 
+    /// The 1-based line numbers, in document order, of every object-valued `example:`
+    /// keyword whose payload omits a top-level property its schema's sibling `required:`
+    /// array lists as mandatory — the object-shape member of the example-conformance
+    /// family (`examples_outside_their_length_bounds`,
+    /// `array_examples_outside_their_item_bounds`, …), without a YAML dep.
+    ///
+    /// In OpenAPI 3.0.x (JSON Schema) an `example` is a sample *instance* of the schema,
+    /// so it MUST satisfy the schema's constraints — and `required: [a, b]` makes `a` and
+    /// `b` mandatory members of every instance. An object example missing a required
+    /// property is a self-contradictory schema whose own validator rejects the sample it
+    /// advertises, so a Redoc/Swagger "try it" prefill and a codegen client's generated
+    /// sample carry an object the `required` list can never legally hold. This is a genuinely
+    /// new dimension: no existing test compares an example's *property set* to `required` —
+    /// the length/numeric/item-bound tests guard a value's size, `every_example_matches_its_
+    /// schema_type` guards its type, and `every_required_entry_names_a_declared_property`
+    /// guards `required` against `properties`, never against the `example`.
+    ///
+    /// Only a **block-form** `example:` (empty inline value) whose payload is a **mapping**
+    /// (its first non-blank child is a `key:` line, not a `- ` sequence item or a scalar)
+    /// and that declares a same-object `required:` **block-sequence** sibling is inspected.
+    /// The required list and the example's *top-level* keys are read at their own indents,
+    /// dedent-bounded exactly like the length-bound family, so a nested or following
+    /// object's `required`/keys never pair; a required entry absent from the top-level
+    /// example keys flags the `example:` line once (however many are missing). Nested keys
+    /// deeper than the example's top level are ignored — a nested object's required members
+    /// are that sub-schema's own concern, unreachable here across a `$ref`. Skipped: a scalar
+    /// or flow (`example: "x"` / `example: {…}` / `example: [ … ]`) example (only a block
+    /// mapping carries line-addressable top-level keys — a documented cut; both corpus pairs
+    /// are block form); a block-opening `example:` whose first child is a `- ` item or a
+    /// scalar; an example whose object declares no `required:` block-sequence sibling (a
+    /// scalar `required: true` request-body/parameter flag never pairs — it opens no `- `
+    /// items); and an `example:` nested inside an outer `example:`/`examples:` payload
+    /// (sample data, not a schema keyword).
+    fn object_examples_missing_required_properties(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        // True when line `i` (indent `c`) sits inside an outer `example:`/`examples:`
+        // payload — some enclosing container key up the indent ladder is
+        // `example`/`examples` — so an `example` key there is sample data, not a schema
+        // keyword. Mirrors `examples_outside_their_length_bounds::inside_example`.
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        // The `- ` item members of a `required:` block sequence opening at line `start`
+        // (indent `c`, empty inline value); `None` when line `start` is not such a
+        // sequence — a `required: <scalar>` (e.g. `true`) whose inline value is non-empty,
+        // or a block whose first non-blank child is not a `- ` item (a property literally
+        // named `required` opening a mapping). Items are gathered at indent > `c` until the
+        // block dedents to <= `c`; each item's inline comment and one surrounding quote pair
+        // are stripped.
+        let read_required_seq = |start: usize, c: usize| -> Option<Vec<String>> {
+            let (k, v) = lines[start].trim_start().split_once(':')?;
+            if k.trim() != "required" {
+                return None;
+            }
+            if !v.split('#').next().unwrap_or(v).trim().is_empty() {
+                return None; // `required: true`-style scalar flag, not a constraint list
+            }
+            let mut items = Vec::new();
+            let mut seen_item = false;
+            let mut j = start + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) <= c {
+                    break;
+                }
+                if let Some(item) = l.trim_start().strip_prefix("- ") {
+                    let it = item.split('#').next().unwrap_or(item).trim();
+                    let it = it
+                        .strip_prefix('"')
+                        .and_then(|s| s.strip_suffix('"'))
+                        .or_else(|| it.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')))
+                        .unwrap_or(it);
+                    items.push(it.to_string());
+                    seen_item = true;
+                } else if !seen_item {
+                    return None; // first child is not a sequence item
+                }
+                j += 1;
+            }
+            if items.is_empty() {
+                None
+            } else {
+                Some(items)
+            }
+        };
+        // The members of a same-indent `required:` block-sequence sibling in the same object
+        // as line `i` (indent `c`): scan down through the object's block then up,
+        // dedent-bounded so a nested or following object's `required` never pairs.
+        let required_siblings = |i: usize, c: usize| -> Option<Vec<String>> {
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && l.trim_start().starts_with("required:") {
+                    if let Some(r) = read_required_seq(j, c) {
+                        return Some(r);
+                    }
+                }
+                j += 1;
+            }
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && l.trim_start().starts_with("required:") {
+                    if let Some(r) = read_required_seq(k, c) {
+                        return Some(r);
+                    }
+                }
+            }
+            None
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some((k, v)) = line.trim_start().split_once(':') else {
+                continue;
+            };
+            if k.trim() != "example" {
+                continue;
+            }
+            let c = indent(line);
+            if !v.split('#').next().unwrap_or(v).trim().is_empty() {
+                continue; // scalar or inline-flow example — no block mapping payload
+            }
+            if inside_example(i, c) {
+                continue;
+            }
+            // The payload must be a block mapping: its first non-blank child is a `key:`
+            // line indented past the `example:` key (not a `- ` sequence item, not empty).
+            let Some(child) = lines[i + 1..].iter().find(|l| !l.trim().is_empty()) else {
+                continue;
+            };
+            let pc = indent(child);
+            if pc <= c || child.trim_start().starts_with("- ") {
+                continue;
+            }
+            if child.trim_start().split_once(':').is_none() {
+                continue; // a block scalar / non-mapping payload
+            }
+            let Some(required) = required_siblings(i, c) else {
+                continue;
+            };
+            // The example's top-level keys: `key:` lines at exactly the payload indent `pc`,
+            // scanned until the example block dedents to <= `c`. Deeper keys (a nested
+            // object's members) are ignored; one surrounding quote pair is stripped.
+            let mut keys: Vec<String> = Vec::new();
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) <= c {
+                    break;
+                }
+                if indent(l) == pc && !l.trim_start().starts_with("- ") {
+                    if let Some((kk, _)) = l.trim_start().split_once(':') {
+                        let kk = kk.trim();
+                        let kk = kk
+                            .strip_prefix('"')
+                            .and_then(|s| s.strip_suffix('"'))
+                            .or_else(|| kk.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')))
+                            .unwrap_or(kk);
+                        keys.push(kk.to_string());
+                    }
+                }
+                j += 1;
+            }
+            if required.iter().any(|r| !keys.contains(r)) {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_object_example_lists_its_required_properties() {
+        // Contract-harness invariant (OpenAPI 3.0.x / JSON-Schema structural rule): where a
+        // Schema Object declares an object-valued `example` beside a `required:` array, the
+        // example object MUST contain every property that array lists. An `example` is a
+        // sample *instance* of the schema, so an object omitting a required property is a
+        // self-contradictory schema whose own validator rejects the sample it advertises —
+        // a Redoc/Swagger "try it" prefill and a codegen client's generated sample carry an
+        // object the `required` list can never legally hold.
+        //
+        // The object-shape complement of `every_example_respects_its_string_length_bounds`
+        // (a string example's length), `every_example_is_within_its_numeric_bounds` (a
+        // numeric example's range) and `every_array_example_respects_its_item_bounds` (an
+        // array example's cardinality): those guard the value an example carries, this guards
+        // its *property set*. No existing test compares an example object's members to
+        // `required` — `every_example_matches_its_schema_type` checks the example's type and
+        // `every_required_entry_names_a_declared_property` checks `required` against
+        // `properties`, never against the `example`. Verified true across all mounted specs
+        // before asserting.
+        for api in APIS {
+            let offenders = object_examples_missing_required_properties(api.body);
+            assert!(
+                offenders.is_empty(),
+                "{} spec declares an object `example` that omits a property its sibling \
+                 `required:` array lists as mandatory (a sample the schema's own validator \
+                 would reject) at `example:` line(s): {:?}",
+                api.name,
+                offenders
+            );
+        }
+    }
+
+    #[test]
+    fn object_example_required_extraction_rules() {
+        // Unit-cover `object_examples_missing_required_properties` so the contract test above
+        // can't pass vacuously and its detection is pinned: an object example carrying every
+        // required property passes; one missing a required member (required declared above)
+        // and one missing a member (required declared *below*, down-scan) are flagged in
+        // document order; a scalar `example:` and a sequence-valued `example:` are skipped (no
+        // block mapping payload); an object with no `required:` block-sequence sibling is
+        // skipped; an `example:` nested inside an outer `example:` payload is skipped (so its
+        // inner `required:` never pairs); and a required property present as a nested-object
+        // top-level key is matched while deeper keys are ignored.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    GoodObject:
+      type: object
+      required:
+        - id
+        - name
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+      example:
+        id: \"x1\"
+        name: \"n\"
+    MissingReq:
+      type: object
+      required:
+        - id
+        - name
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+      example:
+        id: \"x1\"
+    ReqBelow:
+      type: object
+      example:
+        id: \"x1\"
+      required:
+        - id
+        - email
+    ScalarExample:
+      type: string
+      required:
+        - id
+      example: \"just-a-string\"
+    SeqExample:
+      type: object
+      required:
+        - id
+      example:
+        - id
+        - two
+    NoRequired:
+      type: object
+      example:
+        id: \"x1\"
+    InExample:
+      type: object
+      example:
+        required:
+          - id
+        example:
+          name: \"n\"
+    NestedOk:
+      type: object
+      required:
+        - id
+        - data
+      properties:
+        id:
+          type: string
+        data:
+          type: object
+      example:
+        id: \"x1\"
+        data:
+          inner: \"v\"
+";
+        // Flagged, in document order: line 37 (`MissingReq.example` omits required `name`,
+        // required declared above) and line 41 (`ReqBelow.example` omits required `email`,
+        // required declared *below* the example — down-scan). Not flagged: `GoodObject` (both
+        // `id`/`name` present); `ScalarExample` (an inline scalar example, no mapping
+        // payload); `SeqExample` (a `- ` sequence example, not a mapping); `NoRequired` (no
+        // `required:` sibling); `InExample`, whose object example has no same-indent
+        // `required:` sibling and whose *inner* `example:` sits inside the outer `example:`
+        // payload so its adjacent `required:` never pairs (the `inside_example` guard); and
+        // `NestedOk` (required `id`/`data` both present as top-level keys, the deeper
+        // `inner:` under `data` ignored).
+        assert_eq!(
+            object_examples_missing_required_properties(body),
+            vec![37, 41]
+        );
+
+        // Non-vacuous floor: across every registered spec every object example lists all its
+        // required properties (the invariant the contract test asserts), and the corpus
+        // actually declares such a pair (the Quality-on-Demand and Carrier-Billing
+        // `CloudEvent` examples beside their `required:` arrays) — so the containment path
+        // runs on real data and a broken (always-empty) extractor can't hide behind a corpus
+        // that never pairs an object example with `required`. Count pairs with a detector
+        // independent of the extractor's containment check.
+        let mut paired = 0usize;
+        for api in APIS {
+            assert!(
+                object_examples_missing_required_properties(api.body).is_empty(),
+                "{}: every object example must list all its sibling `required` properties",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            for (i, l) in lines.iter().enumerate() {
+                let Some((k, v)) = l.trim_start().split_once(':') else {
+                    continue;
+                };
+                if k.trim() != "example"
+                    || !v.split('#').next().unwrap_or(v).trim().is_empty()
+                {
+                    continue;
+                }
+                let c = indent(l);
+                // an object (mapping) payload
+                let Some(child) = lines[i + 1..].iter().find(|x| !x.trim().is_empty()) else {
+                    continue;
+                };
+                if indent(child) <= c
+                    || child.trim_start().starts_with("- ")
+                    || child.trim_start().split_once(':').is_none()
+                {
+                    continue;
+                }
+                // a same-indent `required:` block-sequence sibling, up or down, dedent-bounded
+                let mut has_req = false;
+                for down in [true, false] {
+                    let mut j = i;
+                    loop {
+                        if down {
+                            j += 1;
+                            if j >= lines.len() {
+                                break;
+                            }
+                        } else if j == 0 {
+                            break;
+                        } else {
+                            j -= 1;
+                        }
+                        let ll = lines[j];
+                        if ll.trim().is_empty() {
+                            continue;
+                        }
+                        let li = indent(ll);
+                        if li < c {
+                            break;
+                        }
+                        if li == c
+                            && ll.trim_start().starts_with("required:")
+                            && ll
+                                .trim_start()
+                                .split_once(':')
+                                .map(|(_, vv)| vv.split('#').next().unwrap_or(vv).trim().is_empty())
+                                .unwrap_or(false)
+                            && lines[j + 1..]
+                                .iter()
+                                .find(|x| !x.trim().is_empty())
+                                .map(|x| x.trim_start().starts_with("- "))
+                                .unwrap_or(false)
+                        {
+                            has_req = true;
+                        }
+                    }
+                }
+                if has_req {
+                    paired += 1;
+                }
+            }
+        }
+        assert!(
+            paired >= 1,
+            "expected at least one object-example + required-array sibling pair across specs, got {paired}"
+        );
+    }
+
     /// The 1-based line numbers, in document order, of every array `example:` keyword
     /// whose item count falls outside a sibling array-size bound — `minItems` or
     /// `maxItems` — declared in the same Schema Object, without a YAML dep. The array-
