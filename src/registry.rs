@@ -27385,6 +27385,345 @@ components:
         );
     }
 
+    /// The 1-based line numbers, in document order, of every **parameter/header-level**
+    /// `example:` keyword — one that sits beside a same-indent `schema:` *block* (a
+    /// Parameter Object, a `components.headers` entry, or a Media-Type Object, whose
+    /// `example` is a sample instance of the sibling `schema`) — whose sibling schema
+    /// declares a direct `format: uuid` child yet whose value is not a well-formed UUID,
+    /// without a YAML dep.
+    ///
+    /// The out-of-schema companion of `uuid_format_examples_malformed`, which guards an
+    /// example declared *inside* a Schema Object (a same-indent `format: uuid` sibling)
+    /// and, by its own account, "conservatively exempt[s]" a "parameter-level example
+    /// whose `format` sits deeper in its own `schema`". CAMARA declares its
+    /// `paymentId`/`appId`/`appInstanceId`/`appDeploymentId` path & query parameters
+    /// exactly that way — the `example` is a sibling of `schema:`, and the `format: uuid`
+    /// a child of that schema — so that heavily-copied family of examples was checked by
+    /// no test: the schema-level uuid/pattern extractors need the format/pattern at the
+    /// example's own indent, and the type/enum/length example tests read type/enum/length,
+    /// never `format`.
+    ///
+    /// In OpenAPI 3.0.x a Parameter/Header Object `example` (and a Media-Type `example`)
+    /// is a sample *instance of that object's `schema`*, so where the schema is a
+    /// `format: uuid` string the example MUST be a syntactically valid UUID; a malformed
+    /// one (a placeholder, a hex digit dropped from a hand-typed id) is a sample the
+    /// schema's own validator rejects, so a Redoc/Swagger "try it" prefill of that path or
+    /// query parameter carries a value no `uuid` field can hold.
+    ///
+    /// Only an `example` carrying an inline scalar (quoted or unquoted; a block-scalar
+    /// `>`/`|` opener and a flow/collection `[`/`{` opener carry no inline uuid literal
+    /// and are skipped) that has (a) a same-indent `schema:` **block-opening** sibling in
+    /// the same object (scanned down then up, dedent-bounded, so a nested or following
+    /// object's `schema` never pairs) and (b) a `format: uuid` among that schema block's
+    /// **direct** children (a deeper nested sub-schema's `format` never pairs, so an
+    /// object-schema parameter is not mistaken for a scalar uuid) is inspected. An
+    /// `example:` nested inside an outer `example:`/`examples:` payload (sample data) is
+    /// skipped. This keys strictly on the schema-*sibling* shape, so it never overlaps
+    /// `uuid_format_examples_malformed` (which keys on a same-indent `format` sibling — a
+    /// parameter-level example has none). UUID shape is judged by `is_well_formed_uuid`.
+    fn parameter_level_uuid_examples_malformed(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let raw_inline = |l: &str, name: &str| -> Option<String> {
+            let (k, v) = l.trim_start().split_once(':')?;
+            if k.trim() != name {
+                return None;
+            }
+            let v = v.split('#').next().unwrap_or(v).trim();
+            if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            }
+        };
+        // The line index of a same-indent `schema:` *block opener* (a `schema:` key with
+        // no inline value) sibling of line `i` (indent `c`) in the same object: scan down
+        // through the object's block then up, dedent-bounded so a nested or following
+        // object's `schema` never pairs.
+        let sibling_schema_block = |i: usize, c: usize| -> Option<usize> {
+            let is_schema_opener = |l: &str| -> bool {
+                l.trim_start().split_once(':').is_some_and(|(k, v)| {
+                    k.trim() == "schema" && v.split('#').next().unwrap_or(v).trim().is_empty()
+                })
+            };
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_schema_opener(l) {
+                    return Some(j);
+                }
+                j += 1;
+            }
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_schema_opener(l) {
+                    return Some(k);
+                }
+            }
+            None
+        };
+        // Whether the schema block opened at `sidx` declares `format: uuid` among its
+        // *direct* children (the first indent level inside the block), bounded by the
+        // dedent that closes the block. A `format` deeper than the direct-child level (a
+        // nested sub-schema's) never pairs, so an object-schema parameter is not mistaken
+        // for a scalar uuid.
+        let schema_block_has_direct_uuid_format = |sidx: usize| -> bool {
+            let sc = indent(lines[sidx]);
+            let is_uuid_format = |l: &str| -> bool {
+                raw_inline(l, "format")
+                    .map(|v| v.trim_matches('"').trim_matches('\'') == "uuid")
+                    .unwrap_or(false)
+            };
+            let mut child: Option<usize> = None;
+            let mut j = sidx + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                let li = indent(l);
+                if li <= sc {
+                    break;
+                }
+                let ci = *child.get_or_insert(li);
+                if li == ci && is_uuid_format(l) {
+                    return true;
+                }
+                j += 1;
+            }
+            false
+        };
+        // True when line `i` (indent `c`) sits inside an outer `example:`/`examples:`
+        // payload — some enclosing container key up the indent ladder is
+        // `example`/`examples`, so an inner `example` key there is sample data.
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some(raw) = raw_inline(line, "example") else {
+                continue;
+            };
+            // A block-scalar opener (`>`/`|`) or a flow/collection opener (`[`/`{`) carries
+            // no inline uuid literal — skip (the uuid parameter examples are plain scalars).
+            if raw.starts_with('>')
+                || raw.starts_with('|')
+                || raw.starts_with('[')
+                || raw.starts_with('{')
+            {
+                continue;
+            }
+            let c = indent(line);
+            if inside_example(i, c) {
+                continue;
+            }
+            let Some(sidx) = sibling_schema_block(i, c) else {
+                continue;
+            };
+            if !schema_block_has_direct_uuid_format(sidx) {
+                continue;
+            }
+            let value = raw.trim_matches('"').trim_matches('\'');
+            if !is_well_formed_uuid(value) {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_parameter_level_uuid_example_conforms_to_the_uuid_format() {
+        // Contract-harness invariant (OpenAPI 3.0.x / JSON-Schema): a Parameter/Header
+        // Object `example` (and a Media-Type Object `example`) is a sample *instance of
+        // its sibling `schema`*, so where that schema is a `format: uuid` string the
+        // example MUST be a syntactically valid UUID. A malformed one — a placeholder or a
+        // dropped hex digit in a hand-typed id — is a sample the schema's own validator
+        // rejects, so a Redoc/Swagger "try it" prefill of that path/query parameter
+        // carries a value no `uuid`-typed field can legally hold.
+        //
+        // The out-of-schema companion of `every_uuid_format_example_is_a_well_formed_uuid`,
+        // which guards examples declared *inside* a Schema Object (a same-indent
+        // `format: uuid` sibling) and by its own account exempts a "parameter-level example
+        // whose `format` sits deeper in its own `schema`". CAMARA declares its
+        // `paymentId`/`appId`/`appInstanceId`/`appDeploymentId` path & query parameters
+        // exactly that way, so this heavily-copied family of examples was checked by no
+        // existing test — the schema-level uuid/pattern extractors need the format/pattern
+        // at the example's own indent, and the type/enum/length example tests never read
+        // `format`. Verified true across all mounted specs before asserting.
+        for api in APIS {
+            let offenders = parameter_level_uuid_examples_malformed(api.body);
+            assert!(
+                offenders.is_empty(),
+                "{} spec declares a parameter/header-level `example` beside a `schema` \
+                 with a direct `format: uuid` that is not a well-formed UUID (a sample the \
+                 schema's own validator would reject) at `example:` line(s): {:?}",
+                api.name,
+                offenders
+            );
+        }
+    }
+
+    #[test]
+    fn parameter_level_uuid_example_extraction_rules() {
+        // Unit-cover `parameter_level_uuid_examples_malformed` so the contract test above
+        // can't pass vacuously and its detection is pinned.
+        //
+        // A parameter whose `schema` is a `format: uuid` string and whose sibling
+        // `example` is a valid uuid passes; a malformed sibling example (too short) is
+        // flagged. A parameter-level example whose schema is a *different* format
+        // (date-time) is skipped; one whose schema is an object with a nested
+        // `format: uuid` property (not a direct child) is skipped (the example is an
+        // object, not a uuid scalar); an `example` with no sibling `schema:` block is
+        // skipped; and a schema-*internal* example (a same-indent `format: uuid`, no
+        // sibling `schema:`) is skipped here — it is `uuid_format_examples_malformed`'s
+        // concern, so the two extractors never double-count.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      parameters:
+        - name: good
+          in: query
+          schema:
+            type: string
+            format: uuid
+          example: 3fa85f64-5717-4562-b3fc-2c963f66afa6
+        - name: bad
+          in: query
+          schema:
+            type: string
+            format: uuid
+          example: \"3fa85f64-5717\"
+        - name: dt
+          in: query
+          schema:
+            type: string
+            format: date-time
+          example: not-a-uuid
+        - name: obj
+          in: query
+          schema:
+            type: object
+            properties:
+              id:
+                type: string
+                format: uuid
+          example: not-a-uuid
+        - name: noschema
+          in: query
+          example: not-a-uuid
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    Internal:
+      type: string
+      format: uuid
+      example: \"bad-internal\"
+";
+        // Flagged: only the `bad` parameter's `example: \"3fa85f64-5717\"` — a
+        // parameter-level example beside a `schema` whose direct `format: uuid` it
+        // violates. Not flagged: `good` (valid uuid); `dt` (schema format is date-time,
+        // not uuid); `obj` (the `format: uuid` is a nested property, not a direct child of
+        // the parameter schema — so the object example is out of scope); `noschema` (no
+        // sibling `schema:` block); `Internal.example` (a schema-internal example with a
+        // same-indent `format: uuid` and no sibling `schema:` — the schema-level test's
+        // concern, never this one's).
+        let flagged = parameter_level_uuid_examples_malformed(body);
+        assert_eq!(flagged.len(), 1, "exactly one offender expected, got {flagged:?}");
+
+        // The schema-internal `Internal.example` is NOT credited here (no overlap with the
+        // schema-level extractor).
+        let internal_line = body.lines().position(|l| l.contains("bad-internal")).unwrap() + 1;
+        assert!(!flagged.contains(&internal_line));
+
+        // Non-vacuous floor: across every registered spec every parameter/header-level
+        // example beside a `format: uuid` schema is a well-formed UUID (the invariant), and
+        // the corpus actually declares several such pairs (the paymentId/appId/… path &
+        // query parameters) — so the uuid-comparison path runs on real data and a broken
+        // (always-empty) extractor can't hide behind a corpus that never pairs one. Count
+        // pairs with a detector independent of the extractor's shape comparison.
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let mut param_uuid_examples = 0usize;
+        for api in APIS {
+            assert!(
+                parameter_level_uuid_examples_malformed(api.body).is_empty(),
+                "{}: every parameter/header-level example beside a `format: uuid` schema \
+                 must be a well-formed UUID",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            for (i, l) in lines.iter().enumerate() {
+                let t = l.trim_start();
+                let has_inline = t.starts_with("example:")
+                    && t.split_once(':')
+                        .map(|(_, v)| !v.split('#').next().unwrap_or(v).trim().is_empty())
+                        .unwrap_or(false);
+                if !has_inline {
+                    continue;
+                }
+                let c = indent(l);
+                let lo = i.saturating_sub(8);
+                let hi = (i + 8).min(lines.len());
+                let has_schema_sibling =
+                    (lo..hi).any(|j| j != i && indent(lines[j]) == c && lines[j].trim() == "schema:");
+                let has_uuid_below =
+                    (lo..hi).any(|j| lines[j].trim() == "format: uuid" && indent(lines[j]) > c);
+                if has_schema_sibling && has_uuid_below {
+                    param_uuid_examples += 1;
+                }
+            }
+        }
+        assert!(
+            param_uuid_examples >= 3,
+            "expected several parameter-level example + `format: uuid` schema pairs across specs, got {param_uuid_examples}"
+        );
+    }
+
     /// The E.164 phone-number `pattern` the CAMARA specs use verbatim (single-quoted
     /// in YAML as `'^\+[1-9][0-9]{4,14}$'`): a leading `+`, then a first digit `1`–`9`,
     /// then 4–14 more decimal digits — i.e. `+` followed by 5–15 digits, the first

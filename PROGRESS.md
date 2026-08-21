@@ -3332,6 +3332,27 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - a **parameter-level `format: uuid` example-conformance** contract test (`src/registry.rs`
+    `every_parameter_level_uuid_example_conforms_to_the_uuid_format`) asserts that a
+    Parameter/Header/Media-Type-level `example` — one sitting **beside** a same-indent
+    `schema:` block whose **direct** child is `format: uuid` — is a well-formed UUID. The
+    **out-of-schema companion** of `every_uuid_format_example_is_a_well_formed_uuid`, which
+    by its own docstring "conservatively exempt[s]" a parameter-level example whose `format`
+    sits deeper in its own `schema`; CAMARA declares its `paymentId`/`appId`/`appInstanceId`/
+    `appDeploymentId` path & query parameters exactly that way (the `example` a sibling of
+    `schema:`, the `format: uuid` a child of it), so that heavily-copied family was checked by
+    **no** existing test — the schema-level uuid/pattern extractors need the format/pattern at
+    the example's own indent, the type/enum/length example tests never read `format`. New pure
+    `parameter_level_uuid_examples_malformed` extractor (inline-scalar `example` with a
+    same-indent `schema:` block-opener sibling scanned down-then-up dedent-bounded, and a
+    `format: uuid` among that block's **direct** children so an object-schema parameter is not
+    mistaken for a scalar uuid; block/flow openers and outer-`example:`-payload skipped;
+    reuses `is_well_formed_uuid`), keyed strictly on the schema-*sibling* shape so it never
+    overlaps the schema-level extractor. Surveyed the corpus first: 5 parameter-level
+    example+`format: uuid` pairs (carrier-billing `paymentId`, traffic-influence `appId`,
+    edge-application-management `appId`/`appInstanceId`/`appDeploymentId`), all valid → 0 drift.
+    Unit-covered (good/bad/date-time-format/object-schema/no-schema/schema-internal cases + a
+    non-vacuous ≥3 floor). Test-only, no spec change.
   - an **enum-member numeric-range-bound conformance** contract test (`src/registry.rs`
     `every_enum_value_is_within_its_numeric_bounds`) asserts that where a mounted spec declares
     an `enum` sequence beside a same-indent `minimum`/`maximum`, every numeric member's value
@@ -5677,6 +5698,23 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-21 — Contract-test harness: added a **parameter-level `format: uuid`
+  example-conformance** test (`src/registry.rs`
+  `every_parameter_level_uuid_example_conforms_to_the_uuid_format`) — a Parameter/Header/
+  Media-Type-level `example` sitting **beside** a same-indent `schema:` block whose **direct**
+  child is `format: uuid` MUST be a well-formed UUID. The out-of-schema companion of
+  `every_uuid_format_example_is_a_well_formed_uuid`, which by its own docstring exempts a
+  parameter-level example whose `format` sits deeper in its own `schema`; CAMARA declares its
+  `paymentId`/`appId`/`appInstanceId`/`appDeploymentId` path & query parameters exactly that way,
+  so that copied family was checked by no existing test (the schema-level uuid/pattern
+  extractors need the format at the example's own indent; the type/enum/length example tests
+  never read `format`). New pure `parameter_level_uuid_examples_malformed` extractor, keyed on
+  the schema-*sibling* shape so it never overlaps the schema-level extractor; reuses
+  `is_well_formed_uuid`; no new dep. Surveyed first: 5 parameter-level example+`format: uuid`
+  pairs (carrier-billing / traffic-influence / edge-application-management), all valid → 0 drift.
+  Unit-covered (good/bad/date-time/object-schema/no-schema/schema-internal + non-vacuous ≥3
+  floor). Test-only, no spec change. `cargo test` 2856 green (+2); `cargo build --release` ok.
+  — binary (release): 5.1M (5323160 B)
 - 2026-08-21 — Contract-test harness: added an **enum-member numeric-range-bound
   conformance** test (`src/registry.rs` `every_enum_value_is_within_its_numeric_bounds`) —
   where a mounted spec declares an `enum` sequence beside a **same-indent** `minimum`/`maximum`,
