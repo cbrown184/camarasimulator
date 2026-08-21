@@ -9982,6 +9982,200 @@ paths:
         assert!(total >= 100, "expected many path keys across specs, got {total}");
     }
 
+    /// Normalize an OpenAPI path template by replacing every `{var}` segment with
+    /// a fixed `{}` placeholder, so two templates that differ *only* in their
+    /// variable names — `/pets/{petId}` and `/pets/{name}` — collapse to the same
+    /// string (`/pets/{}`). Literal (non-variable) segments are preserved verbatim,
+    /// so templates that differ in their concrete hierarchy stay distinct. A single
+    /// scan: text outside braces is copied; a `{` opens a variable run whose
+    /// characters (the variable name) are dropped until the matching `}`, emitting
+    /// one `{}` in its place (an unterminated `{` — a malformed template — swallows
+    /// the rest of the string, still yielding `{}`). No YAML/regex dep.
+    fn normalize_path_template(path: &str) -> String {
+        let mut out = String::with_capacity(path.len());
+        let mut in_var = false;
+        for c in path.chars() {
+            if in_var {
+                if c == '}' {
+                    in_var = false;
+                }
+                continue;
+            }
+            if c == '{' {
+                in_var = true;
+                out.push_str("{}");
+            } else {
+                out.push(c);
+            }
+        }
+        out
+    }
+
+    /// Labels (`"<later key> ~ <first key>"`) of every `paths:` key within one spec
+    /// that is *template-equivalent* to an earlier, textually **different** key —
+    /// i.e. two distinct path templates that map to the same string under
+    /// [`normalize_path_template`]. Built on the trusted `path_item_keys` scan (all
+    /// path-item keys in document order, duplicates preserved), pairing each key
+    /// against the first key that shares its normalized form.
+    ///
+    /// A textually *identical* repeat (`/sessions` listed twice) is **not** reported
+    /// here — that is the last-wins YAML duplicate `every_paths_object_lists_distinct_path_keys`
+    /// already guards; this test's concern is the OpenAPI rule that two templates
+    /// with the same hierarchy but different variable names are *identical* paths and
+    /// MUST NOT coexist (a client/router cannot disambiguate them, and a codegen tool
+    /// silently binds one over the other). So only a normalized collision whose
+    /// literal keys differ is flagged, keeping the two tests non-overlapping.
+    fn path_keys_equivalent_after_template_normalization(body: &str) -> Vec<String> {
+        let mut seen: Vec<(String, String)> = Vec::new(); // (normalized form, first literal key)
+        let mut out = Vec::new();
+        for key in path_item_keys(body) {
+            let norm = normalize_path_template(&key);
+            if let Some((_, first)) = seen.iter().find(|(n, _)| *n == norm) {
+                if *first != key {
+                    out.push(format!("{key} ~ {first}"));
+                }
+            } else {
+                seen.push((norm, key));
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn no_two_path_keys_are_equivalent_after_template_normalization() {
+        // Contract-harness invariant (OpenAPI structural rule): within one document's
+        // `paths` object, two path templates that are identical except for the *names*
+        // of their template variables are considered the **same path** and MUST NOT
+        // both be declared — `/pets/{petId}` and `/pets/{name}` describe the exact
+        // same URL shape, so a server/router cannot decide which Path Item a request
+        // matches and a codegen/Redoc tool silently binds one over the other. The rule
+        // is invisible at the character level: the two keys are textually distinct, so
+        // the YAML mapping is *valid* and no parser drops either — the collision only
+        // appears once the variable names are erased.
+        //
+        // The template-equivalence complement of `every_paths_object_lists_distinct_path_keys`,
+        // which flags a *literal* repeat (the last-wins YAML duplicate) but treats two
+        // keys differing by a single variable name as distinct — so a spec drafted by
+        // copy-pasting a sibling path block and renaming only its `{id}` sails through
+        // that test while declaring two indistinguishable paths. Every other path test
+        // checks a key's shape (`every_paths_object_declares_slash_prefixed_path_items`,
+        // `every_path_item_key_has_no_trailing_slash`) or its template↔parameter wiring
+        // (`path_template_params_match_declared_path_parameters`), never one key against
+        // another after normalization. Verified true across all mounted specs before
+        // asserting.
+        for api in APIS {
+            let clashes = path_keys_equivalent_after_template_normalization(api.body);
+            assert!(
+                clashes.is_empty(),
+                "{} spec declares two `paths:` keys that are identical after \
+                 template-variable normalization (two templates differing only in a \
+                 variable name are the same path and MUST NOT coexist): {:?}",
+                api.name,
+                clashes
+            );
+        }
+    }
+
+    #[test]
+    fn path_template_equivalence_extraction_rules() {
+        // Unit-cover `normalize_path_template` and
+        // `path_keys_equivalent_after_template_normalization` so the contract test
+        // above can't pass vacuously and its detection is pinned: a `{var}` collapses
+        // to `{}` while literal segments survive; two keys differing only in a
+        // variable name collide (single- and multi-variable forms) and are flagged in
+        // document order against the first key of their normalized form; a textually
+        // identical repeat is NOT reported here (delegated to the literal-duplicate
+        // test); and templates with distinct hierarchies never collide.
+        assert_eq!(normalize_path_template("/pets/{petId}"), "/pets/{}");
+        assert_eq!(normalize_path_template("/pets/{name}"), "/pets/{}");
+        assert_eq!(
+            normalize_path_template("/owners/{o}/pets/{p}"),
+            "/owners/{}/pets/{}"
+        );
+        assert_eq!(normalize_path_template("/health"), "/health");
+
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /pets/{petId}:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+  /pets/{name}:
+    get:
+      operationId: getB
+      responses:
+        '200':
+          description: ok
+  /owners/{ownerId}/pets/{petId}:
+    get:
+      operationId: getC
+      responses:
+        '200':
+          description: ok
+  /owners/{o}/pets/{p}:
+    get:
+      operationId: getD
+      responses:
+        '200':
+          description: ok
+  /health:
+    get:
+      operationId: getE
+      responses:
+        '200':
+          description: ok
+  /pets/{petId}:
+    delete:
+      operationId: dropA
+      responses:
+        '204':
+          description: gone
+";
+        // Flagged, in document order: `/pets/{name}` (equivalent to the earlier
+        // `/pets/{petId}` — both `/pets/{}`) and `/owners/{o}/pets/{p}` (equivalent to
+        // `/owners/{ownerId}/pets/{petId}` — both `/owners/{}/pets/{}`). Not flagged:
+        // `/health` (a unique literal path), and the trailing `/pets/{petId}` — a
+        // *textually identical* repeat of the first key (the literal-duplicate test's
+        // concern), which shares the first key's literal form and so is skipped here.
+        assert_eq!(
+            path_keys_equivalent_after_template_normalization(body),
+            vec![
+                "/pets/{name} ~ /pets/{petId}".to_string(),
+                "/owners/{o}/pets/{p} ~ /owners/{ownerId}/pets/{petId}".to_string(),
+            ]
+        );
+
+        // Non-vacuous floor: across every registered spec no two path templates are
+        // equivalent after normalization (the invariant the contract test asserts),
+        // and the corpus declares many *templated* path keys (a `{var}` that
+        // normalization actually rewrites) — so the normalization + collision path
+        // runs on real data and a broken (always-empty) extractor can't hide behind a
+        // corpus with no templated paths.
+        let mut templated = 0usize;
+        for api in APIS {
+            assert!(
+                path_keys_equivalent_after_template_normalization(api.body).is_empty(),
+                "{}: no two path templates may be equivalent after normalization",
+                api.name
+            );
+            for key in path_item_keys(api.body) {
+                if normalize_path_template(&key) != key {
+                    templated += 1;
+                }
+            }
+        }
+        assert!(
+            templated >= 20,
+            "expected many templated path keys across specs, got {templated}"
+        );
+    }
+
     #[test]
     fn every_declared_response_has_a_description() {
         // Contract-harness invariant (OpenAPI structural rule): every response a

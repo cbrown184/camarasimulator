@@ -5827,6 +5827,40 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-21 — Contract-test harness: added a **path-template equivalence** test
+  (`src/registry.rs` `no_two_path_keys_are_equivalent_after_template_normalization`)
+  — within one document's `paths` object, two path templates identical except for
+  their template-**variable names** (`/pets/{petId}` vs `/pets/{name}`) are the
+  *same path* per the OpenAPI structural rule and MUST NOT both be declared: a
+  server/router cannot decide which Path Item a request matches and a codegen/Redoc
+  tool silently binds one over the other. The collision is invisible at the
+  character level — the two keys are textually distinct, so the YAML mapping is
+  valid and no parser drops either; it only appears once the variable names are
+  erased. The **template-equivalence complement** of
+  `every_paths_object_lists_distinct_path_keys`, which flags a *literal* repeat (the
+  last-wins YAML duplicate) but treats two keys differing by a single variable name
+  as distinct — so a spec drafted by copy-pasting a sibling path block and renaming
+  only its `{id}` sails through it while declaring two indistinguishable paths;
+  distinct too from the shape tests (`…declares_slash_prefixed_path_items`,
+  `…key_has_no_trailing_slash`) and the template↔parameter wiring test
+  (`path_template_params_match_declared_path_parameters`), none of which compares one
+  key against another after normalization. New pure `normalize_path_template`
+  (each `{var}` → a fixed `{}` placeholder, literal segments preserved; a single
+  scan, no YAML/regex dep) + `path_keys_equivalent_after_template_normalization`
+  (built on the trusted `path_item_keys` scan; pairs each key against the first key
+  sharing its normalized form and flags only a collision whose literal keys **differ**,
+  so a textually identical repeat stays the literal-duplicate test's concern and the
+  two tests never overlap). Surveyed the corpus first: **42** templated path keys
+  across **136** total, no two equivalent after normalization → **0** drift, a live
+  guard that fires the moment a pasted path template is left renamed only in its
+  variable. Unit-covered (`path_template_equivalence_extraction_rules`:
+  `normalize_path_template` maps `{petId}`/`{name}` alike and preserves literals;
+  a single-var and a multi-var collision flagged in document order against their
+  first form; a distinct literal path and a textually identical repeat both cleared;
+  ≥20 templated-path non-vacuous floor). Test-only (`#[cfg(test)]`), no runtime/spec
+  change. `cargo test` 2882 green (was 2880; +2); `cargo build --release` ok — binary
+  (release): 5.1M (5,323,160 B; unchanged — test-only code), no new deps.
+
 - 2026-08-21 — Contract-test harness: added a **CamaraError response-example
   completeness** test (`src/registry.rs` `every_error_example_declares_code_and_message`)
   — a response example illustrating an error body (marked by an inline **integer**
