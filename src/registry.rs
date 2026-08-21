@@ -4099,6 +4099,108 @@ mod tests {
         out
     }
 
+    /// Enumerate every operation whose `responses:` object repeats a key —
+    /// reported as `"<METHOD> <path>: duplicate response key <key>"` (document
+    /// order, one entry per repeat) — without a YAML dep.
+    ///
+    /// A Responses Object is a YAML mapping keyed by outcome (`"200"`, `"404"`,
+    /// `default`, an `NXX` range, an `x-` extension), and YAML mapping keys MUST
+    /// be unique. A repeated key is last-wins: a second `'400':` block silently
+    /// discards the first, so a Redoc/Swagger/codegen client renders only the
+    /// later response and drops the earlier one — with no error and no missing
+    /// field to notice. A live copy-paste hazard in these scenario-table-heavy
+    /// specs, where an error branch is drafted by pasting a sibling response and
+    /// the pasted status key is left un-retargeted, so the operation now
+    /// documents one status twice and one intended outcome vanishes.
+    ///
+    /// The distinctness complement of the two existing response-key tests,
+    /// neither of which reads a key more than once:
+    /// `every_responses_object_key_is_a_valid_status` checks each key's *shape*
+    /// and `every_declared_response_has_a_description` checks each response *has*
+    /// a description — a duplicate key satisfies both (each occurrence is
+    /// individually well-formed and described) yet still loses a response. It
+    /// mirrors [`responses_with_invalid_status_key`]'s path-item/method scoping
+    /// exactly to reach each 8-space response-entry key under an operation's
+    /// 6-space `responses:` block; keys are unquoted before comparison, and every
+    /// key form (status code, `NXX`, `default`, `x-` extension) participates
+    /// since a duplicate of any is the same last-wins loss. The `seen` set is
+    /// per-operation, so the same status under two different operations is not a
+    /// duplicate.
+    fn operations_with_duplicate_response_status_keys(body: &str) -> Vec<String> {
+        const METHODS: [&str; 8] =
+            ["get", "put", "post", "delete", "patch", "options", "head", "trace"];
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let mut out = Vec::new();
+        let mut in_paths = false;
+        let mut path: Option<String> = None;
+        for (i, line) in lines.iter().enumerate() {
+            let is_top_level_key =
+                !line.is_empty() && !line.starts_with(char::is_whitespace);
+            if is_top_level_key {
+                in_paths = line.trim_end() == "paths:";
+                path = None;
+                continue;
+            }
+            if !in_paths {
+                continue;
+            }
+            if let Some(rest) = line.strip_prefix("  ") {
+                if !rest.starts_with(char::is_whitespace) && rest.starts_with('/') {
+                    let key = rest.trim_end().strip_suffix(':').unwrap_or(rest.trim_end());
+                    path = Some(key.to_string());
+                    continue;
+                }
+            }
+            let Some(current_path) = path.as_deref() else { continue };
+            if indent(line) != 4 {
+                continue;
+            }
+            let key = line.trim_start();
+            let Some(name) = key.strip_suffix(':') else { continue };
+            if name.contains(char::is_whitespace) || !METHODS.contains(&name) {
+                continue;
+            }
+            // Within this operation's block, find the 6-space `responses:` key,
+            // then collect each 8-space response-entry key under it, flagging the
+            // first repeat of each.
+            let mut in_responses = false;
+            let mut seen = std::collections::HashSet::new();
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                let li = indent(l);
+                if li <= 4 {
+                    break; // dedented out of this operation
+                }
+                if li == 6 {
+                    in_responses = l.trim_start().strip_suffix(':') == Some("responses");
+                    j += 1;
+                    continue;
+                }
+                if in_responses && li == 8 {
+                    if let Some(k) = l.trim_start().strip_suffix(':') {
+                        let status = k.trim_matches(|c| c == '"' || c == '\'');
+                        if !seen.insert(status.to_string()) {
+                            out.push(format!(
+                                "{} {}: duplicate response key {}",
+                                name.to_uppercase(),
+                                current_path,
+                                status
+                            ));
+                        }
+                    }
+                }
+                j += 1;
+            }
+        }
+        out
+    }
+
     /// The `METHOD /path` label of every operation a spec declares whose
     /// `responses:` object is present but documents no **success** (`2XX`)
     /// outcome — without a YAML dep.
@@ -9960,6 +10062,117 @@ components:
                 responses_with_invalid_status_key(api.body).is_empty(),
                 "{}: every `responses:` key must be a valid status code, `NXX`, \
                  `default`, or `x-` extension",
+                api.name
+            );
+            total_ops += operation_ids(api.body).len();
+        }
+        assert!(total_ops >= 100, "expected many operations across specs, got {total_ops}");
+    }
+
+    #[test]
+    fn every_operation_lists_distinct_response_status_keys() {
+        // Contract-harness invariant (OpenAPI / YAML structural rule): within one
+        // operation's `responses:` object, every key MUST be distinct. A Responses
+        // Object is a YAML mapping keyed by outcome; a repeated key is last-wins,
+        // so a second `'400':` block silently discards the first — a
+        // Redoc/Swagger/codegen client renders only the later response and drops
+        // the earlier one, with no error and no missing field to notice.
+        //
+        // This closes a gap the two sibling response-key tests leave open: a
+        // duplicate key passes `every_responses_object_key_is_a_valid_status`
+        // (each occurrence is a well-formed status) and
+        // `every_declared_response_has_a_description` (each occurrence has a
+        // description) — neither reads a key more than once — yet the operation
+        // still loses a documented outcome. No other contract test sees it either:
+        // the responses/operationId/path-templating/version/parity/`$ref` tests
+        // check an operation's required fields, path variables, identity, or
+        // wiring, never that its `responses:` keys are mutually distinct. A live
+        // copy-paste hazard in these scenario-heavy specs, where an error branch
+        // is drafted from a sibling response and the pasted status key is left
+        // un-retargeted. Verified true across all mounted specs before asserting.
+        for api in APIS {
+            let dups = operations_with_duplicate_response_status_keys(api.body);
+            assert!(
+                dups.is_empty(),
+                "{} spec repeats a key within an operation's `responses:` object (a \
+                 YAML last-wins key that silently drops a response): {:?}",
+                api.name,
+                dups
+            );
+        }
+    }
+
+    #[test]
+    fn operations_with_duplicate_response_status_keys_extraction_rules() {
+        // Unit-cover the `operations_with_duplicate_response_status_keys` extractor
+        // so the contract test above can't pass vacuously (an extractor returning
+        // an empty Vec for every body would make its assertion meaningless) and its
+        // scoping is pinned: only an 8-space key directly under an operation's
+        // `responses:` participates; the first repeat of each key is flagged in
+        // document order; distinct keys (incl. `default`) are not; the same status
+        // under two different operations is not a duplicate; and a status-looking
+        // key outside `paths:` is never a response key.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+        '400':
+          description: bad
+        '400':
+          description: bad again
+    post:
+      operationId: postA
+      responses:
+        '201':
+          description: created
+        default:
+          description: fallback
+  /b:
+    get:
+      operationId: getB
+      responses:
+        '200':
+          description: ok
+        '200':
+          description: dup ok
+components:
+  schemas:
+    Widget:
+      type: object
+      properties:
+        '200':
+          type: string
+";
+        // Flagged, in document order: `GET /a`'s repeated `'400'` and `GET /b`'s
+        // repeated `'200'`. Not flagged: `POST /a` (`201` and `default` are
+        // distinct); `GET /a`/`GET /b`'s shared `'200'` (different operations, each
+        // set is per-operation); and the `'200'` *property* under
+        // components.schemas.Widget (not under `paths:`, so never a response key).
+        assert_eq!(
+            operations_with_duplicate_response_status_keys(body),
+            vec![
+                "GET /a: duplicate response key 400".to_string(),
+                "GET /b: duplicate response key 200".to_string()
+            ]
+        );
+
+        // Non-vacuous floor: across every registered spec, no operation repeats a
+        // `responses:` key (the invariant the contract test asserts), and the
+        // corpus carries many operations, so a broken extractor can't hide behind
+        // an empty scan.
+        let mut total_ops = 0usize;
+        for api in APIS {
+            assert!(
+                operations_with_duplicate_response_status_keys(api.body).is_empty(),
+                "{}: every operation's `responses:` keys must be mutually distinct",
                 api.name
             );
             total_ops += operation_ids(api.body).len();

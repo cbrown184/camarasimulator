@@ -3332,6 +3332,19 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - a **distinct response-status-keys** contract test (`src/registry.rs`
+    `every_operation_lists_distinct_response_status_keys`) asserts that within one
+    operation's `responses:` object every key is distinct — a YAML mapping's keys MUST be
+    unique, and a repeated `'400':`/`'200':` is last-wins, so the second block silently drops
+    the first response (a codegen/Redoc client renders only the later one). The distinctness
+    complement of the two existing response-key tests: a duplicate passes
+    `every_responses_object_key_is_a_valid_status` (each occurrence well-formed) and
+    `every_declared_response_has_a_description` (each described) — neither reads a key twice.
+    New `operations_with_duplicate_response_status_keys` extractor mirrors
+    `responses_with_invalid_status_key`'s path-item/method scoping, collecting each 8-space
+    key under a 6-space `responses:` block (all forms: status/`NXX`/`default`/`x-`) and
+    flagging the first repeat per operation. Corpus: 0 drift (1396 response entries across 62
+    specs, all distinct). Unit-covered. Test-only, no spec change.
   - a **CAMARA auth-error-response** contract test (`src/registry.rs`
     `every_business_operation_declares_the_camara_auth_error_responses`) asserts that every
     operation a mounted **business** spec declares documents *both* the CAMARA-mandated `401`
@@ -5731,6 +5744,31 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-21 — Contract-test harness: added a **distinct response-status-keys** test
+  (`src/registry.rs` `every_operation_lists_distinct_response_status_keys`) — within one
+  operation's `responses:` object every key MUST be distinct. A Responses Object is a YAML
+  mapping keyed by outcome; a repeated key is last-wins, so a second `'400':`/`'200':` block
+  silently discards the first — a Redoc/Swagger/codegen client renders only the later
+  response and drops the earlier one, with no error and no missing field to notice. The
+  distinctness complement of the two existing response-key tests, neither of which reads a
+  key more than once: `every_responses_object_key_is_a_valid_status` checks each key's shape
+  and `every_declared_response_has_a_description` checks each response has a description — a
+  duplicate satisfies both (each occurrence well-formed and described) yet still loses a
+  documented outcome; no sibling responses/operationId/path-templating/`$ref` test sees it
+  either. New pure `operations_with_duplicate_response_status_keys` extractor reuses
+  `responses_with_invalid_status_key`'s path-item/method scoping exactly (4-space verb under a
+  2-space `/…` path under top-level `paths:`, the 6-space `responses:` opener, its 8-space
+  entry keys), unquotes each key, and flags the first repeat per operation via a per-operation
+  `seen` set — every key form participates (status code, `NXX`, `default`, `x-` extension)
+  since a duplicate of any is the same last-wins loss. Surveyed the corpus first: **1396**
+  response entries across **62** specs, all distinct → **0** drift, a live guard that fires the
+  moment a spec pastes a sibling response and leaves its status key un-retargeted. Unit-covered
+  (`operations_with_duplicate_response_status_keys_extraction_rules`: a repeated `'400'` and a
+  repeated `'200'` flagged in document order; a distinct `201`+`default` pair cleared; the same
+  `'200'` under two different operations not a duplicate; a `'200'` schema property outside
+  `paths:` ignored; ≥100-op non-vacuous floor). Test-only (`#[cfg(test)]`), no runtime/spec
+  change. `cargo test` 2870 green (was 2868; +2); `cargo build --release` ok, no new deps.
+  — binary (release): 5.1M (5,323,160 B; unchanged — test-only code).
 - 2026-08-21 — Contract-test harness: added a **Header-Object name/in omission** test
   (`src/registry.rs` `every_component_header_omits_name_and_in`) — every Header Object a
   spec defines under `components.headers:` MUST NOT declare a `name` or an `in` field.
