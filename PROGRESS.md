@@ -5827,6 +5827,39 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-21 — Contract-test harness: added a **CamaraError response-example
+  completeness** test (`src/registry.rs` `every_error_example_declares_code_and_message`)
+  — a response example illustrating an error body (marked by an inline **integer**
+  `status:` field) MUST also declare `code:` and `message:` siblings in the same
+  example mapping. The CAMARA error model (`specs/shared/errors.yaml` `CamaraError`,
+  DESIGN §8) makes `status`/`code`/`message` all **required**, so an error sample
+  carrying only `status` (or `status` + one of the two — a body truncated in a paste)
+  is one the CamaraError schema's own `required` list rejects: a Redoc/Swagger "try it"
+  prefill and a codegen sample hand a caller an error body that can never validate.
+  The `code`/`message` companion of `every_error_example_status_matches_its_response_key`
+  (which reads the example's `status` field against its enclosing response key but never
+  inspects the *other* body fields) and distinct from
+  `every_object_example_lists_its_required_properties` (which fires only on a same-object
+  `required:` block sibling — an error example `$ref`-ing `CamaraError` carries its
+  `required` list across the ref, out of that test's reach). Unlike the status-match
+  test, the enclosing response key is irrelevant here, so a `default:` response's
+  trio-less error example is inspected too. New pure
+  `error_examples_missing_code_or_message` extractor: reuses the suite's integer-`status`
+  + `inside_example` recognition (block-opener/non-integer-enum `status` skipped, ancestor
+  `example`/`examples`/`value` walk), then reads the mapping's direct sibling keys at the
+  `status:` line's own indent (down-then-up, dedent-bounded so a nested/following mapping
+  never pairs) and flags a `status:` missing `code` or `message`. Surveyed the corpus
+  first: **274** integer-`status` error examples across the specs, every one carrying
+  the full `status`/`code`/`message` trio → **0** drift, a live guard that fires the
+  moment a pasted error example drops `code`/`message`. Unit-covered
+  (`error_example_code_message_extraction_rules`: a missing-`message` and a missing-`code`
+  example plus a trio-less `default:`-response example flagged in document order; a
+  full-trio example, a `status`-less success example, a non-integer `status: ACTIVE`, a
+  `status:` schema property opening a block, and a schema-level full-trio example all
+  cleared; ≥100-example non-vacuous floor). Test-only (`#[cfg(test)]`), no runtime/spec
+  change. `cargo test` 2880 green (was 2878; +2); `cargo build --release` ok — binary
+  (release): 5.1M (5,323,160 B; unchanged — test-only code), no new deps.
+
 - 2026-08-21 — Contract-test harness: added an **`additionalProperties`
   object-type placement** test (`src/registry.rs`
   `every_additional_properties_sits_on_an_object_type`) — every

@@ -52818,6 +52818,335 @@ components:
         );
     }
 
+    /// The 1-based line numbers, in document order, of every CamaraError response
+    /// **example** whose body declares an integer `status:` field but omits a `code:`
+    /// or `message:` sibling in the same example mapping, without a YAML dep.
+    ///
+    /// The CAMARA error model (`specs/shared/errors.yaml` `CamaraError`, DESIGN §8)
+    /// makes all three of `status`, `code`, and `message` **required** on every error
+    /// body, so a sample illustrating an error response MUST carry the full trio. An
+    /// error example showing only `status` (and perhaps just one of `code`/`message`)
+    /// — a body truncated in a paste, or one left half-filled while a sibling case was
+    /// copied — is a self-contradictory spec: the documented sample is a body the
+    /// CamaraError schema's own `required` list rejects, so a Redoc/Swagger "try it"
+    /// prefill and a codegen client's generated sample hand a caller an error body the
+    /// schema can never legally hold. A routine hazard in these scenario-table-heavy
+    /// specs, where each error case is one hand-written example copied from a sibling.
+    ///
+    /// Invisible to every existing test: `every_error_example_status_matches_its_response_key`
+    /// compares the example's `status` field to its enclosing response key but never
+    /// inspects which *other* fields the body carries, and
+    /// `every_object_example_lists_its_required_properties` fires only when the example
+    /// declares a same-object `required:` block-sequence sibling — an error example
+    /// `$ref`-ing `CamaraError` carries its `required` list across the ref, out of that
+    /// test's reach. This is the only test that checks an error example's field set for
+    /// the mandatory CamaraError trio. Unlike the status-match test, the enclosing
+    /// response key is irrelevant here, so a `default:` response's error example (no
+    /// numeric key) is inspected too.
+    ///
+    /// An error example is recognised exactly as the status-match extractor recognises
+    /// one: an inline **integer** `status:` scalar (a block-opener whose value is empty
+    /// — a schema property literally named `status` — or a non-integer lifecycle enum
+    /// such as `AVAILABLE` is skipped) sitting inside an `example:`/`examples:`/`value:`
+    /// payload (some ancestor key up the indent ladder is `example`/`examples`/`value`,
+    /// the suite's `inside_example` walk). Its sibling keys — the direct members of the
+    /// same example mapping — are read at the `status:` line's own indent, scanned down
+    /// then up and dedent-bounded so a nested object's members or a following sibling
+    /// example never pair. The `status:` line is flagged once when `code` or `message`
+    /// (or both) is absent from that sibling set. A `status:` outside any example
+    /// payload (a schema property, an operation's own field) is skipped — it is not an
+    /// error-body sample.
+    fn error_examples_missing_code_or_message(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        // The inline integer value of a `status:` line (inline comment + surrounding
+        // quotes stripped); `None` when the line is a different key, opens a block, or
+        // carries a non-integer scalar (a lifecycle enum, a quoted non-number).
+        let status_int = |l: &str| -> Option<i64> {
+            let (k, v) = l.trim_start().split_once(':')?;
+            if k.trim() != "status" {
+                return None;
+            }
+            let v = v
+                .split('#')
+                .next()
+                .unwrap_or(v)
+                .trim()
+                .trim_matches('"')
+                .trim_matches('\'');
+            v.parse::<i64>().ok()
+        };
+        // True when line `i` (indent `c`) sits inside an `example:`/`examples:`/`value:`
+        // payload — some enclosing container key up the indent ladder is one of those
+        // (mirroring the status-match extractor's ancestor walk).
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" || key == "value" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        // The direct sibling key names of the example mapping containing line `i`
+        // (indent `c`): scan down through the mapping's block then up, each bounded by
+        // the first line indented *below* `c` (the dedent that closes the mapping),
+        // collecting keys at *exactly* `c`. A deeper nested object's members and a
+        // following sibling mapping's keys never enter the set.
+        let sibling_keys = |i: usize, c: usize| -> Vec<String> {
+            let mut keys = Vec::new();
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c {
+                    if let Some((k, _)) = l.trim_start().split_once(':') {
+                        keys.push(k.trim().to_string());
+                    }
+                }
+                j += 1;
+            }
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c {
+                    if let Some((kk, _)) = l.trim_start().split_once(':') {
+                        keys.push(kk.trim().to_string());
+                    }
+                }
+            }
+            keys
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            if status_int(line).is_none() {
+                continue;
+            }
+            let c = indent(line);
+            if !inside_example(i, c) {
+                continue; // a `status` field outside any example payload
+            }
+            let keys = sibling_keys(i, c);
+            let has_code = keys.iter().any(|k| k == "code");
+            let has_message = keys.iter().any(|k| k == "message");
+            if !has_code || !has_message {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_error_example_declares_code_and_message() {
+        // Contract-harness invariant (CAMARA error model, DESIGN §8): the CamaraError
+        // body makes `status`, `code`, and `message` all required, so where a response
+        // example illustrates an error body — marked by an integer `status` field — that
+        // body MUST also declare `code` and `message`. A sample carrying only `status`
+        // (or `status` + one of the two) — an error example truncated in a paste — is a
+        // self-contradictory spec: the documented body is one the CamaraError schema's
+        // own `required` list rejects, so a Redoc/Swagger "try it" prefill and a codegen
+        // sample hand a caller an error body that can never legally validate. Verified
+        // true across all mounted specs before asserting.
+        for api in APIS {
+            let bad = error_examples_missing_code_or_message(api.body);
+            assert!(
+                bad.is_empty(),
+                "{} spec declares a CamaraError response example (integer `status` field) \
+                 that omits a `code` or `message` sibling — an error body the CamaraError \
+                 schema's required trio rejects — at `status:` line(s): {:?}",
+                api.name,
+                bad
+            );
+        }
+    }
+
+    #[test]
+    fn error_example_code_message_extraction_rules() {
+        // Unit-cover `error_examples_missing_code_or_message` so the contract test above
+        // can't pass vacuously and its accept/reject boundary is pinned: an error example
+        // carrying the full `status`/`code`/`message` trio passes; one missing `message`
+        // and one missing `code` are flagged in document order; a `default:` response's
+        // trio-less error example is flagged (the enclosing key is irrelevant here); a
+        // success example with no `status` field is skipped; a non-integer `status`
+        // (a lifecycle enum) is skipped; a `status:` schema *property* opening a block is
+        // skipped; and a schema-level `example` with the full trio passes.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              example:
+                latestSimChange: '2024-01-01T00:00:00Z'
+                monitoredPeriod: 10
+        '400':
+          description: bad
+          content:
+            application/json:
+              example:
+                status: 400
+                code: INVALID_ARGUMENT
+                message: bad input
+        '404':
+          description: nf
+          content:
+            application/json:
+              example:
+                status: 404
+                code: NOT_FOUND
+        '409':
+          description: c
+          content:
+            application/json:
+              examples:
+                conflict:
+                  value:
+                    status: 409
+                    message: dup
+        default:
+          description: d
+          content:
+            application/json:
+              example:
+                status: 500
+  /b:
+    post:
+      operationId: postB
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              example:
+                status: ACTIVE
+components:
+  schemas:
+    Info:
+      type: object
+      properties:
+        status:
+          type: integer
+      example:
+        status: 200
+        code: OK
+        message: fine
+";
+        // Flagged, in document order: line 30 (`status: 404` — no `message` sibling),
+        // line 39 (`status: 409` under a named `examples` entry — no `code` sibling), and
+        // line 46 (`status: 500` under the `default:` response — neither sibling). Not
+        // flagged: line 22 (`status: 400` with the full trio); lines 15-16 (a `'200'`
+        // success example with no `status` field); line 56 (`status: ACTIVE`, not an
+        // integer); line 62 (a `status:` schema property opening a block, no inline
+        // value); and line 65 (a schema-level `example` carrying the full trio).
+        assert_eq!(error_examples_missing_code_or_message(body), vec![30, 39, 46]);
+
+        // Non-vacuous floor: across every registered spec every CamaraError response
+        // example declares its `code` and `message` (the invariant the contract test
+        // asserts), and the corpus actually declares many integer-`status` error
+        // examples — so the completeness path runs on real data and a broken
+        // (always-empty) extractor can't hide behind a corpus that never inlines an
+        // error body. Count integer-`status` examples with an independent ancestor walk
+        // that never performs the extractor's `code`/`message` membership check.
+        let mut error_examples = 0usize;
+        for api in APIS {
+            assert!(
+                error_examples_missing_code_or_message(api.body).is_empty(),
+                "{}: every CamaraError response example must declare `code` and `message`",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            for (i, l) in lines.iter().enumerate() {
+                let Some((k, v)) = l.trim_start().split_once(':') else {
+                    continue;
+                };
+                if k.trim() != "status" {
+                    continue;
+                }
+                let v = v
+                    .split('#')
+                    .next()
+                    .unwrap_or(v)
+                    .trim()
+                    .trim_matches('"')
+                    .trim_matches('\'');
+                if v.parse::<i64>().is_err() {
+                    continue;
+                }
+                let c = indent(l);
+                let mut level = c;
+                let mut j = i;
+                let mut in_ex = false;
+                while j > 0 {
+                    j -= 1;
+                    let x = lines[j];
+                    if x.trim().is_empty() {
+                        continue;
+                    }
+                    let li = indent(x);
+                    if li < level {
+                        let key = x
+                            .trim_start()
+                            .split_once(':')
+                            .map(|(a, _)| a.trim())
+                            .unwrap_or("");
+                        if key == "example" || key == "examples" || key == "value" {
+                            in_ex = true;
+                        }
+                        level = li;
+                        if li == 0 {
+                            break;
+                        }
+                    }
+                }
+                if in_ex {
+                    error_examples += 1;
+                }
+            }
+        }
+        assert!(
+            error_examples >= 100,
+            "expected many CamaraError response examples across specs, got {error_examples}"
+        );
+    }
+
     /// The 1-based line numbers, in document order, of every **External
     /// Documentation Object** an `externalDocs:` field opens that does not declare
     /// a non-empty `url`, without a YAML dep.
