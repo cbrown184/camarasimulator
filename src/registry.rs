@@ -23316,6 +23316,424 @@ components:
         );
     }
 
+    /// The 1-based line numbers, in document order, of every `enum:` keyword whose block
+    /// or flow sequence carries a string member whose character length falls outside a
+    /// sibling string bound — `minLength` or `maxLength` — declared in the same Schema
+    /// Object, without a YAML dep. The **enum-value** analogue of
+    /// `examples_outside_their_length_bounds` (which guards a single `example` string's
+    /// length): where the example test bounds the *sample* value, this bounds every
+    /// *permitted* value the enum enumerates.
+    ///
+    /// In OpenAPI 3.0.x (JSON Schema) `enum` restricts a field to a fixed value set, and
+    /// each member must itself satisfy the schema's other facets. Where the object bounds
+    /// a string with `minLength`/`maxLength`, an enum member shorter than `minLength` or
+    /// longer than `maxLength` is a self-contradictory schema: the schema lists a value
+    /// its own length validator rejects, so a client that selects that member is handed a
+    /// value the bound can never legally hold. `minLength`/`maxLength` count characters, so
+    /// length is measured in Unicode scalar values (`chars().count()`), matching a
+    /// validator.
+    ///
+    /// Only an `enum` that is a YAML **sequence** — an inline flow (`enum: [A, B]`) or a
+    /// block sequence (`enum:` opening a block whose children are `- ` items) — and that
+    /// declares at least one same-object string-length bound sibling is inspected; each
+    /// bound is scanned at the enum's own indent, down through the object's block then up,
+    /// dedent-bounded exactly like `examples_outside_their_length_bounds`, so a nested or
+    /// following sibling object's bound never pairs, and read only when it is a
+    /// non-negative-integer scalar. Each member's length is measured only when it is a
+    /// string — a quoted scalar (quotes stripped), or a bare token that is **not** a
+    /// number/`true`/`false`/`null` (a numeric/boolean member has no character length, so a
+    /// stray length bound on a numeric enum never flags). Skipped: an `enum:` opening a
+    /// block whose first child is *not* a sequence item (a property literally named `enum`,
+    /// or a mapping); an inline flow that never closes on its line (a multi-line flow, left
+    /// un-measured rather than mis-measured); an enum with no length-bound sibling; and an
+    /// `enum:` nested inside an outer `example:`/`examples:` payload (sample data, not a
+    /// schema keyword). The comparison is inclusive — only a member strictly below
+    /// `minLength` or strictly above `maxLength` is flagged.
+    fn enum_values_outside_their_length_bounds(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        // The inline scalar of a `name:` key (inline comment stripped; surrounding quotes
+        // preserved); `None` when the line is a different key or opens a block.
+        let raw_inline = |l: &str, name: &str| -> Option<String> {
+            let (k, v) = l.trim_start().split_once(':')?;
+            if k.trim() != name {
+                return None;
+            }
+            let v = v.split('#').next().unwrap_or(v).trim();
+            if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            }
+        };
+        // A same-indent non-negative-integer length bound sibling `key` in the same object
+        // as line `i` (indent `c`): scan down through the object's block then up,
+        // dedent-bounded so a nested or following object's bound never pairs. Mirrors
+        // `examples_outside_their_length_bounds::sibling_len`.
+        let sibling_len = |i: usize, c: usize, key: &str| -> Option<usize> {
+            let parse_len = |l: &str| -> Option<usize> {
+                let raw = raw_inline(l, key)?;
+                if raw.starts_with('"') || raw.starts_with('\'') {
+                    return None; // quoted → not a plain integer
+                }
+                raw.parse::<usize>().ok()
+            };
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c {
+                    if let Some(n) = parse_len(l) {
+                        return Some(n);
+                    }
+                }
+                j += 1;
+            }
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c {
+                    if let Some(n) = parse_len(l) {
+                        return Some(n);
+                    }
+                }
+            }
+            None
+        };
+        // True when line `i` (indent `c`) sits inside an outer `example:`/`examples:`
+        // payload — some enclosing container key up the indent ladder is
+        // `example`/`examples` — so an `enum` key there is sample data, not a schema
+        // keyword. Mirrors `examples_outside_their_length_bounds::inside_example`.
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        // The character length of an enum *string* member; `None` when the member is not a
+        // string (an unquoted number / `true` / `false` / `null` carries no string length,
+        // so a stray length bound on a numeric enum never flags). A quoted member has its
+        // one matching surrounding quote pair stripped before counting.
+        let member_str_len = |item: &str| -> Option<usize> {
+            let t = item.trim();
+            if let Some(inner) = t
+                .strip_prefix('"')
+                .and_then(|s| s.strip_suffix('"'))
+                .or_else(|| t.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')))
+            {
+                return Some(inner.chars().count());
+            }
+            if t.is_empty() || t.parse::<f64>().is_ok() || matches!(t, "true" | "false" | "null") {
+                return None;
+            }
+            Some(t.chars().count())
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some((k, v)) = line.trim_start().split_once(':') else {
+                continue;
+            };
+            if k.trim() != "enum" {
+                continue;
+            }
+            let c = indent(line);
+            if inside_example(i, c) {
+                continue;
+            }
+            let inline = v.split('#').next().unwrap_or(v).trim();
+            let mut members: Vec<String> = Vec::new();
+            if inline.starts_with('[') {
+                // Inline flow sequence; only a flow that closes on its own line is parsed
+                // (a multi-line flow is left un-measured rather than mis-measured).
+                let Some(end) = inline.find(']') else {
+                    continue;
+                };
+                let inner = &inline[1..end];
+                if !inner.trim().is_empty() {
+                    members.extend(inner.split(',').map(|s| s.trim().to_string()));
+                }
+            } else if inline.is_empty() {
+                // Block sequence: `- ` items at indent >= the enum key, stopping at the
+                // first non-item line at indent <= the enum key (a sibling such as the
+                // length bound) or any dedent below it. A block whose first non-blank child
+                // is not a `- ` item (a property literally named `enum`, or a mapping) is
+                // not a sequence and yields none.
+                let first_child_is_item = lines[i + 1..]
+                    .iter()
+                    .find(|l| !l.trim().is_empty())
+                    .is_some_and(|l| l.trim_start().starts_with("- "));
+                if !first_child_is_item {
+                    continue;
+                }
+                let mut j = i + 1;
+                while j < lines.len() {
+                    let l = lines[j];
+                    if l.trim().is_empty() {
+                        j += 1;
+                        continue;
+                    }
+                    let li = indent(l);
+                    if li < c {
+                        break;
+                    }
+                    if let Some(item) = l.trim_start().strip_prefix("- ") {
+                        members.push(item.split('#').next().unwrap_or(item).trim().to_string());
+                    } else if li <= c {
+                        break;
+                    }
+                    j += 1;
+                }
+            } else {
+                continue; // an inline scalar enum value is not a sequence
+            }
+            if members.is_empty() {
+                continue;
+            }
+            let min = sibling_len(i, c, "minLength");
+            let max = sibling_len(i, c, "maxLength");
+            if min.is_none() && max.is_none() {
+                continue;
+            }
+            let violates = members.iter().any(|m| {
+                member_str_len(m).is_some_and(|len| {
+                    min.is_some_and(|lo| len < lo) || max.is_some_and(|hi| len > hi)
+                })
+            });
+            if violates {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_enum_value_respects_its_string_length_bounds() {
+        // Contract-harness invariant (OpenAPI 3.0.x / JSON-Schema structural rule): where a
+        // Schema Object declares an `enum` sequence beside a `minLength` and/or `maxLength`,
+        // EVERY string member's character length MUST lie within those bounds. An `enum`
+        // fixes the field's permitted value set, so a member shorter than `minLength` or
+        // longer than `maxLength` is a self-contradictory schema: the schema lists a value
+        // its own length validator rejects, so a client selecting that member is handed a
+        // value the bound can never legally hold.
+        //
+        // The **enum-value** complement of `every_example_respects_its_string_length_bounds`
+        // (which guards the single sample `example`): that test bounds one advertised
+        // sample, this bounds every permitted value. No existing test compares an enum
+        // member's *length* to its bounds — `every_enum_value_matches_its_schema_type`
+        // checks each member's type, `every_enum_lists_unique_non_empty_values` checks
+        // members are distinct and non-empty, and the size-bound tests
+        // (`every_size_bound_is_a_non_negative_integer`,
+        // `every_numeric_bound_is_ordered_low_to_high`) check the bounds' own domain and
+        // ordering, never against an enum member. Verified true across all mounted specs
+        // before asserting.
+        for api in APIS {
+            let offenders = enum_values_outside_their_length_bounds(api.body);
+            assert!(
+                offenders.is_empty(),
+                "{} spec declares an `enum` member whose length falls outside its sibling \
+                 `minLength`/`maxLength` bound (a permitted value the bound's own validator \
+                 would reject) at `enum:` line(s): {:?}",
+                api.name,
+                offenders
+            );
+        }
+    }
+
+    #[test]
+    fn enum_length_bound_extraction_rules() {
+        // Unit-cover `enum_values_outside_their_length_bounds` so the contract test above
+        // can't pass vacuously and its detection is pinned: an enum all of whose members
+        // are within bounds passes (block and flow, and the bound declared above *or*
+        // below); a block enum with a member below a `minLength` and a flow enum with a
+        // member above a `maxLength` are flagged in document order; a member whose length
+        // equals a bound passes (inclusive); a numeric enum with a stray length bound is
+        // skipped (numbers have no string length); an enum with no length-bound sibling is
+        // skipped; an `enum:` nested inside an outer `example:` payload is skipped; an enum
+        // in one property never pairs with a following property's bound across the dedent;
+        // and a property literally named `enum` (opening a mapping) is skipped.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    GoodBlock:
+      type: string
+      minLength: 2
+      maxLength: 8
+      enum:
+        - ab
+        - hello
+    TooShortBlock:
+      type: string
+      minLength: 4
+      enum:
+        - ok
+        - fine
+    TooLongFlow:
+      type: string
+      maxLength: 3
+      enum: [ok, toolong]
+    BoundBelow:
+      type: string
+      enum:
+        - abcdef
+      minLength: 2
+    EqualBound:
+      type: string
+      minLength: 3
+      maxLength: 3
+      enum:
+        - abc
+    Numeric:
+      type: integer
+      minLength: 5
+      enum:
+        - 1
+        - 22
+    NoBound:
+      type: string
+      enum:
+        - x
+    InExample:
+      type: object
+      example:
+        minLength: 5
+        enum:
+          - ab
+    Split:
+      type: object
+      properties:
+        a:
+          enum:
+            - x
+        b:
+          type: string
+          minLength: 5
+    NamedEnum:
+      type: object
+      properties:
+        enum:
+          type: string
+          minLength: 5
+";
+        // Flagged, in document order: line 24 (`TooShortBlock.enum` — member `ok` length
+        // 2 < its `minLength: 4`) and line 30 (`TooLongFlow.enum: [ok, toolong]` — member
+        // `toolong` length 7 > its `maxLength: 3`). Not flagged: `GoodBlock` (both in
+        // [2,8]); `BoundBelow` (`abcdef` length 6 >= a `minLength: 2` declared *below* it —
+        // down-scan, no max); `EqualBound` (`abc` length 3 == both bounds, inclusive);
+        // `Numeric` (integer members `1`/`22` have no string length, so the stray
+        // `minLength: 5` never applies); `NoBound` (no length-bound sibling); `InExample`
+        // (its `enum` sits inside the outer `example:` payload); `Split.a.enum`, whose only
+        // candidate `minLength: 5` sits in the following property `Split.b` past a dedent,
+        // so the two never pair; and `NamedEnum` (a property literally named `enum:`
+        // opening a schema block, not an enum sequence).
+        assert_eq!(enum_values_outside_their_length_bounds(body), vec![24, 30]);
+
+        // Non-vacuous floor: across every registered spec every enum member with a sibling
+        // length bound lies within it (the invariant the contract test asserts), and the
+        // corpus actually declares such a pair (the Verified Caller `strategy` enum beside
+        // `maxLength: 32`) — so the length-comparison path runs on real data and a broken
+        // (always-empty) extractor can't hide behind a corpus that never pairs an enum with
+        // a length bound. Count pairs with a window detector independent of the extractor's
+        // length comparison.
+        let mut bounded_enums = 0usize;
+        for api in APIS {
+            assert!(
+                enum_values_outside_their_length_bounds(api.body).is_empty(),
+                "{}: every enum member must lie within its sibling minLength/maxLength bound",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            let opens_sequence = |i: usize, l: &str| {
+                l.trim_start().split_once(':').is_some_and(|(k, v)| {
+                    if k.trim() != "enum" {
+                        return false;
+                    }
+                    let v = v.split('#').next().unwrap_or(v).trim();
+                    v.starts_with('[')
+                        || (v.is_empty()
+                            && lines
+                                .get(i + 1)
+                                .map(|n| n.trim_start().starts_with("- "))
+                                .unwrap_or(false))
+                })
+            };
+            let is_int_key = |l: &str, name: &str| {
+                l.trim_start().split_once(':').is_some_and(|(k, v)| {
+                    k.trim() == name
+                        && v.split('#')
+                            .next()
+                            .unwrap_or(v)
+                            .trim()
+                            .parse::<usize>()
+                            .is_ok()
+                })
+            };
+            for (i, l) in lines.iter().enumerate() {
+                if !opens_sequence(i, l) {
+                    continue;
+                }
+                let c = indent(l);
+                let lo = i.saturating_sub(8);
+                let hi = (i + 8).min(lines.len());
+                let has_bound = (lo..hi).any(|j| {
+                    j != i
+                        && indent(lines[j]) == c
+                        && (is_int_key(lines[j], "minLength") || is_int_key(lines[j], "maxLength"))
+                });
+                if has_bound {
+                    bounded_enums += 1;
+                }
+            }
+        }
+        assert!(
+            bounded_enums >= 1,
+            "expected at least one enum+length-bound sibling pair across specs, got {bounded_enums}"
+        );
+    }
+
     /// The 1-based line numbers, in document order, of every array `example:` keyword
     /// whose item count falls outside a sibling array-size bound — `minItems` or
     /// `maxItems` — declared in the same Schema Object, without a YAML dep. The array-

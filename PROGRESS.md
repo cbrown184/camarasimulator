@@ -5669,6 +5669,39 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-21 — Contract-test harness: added an **enum-member string-length-bound
+  conformance** test (`src/registry.rs`
+  `every_enum_value_respects_its_string_length_bounds`) — where a mounted spec declares an
+  `enum` sequence beside a **same-indent** `minLength`/`maxLength`, every **string** member's
+  character length MUST lie within those bounds. An `enum` fixes the field's permitted value
+  set, so a member shorter than `minLength` or longer than `maxLength` is a self-contradictory
+  schema whose own length validator rejects a value the schema itself lists as legal (a client
+  that selects that member is handed an unusable value). The **enum-value complement of
+  `every_example_respects_its_string_length_bounds`**: that test bounds the single advertised
+  *sample*, this bounds every *permitted* value — a genuinely new dimension. No existing test
+  compares an enum member's *length* to its bounds: `every_enum_value_matches_its_schema_type`
+  checks member *type*, `every_enum_lists_unique_non_empty_values` checks members are distinct
+  and non-empty, and the size-bound tests (`every_size_bound_is_a_non_negative_integer`,
+  `every_numeric_bound_is_ordered_low_to_high`) check the bounds' own domain/ordering, never
+  against a member — so a too-long/too-short enum member was previously unchecked. New pure
+  `enum_values_outside_their_length_bounds` extractor: collects an enum's members (inline flow
+  `enum: [A, B]` that closes on its line, or a block sequence whose first non-blank child is a
+  `- ` item), reuses `examples_outside_their_length_bounds`' `sibling_len` (same-indent
+  non-negative-integer bound, down-then-up dedent-bounded) and `inside_example` guards, and
+  measures each member's length only when it is a string — a quoted scalar (quotes stripped) or
+  a bare token that is **not** a number/`true`/`false`/`null` (so a stray length bound on a
+  numeric enum never flags). Surveyed the corpus first: the only enum+length-bound pair is
+  Verified Caller `strategy` (`enum: [SMS, BRAND_DISPLAY]` beside `maxLength: 32`; 3/13 ≤ 32) →
+  0 drift; a live guard that fires the moment a spec adds an over-/under-long enum member.
+  Unit-covered (`enum_length_bound_extraction_rules`: a block member below `minLength` and a
+  flow member above `maxLength` flagged in document order; a within-bounds block+flow enum, a
+  member equal to a bound (inclusive), a numeric enum with a stray `minLength`, a bound declared
+  *below* the enum (down-scan), a no-bound enum, an enum inside an outer `example:` payload, a
+  cross-property split across a dedent, and a property literally named `enum:` opening a mapping
+  all cleared; ≥1-pair non-vacuous floor — the Verified Caller pair). Test-only
+  (`#[cfg(test)]` module), so no runtime behaviour change and no spec change. `cargo test` 2848
+  green (was 2846; +2), `cargo build --release` green, no new deps. — binary (release): 5.1M
+  (5,323,160 B; unchanged — test-only code).
 - 2026-08-21 — Contract-test harness: added a **`uniqueItems: true` array-example
   uniqueness** conformance test (`src/registry.rs`
   `every_array_example_with_unique_items_has_distinct_elements`) — where a mounted spec
