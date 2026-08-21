@@ -5669,6 +5669,42 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-21 — Contract-test harness: added a **version-4 UUID (mixed-case, version nibble
+  pinned to `4`)-`pattern` example-conformance** contract test (`src/registry.rs`
+  `every_uuid_v4_pattern_example_conforms_to_the_uuid_v4_pattern`) — where a mounted spec
+  declares an inline `example` beside a **same-indent** `pattern:
+  ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$` (the
+  Sponsored Data `callbackToken` field — a version-4 UUID webhook security token), the example
+  MUST match it. A UUID example whose version nibble is not `4`, whose variant nibble is outside
+  `8/9/a/b`, or that is otherwise not a hyphenated 8-4-4-4-12 hex string is a self-contradictory
+  schema whose own validator rejects the sample it advertises. The **thirty-third member of the
+  `pattern`-conformance family** and the **version-4-pinned mixed-case sibling of the UUID member**:
+  `matches_uuid_v1to5_pattern` accepts versions `1..=5` but only *lowercase* hex, whereas this
+  accepts *only* version `4` but *admits uppercase* hex — so a lowercase version-1 UUID (legal for
+  v1–5, rejected here) and an uppercase version-4 UUID (legal here, rejected by v1–5) are each the
+  fault only one member can catch, and the two `pattern` strings differ so they never cross-pair.
+  Unlike most family members this field **does** carry a `format: uuid` sibling, but that check is
+  shape-only (accepts any version/variant nibble), so the version-4 pinning stays otherwise
+  unchecked. New pure `matches_uuid_v4_pattern` (len 36; separators at 8/13/18/23; index 14 == `4`;
+  index 19 ∈ `8/9/a/A/b/B`; every other index `is_ascii_hexdigit`; no regex/YAML dep) +
+  `uuid_v4_pattern_examples_malformed` extractor cloning `client_id_pattern_examples_malformed`'s
+  down-then-up dedent-bounded same-indent scoping (so the folded `description` block the corpus
+  places between the `pattern` and the `example` is stepped over), keyed on `UUID_V4_PATTERN`.
+  Unit-covered (`uuid_v4_pattern_example_extraction_rules`: matcher accepts corpus value /
+  uppercase-hex v4 / variant-`b`, rejects version-3 / version-6 / variant-`c` / variant-`7` /
+  non-hex / hyphenless / empty; explicit cross-member distinctness vs `matches_uuid_v1to5_pattern`
+  both ways; a version-3 and a wrong-variant and a below-pattern non-hex `example` flagged in
+  document order across a folded description; a good below-folded value, an uppercase value, a
+  no-`pattern` sibling, the strict-lowercase **v1–5**-`pattern` sibling out of scope proving the two
+  UUID patterns never cross-pair, a nested-`example` payload, a cross-property split, and a
+  block-opening `example:` property all cleared; ≥1-pair non-vacuous floor — Sponsored Data is the
+  only mounted spec with this pattern). Surveyed the corpus first: 1 example+v4-UUID-`pattern` pair
+  (sponsored-data `callbackToken`, `550e8400-e29b-41d4-a716-446655440000`) → 0 drift; a live guard
+  that fires the moment a spec adds a malformed version-4-UUID example. Test-side only — no
+  request/response/behaviour change, so no vendored-spec edits; the matcher, extractor and both
+  tests live in the `#[cfg(test)]` module, so nothing ships in the binary. `cargo test` 2840 green
+  (was 2838; +2), `cargo build --release` green, no new deps. — binary (release): 5.1M (5,323,160 B;
+  unchanged).
 - 2026-08-20 — Contract-test harness: added a **client-id (`^[a-zA-Z0-9_\-]{1,128}$`)-`pattern`
   example-conformance** contract test (`src/registry.rs`
   `every_client_id_pattern_example_conforms_to_the_client_id_pattern`) — where a mounted spec
