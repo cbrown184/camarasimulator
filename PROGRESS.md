@@ -5737,12 +5737,59 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     satisfies it. Unit-covered (`request_bodies_missing_required_flag_extraction_rules`) with a ≥50
     request-body floor. Surveyed the corpus first (106 request bodies, all with an explicit boolean
     `required`) → 0 drift.
+  - a **distinct inline-`examples:`-map example-name** contract test (`src/registry.rs`
+    `every_examples_map_lists_distinct_example_names`) asserts that a Media Type / Parameter /
+    Header Object's inline `examples:` field — a YAML mapping keyed by example name — never lists
+    the same name twice. A repeated key is last-wins, so the earlier Example Object's
+    `summary`/`value` is dropped silently and a Redoc/Swagger "examples" dropdown shows one fewer
+    scenario than the author documented. The Media-Type-examples twin of
+    `properties_objects_with_duplicate_names` / the components-keys test: the same silent
+    last-wins hazard on the inline map. Complements `every_components_object_lists_distinct_component_keys`
+    (which already guards the reusable `components.examples` section — this extractor skips a
+    `components:`-parented `examples:`) and `every_example_object_declares_a_value` (which checks
+    each named example *has* a `value`, never that the names are distinct). New pure
+    `examples_maps_with_duplicate_names` extractor (block-opening `examples:` at indent C, out-of-scope
+    when its nearest ancestor is `components:` at column 0 or it sits inside an `example:`/`examples:`
+    payload; collects the example names at the first-child indent D, flags the first repeat per map).
+    Surveyed the corpus first: 278 inline `examples:` maps, all names distinct → 0 drift, a live guard.
+    Unit-covered (`examples_map_duplicate_name_extraction_rules`: a repeated `healthy` flagged with the
+    map's line; a distinct `one`/`two` map cleared; the `components.examples` section out of scope; each
+    Example Object's own `summary`/`value` never a name; ≥100 named-example non-vacuous floor). Test-only,
+    no spec change.
   Full response-vs-schema validation still TODO (would need a YAML/JSON-Schema
   validator — a dependency trade-off, deferred).
 
 ---
 
 ## Scan journal
+
+- 2026-08-21 — Contract-test harness: added a **distinct inline-`examples:`-map
+  example-name** test (`src/registry.rs` `every_examples_map_lists_distinct_example_names`) —
+  a Media Type / Parameter / Header Object's inline `examples:` field is a YAML mapping keyed
+  by example name, so a mounted spec MUST NOT list the same name twice. A repeated key is
+  last-wins: the earlier Example Object (its `summary`/`value`) is dropped without a trace, so
+  a Redoc/Swagger "examples" dropdown renders one fewer scenario than the author documented —
+  invisible to every existing test. The Media-Type-examples twin of
+  `properties_objects_with_duplicate_names` (a `properties:` block repeating a name): the same
+  silent last-wins YAML hazard on a different mapping. Complements the two tests that touch the
+  same surface without seeing name-duplication:
+  `every_components_object_lists_distinct_component_keys` guards only the *reusable*
+  `components.examples` section (so this extractor deliberately skips a `components:`-parented
+  `examples:`, keeping the two non-overlapping) and `every_example_object_declares_a_value`
+  checks each named example *has* a `value` but never that the names are distinct. New pure
+  `examples_maps_with_duplicate_names` extractor: for each block-opening `examples:` at indent
+  C that is neither the components section (nearest column-0 ancestor `components:`) nor sample
+  data inside an outer `example:`/`examples:` payload (an ancestor walk excludes both, mirroring
+  `example_objects_missing_value`'s guard), it finds the first-child indent D and flags a
+  repeated example name (a direct key at exactly D) via a per-map `seen` set — deeper keys are
+  the Example Object's own `summary`/`value`, never names. Surveyed the corpus first: **278**
+  inline `examples:` maps, all names distinct → **0** drift, a live guard that fires the moment
+  a spec pastes a sibling example case and leaves its name un-renamed. Unit-covered
+  (`examples_map_duplicate_name_extraction_rules`: a repeated `healthy` flagged with the map's
+  line; a distinct `one`/`two` map cleared; the `components.examples` `Shared` duplicate out of
+  scope; each Example Object's own `summary`/`value` never a name; ≥100 named-example
+  non-vacuous floor). Test-only (`#[cfg(test)]`), no runtime/spec change. `cargo test` 2872
+  green (was 2870; +2); `cargo build --release` ok (5.1M, unchanged — test-only), no new deps.
 
 - 2026-08-21 — Contract-test harness: added a **distinct response-status-keys** test
   (`src/registry.rs` `every_operation_lists_distinct_response_status_keys`) — within one

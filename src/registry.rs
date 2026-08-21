@@ -20852,6 +20852,322 @@ components:
         );
     }
 
+    /// The `` `<name>` (examples map at line N) `` label of every **inline**
+    /// `examples:` map a mounted spec declares — a Media Type / Parameter /
+    /// Header Object's named examples — that lists the **same example name
+    /// twice**, without a YAML dep.
+    ///
+    /// An `examples:` field is a YAML mapping keyed by example name
+    /// (`healthy`/`degraded`, one entry per documented functional case), so the
+    /// names must be unique: a mapping that repeats a key is invalid YAML, and
+    /// every parser keeps only the **last** occurrence — so the earlier Example
+    /// Object (its `summary`/`value`) is dropped without a trace and a
+    /// Redoc/Swagger "examples" dropdown renders one fewer sample than the author
+    /// wrote, exactly where a caller reads how each scenario maps to a payload.
+    /// The routine hazard in these scenario-table-heavy specs: a named example
+    /// grown by pasting a sibling case and left unrenamed, so the sample shown
+    /// under that name is whichever copy came last.
+    ///
+    /// The Media-Type-examples twin of `properties_objects_with_duplicate_names`
+    /// / `component_sections_with_duplicate_component_keys`: the same silent
+    /// last-wins YAML hazard on the *inline* examples map. The components twin
+    /// (`every_components_object_lists_distinct_component_keys`) already guards
+    /// the reusable `components.examples` section's keys, so this deliberately
+    /// skips a top-level `components:`-parented `examples:` (covered there) and
+    /// checks only the inline maps no other test reads.
+    /// `every_example_object_declares_a_value` asserts each named example *has* a
+    /// `value` but never that the names are distinct.
+    ///
+    /// For each block-opening `examples:` at indent `C` that is neither the
+    /// reusable components section nor sample data nested inside an outer
+    /// `example:`/`examples:` payload (an ancestor walk excludes both, mirroring
+    /// `example_objects_missing_value`'s guard), this finds the first-child indent
+    /// `D` (the first deeper non-blank line) and collects the mapping keys at
+    /// *exactly* `D` — the example names — bounded by the first non-blank line
+    /// that dedents to `C` or shallower. Keys deeper than `D` are an Example
+    /// Object's own `summary`/`value`, never names, so they are skipped. A
+    /// repeated name is flagged with the name and the map's line, in document
+    /// order.
+    fn examples_maps_with_duplicate_names(body: &str) -> Vec<String> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        // The `(key, inline-value)` of a line, inline comment stripped; the value
+        // is empty when the line opens a block. `None` when there is no `key:`.
+        let key_of = |l: &str| -> Option<(String, String)> {
+            let (k, v) = l.trim_start().split_once(':')?;
+            let v = v.split('#').next().unwrap_or(v).trim();
+            Some((k.trim().to_string(), v.to_string()))
+        };
+        let unquote = |name: &str| -> String {
+            name.strip_prefix('"')
+                .and_then(|s| s.strip_suffix('"'))
+                .or_else(|| name.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')))
+                .unwrap_or(name)
+                .to_string()
+        };
+        // True when the `examples:` at line `i` (indent `c`) is out of scope for
+        // this test: its nearest shallower ancestor key is `components` at column
+        // zero (the reusable examples section — guarded by the components-keys
+        // test), or some enclosing key up the indent ladder is `example`/`examples`
+        // (so this `examples:` is sample data inside an example payload, not the
+        // OpenAPI examples field).
+        let out_of_scope = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            let mut checked_parent = false;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() || l.trim_start().starts_with('#') {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = key_of(l) {
+                        if !checked_parent {
+                            checked_parent = true;
+                            if key == "components" && li == 0 {
+                                return true; // the reusable components.examples section
+                            }
+                        }
+                        if key == "example" || key == "examples" {
+                            return true; // inside an example payload
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            // A block-opening `examples:` map: the key `examples`, its value empty
+            // or a trailing comment (an inline value would be a scalar/flow).
+            let Some((k, v)) = key_of(line) else { continue };
+            if k != "examples" || !v.is_empty() {
+                continue;
+            }
+            let c = indent(line);
+            if out_of_scope(i, c) {
+                continue;
+            }
+            // First-child indent D (first non-blank, non-comment line deeper than C).
+            let mut d: Option<usize> = None;
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                let tl = l.trim();
+                if tl.is_empty() || tl.starts_with('#') {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) <= c {
+                    break; // empty examples map
+                }
+                d = Some(indent(l));
+                break;
+            }
+            let Some(d) = d else { continue };
+            // Collect the example names (direct keys at exactly D) until the map closes.
+            let mut seen = HashSet::new();
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                let tl = l.trim();
+                if tl.is_empty() || tl.starts_with('#') {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) <= c {
+                    break; // dedented out of the examples map
+                }
+                if indent(l) == d && !tl.starts_with('-') {
+                    if let Some((key, _)) = key_of(l) {
+                        let name = unquote(&key);
+                        if !name.is_empty() && !seen.insert(name.clone()) {
+                            out.push(format!("`{name}` (examples map at line {})", i + 1));
+                        }
+                    }
+                }
+                j += 1;
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_examples_map_lists_distinct_example_names() {
+        // Contract-harness invariant (OpenAPI / YAML structural rule): an inline
+        // `examples:` field (a Media Type / Parameter / Header Object's named
+        // examples) is a mapping keyed by example name, so a mounted spec MUST NOT
+        // list the same example name twice in one `examples:` map. A repeated key
+        // is an invalid mapping every parser resolves by keeping only the last
+        // copy — so the earlier Example Object's `summary`/`value` is dropped
+        // silently, and the "examples" dropdown a caller browses shows one fewer
+        // scenario than the author documented.
+        //
+        // No sibling "distinct" test looks at inline example *names*:
+        // `every_components_object_lists_distinct_component_keys` guards only the
+        // reusable `components.examples` section (this extractor skips it), and
+        // `every_example_object_declares_a_value` checks each named example has a
+        // `value` but never that the names are distinct. CamaraSim documents its
+        // scenario matrix as named examples on every response media type, so a
+        // scenario pasted from a sibling and left unrenamed is a live copy-paste
+        // hazard. Verified true across all mounted specs before asserting.
+        for api in APIS {
+            let bad = examples_maps_with_duplicate_names(api.body);
+            assert!(
+                bad.is_empty(),
+                "{} spec declares an inline `examples:` map that repeats an example \
+                 name (a named-examples mapping's keys must be distinct): {:?}",
+                api.name,
+                bad
+            );
+        }
+    }
+
+    #[test]
+    fn examples_map_duplicate_name_extraction_rules() {
+        // Unit-cover the `examples_maps_with_duplicate_names` extractor so the
+        // contract test above can't pass vacuously and its detection is pinned: an
+        // inline `examples:` map that repeats an example name is flagged (with the
+        // name and the map's line); an Example Object's own `summary`/`value`
+        // (deeper than the name indent) is never counted as a name; a clean map
+        // passes; the reusable `components.examples` section is out of scope (its
+        // keys are the components-keys test's job); and an `examples:` nested
+        // inside an example payload is sample data, not the examples field.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    post:
+      operationId: postA
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+              examples:
+                healthy:
+                  summary: ok
+                  value:
+                    a: 1
+                degraded:
+                  value:
+                    a: 2
+                healthy:
+                  value:
+                    a: 3
+        '400':
+          description: bad
+          content:
+            application/json:
+              examples:
+                one:
+                  value:
+                    b: 1
+                two:
+                  value:
+                    b: 2
+components:
+  examples:
+    Shared:
+      value:
+        x: 1
+    Shared:
+      value:
+        x: 2
+";
+        // Flagged: only the `/a` 200 media type's `examples:` map (line 16), which
+        // repeats `healthy`. Not flagged: the 400 map (`one`/`two`, distinct), the
+        // reusable `components.examples` section (its repeated `Shared` is out of
+        // scope — the components-keys test guards it), and every Example Object's
+        // own `summary`/`value` (deeper than the name indent, never a name).
+        assert_eq!(
+            examples_maps_with_duplicate_names(body),
+            vec!["`healthy` (examples map at line 16)".to_string()]
+        );
+
+        // Non-vacuous floor: across every registered spec no inline `examples:` map
+        // repeats a name (the invariant the contract test asserts), and the corpus
+        // actually declares many named examples, so a broken (always-empty)
+        // extractor can't hide behind a corpus with no examples maps. Count named
+        // examples (a mapping key at the first-child indent of an in-scope
+        // block-opening `examples:`) with a detection independent of the extractor.
+        let mut example_names = 0usize;
+        for api in APIS {
+            assert!(
+                examples_maps_with_duplicate_names(api.body).is_empty(),
+                "{}: every inline `examples:` map must list distinct example names",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            for (i, line) in lines.iter().enumerate() {
+                let t = line.trim_start();
+                let Some(rest) = t.strip_prefix("examples:") else { continue };
+                let rest = rest.split('#').next().unwrap_or("").trim();
+                if !rest.is_empty() {
+                    continue;
+                }
+                let c = indent(line);
+                // Skip the reusable components.examples section (nearest shallower
+                // ancestor is `components` at column 0) — counted elsewhere.
+                let mut is_components = false;
+                for l in lines[..i].iter().rev() {
+                    let tl = l.trim();
+                    if tl.is_empty() || tl.starts_with('#') {
+                        continue;
+                    }
+                    if indent(l) < c {
+                        is_components = indent(l) == 0 && tl.starts_with("components:");
+                        break;
+                    }
+                }
+                if is_components {
+                    continue;
+                }
+                let mut d: Option<usize> = None;
+                for l in &lines[i + 1..] {
+                    let tl = l.trim();
+                    if tl.is_empty() || tl.starts_with('#') {
+                        continue;
+                    }
+                    if indent(l) <= c {
+                        break;
+                    }
+                    d = Some(indent(l));
+                    break;
+                }
+                let Some(d) = d else { continue };
+                for l in &lines[i + 1..] {
+                    let tl = l.trim();
+                    if tl.is_empty() || tl.starts_with('#') {
+                        continue;
+                    }
+                    if indent(l) <= c {
+                        break;
+                    }
+                    if indent(l) == d && !tl.starts_with('-') && tl.contains(':') {
+                        example_names += 1;
+                    }
+                }
+            }
+        }
+        assert!(
+            example_names >= 100,
+            "expected many named examples across specs, got {example_names}"
+        );
+    }
+
     /// The `<name>` (with its `components.<section>` and the section's line) label
     /// of every component-definition mapping a mounted spec declares under
     /// top-level `components:` that lists the **same component name twice** —
