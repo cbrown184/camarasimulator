@@ -3335,6 +3335,20 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - a **Path Item / Operation `parameters` is-a-sequence** contract test
+    (`src/registry.rs` `every_parameters_field_is_a_sequence`) — the `parameters`
+    member of the is-a-sequence shape family (`every_enum_field_is_a_sequence` /
+    `every_security_field_is_a_sequence` / `every_composer_keyword_declares_a_sequence` /
+    `every_schema_required_field_is_a_sequence`). A Path Item / Operation Object's
+    `parameters` MUST be an array of Parameter/`$ref` Objects; the vacuous-pass gap the
+    parameter-entry tests (`every_parameter_array_lists_distinct_name_location_pairs`, …)
+    leave open — they gather members only from a flow/block list, so a mapping- or
+    scalar-shaped `parameters:` yields zero entries and passes silently. New pure
+    `parameters_fields_not_a_sequence` (mirrors `enum_/required_fields_not_a_sequence`;
+    excludes the Components Object's name→Parameter *map* by the `components` parent, and
+    `example:` payloads). Corpus: 230 `parameters:` keys (170 array-form, 60 Components
+    maps) → 0 drift. Unit-covered (`parameters_field_sequence_extraction_rules`; ≥100
+    array-`parameters` floor). Test-only, no spec change.
   - a **scenario case-input distinctness** contract test (`src/registry.rs`
     `every_scenario_block_lists_distinct_case_inputs`) — the distinctness member of the
     scenario family. Within one `x-camarasim-scenarios` block no two cases may declare
@@ -6160,6 +6174,35 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-22 — Contract-test harness: guard every **Path Item / Operation
+  `parameters` field is a sequence** (`src/registry.rs`
+  `every_parameters_field_is_a_sequence`). A Path Item / Operation Object's
+  `parameters` MUST be an array of Parameter (or `$ref`) Objects; a `parameters:` a
+  paste turned into a bare scalar or a mapping is an invalid document a
+  validator/Redoc/codegen client reads an operation's inputs from a shape that isn't
+  the parameter list they expect, so the intended query/path/header inputs silently
+  don't parse. The **`parameters` member of the is-a-sequence shape family**
+  (`every_enum_field_is_a_sequence` / `every_security_field_is_a_sequence` /
+  `every_composer_keyword_declares_a_sequence` / `every_schema_required_field_is_a_sequence`),
+  and a real vacuous-pass gap the parameter-entry tests leave open:
+  `every_parameter_array_lists_distinct_name_location_pairs` (and its siblings) gather
+  members only from a flow `[ … ]` / block `- ` list, so a mapping- or scalar-shaped
+  `parameters:` yields zero entries and passes silently, its broken shape unseen. New
+  pure `parameters_fields_not_a_sequence` (mirrors `enum_/required_fields_not_a_sequence`:
+  flow `[` or block-first-`-` = a sequence; a non-empty non-`[` scalar or a
+  mapping-first block = flagged; `example:`/`examples:` payloads skipped by ancestor
+  walk; `[]` left as a legal empty list) with the added exclusion of the **Components
+  Object** `parameters:` — a name→Parameter *map* (the corpus's
+  `components: parameters: XCorrelator: …` form), skipped when the key's nearest
+  shallower ancestor is `components`. Surveyed the corpus first (230 `parameters:` keys:
+  170 array-form under post/get/delete/patch/put or a path key, 60 Components maps;
+  every array-form one a block sequence) → 0 drift. Tests: +2 (the contract test +
+  `parameters_field_sequence_extraction_rules`: flow/block/`[]`/Components-map cleared;
+  a bare scalar, a mapping-form block, and an empty block flagged in document order; an
+  `example:`-payload `parameters:` skipped; ≥100 array-`parameters` non-vacuity floor).
+  `cargo test` 2926 green (was 2924); `cargo build --release` succeeds. No new
+  dependency; test-only change (no spec/runtime edit). — binary (release): 5.1M
+  (5,323,160 B; unchanged).
 - 2026-08-22 — Contract-test harness: guard every **`x-camarasim-scenarios` block
   lists distinct case `input:`s** (`src/registry.rs`
   `every_scenario_block_lists_distinct_case_inputs`). A block's `cases:` sequence is

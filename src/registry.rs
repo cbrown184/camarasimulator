@@ -55893,6 +55893,318 @@ components:
         );
     }
 
+    /// The 1-based line numbers of every **Path Item / Operation** `parameters:` field
+    /// a spec declares whose value is not a valid sequence (array) — the `parameters`
+    /// member of the is-a-sequence shape family (`every_enum_field_is_a_sequence`,
+    /// `every_security_field_is_a_sequence`, `every_composer_keyword_declares_a_sequence`,
+    /// `every_schema_required_field_is_a_sequence`).
+    ///
+    /// A Path Item Object's / Operation Object's `parameters` MUST be an array of
+    /// Parameter (or `$ref`) Objects. This walks every `parameters:` key (the `:` must
+    /// immediately follow `parameters`, so a longer key sharing the prefix never matches)
+    /// and flags one whose value is neither a flow sequence (`[ … ]`) nor a block sequence
+    /// (its first deeper non-blank/non-comment line is a `-` item). An inline empty flow
+    /// `[]` is deliberately **not** flagged (a legal, if pointless, empty parameter list).
+    ///
+    /// Two `parameters:` contexts that are legitimately **not** arrays are excluded:
+    /// * the **Components Object** `parameters:` — a name→Parameter *map* of reusable
+    ///   parameters (the corpus's `components: parameters: XCorrelator: …` form), skipped
+    ///   when the key's nearest shallower ancestor key is `components`; and
+    /// * a `parameters:` inside an `example:`/`examples:` payload (sample data, not the
+    ///   keyword), skipped via the ancestor walk.
+    ///
+    /// A Link Object's `parameters:` (also a map) and a schema property literally *named*
+    /// `parameters` opening a mapping would be flagged — the mounted specs declare neither
+    /// (a documented scoping trade shared with the sibling sequence-shape extractors).
+    fn parameters_fields_not_a_sequence(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        // The inline value of a `parameters:` line (inline comment stripped, whitespace
+        // trimmed). `None` when the line is a different key; an empty string marks a
+        // block opener (no inline value).
+        let inline = |l: &str| -> Option<String> {
+            let rest = l.trim_start().strip_prefix("parameters")?;
+            let v = rest.strip_prefix(':')?;
+            Some(v.split('#').next().unwrap_or(v).trim().to_string())
+        };
+        // The nearest key strictly shallower than indent `c` above line `i` — the
+        // `parameters:` field's parent key (`components`, an HTTP verb, a `/…` path key).
+        // `None` at document root.
+        let parent_key = |i: usize, c: usize| -> Option<String> {
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() || l.trim_start().starts_with('#') {
+                    continue;
+                }
+                if indent(l) < c {
+                    return l.trim_start().split_once(':').map(|(key, _)| key.trim().to_string());
+                }
+            }
+            None
+        };
+        // True when line `i` (indent `c`) sits inside an `example:`/`examples:`
+        // payload — some enclosing container key up the indent ladder is
+        // `example`/`examples` (mirroring the other keyword extractors).
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some(v) = inline(line) else { continue };
+            let c = indent(line);
+            if inside_example(i, c) {
+                continue; // example data, not the keyword
+            }
+            if parent_key(i, c).as_deref() == Some("components") {
+                continue; // the Components Object's name→Parameter map, not an array
+            }
+            if v.starts_with('[') {
+                continue; // an inline flow sequence (`[]` / `[ … ]`) — a sequence
+            }
+            if !v.is_empty() {
+                out.push(i + 1); // a non-empty, non-sequence scalar/flow
+                continue;
+            }
+            // Block opener: a sequence iff its first non-blank, non-comment line
+            // indented deeper than the key is a `-` sequence item.
+            let mut j = i + 1;
+            let is_seq = loop {
+                if j >= lines.len() {
+                    break false; // no deeper line — an empty/`null` field
+                }
+                let l = lines[j];
+                if l.trim().is_empty() || l.trim_start().starts_with('#') {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) <= c {
+                    break false; // dedented out with nothing under `parameters:`
+                }
+                break l.trim_start().starts_with('-');
+            };
+            if !is_seq {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_parameters_field_is_a_sequence() {
+        // Contract-harness invariant (OpenAPI 3.0.x structural rule): every Path Item /
+        // Operation Object `parameters` field a mounted spec declares MUST be a sequence
+        // (array) of Parameter (or `$ref`) Objects. A `parameters:` that is a bare scalar
+        // or a mapping is an invalid document — a validator and a Redoc/Swagger/codegen
+        // client read an operation's inputs from a shape that isn't the parameter list
+        // they expect, so the intended query/path/header inputs silently don't parse right
+        // where a caller builds the request.
+        //
+        // Closes a real vacuous-pass gap the sibling parameter tests leave open:
+        // `every_parameter_array_lists_distinct_name_location_pairs` and the other
+        // parameter-entry tests collect an array's members only by gathering a flow list's
+        // `[ … ]` elements or a block list's `- ` items — so a `parameters:` a paste turned
+        // into a mapping or a lone scalar yields zero entries and passes them silently, its
+        // broken shape unseen. This test inspects the field's shape itself, the
+        // `parameters` analogue of `every_enum_field_is_a_sequence` /
+        // `every_schema_required_field_is_a_sequence`. The Components Object's
+        // name→Parameter *map* (a map by spec, not an array) is out of scope. Verified true
+        // across all mounted specs before asserting.
+        for api in APIS {
+            let bad = parameters_fields_not_a_sequence(api.body);
+            assert!(
+                bad.is_empty(),
+                "{} spec declares a Path Item / Operation `parameters` field that is not a \
+                 sequence (array) — an input list a client and a validator can't parse — at \
+                 `parameters:` line(s): {:?}",
+                api.name,
+                bad
+            );
+        }
+    }
+
+    #[test]
+    fn parameters_field_sequence_extraction_rules() {
+        // Unit-cover `parameters_fields_not_a_sequence` so the contract test above can't
+        // pass vacuously and its detection is pinned: a flow sequence
+        // (`parameters: [$ref]`), a block sequence (`parameters:` + `- name: x`), an inline
+        // empty flow (`parameters: []`), and the Components Object's name→Parameter map pass;
+        // a bare scalar (`parameters: foo`), a mapping-form block (`parameters:` + `foo: bar`,
+        // no dash), and an empty block (`parameters:` with nothing deeper under it) are
+        // flagged in document order; and a `parameters:` inside an `example:` payload is
+        // skipped.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /flow:
+    get:
+      operationId: getFlow
+      parameters: [a, b]
+      responses:
+        '200':
+          description: ok
+  /block:
+    get:
+      operationId: getBlock
+      parameters:
+        - name: x
+          in: query
+      responses:
+        '200':
+          description: ok
+  /emptyflow:
+    get:
+      operationId: getEmptyFlow
+      parameters: []
+      responses:
+        '200':
+          description: ok
+  /scalar:
+    get:
+      operationId: getScalar
+      parameters: foo
+      responses:
+        '200':
+          description: ok
+  /mapping:
+    get:
+      operationId: getMapping
+      parameters:
+        foo: bar
+      responses:
+        '200':
+          description: ok
+  /empty:
+    get:
+      operationId: getEmpty
+      parameters:
+      responses:
+        '200':
+          description: ok
+  /inexample:
+    get:
+      operationId: getInExample
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              example:
+                parameters: nope
+components:
+  parameters:
+    XCorrelator:
+      name: x-correlator
+      in: header
+      schema:
+        type: string
+";
+        // Flagged, in document order: line 32 (`/scalar` `parameters: foo` — a bare
+        // scalar), line 39 (`/mapping` — a block `parameters:` whose first deeper line
+        // `foo: bar` is a mapping key, no dash), and line 47 (`/empty` — a block
+        // `parameters:` with only the dedented `responses:` below it, i.e. an empty/`null`
+        // field). Not flagged: `/flow` (inline flow), `/block` (block sequence), `/emptyflow`
+        // (`parameters: []`, an inline empty flow), the `/inexample` occurrence (its
+        // `parameters: nope` sits inside the `example:` payload), and the
+        // `components: parameters:` map (a name→Parameter map by spec, excluded by the
+        // `components` parent).
+        assert_eq!(parameters_fields_not_a_sequence(body), vec![32, 39, 47]);
+
+        // Non-vacuous floor: across every registered spec every Path Item / Operation
+        // `parameters` field is a sequence (the invariant the contract test asserts), and
+        // the corpus actually declares many parameter arrays (query/path/header inputs, in
+        // block form) — so the sequence-recognition path runs on real data and a broken
+        // (always-empty) extractor can't hide behind a corpus that never declares one. Count
+        // the sequence-shaped `parameters` fields with a detector independent of the
+        // extractor (the Components Object's name→Parameter map excluded — it is not an array).
+        let mut seq_parameters = 0usize;
+        for api in APIS {
+            assert!(
+                parameters_fields_not_a_sequence(api.body).is_empty(),
+                "{}: every Path Item / Operation `parameters` field must be a sequence",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            for (i, l) in lines.iter().enumerate() {
+                let Some(rest) = l.trim_start().strip_prefix("parameters") else {
+                    continue;
+                };
+                let Some(val) = rest.strip_prefix(':') else { continue };
+                let val = val.split('#').next().unwrap_or(val).trim();
+                let c = indent(l);
+                // Skip the Components Object map (nearest shallower ancestor `components`).
+                let mut parent = None;
+                let mut k = i;
+                while k > 0 {
+                    k -= 1;
+                    let lj = lines[k];
+                    if lj.trim().is_empty() || lj.trim_start().starts_with('#') {
+                        continue;
+                    }
+                    if indent(lj) < c {
+                        parent = lj.trim_start().split_once(':').map(|(key, _)| key.trim());
+                        break;
+                    }
+                }
+                if parent == Some("components") {
+                    continue;
+                }
+                if val.starts_with('[') {
+                    if !val.starts_with("[]") {
+                        seq_parameters += 1; // a non-empty inline flow sequence
+                    }
+                    continue;
+                }
+                if !val.is_empty() {
+                    continue; // a scalar — the extractor flags it, never a sequence
+                }
+                let mut j = i + 1;
+                while j < lines.len()
+                    && (lines[j].trim().is_empty() || lines[j].trim_start().starts_with('#'))
+                {
+                    j += 1;
+                }
+                if j < lines.len()
+                    && indent(lines[j]) > c
+                    && lines[j].trim_start().starts_with('-')
+                {
+                    seq_parameters += 1; // a deeper `- `-item block sequence
+                }
+            }
+        }
+        assert!(
+            seq_parameters >= 100,
+            "expected many sequence `parameters` fields across specs, got {seq_parameters}"
+        );
+    }
+
     /// The `METHOD /path <status>` label of every **response entry** a spec
     /// declares whose Response Object carries an inline `description` field with an
     /// **empty** value — a present-but-blank description — without a YAML dep.
