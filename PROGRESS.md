@@ -3332,6 +3332,20 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - a **response-slot `$ref` section-typing** contract test (`src/registry.rs`
+    `every_response_ref_targets_the_responses_section`) asserts every `$ref` a spec uses
+    as the value of a `responses:` status-code slot targets the `responses` component
+    section (`#/components/responses/<name>`) — a Responses Object maps a status code to a
+    Response Object *or a reference to one*, so a `$ref` into `schemas`/`parameters`/
+    `headers` is type-mismatched (a resolver handed the wrong kind of component). The third
+    sibling of the response-header and parameters-list `$ref` section tests: these specs
+    carry both a `CamaraError` schema and the shared error responses that wrap it, so a
+    schema ref pasted into a status slot resolves to a real component of the wrong kind. New
+    pure `response_ref_targets` reads only a response's own ref (inline `'401': { $ref: … }`
+    or block-form direct-child), skipping an inline Response Object's deeper `headers:`/
+    `content: → schema:` refs; example payloads excluded. Corpus: ~1200 response-slot refs,
+    every one → `#/components/responses/…` → 0 drift. Unit-covered
+    (`response_ref_target_extraction_rules`; ≥100 floor). Test-only, no spec change.
   - a **path-parameter ↔ template-variable binding** contract test (`src/registry.rs`
     `every_path_parameter_names_a_path_template_variable`) asserts the reverse of
     `every_path_template_variable_has_a_declared_path_parameter`: every `in: path`
@@ -5945,6 +5959,39 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-22 — Contract-test harness: added a **response-slot `$ref` section-typing**
+  contract test (`src/registry.rs` `every_response_ref_targets_the_responses_section`) —
+  every `$ref` a spec uses as the value of a `responses:` status-code slot MUST target the
+  `responses` component section (`#/components/responses/<name>`). An OpenAPI 3.0.x
+  Responses Object maps each status code to a Response Object *or a reference to one*, so a
+  `$ref` there into `#/components/schemas/…` / `#/components/parameters/…` /
+  `#/components/headers/…` is type-mismatched: a resolver is handed a Schema/Parameter/
+  Header Object where a Response Object is required, and a Redoc/Swagger/codegen client
+  mis-binds or drops the response. The third sibling of
+  `every_response_header_ref_targets_the_headers_section` and
+  `every_parameter_ref_targets_the_parameters_section`, the same copy-paste hazard one
+  slot over: these specs carry both a `CamaraError` **schema** and the shared error
+  **responses** that wrap it (`Unauthenticated`/`NotFound`/`Conflict`/…), so a schema ref
+  pasted into a status-code slot resolves to a real component of the wrong kind. Invisible
+  to `local_component_refs_resolve_within_their_own_spec` (checks a local `$ref` finds
+  *some* target, never that its section fits the slot), the response tests
+  (`responses_missing_description`, the status-key/coverage series read a response's own
+  fields or key, never the slot's ref), and the ref-shape tests (read a `$ref`'s siblings
+  and fragment form, never its section against its use). New pure `response_ref_targets`
+  extractor (mirrors `response_header_ref_targets`/`parameter_ref_targets`): scoped to a
+  status-code key (`'200'`/`"404"`/`default`) whose immediate parent is a `responses:`
+  block within `paths:` (example payloads excluded via the ancestor walk), reading only
+  the response's *own* ref — inline (`'401': { $ref: … }`) or at the Response Object's own
+  direct-child indent — so an inline Response Object's deeper `headers:` (XCorrelator) and
+  `content: → schema:` refs are skipped. Surveyed the corpus first (~1200 response-slot
+  refs — Unauthenticated/PermissionDenied/NotFound/TooManyRequests/Unavailable/Internal/
+  Conflict/InvalidArgument/… — every one targets `#/components/responses/…`) → 0 drift, a
+  live guard the moment a schema/parameter/header ref is pasted into a response slot.
+  Tests: +2 (the contract test + `response_ref_target_extraction_rules`: block-form good/
+  drift refs, inline-flow, `default` slot, the skipped deeper header/schema refs, the
+  examples-payload exclusion, document-order lines; ≥100 non-vacuous floor). `cargo test`
+  2894 green (was 2892); `cargo build --release` succeeds. No new dependency; test-only
+  change. — binary: 5.1M (5,323,160 B; unchanged)
 - 2026-08-22 — Contract-test harness: added a **parameters-list `$ref` section-typing**
   contract test (`src/registry.rs` `every_parameter_ref_targets_the_parameters_section`)
   — every `$ref` used as an item of an operation- or path-item-level `parameters:` list

@@ -5336,6 +5336,168 @@ mod tests {
         out
     }
 
+    /// Every `$ref` a spec uses as a Response Object — the value of a response
+    /// status-code key inside a `responses:` map — as `(1-based line, pointer,
+    /// component-section)`: the line the `$ref` sits on, the pointer string, and the
+    /// component section its fragment names (`responses`, `schemas`, `parameters`,
+    /// `headers`, …). A `$ref` whose fragment names no `#/…/components/<section>/<name>`
+    /// yields no entry (the ref-shape tests police malformed refs).
+    ///
+    /// The section a **response-slot** ref names MUST be `responses`: an OpenAPI
+    /// Responses Object maps each status code to a Response Object *or a reference to
+    /// one*, so a `$ref` there into `#/components/schemas/…` / `#/components/parameters/…`
+    /// / `#/components/headers/…` is a type-mismatched reference — a resolver is handed a
+    /// Schema/Parameter/Header Object where a Response Object is required, and a
+    /// Redoc/Swagger/codegen client mis-binds or drops the response. The third sibling of
+    /// [`response_header_ref_targets`] and [`parameter_ref_targets`], the same copy-paste
+    /// hazard one slot over: these specs carry a `CamaraError` **schema** and shared error
+    /// **responses** wrapping it (`Unauthenticated`, `NotFound`, `Conflict`, …), so a
+    /// schema ref pasted into a status-code slot resolves to a real component of the wrong
+    /// kind.
+    ///
+    /// Scope is a real Responses Object: a status-code key (`'200'`/`"404"`/`default`)
+    /// whose immediate parent is a `responses:` block within `paths:` (an
+    /// `example:`/`examples:` payload is excluded via the ancestor walk). Only a `$ref`
+    /// that is the response's *own* value is read — inline on the status-key line
+    /// (`'401': { $ref: … }`) or at the Response Object's own direct-child indent (block
+    /// form). A `$ref` nested deeper (an inline Response Object's `headers:`'s
+    /// XCorrelator ref, or its `content: → schema:`'s ref) is that header's/schema's ref,
+    /// not the response's, and is skipped. Pure and YAML-dep-free.
+    fn response_ref_targets(body: &str) -> Vec<(usize, String, String)> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+
+        let Some(ps) = lines
+            .iter()
+            .position(|l| l.trim_end() == "paths:" && !l.starts_with(char::is_whitespace))
+        else {
+            return Vec::new();
+        };
+        let pe = (ps + 1..lines.len())
+            .find(|&i| !lines[i].trim().is_empty() && !lines[i].starts_with(char::is_whitespace))
+            .unwrap_or(lines.len());
+
+        let is_status_key = |k: &str| -> bool {
+            let s = k.trim_matches(|c| c == '"' || c == '\'');
+            s == "default"
+                || (s.len() == 3
+                    && matches!(s.as_bytes()[0], b'1'..=b'5')
+                    && s.as_bytes()[1..]
+                        .iter()
+                        .all(|&c| c.is_ascii_digit() || c == b'X'))
+        };
+
+        // The pointer string of a `$ref` occurrence in `s` (a standalone `$ref:` line or
+        // a flow `{ $ref: … }`): the value after `$ref:`, one surrounding quote pair
+        // stripped, a bare token bounded by whitespace/`}`/`,`. `None` when `s` carries
+        // no `$ref` or no non-empty value.
+        let ref_pointer = |s: &str| -> Option<String> {
+            let after = &s[s.find("$ref")? + 4..];
+            let after = after.trim_start().strip_prefix(':')?.trim_start();
+            let val = if let Some(r) = after.strip_prefix('"') {
+                r.split('"').next()?
+            } else if let Some(r) = after.strip_prefix('\'') {
+                r.split('\'').next()?
+            } else {
+                after
+                    .split(|c: char| c.is_whitespace() || c == '}' || c == ',')
+                    .next()?
+            };
+            (!val.is_empty()).then(|| val.to_string())
+        };
+
+        // The `<section>` of a `…#/…/components/<section>/<name>` pointer, or `None`.
+        let component_section = |pointer: &str| -> Option<String> {
+            let frag = pointer.split_once('#')?.1;
+            let mut segs = frag.split('/').filter(|s| !s.is_empty());
+            while let Some(s) = segs.next() {
+                if s == "components" {
+                    return segs.next().map(str::to_string);
+                }
+            }
+            None
+        };
+
+        let mut out = Vec::new();
+        for i in (ps + 1)..pe {
+            let t = lines[i].trim_start();
+            let Some((key, after)) = t.split_once(':') else {
+                continue;
+            };
+            if !is_status_key(key.trim()) {
+                continue;
+            }
+            let c = indent(lines[i]);
+
+            // Gate: the status key's immediate parent must be a `responses:` block, and
+            // no `example:`/`examples:` may sit on its ancestor chain (a `responses`
+            // *inside* an example payload is documentation, not a live Responses Object).
+            let mut level = c;
+            let mut immediate_parent: Option<&str> = None;
+            let mut excluded = false;
+            let mut k = i;
+            while k > ps && level > 0 {
+                k -= 1;
+                let a = lines[k];
+                if a.trim().is_empty() {
+                    continue;
+                }
+                let ai = indent(a);
+                if ai < level {
+                    level = ai;
+                    let akey = a.trim().strip_suffix(':').unwrap_or("");
+                    if immediate_parent.is_none() {
+                        immediate_parent = Some(akey);
+                    }
+                    if akey == "example" || akey == "examples" {
+                        excluded = true;
+                        break;
+                    }
+                }
+            }
+            if excluded || immediate_parent != Some("responses") {
+                continue;
+            }
+
+            // Inline reference on the status-key line (`'401': { $ref: … }`).
+            if after.contains("$ref") {
+                if let Some(p) = ref_pointer(after) {
+                    if let Some(sec) = component_section(&p) {
+                        out.push((i + 1, p, sec));
+                    }
+                }
+                continue;
+            }
+
+            // Block form: the Response Object's own direct-child `$ref` (a Reference
+            // Object stands alone). A `$ref` deeper than the direct-child indent — an
+            // inline Response Object's `headers:` or `content: → schema:` ref — is skipped.
+            let mut child_indent = None;
+            let mut j = i + 1;
+            while j < pe {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                let li = indent(l);
+                if li <= c {
+                    break;
+                }
+                let child = *child_indent.get_or_insert(li);
+                if li == child && l.trim_start().starts_with("$ref") {
+                    if let Some(p) = ref_pointer(l.trim_start()) {
+                        if let Some(sec) = component_section(&p) {
+                            out.push((j + 1, p, sec));
+                        }
+                    }
+                }
+                j += 1;
+            }
+        }
+        out
+    }
+
     /// The `METHOD /path` label of every operation a spec declares whose
     /// `requestBody` object carries neither a `content` field nor a `$ref` —
     /// without a YAML dep.
@@ -16515,6 +16677,157 @@ paths:
         assert!(
             total >= 100,
             "expected many parameters-list refs across specs, got {total}"
+        );
+    }
+
+    #[test]
+    fn every_response_ref_targets_the_responses_section() {
+        // Contract-harness invariant (OpenAPI 3.0.x Responses Object rule): a
+        // `responses:` map keys each status code to a Response Object *or a reference
+        // to one*, so every `$ref` a spec uses as a status-code slot's value MUST
+        // target the `responses` component section (`#/components/responses/<name>`). A
+        // `$ref` there into `#/components/schemas/…` / `#/components/parameters/…` /
+        // `#/components/headers/…` is a type-mismatched reference: a resolver is handed
+        // a Schema/Parameter/Header Object where a Response Object is required, so a
+        // Redoc/Swagger/codegen client mis-binds or drops the response.
+        //
+        // The third sibling of `every_response_header_ref_targets_the_headers_section`
+        // and `every_parameter_ref_targets_the_parameters_section`, the same copy-paste
+        // hazard one slot over: these specs carry both a `CamaraError` **schema** and
+        // the shared error **responses** that wrap it (`Unauthenticated`, `NotFound`,
+        // `Conflict`, …), so a schema ref pasted into a status-code slot resolves to a
+        // real component of the wrong kind. No existing test sees it:
+        // `local_component_refs_resolve_within_their_own_spec` checks a local `$ref`
+        // finds *some* target, never that its section fits the slot it fills; the
+        // response tests (`responses_missing_description`, the status-key/coverage
+        // series) read a response's own fields or key, never a status slot's ref; the
+        // ref-shape tests read a `$ref`'s siblings and fragment form, never its section
+        // against its use. Verified true across every mounted spec before asserting
+        // (every response-slot ref targets `#/components/responses/…`).
+        for api in APIS {
+            for (line, pointer, section) in response_ref_targets(api.body) {
+                assert_eq!(
+                    section, "responses",
+                    "{} spec: the response-slot `$ref` `{}` (line {}) targets the `{}` \
+                     component section, not `responses` — a `responses:` status-code slot \
+                     must reference a Response Object (`#/components/responses/<name>`); a \
+                     schema/parameter/header ref pasted into a response slot resolves to \
+                     the wrong kind of component",
+                    api.name, pointer, line, section
+                );
+            }
+        }
+        // Non-vacuous floor: the corpus references the shared error responses
+        // (`Unauthenticated`/`PermissionDenied`/`NotFound`/…) from nearly every
+        // operation, so a broken extractor can't hide behind an empty scan.
+        let total: usize = APIS.iter().map(|a| response_ref_targets(a.body).len()).sum();
+        assert!(
+            total >= 100,
+            "expected many response-slot refs across specs, got {total}"
+        );
+    }
+
+    #[test]
+    fn response_ref_target_extraction_rules() {
+        // Unit-cover `response_ref_targets` so the contract test above can't pass
+        // vacuously and its scoping/section reading is pinned: a block-form status slot
+        // whose value is a `$ref` into `#/components/responses/…` reads section
+        // `responses` (good); a block-form slot whose ref goes into
+        // `#/components/schemas/…` reads `schemas` (the drift the contract test turns
+        // into a failure); an inline-flow `'409': { $ref: … }` slot is read; a `default`
+        // slot is a status key; an inline Response Object's own `headers:` (XCorrelator)
+        // and `content: → schema:` refs, nested deeper than the direct-child indent, are
+        // skipped; and a `responses:` map inside an `examples:` payload is excluded (an
+        // `examples` ancestor). All in document order.
+        let body = "\
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+          headers:
+            x-correlator:
+              $ref: \"#/components/headers/XCorrelator\"
+          content:
+            application/json:
+              schema:
+                $ref: \"#/components/schemas/Thing\"
+        '401':
+          $ref: \"#/components/responses/Unauthenticated\"
+        '404':
+          $ref: \"#/components/schemas/Nope\"
+        '409': { $ref: \"../../shared/errors.yaml#/components/responses/Conflict\" }
+        default:
+          $ref: \"#/components/responses/Generic\"
+    post:
+      operationId: postA
+      responses:
+        '200':
+          description: made
+          content:
+            application/json:
+              examples:
+                sample:
+                  value:
+                    responses:
+                      '404':
+                        $ref: \"#/components/schemas/InExample\"
+components:
+  responses:
+    Unauthenticated:
+      description: unauth
+";
+        // Flagged, in document order: `'401'`'s block ref (line 16, `responses`); the
+        // `'404'` block ref into `schemas` (line 18, the drift); the `'409'` inline-flow
+        // ref (line 19, `responses`); and the `default` block ref (line 21, `responses`).
+        // Not returned: `'200'`'s XCorrelator header ref (line 10) and schema ref (line
+        // 14), both deeper than the Response Object's direct-child indent; and the
+        // `'404'` inside the `post` `examples:` payload (line 34, an `examples` ancestor).
+        assert_eq!(
+            response_ref_targets(body),
+            vec![
+                (16, "#/components/responses/Unauthenticated".to_string(), "responses".to_string()),
+                (18, "#/components/schemas/Nope".to_string(), "schemas".to_string()),
+                (
+                    19,
+                    "../../shared/errors.yaml#/components/responses/Conflict".to_string(),
+                    "responses".to_string(),
+                ),
+                (21, "#/components/responses/Generic".to_string(), "responses".to_string()),
+            ]
+        );
+        // The section-drift filter finds exactly the `schemas` mis-ref.
+        let drift: Vec<_> = response_ref_targets(body)
+            .into_iter()
+            .filter(|(_, _, sec)| sec != "responses")
+            .collect();
+        assert_eq!(
+            drift,
+            vec![(18, "#/components/schemas/Nope".to_string(), "schemas".to_string())]
+        );
+        // A body with no `paths:` yields nothing.
+        assert!(response_ref_targets("components:\n  responses: {}\n").is_empty());
+
+        // Non-vacuous floor: across every registered spec every response-slot ref
+        // targets the `responses` section (the invariant the contract test asserts),
+        // yet the corpus declares many such refs, so a broken extractor can't hide
+        // behind an empty scan.
+        let mut total = 0usize;
+        for api in APIS {
+            for (_, _, section) in response_ref_targets(api.body) {
+                assert_eq!(
+                    section, "responses",
+                    "{}: every response-slot ref must target the responses section",
+                    api.name
+                );
+                total += 1;
+            }
+        }
+        assert!(
+            total >= 100,
+            "expected many response-slot refs across specs, got {total}"
         );
     }
 
