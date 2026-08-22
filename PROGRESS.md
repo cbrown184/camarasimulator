@@ -3335,6 +3335,18 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - a **static path-segment kebab-case** contract test (`src/registry.rs`
+    `every_static_path_segment_is_kebab_case`) — CAMARA Commonalities fixes URL path
+    segments to lowercase-hyphen words, so every *static* segment of a `paths:` key
+    MUST match `^[a-z0-9]+(-[a-z0-9]+)*$` (a `{template}` variable is exempt —
+    camelCase by the same convention, checked by the path-template tests). The
+    segment-*casing* guard the existing path tests leave open: brace well-formedness
+    (`every_path_template_key_is_well_formed`), trailing slash, key distinctness and
+    variable↔parameter binding all read a key's shape or variable set, never a literal
+    segment's case. New pure `path_keys_with_non_kebab_segment` on the trusted
+    `path_item_keys` scan. Corpus: 131 keys / 161 static segments (63 hyphenated) → 0
+    drift. Unit-covered (`path_segment_kebab_case_extraction_rules`; ≥100 static +
+    ≥30 hyphenated floors). Test-only, no spec change.
   - a **Response/Encoding header-map key distinctness** contract test
     (`src/registry.rs` `every_response_header_map_lists_distinct_header_names`) — the
     **response-header member** of the distinct-keys family (components/properties/
@@ -6117,6 +6129,28 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-22 — Contract-test harness: guard every **static path segment is
+  kebab-case** (`src/registry.rs` `every_static_path_segment_is_kebab_case`). CAMARA
+  Commonalities fixes URL path segments to lowercase-hyphen words
+  (`retrieve-closest-edge-cloud-zone`, `device-phone-number`) so a resource's URL is
+  predictable across the whole API family; a segment that slips into camelCase /
+  snake_case / Title-Case is a URL a caller building the path from the naming
+  convention would get wrong and makes one API inconsistent with its 60 siblings.
+  New pure `path_keys_with_non_kebab_segment` (built on the trusted `path_item_keys`
+  scan; splits each key on `/`, skips the empty leading span and any *entire*
+  `{template}` variable — a path parameter is camelCase by the same convention,
+  validated by the path-template tests — and checks each static segment against the
+  kebab grammar `^[a-z0-9]+(-[a-z0-9]+)*$`: no uppercase, no `_`/`.`, no leading/
+  trailing/doubled `-`; a digit-bearing word like `oauth2` is valid). A gap no
+  existing path test sees: the path tests check brace well-formedness
+  (`every_path_template_key_is_well_formed`), trailing slash, key distinctness, and
+  variable↔parameter binding — none reads a literal segment's *casing*. Corpus: 131
+  path keys / 161 static segments (63 hyphenated), every one kebab-case → 0 drift.
+  Unit-covered (`path_segment_kebab_case_extraction_rules`: camelCase / snake_case /
+  Title-Case / leading- / trailing- / doubled-hyphen each flagged in order,
+  `{template}` vars skipped, `oauth2` cleared; ≥100 static-segment + ≥30 hyphenated
+  floors). Test-only, no spec change. 2918 tests green (was 2916). — binary
+  (release): 5.1M (5323160 B; test-only, unchanged).
 - 2026-08-22 — Contract-test harness: guard every schema **`required` field is a
   sequence** (`src/registry.rs` `every_schema_required_field_is_a_sequence`). A
   Schema Object's `required` MUST be an array of property-name strings; a

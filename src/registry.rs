@@ -62417,4 +62417,192 @@ paths:
             "expected several multi-header maps (exercising the distinctness compare), got {multi_key_maps}"
         );
     }
+
+    /// Labels (`"<path> <segment>"`) of every **static** path segment a spec's
+    /// `paths:` keys declare that is not kebab-case, in document order. Built on the
+    /// trusted `path_item_keys` scan; each key is split on `/`, the empty leading
+    /// segment is dropped, and a segment that is *entirely* a template variable
+    /// (`{name}`) is skipped — a path parameter's name is camelCase by CAMARA
+    /// convention and is validated by the path-template tests, not here. Every
+    /// remaining (static, literal) segment is checked against the kebab-case grammar
+    /// `^[a-z0-9]+(-[a-z0-9]+)*$` — lowercase ASCII letters/digits in one-or-more
+    /// hyphen-separated groups, so no uppercase, no `_`/`.`, and no leading, trailing
+    /// or doubled `-`. A non-conforming segment is reported once. No YAML/regex dep.
+    fn path_keys_with_non_kebab_segment(body: &str) -> Vec<String> {
+        // A single static path segment is kebab-case iff it is a non-empty run of
+        // lowercase-alphanumeric hyphen-groups: `[a-z0-9]+(-[a-z0-9]+)*`.
+        let is_kebab = |seg: &str| -> bool {
+            if seg.is_empty() || seg.starts_with('-') || seg.ends_with('-') {
+                return false;
+            }
+            let mut prev_hyphen = false;
+            for c in seg.chars() {
+                match c {
+                    'a'..='z' | '0'..='9' => prev_hyphen = false,
+                    '-' => {
+                        if prev_hyphen {
+                            return false; // a doubled hyphen (`a--b`)
+                        }
+                        prev_hyphen = true;
+                    }
+                    _ => return false, // uppercase, `_`, `.`, or any other byte
+                }
+            }
+            true
+        };
+        let mut out = Vec::new();
+        for key in path_item_keys(body) {
+            for seg in key.split('/') {
+                if seg.is_empty() {
+                    continue; // the empty span before the leading `/`
+                }
+                if seg.starts_with('{') && seg.ends_with('}') {
+                    continue; // a template variable — camelCase, checked elsewhere
+                }
+                if !is_kebab(seg) {
+                    out.push(format!("{key} {seg}"));
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_static_path_segment_is_kebab_case() {
+        // Contract-harness invariant (CAMARA Commonalities URL convention): every
+        // *static* segment of a spec's `paths:` keys MUST be kebab-case — lowercase
+        // ASCII words joined by single hyphens (`retrieve-closest-edge-cloud-zone`,
+        // `device-phone-number`). CAMARA fixes this casing so a resource's URL is
+        // predictable across every API in the family; a segment that slips into
+        // camelCase (`retrieveDate`), snake_case (`retrieve_date`) or Title-Case
+        // (`Payments`) is a URL a caller building the path from the API's naming
+        // convention would get wrong, and it makes one API's paths inconsistent with
+        // its 60 siblings that all key resources the same way. Template variables
+        // (`{sessionId}`, `{trustDomainId}`) are the deliberate exception — a path
+        // *parameter* name is camelCase by the same convention — so they are excluded
+        // and left to the path-template tests.
+        //
+        // A gap no existing path test sees: `every_path_template_key_is_well_formed`
+        // checks a key's brace syntax, `every_path_item_key_has_no_trailing_slash`
+        // its trailing `/`, and the distinctness/binding tests
+        // (`every_paths_object_lists_distinct_path_keys`,
+        // `every_path_template_variable_has_a_declared_path_parameter`) compare whole
+        // keys or a key's variable set to declared parameters — none ever reads the
+        // *casing* of a key's literal segments. This is the segment-casing guard.
+        // Verified true across every mounted spec before asserting.
+        for api in APIS {
+            let bad = path_keys_with_non_kebab_segment(api.body);
+            assert!(
+                bad.is_empty(),
+                "{} spec declares a `paths:` key with a non-kebab-case static segment \
+                 (CAMARA URLs are lowercase-hyphen; a template variable is exempt) at: {:?}",
+                api.name,
+                bad
+            );
+        }
+    }
+
+    #[test]
+    fn path_segment_kebab_case_extraction_rules() {
+        // Unit-cover `path_keys_with_non_kebab_segment` so the contract test above
+        // can't pass vacuously and its accept/flag boundary is pinned: a lowercase
+        // single word and a hyphenated word pass; a template variable — even a
+        // camelCase one — is skipped; and camelCase, snake_case, Title-Case, a
+        // trailing/leading hyphen and a doubled hyphen are each flagged, in document
+        // order, once per offending segment (a multi-segment key can contribute more
+        // than one). A digit-bearing word (`oauth2`) is valid kebab.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /retrieve-date:
+    post:
+      operationId: a
+      responses:
+        '200':
+          description: ok
+  /sessions/{sessionId}/extend:
+    post:
+      operationId: b
+      responses:
+        '200':
+          description: ok
+  /retrieveDate:
+    post:
+      operationId: c
+      responses:
+        '200':
+          description: ok
+  /retrieve_date/Sub:
+    post:
+      operationId: d
+      responses:
+        '200':
+          description: ok
+  /-lead/trail-/dbl--hyphen:
+    post:
+      operationId: e
+      responses:
+        '200':
+          description: ok
+";
+        assert_eq!(
+            path_keys_with_non_kebab_segment(body),
+            vec![
+                // `/retrieve-date` and `/sessions/{sessionId}/extend` are clean
+                // (the camelCase `{sessionId}` is an exempt template variable).
+                "/retrieveDate retrieveDate".to_string(),
+                "/retrieve_date/Sub retrieve_date".to_string(),
+                "/retrieve_date/Sub Sub".to_string(),
+                "/-lead/trail-/dbl--hyphen -lead".to_string(),
+                "/-lead/trail-/dbl--hyphen trail-".to_string(),
+                "/-lead/trail-/dbl--hyphen dbl--hyphen".to_string(),
+            ]
+        );
+
+        // A digit-bearing lowercase word is valid kebab; a bare single word passes.
+        assert!(path_keys_with_non_kebab_segment(
+            "openapi: 3.0.3\npaths:\n  /oauth2/token:\n    get:\n      responses:\n        '200':\n          description: ok\n"
+        )
+        .is_empty());
+
+        // Non-vacuous floor: across every registered spec every static path segment
+        // is kebab-case (the invariant the contract test asserts), and the corpus
+        // actually declares many static segments — a large share of them hyphenated,
+        // where the kebab grammar does real work distinguishing a valid
+        // `retrieve-date` from a `retrieve_date` — so the casing check runs on real
+        // multi-part data and a broken (always-empty) extractor can't hide behind a
+        // corpus of single bare words. Count static segments (and the hyphenated
+        // subset) independently of the extractor.
+        let mut static_segs = 0usize;
+        let mut hyphenated = 0usize;
+        for api in APIS {
+            assert!(
+                path_keys_with_non_kebab_segment(api.body).is_empty(),
+                "{}: every static path segment must be kebab-case",
+                api.name
+            );
+            for key in path_item_keys(api.body) {
+                for seg in key.split('/') {
+                    if seg.is_empty() || (seg.starts_with('{') && seg.ends_with('}')) {
+                        continue;
+                    }
+                    static_segs += 1;
+                    if seg.contains('-') {
+                        hyphenated += 1;
+                    }
+                }
+            }
+        }
+        assert!(
+            static_segs >= 100,
+            "expected many static path segments across specs, got {static_segs}"
+        );
+        assert!(
+            hyphenated >= 30,
+            "expected many hyphenated static segments (exercising the kebab grammar), got {hyphenated}"
+        );
+    }
 }
