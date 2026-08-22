@@ -6183,6 +6183,26 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     operation / inline-flow / cross-file refs, the schema-ref drift, the deeper `schema:`
     ref skip, the examples-payload exclusion, document-order lines; ≥100 parameters-list-ref
     non-vacuous floor). Test-only, no spec change.
+  - a **property-value is-a-Schema-Object** contract test (`src/registry.rs`
+    `every_property_value_is_a_schema_object`) — the **property-value member** of the
+    `properties:` family. A `properties:` mapping is keyed by property name and each
+    value MUST be a Schema Object (an inline schema or a `$ref`, both mappings); a value
+    pasted as a bare scalar (`amount: number`), a sequence (`amount: [a,b]` / a `- `
+    block), or an empty/`null` field is an invalid document a validator/Redoc/codegen
+    reads as a non-schema, so the field's type silently doesn't parse. Blind spot of
+    `every_properties_object_lists_distinct_property_names` (property *keys* only) and
+    `every_properties_object_is_object_typed` (the enclosing schema's `type`, never each
+    value); the schema-shape tests only descend once a value is already a mapping. New
+    pure `properties_with_non_mapping_value` (per block-opening `properties:` at indent C
+    outside an `example:`/`examples:` payload: first-child indent D, then each direct
+    property at D — an inline `{ … }`/`{}` flow map or a `$ref`/mapping-key block passes,
+    a scalar / `[ … ]` / `- ` block / empty field flagged; a `properties:` pasted as a
+    `- ` list flagged too). Surveyed the corpus first (1571 direct property values across
+    62 specs, all Schema Objects) → 0 drift. Unit-covered
+    (`property_value_schema_object_extraction_rules`: block schema / `$ref` / flow map /
+    `{}` cleared; scalar / flow-seq / `- ` block / empty block / nested-block scalar /
+    list-form `properties:` flagged in document order; an `example:`-nested `properties:`
+    skipped; ≥500 mapping-value non-vacuity floor). Test-only, no spec change.
   Full response-vs-schema validation still TODO (would need a YAML/JSON-Schema
   validator — a dependency trade-off, deferred).
 
@@ -6190,6 +6210,34 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-22 — Contract-test harness: guard that every **`properties:` entry carries a
+  Schema Object value** (`src/registry.rs` `every_property_value_is_a_schema_object`). A
+  `properties:` mapping is keyed by property name and each value MUST be a Schema Object —
+  an inline schema or a `$ref`, both mappings. A value pasted as a bare scalar
+  (`amount: number`), a sequence (`amount: [a,b]` or a `- ` block), or an empty/`null`
+  field (`amount:` with nothing deeper) is an invalid document: a validator/Redoc/codegen
+  client reads the property's type from a shape that isn't a schema, so the field silently
+  doesn't parse right where a caller builds or reads the payload. The **property-value
+  member of the `properties:` family**, in the blind spot of
+  `every_properties_object_lists_distinct_property_names` (which reads the property *keys*
+  only, never their values) and `every_properties_object_is_object_typed` (which checks the
+  *enclosing* schema's `type: object`, never each property's own value); the schema-shape
+  tests (`every_type_names_a_valid_schema_type`, `every_items_declares_a_single_schema`, …)
+  never reach a value pasted as a scalar or a list, since they only descend once a value is
+  already a mapping. New pure `properties_with_non_mapping_value` (for each block-opening
+  `properties:` at indent C not inside an `example:`/`examples:` payload — ancestor walk —
+  finds the first-child indent D and inspects each direct property at exactly D: an inline
+  `{ … }` flow map (`{}` included) or a block whose first deeper line is a mapping key
+  passes; a bare scalar, a `[ … ]` flow sequence, a `- ` block sequence, or an empty/`null`
+  field is flagged, as is a `properties:` whose direct children are `- ` items). Surveyed
+  the corpus first (1571 direct property values across the 62 mounted specs, every one a
+  Schema Object) → 0 drift. Tests: +2 (the contract test +
+  `property_value_schema_object_extraction_rules`: a block schema, a `$ref` block, a flow
+  map and `{}` cleared; a scalar, a flow sequence, a `- ` block, an empty block, a
+  nested-block scalar and a list-form `properties:` flagged in document order; an
+  `example:`-nested `properties:` skipped; ≥500 mapping-value non-vacuity floor).
+  `cargo test` 2932 green (was 2930); `cargo build --release` succeeds. No new dependency;
+  test-only change (no spec/runtime edit). — binary (release): 5.1M (5,323,160 B; unchanged).
 - 2026-08-22 — Contract-test harness: guard that every **CAMARA-generic error example
   `code` sits under its canonical HTTP status** (`src/registry.rs`
   `every_generic_error_example_code_matches_its_response_status`). CAMARA Commonalities

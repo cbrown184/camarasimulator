@@ -25460,6 +25460,370 @@ components:
         );
     }
 
+    /// The `` `<name>` (property at line N) `` label of every direct property a
+    /// mounted spec declares under a block-opening `properties:` mapping whose
+    /// value is **not** a Schema Object (a mapping).
+    ///
+    /// A `properties:` mapping is keyed by property name and each value MUST be a
+    /// Schema Object — an inline schema (a block whose first deeper line is a
+    /// mapping key, or a `{ … }` flow map, `{}` included) or a `$ref` (itself a
+    /// mapping). A property whose value is a bare scalar (`amount: number`), a flow
+    /// sequence (`amount: [a, b]`), a `- ` block sequence, or an empty/`null` field
+    /// (`amount:` with nothing deeper) is an invalid document: a validator and a
+    /// Redoc/Swagger/codegen client read the property's schema from a shape that is
+    /// not a schema, so the field's type silently doesn't parse right where a caller
+    /// builds or reads the payload. A `properties:` whose direct children are `- `
+    /// items (the whole map pasted as a list) is flagged the same way.
+    ///
+    /// The property-*value* member of the `properties:` family, in the blind spot of
+    /// `every_properties_object_lists_distinct_property_names` (which reads only the
+    /// property *keys* — the mapping's names — never their values) and
+    /// `every_properties_object_is_object_typed` (which checks the *enclosing* schema
+    /// carries `type: object`, never each property's own value). The schema-shape
+    /// tests (`every_type_names_a_valid_schema_type`,
+    /// `every_items_declares_a_single_schema`, …) never reach a property whose value
+    /// was pasted as a scalar or a list — they only descend once a value is already a
+    /// mapping.
+    ///
+    /// For each block-opening `properties:` at indent `C` that is not sample data
+    /// nested inside an `example:`/`examples:` payload (an ancestor walk excludes it,
+    /// mirroring `properties_objects_with_duplicate_names`), this finds the
+    /// first-child indent `D` (the first deeper non-blank, non-comment line) and
+    /// inspects each direct property at *exactly* `D`, bounded by the first line that
+    /// dedents to `C` or shallower. Keys deeper than `D` are a property's own schema
+    /// keywords, never property values, so they are skipped.
+    fn properties_with_non_mapping_value(body: &str) -> Vec<String> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        // True when the `properties:` at line `i` (indent `c`) sits inside an
+        // `example:`/`examples:` payload — some enclosing key up the indent ladder is
+        // `example`/`examples` (mirroring the sibling property extractors).
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        // The shape of the value opened by a block property key at line `j` whose
+        // deeper content sits below indent `d`: `Some(true)` when its first deeper
+        // non-blank, non-comment line is a mapping key (a Schema Object), `Some(false)`
+        // when that line is a `- ` sequence item, `None` when the field is empty
+        // (dedents with nothing deeper).
+        let block_value_is_map = |j: usize, d: usize| -> Option<bool> {
+            for l in &lines[j + 1..] {
+                let tl = l.trim();
+                if tl.is_empty() || tl.starts_with('#') {
+                    continue;
+                }
+                if indent(l) <= d {
+                    return None; // dedented out with nothing under the property
+                }
+                return Some(!tl.starts_with('-'));
+            }
+            None
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let t = line.trim_start();
+            let Some(rest) = t.strip_prefix("properties:") else {
+                continue;
+            };
+            let rest = rest.split('#').next().unwrap_or(rest).trim();
+            if !rest.is_empty() {
+                continue; // an inline value — not a block-opening properties map
+            }
+            let c = indent(line);
+            if inside_example(i, c) {
+                continue; // sample data, not the keyword
+            }
+            // First-child indent D (the first deeper non-blank, non-comment line).
+            let mut d: Option<usize> = None;
+            for l in &lines[i + 1..] {
+                let tl = l.trim();
+                if tl.is_empty() || tl.starts_with('#') {
+                    continue;
+                }
+                if indent(l) <= c {
+                    break;
+                }
+                d = Some(indent(l));
+                break;
+            }
+            let Some(d) = d else { continue };
+            // Each direct property at exactly D, until the block dedents to <= C.
+            for (off, l) in lines[i + 1..].iter().enumerate() {
+                let tl = l.trim();
+                if tl.is_empty() || tl.starts_with('#') {
+                    continue;
+                }
+                if indent(l) <= c {
+                    break;
+                }
+                if indent(l) != d {
+                    continue; // deeper — a property's own schema keywords
+                }
+                let j = i + 1 + off;
+                if tl.starts_with('-') {
+                    // `properties:` opened a sequence, not a name→schema map.
+                    out.push(format!("`-` (properties list item at line {})", j + 1));
+                    continue;
+                }
+                let Some((name, val)) = tl.split_once(':') else {
+                    continue; // not a `key:` line (defensive)
+                };
+                let name = name.trim();
+                let val = val.split('#').next().unwrap_or(val).trim();
+                let ok = if val.is_empty() {
+                    // Block opener: a Schema Object iff its first deeper line is a
+                    // mapping key (never a `- ` item), and it is non-empty.
+                    matches!(block_value_is_map(j, d), Some(true))
+                } else {
+                    // Inline value: only a `{ … }` flow map (`{}` included) is a Schema
+                    // Object; `[ … ]` is a sequence and any other scalar is not a schema.
+                    val.starts_with('{')
+                };
+                if !ok {
+                    out.push(format!("`{name}` (property at line {})", j + 1));
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_property_value_is_a_schema_object() {
+        // Contract-harness invariant (OpenAPI 3.0.x / JSON-Schema structural rule):
+        // every direct property a mounted spec lists under a `properties:` mapping
+        // MUST carry a Schema Object value — an inline schema or a `$ref`, both
+        // mappings. A property whose value is a bare scalar (`amount: number`), a
+        // sequence (`amount: [a, b]` or a `- ` block), or an empty/`null` field is an
+        // invalid document: a validator and a Redoc/Swagger/codegen client read the
+        // property's type from a shape that isn't a schema, so the field silently
+        // doesn't parse right where a caller builds or reads the payload.
+        //
+        // The property-*value* member of the `properties:` family, closing the blind
+        // spot of `every_properties_object_lists_distinct_property_names` (property
+        // *keys* only) and `every_properties_object_is_object_typed` (the enclosing
+        // schema's `type`, not each value). A routine copy-paste hazard in these
+        // scenario-table-heavy specs, where a property grown from a sibling can lose
+        // its schema body or be half-typed as a scalar. Verified true across all
+        // mounted specs before asserting.
+        for api in APIS {
+            let bad = properties_with_non_mapping_value(api.body);
+            assert!(
+                bad.is_empty(),
+                "{} spec declares a `properties:` entry whose value is not a Schema \
+                 Object (a mapping) — a field a client and a validator can't parse: {:?}",
+                api.name,
+                bad
+            );
+        }
+    }
+
+    #[test]
+    fn property_value_schema_object_extraction_rules() {
+        // Unit-cover `properties_with_non_mapping_value` so the contract test above
+        // can't pass vacuously and its accept/flag boundary is pinned: a block schema
+        // (`a:` + `type: string`), a `$ref` block, an inline flow map (`{type: …}`),
+        // and an empty flow map (`{}`) pass; a bare scalar (`e: string`), a flow
+        // sequence (`f: [x, y]`), a `- ` block sequence (`g:`), an empty/`null` block
+        // (`h:`), a nested block's scalar (`inner: string`), and a `properties:` pasted
+        // as a `- ` list are flagged in document order; a `properties:` inside an
+        // `example:` payload is skipped.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths: {}
+components:
+  schemas:
+    Good:
+      type: object
+      properties:
+        a:
+          type: string
+        b:
+          $ref: '#/components/schemas/Good'
+        c: {type: number}
+        d: {}
+    Bad:
+      type: object
+      properties:
+        e: string
+        f: [x, y]
+        g:
+          - nope
+        h:
+    Nested:
+      type: object
+      properties:
+        outer:
+          type: object
+          properties:
+            inner: string
+    InExample:
+      type: object
+      example:
+        properties:
+          notAField: 1
+    ListProps:
+      type: object
+      properties:
+        - name: x
+";
+        // Flagged, in document order: `Bad`'s scalar `e` (line 20), flow sequence `f`
+        // (21), `- ` block `g` (22) and empty block `h` (24); the nested block's scalar
+        // `inner` (31, the inner `properties:` scanned as its own block); and
+        // `ListProps`'s `- ` item (40, a `properties:` pasted as a list). Not flagged:
+        // `Good`'s `a`/`b` (block schema + `$ref`), `c`/`d` (flow maps `{…}`/`{}`),
+        // `Nested`'s `outer` (a block schema — its deeper `type`/`properties` are its
+        // own body), and the `InExample` occurrence (inside an `example:` payload).
+        assert_eq!(
+            properties_with_non_mapping_value(body),
+            vec![
+                "`e` (property at line 20)".to_string(),
+                "`f` (property at line 21)".to_string(),
+                "`g` (property at line 22)".to_string(),
+                "`h` (property at line 24)".to_string(),
+                "`inner` (property at line 31)".to_string(),
+                "`-` (properties list item at line 40)".to_string(),
+            ]
+        );
+
+        // Non-vacuous floor: across every registered spec every `properties:` entry
+        // carries a Schema Object value (the invariant the contract test asserts), and
+        // the corpus actually declares many such properties, so the mapping-recognition
+        // path runs on real data and a broken (always-empty) extractor can't hide
+        // behind a corpus that never declares one. Count direct property values that
+        // ARE mappings with a detector independent of the extractor.
+        let mut mapping_values = 0usize;
+        for api in APIS {
+            assert!(
+                properties_with_non_mapping_value(api.body).is_empty(),
+                "{}: every `properties:` entry must carry a Schema Object value",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            for (i, line) in lines.iter().enumerate() {
+                let t = line.trim_start();
+                let Some(rest) = t.strip_prefix("properties:") else {
+                    continue;
+                };
+                let rest = rest.split('#').next().unwrap_or(rest).trim();
+                if !rest.is_empty() {
+                    continue;
+                }
+                let c = indent(line);
+                // Skip an `example:`/`examples:`-nested `properties:`.
+                let mut level = c;
+                let mut k = i;
+                let mut in_example = false;
+                while k > 0 {
+                    k -= 1;
+                    let l = lines[k];
+                    if l.trim().is_empty() {
+                        continue;
+                    }
+                    let li = indent(l);
+                    if li < level {
+                        if let Some((key, _)) = l.trim_start().split_once(':') {
+                            let key = key.trim();
+                            if key == "example" || key == "examples" {
+                                in_example = true;
+                                break;
+                            }
+                        }
+                        level = li;
+                        if li == 0 {
+                            break;
+                        }
+                    }
+                }
+                if in_example {
+                    continue;
+                }
+                let mut d: Option<usize> = None;
+                for l in &lines[i + 1..] {
+                    let tl = l.trim();
+                    if tl.is_empty() || tl.starts_with('#') {
+                        continue;
+                    }
+                    if indent(l) <= c {
+                        break;
+                    }
+                    d = Some(indent(l));
+                    break;
+                }
+                let Some(d) = d else { continue };
+                for (off, l) in lines[i + 1..].iter().enumerate() {
+                    let tl = l.trim();
+                    if tl.is_empty() || tl.starts_with('#') {
+                        continue;
+                    }
+                    if indent(l) <= c {
+                        break;
+                    }
+                    if indent(l) != d || tl.starts_with('-') {
+                        continue;
+                    }
+                    let Some((_, val)) = tl.split_once(':') else {
+                        continue;
+                    };
+                    let val = val.split('#').next().unwrap_or(val).trim();
+                    let j = i + 1 + off;
+                    let is_map = if val.is_empty() {
+                        // Block opener with a deeper mapping-key first line.
+                        let mut m = j + 1;
+                        loop {
+                            if m >= lines.len() {
+                                break false;
+                            }
+                            let ll = lines[m].trim();
+                            if ll.is_empty() || ll.starts_with('#') {
+                                m += 1;
+                                continue;
+                            }
+                            if indent(lines[m]) <= d {
+                                break false;
+                            }
+                            break !ll.starts_with('-');
+                        }
+                    } else {
+                        val.starts_with('{')
+                    };
+                    if is_map {
+                        mapping_values += 1;
+                    }
+                }
+            }
+        }
+        assert!(
+            mapping_values >= 500,
+            "expected many Schema Object property values across specs, got {mapping_values}"
+        );
+    }
+
     /// The `` `<name>` (examples map at line N) `` label of every **inline**
     /// `examples:` map a mounted spec declares — a Media Type / Parameter /
     /// Header Object's named examples — that lists the **same example name
