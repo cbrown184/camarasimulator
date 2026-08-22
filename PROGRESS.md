@@ -5914,6 +5914,30 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     map's line; a distinct `one`/`two` map cleared; the `components.examples` section out of scope; each
     Example Object's own `summary`/`value` never a name; ≥100 named-example non-vacuous floor). Test-only,
     no spec change.
+  - a **parameters-list `$ref` section-typing** contract test (`src/registry.rs`
+    `every_parameter_ref_targets_the_parameters_section`) asserts that every `$ref` used
+    as an item of an operation- or path-item-level `parameters:` list targets the
+    `parameters` component section (`#/components/parameters/<name>`). A `parameters:`
+    list holds Parameter Objects *or references to them*, so a `$ref` there into
+    `#/components/schemas/…` or `#/components/headers/…` is a type-mismatched reference —
+    a resolver is handed a Schema/Header Object where a Parameter Object is required, and
+    a Redoc/Swagger/codegen client mis-binds or drops the parameter. The **request-side
+    twin** of `every_response_header_ref_targets_the_headers_section`, the same
+    copy-paste hazard one slot over (these specs define both a request
+    `#/components/parameters/XCorrelator` and a response `#/components/headers/XCorrelator`
+    — names differing only by section). Invisible to
+    `local_component_refs_resolve_within_their_own_spec` (which checks a local `$ref`
+    finds *some* target, never that its section fits the slot) and to the
+    parameter-name/location tests (which read a parameter object's own fields, never a
+    list item's ref). New pure `parameter_ref_targets` extractor (no YAML dep, mirroring
+    `response_header_ref_targets`): scoped to a `parameters:` block-opener within
+    `paths:` (excluding an `example:`/`examples:` payload), reads a `$ref` only on the
+    `- ` item line (`- $ref: …` or an inline flow `- { $ref: … }`) so a deeper
+    `- name:` parameter's own `schema:` ref is skipped, and resolves the fragment's
+    component section. Unit-covered (`parameter_ref_target_extraction_rules`: path-item /
+    operation / inline-flow / cross-file refs, the schema-ref drift, the deeper `schema:`
+    ref skip, the examples-payload exclusion, document-order lines; ≥100 parameters-list-ref
+    non-vacuous floor). Test-only, no spec change.
   Full response-vs-schema validation still TODO (would need a YAML/JSON-Schema
   validator — a dependency trade-off, deferred).
 
@@ -5921,6 +5945,31 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-22 — Contract-test harness: added a **parameters-list `$ref` section-typing**
+  contract test (`src/registry.rs` `every_parameter_ref_targets_the_parameters_section`)
+  — every `$ref` used as an item of an operation- or path-item-level `parameters:` list
+  must target the `parameters` component section (`#/components/parameters/<name>`). A
+  `parameters:` list holds Parameter Objects *or references to them*, so a `$ref` there
+  into `#/components/schemas/…` or `#/components/headers/…` is type-mismatched: a resolver
+  is handed a Schema/Header Object where a Parameter Object is required, and a
+  Redoc/Swagger/codegen client mis-binds or drops the parameter. The request-side twin of
+  `every_response_header_ref_targets_the_headers_section`, the same copy-paste hazard one
+  slot over (these specs define both a request `#/components/parameters/XCorrelator` and a
+  response `#/components/headers/XCorrelator`, differing only by section). Invisible to
+  `local_component_refs_resolve_within_their_own_spec` (checks a local `$ref` finds *some*
+  target, never that its section fits the slot) and the parameter-name/location tests
+  (read a parameter's own fields, never a list item's ref). New pure `parameter_ref_targets`
+  extractor (no YAML dep, mirroring `response_header_ref_targets`): scoped to a
+  `parameters:` block-opener within `paths:` (excluding example payloads), reading a `$ref`
+  only on the `- ` item line so a deeper `- name:` parameter's own `schema:` ref is
+  skipped. Surveyed the corpus first (~194 `- $ref:` parameters-list items — XCorrelator +
+  AccessId/PaymentId/… — every one targets `#/components/parameters/…`) → 0 drift, a live
+  guard the moment a schema/header ref is pasted into a parameter slot. Tests: +2 (the
+  contract test + `parameter_ref_target_extraction_rules`: path-item / operation / inline-
+  flow / cross-file refs, the schema-ref drift, the deeper-`schema:`-ref skip, the
+  examples-payload exclusion, document-order lines; ≥100 non-vacuous floor). `cargo test`
+  2892 green (was 2890); `cargo build --release` succeeds. No new dependency; test-only
+  change. — binary: 5.1M (5,323,160 B; unchanged)
 - 2026-08-22 — Contract-test harness: added a **path-parameter ↔ template-variable
   binding** test (`src/registry.rs` `every_path_parameter_names_a_path_template_variable`)
   — the exact **reverse** of `every_path_template_variable_has_a_declared_path_parameter`.

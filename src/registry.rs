@@ -5204,6 +5204,138 @@ mod tests {
         out
     }
 
+    /// Every `$ref` a spec uses as an item of an operation- or path-item-level
+    /// `parameters:` list, as `(1-based line, pointer, component-section)`: the line
+    /// of the `- $ref:` item, the pointer string, and the component section its
+    /// fragment names (`parameters`, `schemas`, `headers`, …). A `$ref` whose
+    /// fragment names no `#/…/components/<section>/<name>` yields no entry (the
+    /// ref-shape tests police malformed refs).
+    ///
+    /// The section a **parameters-list** ref names MUST be `parameters`: an OpenAPI
+    /// Path Item / Operation `parameters:` is a list of Parameter Objects *or
+    /// references to them*, so a `$ref` there into `#/components/schemas/…` or
+    /// `#/components/headers/…` is a type-mismatched reference — a resolver is handed
+    /// a Schema/Header Object where a Parameter Object is required, and a
+    /// Redoc/Swagger/codegen client mis-binds or drops the parameter. The
+    /// request-side twin of [`response_header_ref_targets`], the same copy-paste
+    /// hazard one slot over: these specs define both a request
+    /// `#/components/parameters/XCorrelator` Parameter Object and a response
+    /// `#/components/headers/XCorrelator` Header Object — two component names
+    /// differing only by section — so a header ref pasted into a parameter slot
+    /// resolves to a real component of the wrong kind.
+    ///
+    /// Scope is a `parameters:` block-opener within `paths:` (a Path Item or
+    /// Operation Object property; a `parameters` key inside an `example:`/`examples:`
+    /// payload is excluded via the ancestor walk). Only a `$ref` that is the value of
+    /// a direct list item (`- $ref: …`, or an inline flow `- { $ref: … }`) is read —
+    /// a `$ref` nested deeper under a `- name:` inline Parameter Object (that
+    /// parameter's own `schema:`'s ref) is not the parameter's ref and is skipped.
+    /// Pure and YAML-dep-free.
+    fn parameter_ref_targets(body: &str) -> Vec<(usize, String, String)> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+
+        let Some(ps) = lines
+            .iter()
+            .position(|l| l.trim_end() == "paths:" && !l.starts_with(char::is_whitespace))
+        else {
+            return Vec::new();
+        };
+        let pe = (ps + 1..lines.len())
+            .find(|&i| !lines[i].trim().is_empty() && !lines[i].starts_with(char::is_whitespace))
+            .unwrap_or(lines.len());
+
+        // The pointer string of a `$ref` occurrence in `s` (a `- $ref:` item or an
+        // inline flow `- { $ref: … }`): the value after `$ref:`, one surrounding
+        // quote pair stripped, a bare token bounded by whitespace/`}`/`,`.
+        let ref_pointer = |s: &str| -> Option<String> {
+            let after = &s[s.find("$ref")? + 4..];
+            let after = after.trim_start().strip_prefix(':')?.trim_start();
+            let val = if let Some(r) = after.strip_prefix('"') {
+                r.split('"').next()?
+            } else if let Some(r) = after.strip_prefix('\'') {
+                r.split('\'').next()?
+            } else {
+                after
+                    .split(|c: char| c.is_whitespace() || c == '}' || c == ',')
+                    .next()?
+            };
+            (!val.is_empty()).then(|| val.to_string())
+        };
+        // The `<section>` of a `…#/…/components/<section>/<name>` pointer, or `None`.
+        let component_section = |pointer: &str| -> Option<String> {
+            let frag = pointer.split_once('#')?.1;
+            let mut segs = frag.split('/').filter(|s| !s.is_empty());
+            while let Some(s) = segs.next() {
+                if s == "components" {
+                    return segs.next().map(str::to_string);
+                }
+            }
+            None
+        };
+
+        let mut out = Vec::new();
+        for i in (ps + 1)..pe {
+            if lines[i].trim() != "parameters:" {
+                continue;
+            }
+            let c = indent(lines[i]);
+            // Exclude a `parameters` key inside an `example:`/`examples:` payload.
+            let mut level = c;
+            let mut excluded = false;
+            let mut k = i;
+            while k > ps && level > 0 {
+                k -= 1;
+                let a = lines[k];
+                if a.trim().is_empty() {
+                    continue;
+                }
+                let ai = indent(a);
+                if ai < level {
+                    level = ai;
+                    let akey = a.trim().strip_suffix(':').unwrap_or("");
+                    if akey == "example" || akey == "examples" {
+                        excluded = true;
+                        break;
+                    }
+                }
+            }
+            if excluded {
+                continue;
+            }
+            // Walk the list's direct items (`- …` at the first item indent). A `$ref`
+            // is the item's ref only when it sits on the `- ` line itself; a deeper
+            // `$ref` under a `- name:` inline Parameter Object (its `schema`'s ref) is
+            // not on a `- ` line, so it is never read.
+            let mut item_indent = None;
+            let mut j = i + 1;
+            while j < pe {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                let li = indent(l);
+                if li <= c {
+                    break;
+                }
+                let t = l.trim_start();
+                if t.starts_with('-') {
+                    let ii = *item_indent.get_or_insert(li);
+                    if li == ii && t.contains("$ref") {
+                        if let Some(p) = ref_pointer(t) {
+                            if let Some(sec) = component_section(&p) {
+                                out.push((j + 1, p, sec));
+                            }
+                        }
+                    }
+                }
+                j += 1;
+            }
+        }
+        out
+    }
+
     /// The `METHOD /path` label of every operation a spec declares whose
     /// `requestBody` object carries neither a `content` field nor a `$ref` —
     /// without a YAML dep.
@@ -16223,6 +16355,166 @@ paths:
         assert!(
             total >= 100,
             "expected many response-header refs across specs, got {total}"
+        );
+    }
+
+    #[test]
+    fn every_parameter_ref_targets_the_parameters_section() {
+        // Contract-harness invariant (OpenAPI 3.0.x Path Item / Operation Object
+        // rule): a `parameters:` list holds Parameter Objects *or references to
+        // them*, so every `$ref` a spec uses as a parameters-list item MUST target
+        // the `parameters` component section (`#/components/parameters/<name>`). A
+        // `$ref` there into `#/components/schemas/…` or `#/components/headers/…` is a
+        // type-mismatched reference: a resolver is handed a Schema/Header Object
+        // where a Parameter Object is required, so a Redoc/Swagger/codegen client
+        // mis-binds or drops the parameter.
+        //
+        // The request-side twin of `every_response_header_ref_targets_the_headers_section`,
+        // the same copy-paste hazard one slot over: these specs define both a request
+        // `#/components/parameters/XCorrelator` Parameter Object and a response
+        // `#/components/headers/XCorrelator` Header Object — two component names that
+        // differ only by their section — so a header ref pasted into a parameter slot
+        // resolves to a real component of the wrong kind. No existing test sees it:
+        // `local_component_refs_resolve_within_their_own_spec` checks a local `$ref`
+        // finds *some* target, never that its section fits the slot it fills; the
+        // parameter-name/location tests read a parameter object's own fields, never a
+        // list item's ref; the ref-shape tests read a `$ref`'s siblings and fragment
+        // form, never its section against its use. Verified true across every mounted
+        // spec before asserting (every parameters-list ref targets
+        // `#/components/parameters/…`).
+        for api in APIS {
+            for (line, pointer, section) in parameter_ref_targets(api.body) {
+                assert_eq!(
+                    section, "parameters",
+                    "{} spec: the parameters-list `$ref` `{}` (line {}) targets the \
+                     `{}` component section, not `parameters` — a `parameters:` item \
+                     must reference a Parameter Object (`#/components/parameters/<name>`); \
+                     a schema/header ref pasted into a parameter slot resolves to the \
+                     wrong kind of component",
+                    api.name, pointer, line, section
+                );
+            }
+        }
+        // Non-vacuous floor: the corpus declares many parameters-list refs (every
+        // business operation refs `#/components/parameters/XCorrelator`), so a broken
+        // extractor can't hide behind an empty scan.
+        let total: usize = APIS
+            .iter()
+            .map(|a| parameter_ref_targets(a.body).len())
+            .sum();
+        assert!(
+            total >= 100,
+            "expected many parameters-list refs across specs, got {total}"
+        );
+    }
+
+    #[test]
+    fn parameter_ref_target_extraction_rules() {
+        // Unit-cover `parameter_ref_targets` so the contract test above can't pass
+        // vacuously and its scoping/section reading is pinned: a path-item-level
+        // `parameters:` ref into `#/components/parameters/…` reads section
+        // `parameters` (good); an operation-level ref into `#/components/schemas/…`
+        // reads `schemas` (the drift the contract test turns into a failure); a
+        // `- name:` inline Parameter Object whose `schema:`'s `$ref` sits deeper is
+        // skipped (not on the `- ` item line); an inline flow `- { $ref: … }` item is
+        // read; and a `parameters:` list inside an `examples:` payload is excluded (an
+        // `examples` ancestor). All in document order.
+        let body = "\
+paths:
+  /a:
+    parameters:
+      - $ref: \"#/components/parameters/XCorrelator\"
+    get:
+      operationId: getA
+      parameters:
+        - $ref: \"#/components/schemas/Nope\"
+        - name: page
+          in: query
+          schema:
+            $ref: \"#/components/schemas/PageSize\"
+        - { $ref: \"#/components/parameters/AccessId\" }
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              examples:
+                sample:
+                  value:
+                    parameters:
+                      - $ref: \"#/components/schemas/InExample\"
+components:
+  parameters:
+    XCorrelator:
+      name: x-correlator
+      in: header
+      schema:
+        type: string
+";
+        // Flagged, in document order: the path-item ref (line 4, `parameters`); the
+        // operation ref into `schemas` (line 8, the drift); and the inline-flow ref
+        // (line 13, `parameters`). Not returned: the `- name: page` object's
+        // `schema:` ref (line 12, deeper than the `- ` item line); and the
+        // `parameters:` list inside the `examples:` payload (line 23, an `examples`
+        // ancestor). The `components.parameters` section (outside `paths:`) is out of
+        // scope.
+        assert_eq!(
+            parameter_ref_targets(body),
+            vec![
+                (4, "#/components/parameters/XCorrelator".to_string(), "parameters".to_string()),
+                (8, "#/components/schemas/Nope".to_string(), "schemas".to_string()),
+                (13, "#/components/parameters/AccessId".to_string(), "parameters".to_string()),
+            ]
+        );
+        // The section-drift filter finds exactly the `schemas` mis-ref.
+        let drift: Vec<_> = parameter_ref_targets(body)
+            .into_iter()
+            .filter(|(_, _, sec)| sec != "parameters")
+            .collect();
+        assert_eq!(
+            drift,
+            vec![(8, "#/components/schemas/Nope".to_string(), "schemas".to_string())]
+        );
+        // A cross-file parameters-list ref reads its section too.
+        let cross = "\
+paths:
+  /a:
+    get:
+      parameters:
+        - $ref: \"../../shared/params.yaml#/components/parameters/Foo\"
+      responses:
+        '200':
+          description: ok
+";
+        assert_eq!(
+            parameter_ref_targets(cross),
+            vec![(
+                5,
+                "../../shared/params.yaml#/components/parameters/Foo".to_string(),
+                "parameters".to_string(),
+            )]
+        );
+        // A body with no `paths:` yields nothing.
+        assert!(parameter_ref_targets("components:\n  parameters: {}\n").is_empty());
+
+        // Non-vacuous floor: across every registered spec every parameters-list ref
+        // targets the `parameters` section (the invariant the contract test asserts),
+        // yet the corpus declares many such refs, so a broken extractor can't hide
+        // behind an empty scan.
+        let mut total = 0usize;
+        for api in APIS {
+            for (_, _, section) in parameter_ref_targets(api.body) {
+                assert_eq!(
+                    section, "parameters",
+                    "{}: every parameters-list ref must target the parameters section",
+                    api.name
+                );
+                total += 1;
+            }
+        }
+        assert!(
+            total >= 100,
+            "expected many parameters-list refs across specs, got {total}"
         );
     }
 
