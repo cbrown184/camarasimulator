@@ -6117,6 +6117,35 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-22 — Contract-test harness: guard every schema **`required` field is a
+  sequence** (`src/registry.rs` `every_schema_required_field_is_a_sequence`). A
+  Schema Object's `required` MUST be an array of property-name strings; a
+  `required:` a paste turned into a bare scalar or a mapping is an invalid document
+  a validator/Redoc/codegen client reads the object's mandatory-property set from a
+  shape that isn't the name list they expect, so the intended constraint silently
+  doesn't parse. The **`required` member of the is-a-sequence shape family**
+  (`every_enum_field_is_a_sequence` / `every_security_field_is_a_sequence` /
+  `every_composer_keyword_declares_a_sequence`), and a real vacuous-pass gap the
+  four sibling `required`-*array* tests leave open: `every_required_array_is_non_empty`,
+  `…lists_distinct_entries`, `every_required_entry_names_a_declared_property` and
+  `every_required_array_sits_on_an_object_type` all gather entries only from a flow
+  `[ … ]`/block `- ` list, so a mapping- or scalar-shaped `required:` yields zero
+  entries and passes them all silently, its broken shape unseen. New pure
+  `required_fields_not_a_sequence` (mirrors `enum_fields_not_a_sequence`: flow `[`
+  or block-first-`-` = a sequence; a non-empty non-`[` scalar or a mapping-first
+  block = flagged; `example:`/`examples:` payloads skipped by ancestor walk) with
+  the added exclusion of the scalar **boolean** flag `required: true`/`false` — the
+  Parameter/Request Body/(component) Header form, not the schema array — mirroring
+  `empty_required_arrays`' scoping; and `[]` left to the non-empty test. Surveyed the
+  corpus first (266 block-form + ~18 flow-form schema `required` arrays; 169 `true` +
+  163 `false` boolean flags; 0 property literally named `required`) → every schema
+  `required` is a sequence → 0 drift. Tests: +2 (the contract test +
+  `required_field_sequence_extraction_rules`: scalar / mapping-block / empty-block
+  flagged in document order at lines [31,34,38]; boolean flag / flow / block / empty
+  flow / in-`example:` cleared; ≥100 sequence-`required` non-vacuity floor).
+  `cargo test` 2916 green (was 2914); `cargo build --release` succeeds. No new
+  dependency; test-only change (no spec/runtime edit). — binary: 5.1M (5,323,160 B;
+  unchanged)
 - 2026-08-22 — Contract-test harness: guard every inline **Response/Encoding
   `headers:` map lists distinct header names** (`src/registry.rs`
   `every_response_header_map_lists_distinct_header_names`). An OpenAPI `headers:`

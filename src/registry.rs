@@ -55277,6 +55277,257 @@ components:
         );
     }
 
+    /// The 1-based line numbers of every `required:` **schema field** a spec declares
+    /// whose value is not a valid sequence (array) — the `required` member of the
+    /// is-a-sequence shape family (`every_enum_field_is_a_sequence`,
+    /// `every_security_field_is_a_sequence`, `every_composer_keyword_declares_a_sequence`).
+    ///
+    /// A Schema Object's `required` MUST be an array of property-name strings. This
+    /// walks every `required:` key (the `:` must immediately follow `required`, so a
+    /// longer key sharing the prefix — `requiredScopes:` — never matches) and flags one
+    /// whose value is neither a flow sequence (`[ … ]`) nor a block sequence (its first
+    /// deeper non-blank/non-comment line is a `-` item). Two forms are deliberately
+    /// **not** flagged: the scalar boolean flag `required: true` / `required: false` —
+    /// the Parameter / Request Body / (component) Header form, not the schema array
+    /// (mirroring [`empty_required_arrays`]' scoping) — and an inline empty flow `[]`
+    /// (emptiness is `every_required_array_is_non_empty`'s concern). A `required:` inside
+    /// an `example:`/`examples:` payload is skipped via the ancestor walk (sample data,
+    /// not the keyword), and a `- required:` sequence-item opener (under a `- `) is out
+    /// of scope. As with the sibling sequence-shape extractors a schema property literally
+    /// *named* `required` opening a mapping would be flagged — the specs declare none (a
+    /// documented scoping trade shared with [`empty_required_arrays`]).
+    fn required_fields_not_a_sequence(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        // The inline value of a `required:` line (inline comment stripped, whitespace
+        // trimmed). `None` when the line is a different key; an empty string marks a
+        // block opener (no inline value).
+        let inline = |l: &str| -> Option<String> {
+            let rest = l.trim_start().strip_prefix("required")?;
+            let v = rest.strip_prefix(':')?;
+            Some(v.split('#').next().unwrap_or(v).trim().to_string())
+        };
+        // True when line `i` (indent `c`) sits inside an `example:`/`examples:`
+        // payload — some enclosing container key up the indent ladder is
+        // `example`/`examples` (mirroring the other keyword extractors).
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some(v) = inline(line) else { continue };
+            let c = indent(line);
+            if inside_example(i, c) {
+                continue; // example data, not the keyword
+            }
+            if v == "true" || v == "false" {
+                continue; // the Parameter/Request Body/Header boolean flag, not an array
+            }
+            if v.starts_with('[') {
+                continue; // an inline flow sequence (`[]` / `[ … ]`) — a sequence
+            }
+            if !v.is_empty() {
+                out.push(i + 1); // a non-empty, non-boolean, non-sequence scalar/flow
+                continue;
+            }
+            // Block opener: a sequence iff its first non-blank, non-comment line
+            // indented deeper than the key is a `-` sequence item.
+            let mut j = i + 1;
+            let is_seq = loop {
+                if j >= lines.len() {
+                    break false; // no deeper line — an empty/`null` field
+                }
+                let l = lines[j];
+                if l.trim().is_empty() || l.trim_start().starts_with('#') {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) <= c {
+                    break false; // dedented out with nothing under `required:`
+                }
+                break l.trim_start().starts_with('-');
+            };
+            if !is_seq {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_schema_required_field_is_a_sequence() {
+        // Contract-harness invariant (OpenAPI 3.0.x / JSON-Schema structural rule):
+        // every Schema Object `required` field a mounted spec declares MUST be a
+        // sequence (array) of property names. A `required:` that is a bare scalar or a
+        // mapping is an invalid document — a validator and a Redoc/Swagger/codegen
+        // client read the object's mandatory-property set from a shape that isn't the
+        // name list they expect, so the intended constraint silently doesn't parse right
+        // where a caller builds the payload.
+        //
+        // Closes a real vacuous-pass gap the sibling `required` tests leave open:
+        // `every_required_array_is_non_empty` (via `empty_required_arrays`),
+        // `every_required_array_lists_distinct_entries`,
+        // `every_required_entry_names_a_declared_property` and
+        // `every_required_array_sits_on_an_object_type` all collect a `required` array's
+        // entries only by gathering a flow list's `[ … ]` elements or a block list's `- `
+        // items — so a `required:` a paste turned into a mapping or a lone scalar yields
+        // zero entries and passes them all silently, its broken shape unseen. This test
+        // inspects the field's shape itself, the `required` analogue of
+        // `every_enum_field_is_a_sequence` / `every_security_field_is_a_sequence`. The
+        // scalar boolean flag `required: true`/`false` (the Parameter/Request Body/Header
+        // form) is out of scope — it is not the schema array — mirroring
+        // `empty_required_arrays`. Verified true across all mounted specs before asserting.
+        for api in APIS {
+            let bad = required_fields_not_a_sequence(api.body);
+            assert!(
+                bad.is_empty(),
+                "{} spec declares a schema `required` field that is not a sequence (array) \
+                 — a mandatory-property set a client and a validator can't parse — at \
+                 `required:` line(s): {:?}",
+                api.name,
+                bad
+            );
+        }
+    }
+
+    #[test]
+    fn required_field_sequence_extraction_rules() {
+        // Unit-cover `required_fields_not_a_sequence` so the contract test above can't
+        // pass vacuously and its detection is pinned: a flow sequence (`required: [a, b]`),
+        // a block sequence (`required:` + `- a`), an inline empty flow (`required: []`),
+        // and the boolean parameter flag (`required: true`) pass; a bare scalar
+        // (`required: name`), a mapping-form block (`required:` + `foo: bar`, no dash), and
+        // an empty block (`required:` with nothing deeper under it) are flagged in document
+        // order; and a `required:` inside an `example:` payload is skipped.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      parameters:
+        - name: x
+          in: query
+          required: true
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    FlowSeq:
+      type: object
+      required: [a, b]
+    BlockSeq:
+      type: object
+      required:
+        - a
+        - b
+    EmptyFlow:
+      type: object
+      required: []
+    Scalar:
+      type: object
+      required: name
+    MappingBlock:
+      type: object
+      required:
+        foo: bar
+    EmptyBlock:
+      type: object
+      required:
+    InExample:
+      type: object
+      example:
+        required: nope
+";
+        // Flagged, in document order: line 31 (`Scalar.required: name` — a bare scalar),
+        // line 34 (`MappingBlock` — a block whose first deeper line `foo: bar` is a mapping
+        // key, no dash), and line 38 (`EmptyBlock` — a block `required:` with only the
+        // dedented `InExample:` below it, i.e. an empty/`null` field). Not flagged:
+        // `parameters[0].required: true` (the boolean flag), `FlowSeq` (inline flow),
+        // `BlockSeq` (block sequence), `EmptyFlow` (`required: []`, an inline empty flow —
+        // emptiness is `every_required_array_is_non_empty`'s concern), and the `InExample`
+        // occurrence (its `required: nope` sits inside the `example:` payload).
+        assert_eq!(required_fields_not_a_sequence(body), vec![31, 34, 38]);
+
+        // Non-vacuous floor: across every registered spec every schema `required` field is
+        // a sequence (the invariant the contract test asserts), and the corpus actually
+        // declares many `required` arrays (object mandatory-property sets, in both flow and
+        // block form) — so the sequence-recognition path runs on real data and a broken
+        // (always-empty) extractor can't hide behind a corpus that never declares one.
+        // Count the sequence-shaped `required` fields with a detector independent of the
+        // extractor (the boolean parameter flag excluded — it is not the schema array).
+        let mut seq_required = 0usize;
+        for api in APIS {
+            assert!(
+                required_fields_not_a_sequence(api.body).is_empty(),
+                "{}: every schema `required` field must be a sequence",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            for (i, l) in lines.iter().enumerate() {
+                let Some(rest) = l.trim_start().strip_prefix("required") else {
+                    continue;
+                };
+                let Some(val) = rest.strip_prefix(':') else { continue };
+                let val = val.split('#').next().unwrap_or(val).trim();
+                if val == "true" || val == "false" {
+                    continue; // the boolean parameter/request-body flag, not the array
+                }
+                if val.starts_with('[') {
+                    seq_required += 1; // an inline flow sequence
+                    continue;
+                }
+                if !val.is_empty() {
+                    continue; // a scalar — the extractor flags it, never a sequence
+                }
+                let c = indent(l);
+                let mut j = i + 1;
+                while j < lines.len()
+                    && (lines[j].trim().is_empty() || lines[j].trim_start().starts_with('#'))
+                {
+                    j += 1;
+                }
+                if j < lines.len()
+                    && indent(lines[j]) > c
+                    && lines[j].trim_start().starts_with('-')
+                {
+                    seq_required += 1; // a deeper `- `-item block sequence
+                }
+            }
+        }
+        assert!(
+            seq_required >= 100,
+            "expected many sequence `required` fields across specs, got {seq_required}"
+        );
+    }
+
     /// The `METHOD /path <status>` label of every **response entry** a spec
     /// declares whose Response Object carries an inline `description` field with an
     /// **empty** value — a present-but-blank description — without a YAML dep.
