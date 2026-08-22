@@ -57988,4 +57988,282 @@ paths: {}
             "expected many additionalProperties keywords across the corpus, got {keyword_lines}"
         );
     }
+
+    // Lines of every schema whose `minimum` is strictly greater than its
+    // same-object `maximum` — an unsatisfiable numeric range.
+    fn numeric_bounds_out_of_order(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        // The inline numeric scalar of key `key` on line `l` (inline comment +
+        // surrounding quotes stripped), or `None` for another key, a block
+        // opener, or a non-numeric value. Mirrors `numeric_facet_type_mismatches`.
+        let bound_scalar = |l: &str, key: &str| -> Option<f64> {
+            let (k, v) = l.trim_start().split_once(':')?;
+            if k.trim() != key {
+                return None;
+            }
+            let v = v
+                .split('#')
+                .next()
+                .unwrap_or(v)
+                .trim()
+                .trim_matches('"')
+                .trim_matches('\'');
+            if v.is_empty() {
+                None
+            } else {
+                v.parse::<f64>().ok()
+            }
+        };
+        // The sibling `maximum:` scalar in the same object as line `i` (indent
+        // `c`): scan down through the object's block for a same-indent `maximum`,
+        // then up, dedent-bounded so a nested/following object's `maximum` never
+        // pairs. Mirrors `additional_properties_off_object_type`'s `sibling_type`.
+        let sibling_maximum = |i: usize, c: usize| -> Option<f64> {
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c {
+                    if let Some(v) = bound_scalar(l, "maximum") {
+                        return Some(v);
+                    }
+                }
+                j += 1;
+            }
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c {
+                    if let Some(v) = bound_scalar(l, "maximum") {
+                        return Some(v);
+                    }
+                }
+            }
+            None
+        };
+        // True when line `i` (indent `c`) is a property literally NAMED `minimum`
+        // (its NEAREST shallower ancestor key is `properties`) or sits inside an
+        // `example:`/`examples:` payload (some enclosing container up the indent
+        // ladder is `example`/`examples`). Mirrors
+        // `additional_properties_off_object_type`'s `excluded_context`.
+        let excluded_context = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut nearest = true;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if nearest && key == "properties" {
+                            return true; // a property NAMED minimum
+                        }
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    nearest = false;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some(min) = bound_scalar(line, "minimum") else {
+                continue;
+            };
+            let c = indent(line);
+            if excluded_context(i, c) {
+                continue;
+            }
+            if let Some(max) = sibling_maximum(i, c) {
+                // Strict `>` only: `minimum == maximum` is a valid single-value
+                // range (barring exclusive bounds, which 3.0.x models as separate
+                // booleans), so equality is never flagged.
+                if min > max {
+                    out.push(i + 1);
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_numeric_range_has_minimum_not_above_maximum() {
+        // Contract-harness invariant (OpenAPI 3.0.x / JSON Schema Schema Object):
+        // when a numeric schema declares BOTH `minimum` and `maximum`, the two
+        // bound a closed interval `[minimum, maximum]`, so `minimum` MUST NOT
+        // exceed `maximum`. An inverted pair (`minimum: 10`, `maximum: 5`) is an
+        // UNSATISFIABLE range — no value validates — so a request/response that
+        // must populate the field can never conform, and a Redoc/Swagger/codegen
+        // reader is handed an empty domain. It is a live copy-paste/transposition
+        // hazard: these specs bound many parameters (`maxAge`, ports, page sizes,
+        // radii, latitudes/longitudes) with numeric ranges, and swapping the two
+        // values or editing one in isolation flips the interval.
+        //
+        // Distinct from every existing numeric test: `numeric_facet_type_mismatches`
+        // pins each facet's ENCLOSING TYPE (that `minimum`/`maximum` sit on a
+        // numeric schema) but never compares the two VALUES; the pattern/length
+        // example tests read a facet against an EXAMPLE, never one facet against
+        // its sibling. This is the value-ordering guard for the pair. Verified
+        // every mounted spec keeps `minimum <= maximum` before asserting.
+        for api in APIS {
+            let bad = numeric_bounds_out_of_order(api.body);
+            assert!(
+                bad.is_empty(),
+                "{} spec declares a numeric schema whose `minimum` exceeds its \
+                 `maximum` (an unsatisfiable range) at line(s): {bad:?}",
+                api.name
+            );
+        }
+    }
+
+    #[test]
+    fn numeric_bounds_ordering_extraction_rules() {
+        // Pin the extractor's flag / skip boundaries so the contract test above
+        // can't pass vacuously and each branch is exercised.
+
+        // An inverted pair → flagged (regardless of `maximum` being above or below
+        // `minimum` in document order); a well-ordered pair and an equal pair →
+        // cleared. A float pair and an integer pair both parse and compare.
+        let mixed = "\
+openapi: 3.0.3
+components:
+  schemas:
+    BadIntRange:
+      type: integer
+      minimum: 10
+      maximum: 5
+    GoodIntRange:
+      type: integer
+      minimum: 1
+      maximum: 65535
+    EqualRange:
+      type: integer
+      minimum: 7
+      maximum: 7
+    BadMaxAbove:
+      type: number
+      maximum: 1.5
+      minimum: 9.5
+    GoodFloatRange:
+      type: number
+      minimum: -90.0
+      maximum: 90.0
+paths: {}
+";
+        // `BadIntRange.minimum` (line 6) and `BadMaxAbove.minimum` (line 19)
+        // flagged in document order; the well-ordered and equal ranges cleared.
+        // `BadMaxAbove` proves the up-scan finds a `maximum` declared *before* the
+        // `minimum` line.
+        assert_eq!(numeric_bounds_out_of_order(mixed), vec![6, 19]);
+
+        // A lone `minimum` with no sibling `maximum` → never flagged; a nested
+        // object's `maximum` (deeper indent) never pairs with an outer `minimum`;
+        // a property literally NAMED `minimum`/`maximum` under `properties:` and a
+        // pair inside an `example:` payload → never flagged.
+        let cleared = "\
+openapi: 3.0.3
+components:
+  schemas:
+    LoneMin:
+      type: integer
+      minimum: 3
+    OuterMinNestedMax:
+      type: object
+      minimum: 100
+      properties:
+        inner:
+          type: integer
+          maximum: 1
+    RangeObject:
+      type: object
+      properties:
+        minimum:
+          type: integer
+        maximum:
+          type: integer
+    WithExample:
+      type: integer
+      minimum: 0
+      maximum: 9
+      example:
+        minimum: 10
+        maximum: 5
+paths: {}
+";
+        assert!(numeric_bounds_out_of_order(cleared).is_empty());
+
+        // Non-vacuous corpus floor: the mounted specs declare many co-occurring
+        // minimum/maximum pairs (every one well-ordered), so the extractor runs on
+        // real data and flags none.
+        let mut pair_count = 0usize;
+        for api in APIS {
+            assert!(
+                numeric_bounds_out_of_order(api.body).is_empty(),
+                "{}: every minimum/maximum pair expected well-ordered",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            for (i, l) in lines.iter().enumerate() {
+                if l.trim_start().starts_with("minimum:") {
+                    let c = indent(l);
+                    // A same-indent sibling `maximum` in the same object block.
+                    let mut has_max = false;
+                    for &dir in &[1isize, -1] {
+                        let mut j = i as isize + dir;
+                        while j >= 0 && (j as usize) < lines.len() {
+                            let lj = lines[j as usize];
+                            if lj.trim().is_empty() {
+                                j += dir;
+                                continue;
+                            }
+                            if indent(lj) < c {
+                                break;
+                            }
+                            if indent(lj) == c && lj.trim_start().starts_with("maximum:") {
+                                has_max = true;
+                                break;
+                            }
+                            j += dir;
+                        }
+                        if has_max {
+                            break;
+                        }
+                    }
+                    if has_max {
+                        pair_count += 1;
+                    }
+                }
+            }
+        }
+        assert!(
+            pair_count >= 40,
+            "expected many co-occurring minimum/maximum pairs across the corpus, got {pair_count}"
+        );
+    }
 }

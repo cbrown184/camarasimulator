@@ -3332,6 +3332,23 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - a **numeric-bound ordering** contract test (`src/registry.rs`
+    `every_numeric_range_has_minimum_not_above_maximum`) asserts that when a numeric
+    schema declares both `minimum` and `maximum` they bound a closed interval
+    `[minimum, maximum]`, so `minimum` never exceeds `maximum` — an inverted pair is
+    an unsatisfiable range no value validates, a copy-paste/transposition hazard
+    across the many bounded parameters (`maxAge`, ports, page sizes, radii,
+    lat/long). Distinct from `numeric_facet_type_mismatches` (which pins each
+    facet's enclosing type, never compares the two values) and the example tests
+    (facet vs example, never facet vs sibling). New pure `numeric_bounds_out_of_order`
+    anchors each `minimum:` scalar, finds its same-indent sibling `maximum:`
+    (down-then-up, dedent-bounded, mirroring `sibling_type`), flags `minimum > maximum`
+    (strict; equality is a valid single value); skips a property named `minimum` and
+    an `example`/`examples` payload. Corpus: 130 co-occurring pairs, all well-ordered
+    → 0 drift. Unit-covered (`numeric_bounds_ordering_extraction_rules`: two inverted
+    pairs incl. `maximum`-before-`minimum` flagged in order; well-ordered/equal/float
+    cleared; lone-min, nested-max, range-object props, example-payload skipped;
+    ≥40-pair floor). Test-only, no spec change.
   - a **response-header `$ref` target-section** contract test (`src/registry.rs`
     `every_response_header_ref_targets_the_headers_section`) asserts that every
     `$ref` used as a Response Object `headers:` entry's value targets the `headers`
@@ -5880,6 +5897,41 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 ---
 
 ## Scan journal
+
+- 2026-08-22 — Contract-test harness: added a **numeric-bound ordering** test
+  (`src/registry.rs` `every_numeric_range_has_minimum_not_above_maximum`) — when a
+  numeric schema declares BOTH `minimum` and `maximum`, they bound a closed
+  interval `[minimum, maximum]`, so `minimum` MUST NOT exceed `maximum`. An
+  inverted pair (`minimum: 10`, `maximum: 5`) is an **unsatisfiable** range — no
+  value validates — so a field that must be populated can never conform and a
+  Redoc/Swagger/codegen reader is handed an empty domain. A live
+  copy-paste/transposition hazard: these specs bound many parameters (`maxAge`,
+  ports, page sizes, radii, latitudes/longitudes) with numeric ranges, and
+  swapping the two values or editing one in isolation flips the interval. Distinct
+  from every existing numeric test: `numeric_facet_type_mismatches` pins each
+  facet's **enclosing type** (that `minimum`/`maximum` sit on a numeric schema) but
+  never compares the two **values**; the pattern/length example tests read a facet
+  against an **example**, never one facet against its sibling — this is the
+  value-ordering guard for the pair. New pure `numeric_bounds_out_of_order`
+  extractor: anchors on each `minimum:` inline numeric scalar, finds its
+  same-indent sibling `maximum:` in the same object block (down-then-up scan,
+  dedent-bounded, mirroring `additional_properties_off_object_type`'s
+  `sibling_type`), and flags `minimum > maximum` (strict `>` only — equality is a
+  valid single-value range, exclusive bounds being separate booleans in 3.0.x).
+  Skips a property literally NAMED `minimum` (nearest shallower ancestor
+  `properties:`) and a pair inside an `example`/`examples` payload
+  (`excluded_context`, same helper shape as the additionalProperties test).
+  Surveyed the corpus first: **130** co-occurring minimum/maximum pairs across the
+  specs, every one well-ordered → **0** drift, a live guard that fires the moment
+  a bound pair is transposed. Unit-covered
+  (`numeric_bounds_ordering_extraction_rules`: an inverted int pair and an inverted
+  pair whose `maximum` precedes `minimum` flagged in document order; a well-ordered
+  pair, an equal pair, and a well-ordered float pair cleared; a lone `minimum`, an
+  outer `minimum` vs a nested `maximum`, a `RangeObject` with properties named
+  `minimum`/`maximum`, and an example-payload pair all skipped; ≥40-pair
+  non-vacuous corpus floor). Test-only (`#[cfg(test)]`), no runtime/spec change.
+  `cargo test` 2888 green (was 2886; +2); `cargo build --release` ok — binary
+  (release): 5.1M (5,323,160 B; unchanged — test-only code), no new deps.
 
 - 2026-08-22 — Contract-test harness: added a **response-header `$ref` target
   section** test (`src/registry.rs`
