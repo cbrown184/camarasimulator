@@ -3332,6 +3332,20 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - a **schema-slot `$ref` section-typing** contract test (`src/registry.rs`
+    `every_schema_ref_targets_the_schemas_section`) asserts every `$ref` a spec uses as
+    the value of a `schema:` field (Parameter / Media Type / Header Object) targets the
+    `schemas` component section (`#/components/schemas/<name>`) — a `schema:` holds a
+    Schema Object *or a reference to one*, so a `$ref` into `parameters`/`responses`/
+    `headers` is type-mismatched (a resolver handed the wrong kind of component). The
+    fourth sibling of the response-slot, parameters-list, and response-header `$ref`
+    section tests, and the highest-traffic slot of the four (every request/response body
+    binds a `content: → schema:` ref). New pure `schema_ref_targets` reads only a
+    `schema:`'s own ref (inline `schema: { $ref: … }` or block-form direct-child),
+    skipping a deeper `$ref` under the schema's `properties:`/`items:`/`allOf:`; example
+    payloads excluded via the ancestor walk. Corpus: 812 schema-slot refs, every one →
+    `#/components/schemas/…` → 0 drift. Unit-covered (`schema_ref_target_extraction_rules`;
+    ≥100 floor). Test-only, no spec change.
   - a **response-slot `$ref` section-typing** contract test (`src/registry.rs`
     `every_response_ref_targets_the_responses_section`) asserts every `$ref` a spec uses
     as the value of a `responses:` status-code slot targets the `responses` component
@@ -5959,6 +5973,41 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-22 — Contract-test harness: added a **schema-slot `$ref` section-typing**
+  contract test (`src/registry.rs` `every_schema_ref_targets_the_schemas_section`) —
+  every `$ref` a spec uses as the value of a `schema:` field MUST target the `schemas`
+  component section (`#/components/schemas/<name>`). A `schema:` (on a Parameter Object,
+  a Media Type Object, or a Header Object) holds a Schema Object *or a reference to one*,
+  so a `$ref` there into `#/components/parameters/…` / `#/components/responses/…` /
+  `#/components/headers/…` is type-mismatched: a resolver is handed a Parameter/Response/
+  Header Object where a Schema Object is required, and a Redoc/Swagger/codegen client
+  mis-binds or drops the schema. The **fourth** sibling of
+  `every_response_ref_targets_the_responses_section`,
+  `every_parameter_ref_targets_the_parameters_section`, and
+  `every_response_header_ref_targets_the_headers_section`, and the highest-traffic slot
+  of the four — every request/response body binds a `content: → schema:` ref, and these
+  specs carry both a `CamaraError` **schema** and the shared error **responses**/
+  **headers**/**parameters** that wrap or accompany it (component names differing only by
+  section), so a response/header/parameter ref transposed into a schema slot resolves to
+  a real component of the wrong kind. Invisible to
+  `local_component_refs_resolve_within_their_own_spec` (checks a local `$ref` finds
+  *some* target, never that its section fits the slot), to `every_media_type_declares_a_schema`
+  / the parameter schema-or-content tests (check a `schema:` is *present*, never where its
+  ref points), and to the ref-shape tests (read a `$ref`'s siblings and fragment form,
+  never section vs. use). New pure `schema_ref_targets` extractor (mirrors
+  `response_ref_targets`): scoped to a `schema:` key within `paths:` (example payloads
+  excluded via the ancestor walk), reading only the schema's *own* ref — inline on the key
+  line (`schema: { $ref: … }`) or at the Schema Object's own direct-child indent (block
+  form) — so a deeper `$ref` under the schema's `properties:`/`items:`/`allOf:` (that
+  sub-schema's ref, not this slot's) is skipped. Surveyed the corpus first (812 schema-slot
+  refs — every request/response `content: → schema:` binding plus parameter `schema:`s —
+  every one targets `#/components/schemas/…`) → 0 drift, a live guard the moment a
+  parameter/response/header ref is pasted into a schema slot. Tests: +2 (the contract test
+  + `schema_ref_target_extraction_rules`: block-form good/`parameters`-drift refs, an
+  inline-flow `responses`-drift ref, the deeper-`properties`-ref skip, the examples-payload
+  exclusion, a cross-file `errors.yaml#/components/schemas/…` ref, document-order lines;
+  ≥100 non-vacuous floor). `cargo test` 2896 green (was 2894); `cargo build --release`
+  succeeds. No new dependency; test-only change. — binary: 5.1M (5,323,160 B; unchanged)
 - 2026-08-22 — Contract-test harness: added a **response-slot `$ref` section-typing**
   contract test (`src/registry.rs` `every_response_ref_targets_the_responses_section`) —
   every `$ref` a spec uses as the value of a `responses:` status-code slot MUST target the
