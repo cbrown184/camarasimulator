@@ -61802,4 +61802,368 @@ paths: {}
             "expected many co-occurring minimum/maximum pairs across the corpus, got {pair_count}"
         );
     }
+
+    /// Returns `"<name>@line <n>"` for every repeated key within a Response-Object
+    /// (or Encoding-Object) `headers:` map — a header name listed twice in the same
+    /// map — as 1-based line numbers of the repeat, in document order. Pure and
+    /// YAML-dep-free, mirroring `discriminator_mappings_with_duplicate_keys`'
+    /// per-block seen-set walk.
+    ///
+    /// An OpenAPI `headers:` map (on a Response Object, or an Encoding Object) is a
+    /// mapping keyed by header name, so its keys MUST be distinct. A `headers:` map
+    /// that is the direct child of the top-level `components:` object — the
+    /// Components Object's own `headers` section, whose entries are reusable
+    /// component definitions — is deliberately EXCLUDED here: its keys are already
+    /// guarded by `every_components_object_lists_distinct_component_keys` (which
+    /// names `headers:` among the `components:` sub-objects it scans), so this
+    /// extractor owns only the inline header maps that test never reaches. A
+    /// `headers:` line sitting inside an `example:`/`examples:` payload is sample
+    /// data, not a Header Object map, and is skipped.
+    ///
+    /// For each in-scope `headers:` opener at indent `c`, the header names are the
+    /// keys at exactly the map's first-child indent (a Header Object's own children
+    /// — `schema`/`description`/`example`/… — are deeper and never counted, and a
+    /// following sibling/ancestor at `<= c` closes the block). A `$ref` entry
+    /// (`WWW-Authenticate:` opening a `$ref` block, or an inline `<name>: {...}`)
+    /// is keyed the same way — the name before the first colon, an optional
+    /// surrounding quote stripped.
+    fn header_maps_with_duplicate_keys(body: &str) -> Vec<String> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        // The header-name key of a map entry line (`<name>:` or `<name>: <inline>`),
+        // an optional single/double quote stripped; `None` for a sequence item or a
+        // line with no `key:` structure. Header names are RFC 7230 tokens (no colon
+        // inside), so a simple split on the first colon is exact for the unquoted
+        // form; a quoted key is consumed to its closing quote.
+        let header_key = |s: &str| -> Option<String> {
+            let s = s.trim();
+            if s.starts_with('-') {
+                return None; // a YAML sequence item, not a mapping entry
+            }
+            if let Some(r) = s.strip_prefix('"') {
+                let end = r.find('"')?;
+                r[end + 1..].trim_start().strip_prefix(':')?; // must be `"name": …`
+                let key = &r[..end];
+                (!key.is_empty()).then(|| key.to_string())
+            } else if let Some(r) = s.strip_prefix('\'') {
+                let end = r.find('\'')?;
+                r[end + 1..].trim_start().strip_prefix(':')?;
+                let key = &r[..end];
+                (!key.is_empty()).then(|| key.to_string())
+            } else {
+                let (k, _v) = s.split_once(':')?;
+                let key = k.trim();
+                (!key.is_empty()).then(|| key.to_string())
+            }
+        };
+        // True when the `headers:` opener at line `i` (indent `c`) is the direct
+        // child of the top-level `components:` object (its nearest shallower ancestor
+        // key is `components:`), OR sits inside an `example:`/`examples:` payload
+        // (some enclosing container up the indent ladder is `example`/`examples`) —
+        // in either case it is not an inline Response/Encoding header map this
+        // extractor owns. Mirrors the ancestor-ladder walk of the sibling extractors.
+        let out_of_scope = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut nearest = true;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if nearest && key == "components" {
+                            return true; // the Components Object's own headers section
+                        }
+                        if key == "example" || key == "examples" {
+                            return true; // sample data, not a Header Object map
+                        }
+                    }
+                    level = li;
+                    nearest = false;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            if line.trim() != "headers:" {
+                continue;
+            }
+            let c = indent(line);
+            if out_of_scope(i, c) {
+                continue;
+            }
+            // The map's first-child indent (the header-name level); the map may be
+            // empty (`headers: {}` never reaches here — that has an inline value, so
+            // `line.trim() != "headers:"`), so an absent first child leaves nothing to
+            // scan.
+            let mut child_indent: Option<usize> = None;
+            let mut seen: HashSet<String> = HashSet::new();
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) <= c {
+                    break; // headers block closed
+                }
+                let li = indent(l);
+                let ci = *child_indent.get_or_insert(li);
+                if li == ci {
+                    if let Some(key) = header_key(l) {
+                        if !seen.insert(key.clone()) {
+                            out.push(format!("{key}@line {}", j + 1));
+                        }
+                    }
+                }
+                j += 1;
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_response_header_map_lists_distinct_header_names() {
+        // Contract-harness invariant (OpenAPI / YAML structural rule): a Response
+        // Object's (or an Encoding Object's) `headers:` field is a mapping keyed by
+        // header name, so within one such map every key MUST be distinct. A repeated
+        // key is an invalid YAML mapping every parser resolves last-wins, so a second
+        // `x-correlator:` (or `WWW-Authenticate:`) block silently discards the first —
+        // a Redoc/Swagger/codegen client renders only the later Header Object and
+        // drops the earlier one, with no error and no missing field to notice, exactly
+        // where a caller reads which headers a response carries.
+        //
+        // This is the response-header member of the distinct-keys family and the
+        // inline-map complement of `every_components_object_lists_distinct_component_keys`
+        // (which owns the Components Object's own `headers:` section — a reusable-
+        // component namespace — but never descends into a Response/Encoding Object's
+        // inline `headers:` map; this extractor deliberately excludes that
+        // components-level section so the two never overlap). No other test sees an
+        // inline header map's keys either: the header-*ref*/reserved-name tests
+        // (`every_response_header_ref_targets_the_headers_section`,
+        // `no_response_header_uses_the_reserved_content_type_name`) read one entry's
+        // target or name, and the x-correlator/WWW-Authenticate presence tests check a
+        // header is *present*, never that a name is listed only once. A live copy-paste
+        // hazard now that the shared auth-error responses carry two headers
+        // (`x-correlator` + `WWW-Authenticate`) side by side and several responses pair
+        // `x-correlator` with `Location` — a second header drafted from the first and
+        // left un-renamed silently loses one. Verified true across all mounted specs
+        // before asserting.
+        for api in APIS {
+            let dups = header_maps_with_duplicate_keys(api.body);
+            assert!(
+                dups.is_empty(),
+                "{} spec repeats a key within a Response/Encoding `headers:` map (a \
+                 YAML last-wins key that silently drops a response header): {:?}",
+                api.name,
+                dups
+            );
+        }
+    }
+
+    #[test]
+    fn header_map_duplicate_key_extraction_rules() {
+        // Unit-cover `header_maps_with_duplicate_keys` so the contract test above
+        // can't pass vacuously and its scoping is pinned: within one Response
+        // `headers:` map the first repeat of a header name is flagged (a `$ref` entry
+        // and a Header Object entry alike); distinct names pass; a Header Object's own
+        // children (`schema`/`description`, deeper than the header-name indent) are
+        // never read as header keys — so a header whose schema property reuses a
+        // header name is not a duplicate; the same name in two *different* header maps
+        // is legitimate; the Components Object's own `headers:` section (a components
+        // child) is out of scope (owned by the component-keys test); and a `headers:`
+        // key inside an `example:` payload is sample data, skipped.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+          headers:
+            x-correlator:
+              description: correlation id
+              schema:
+                type: string
+            Cache-Control:
+              schema:
+                type: string
+        '401':
+          description: unauthorized
+          headers:
+            x-correlator:
+              $ref: '#/components/headers/XCorrelator'
+            WWW-Authenticate:
+              schema:
+                type: string
+            x-correlator:
+              schema:
+                type: string
+        '429':
+          description: too many
+          headers:
+            Retry-After:
+              schema:
+                type: integer
+            Retry-After:
+              schema:
+                type: integer
+          content:
+            application/json:
+              example:
+                headers:
+                  dup:
+                    a: 1
+                  dup:
+                    a: 2
+components:
+  headers:
+    XCorrelator:
+      schema:
+        type: string
+    XCorrelator:
+      schema:
+        type: string
+";
+        // Flagged, in document order: the second `x-correlator` in the `'401'` map
+        // (a Header Object entry repeating a `$ref` entry's name) and the second
+        // `Retry-After` in the `'429'` map. Not flagged: the `'200'` map's distinct
+        // names; the `WWW-Authenticate` beside `x-correlator`; the `dup` keys inside
+        // the `example:` payload (sample data, not a header map); and the repeated
+        // `XCorrelator` under `components.headers` (owned by the component-keys test).
+        let dup_401 = body
+            .lines()
+            .enumerate()
+            .filter(|(_, l)| l.trim() == "x-correlator:")
+            .nth(2)
+            .map(|(n, _)| n + 1)
+            .unwrap();
+        let dup_429 = body
+            .lines()
+            .enumerate()
+            .filter(|(_, l)| l.trim() == "Retry-After:")
+            .nth(1)
+            .map(|(n, _)| n + 1)
+            .unwrap();
+        assert_eq!(
+            header_maps_with_duplicate_keys(body),
+            vec![
+                format!("x-correlator@line {dup_401}"),
+                format!("Retry-After@line {dup_429}"),
+            ]
+        );
+
+        // A spec whose every inline header map lists distinct names → empty.
+        let clean = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+          headers:
+            x-correlator:
+              schema:
+                type: string
+";
+        assert!(header_maps_with_duplicate_keys(clean).is_empty());
+
+        // Non-vacuous floor: across every registered spec every inline Response/
+        // Encoding header map lists distinct header names (the invariant the contract
+        // test asserts), and the corpus actually declares many such maps — several
+        // with two or more headers side by side (the shared auth errors' `x-correlator`
+        // + `WWW-Authenticate`, responses pairing `x-correlator` with `Location`) — so
+        // the distinctness comparison runs on real multi-key data and a broken
+        // (always-empty) extractor can't hide behind single-key maps. Count in-scope
+        // header maps and the header names within them, independently of the extractor.
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let mut header_maps = 0usize;
+        let mut multi_key_maps = 0usize;
+        for api in APIS {
+            assert!(
+                header_maps_with_duplicate_keys(api.body).is_empty(),
+                "{}: every Response/Encoding `headers:` map must list distinct header names",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            for (i, l) in lines.iter().enumerate() {
+                if l.trim() != "headers:" {
+                    continue;
+                }
+                let c = indent(l);
+                // Skip the components-level headers section for the count too.
+                let mut parent_is_components = false;
+                let mut k = i;
+                let level = c;
+                while k > 0 {
+                    k -= 1;
+                    let p = lines[k];
+                    if p.trim().is_empty() {
+                        continue;
+                    }
+                    if indent(p) < level {
+                        parent_is_components = p.trim() == "components:";
+                        break;
+                    }
+                }
+                if parent_is_components {
+                    continue;
+                }
+                // Count header-name keys at the map's first-child indent.
+                let mut child_indent: Option<usize> = None;
+                let mut names = 0usize;
+                let mut j = i + 1;
+                while j < lines.len() {
+                    let x = lines[j];
+                    if x.trim().is_empty() {
+                        j += 1;
+                        continue;
+                    }
+                    if indent(x) <= c {
+                        break;
+                    }
+                    let ci = *child_indent.get_or_insert(indent(x));
+                    if indent(x) == ci && x.trim().ends_with(':') && !x.trim_start().starts_with('-')
+                    {
+                        names += 1;
+                    }
+                    j += 1;
+                }
+                if names > 0 {
+                    header_maps += 1;
+                }
+                if names >= 2 {
+                    multi_key_maps += 1;
+                }
+            }
+        }
+        assert!(
+            header_maps >= 50,
+            "expected many inline Response/Encoding header maps across specs, got {header_maps}"
+        );
+        assert!(
+            multi_key_maps >= 3,
+            "expected several multi-header maps (exercising the distinctness compare), got {multi_key_maps}"
+        );
+    }
 }

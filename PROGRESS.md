@@ -3335,6 +3335,23 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - a **Response/Encoding header-map key distinctness** contract test
+    (`src/registry.rs` `every_response_header_map_lists_distinct_header_names`) — the
+    **response-header member** of the distinct-keys family (components/properties/
+    examples/parameters/paths/responses/required/tags/discriminator-mapping) and the
+    inline-map complement of `every_components_object_lists_distinct_component_keys`,
+    which owns the *Components Object's own* `headers:` section but never a Response/
+    Encoding Object's inline `headers:` map. An OpenAPI `headers:` field is a mapping
+    keyed by header name, so its keys MUST be distinct; a duplicate is invalid YAML a
+    parser collapses last-wins, silently dropping a declared response header. New pure
+    `header_maps_with_duplicate_keys` (per-block seen-set walk mirroring
+    `discriminator_mappings_with_duplicate_keys`; excludes the components-level section
+    and `example:`-payload `headers:`; reads keys only at the map's first-child indent
+    so a Header Object's own children aren't counted). Corpus: 395 `headers:` maps, 9
+    multi-key (shared errors' x-correlator+WWW-Authenticate, auth's Location+Cache-
+    Control, x-correlator+Location) → every map's keys distinct → 0 drift. Unit-covered
+    (`header_map_duplicate_key_extraction_rules`; ≥50 inline-map + ≥3 multi-key floors).
+    Test-only, no spec change.
   - a **path-template variable distinctness** contract test (`src/registry.rs`
     `every_path_template_variable_is_distinct_within_its_path`) asserts that within
     one `paths:` key every `{name}` template expression is unique — OpenAPI paths
@@ -6100,6 +6117,40 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-22 — Contract-test harness: guard every inline **Response/Encoding
+  `headers:` map lists distinct header names** (`src/registry.rs`
+  `every_response_header_map_lists_distinct_header_names`). An OpenAPI `headers:`
+  field is a mapping keyed by header name, so its keys MUST be distinct; a
+  duplicate is invalid YAML every parser collapses last-wins, silently dropping a
+  declared response header (a Redoc/codegen client renders only the later Header
+  Object). The **response-header member of the distinct-keys family** and the
+  inline-map complement of `every_components_object_lists_distinct_component_keys`,
+  which owns the *Components Object's own* `headers:` section (a reusable-component
+  namespace) but never descends into a Response/Encoding Object's inline
+  `headers:` map — so the new extractor deliberately **excludes** the
+  components-level section (nearest shallower ancestor `components:`) and an
+  `example:`-payload `headers:`, leaving exactly the maps no test reached. The
+  header-*ref*/reserved-name tests (`every_response_header_ref_targets_the_headers_
+  section`, `no_response_header_uses_the_reserved_content_type_name`) read one
+  entry's target/name; the x-correlator/WWW-Authenticate presence tests check a
+  header is present — none checks a name is listed only once. A live hazard now
+  that the shared auth-error responses carry two headers (`x-correlator` +
+  `WWW-Authenticate`) side by side and several responses pair `x-correlator` with
+  `Location`. New pure `header_maps_with_duplicate_keys` (per-block seen-set walk
+  mirroring `discriminator_mappings_with_duplicate_keys`; a `header_key` companion
+  handling `$ref`/Header-Object/quoted entries; keys read only at the map's
+  first-child indent so a Header Object's own `schema`/`description` children are
+  never counted). Surveyed the corpus first (60 specs, 395 `headers:` maps, 9
+  multi-key — the shared errors' x-correlator+WWW-Authenticate, auth's
+  Location+Cache-Control, network-access-devices / traffic-influence
+  x-correlator+Location) → every map's keys distinct → 0 drift. Tests: +2 (the
+  contract test + `header_map_duplicate_key_extraction_rules`: a repeated
+  `$ref`/Header-Object name flagged at the repeat in document order, distinct names
+  / two different maps / a nested Header-Object property / an `example:`-payload
+  `headers:` / the components-level section all cleared; ≥50 inline-map and ≥3
+  multi-key non-vacuity floors). `cargo test` 2914 green (was 2912); `cargo build
+  --release` succeeds. No new dependency; test-only change (no spec/runtime edit).
+  — binary: 5.1M (5,323,160 B; unchanged)
 - 2026-08-22 — Contract test: guard every path-template variable is distinct
   **within its own path** (`registry::tests::every_path_template_variable_is_
   distinct_within_its_path`). Within one `paths:` key each `{name}` MUST be unique
