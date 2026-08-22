@@ -1834,8 +1834,12 @@ mod tests {
     /// Two sections are deliberately out of scope, because "no `$ref` targets it"
     /// does **not** mean "unused" for them:
     /// - `securitySchemes` — a scheme is referenced by *name* inside a `security`
-    ///   requirement (`- openId: [...]`), never by a `$ref`; its used-ness is the
-    ///   contract of `every_security_requirement_references_a_defined_scheme`.
+    ///   requirement (`- openId: [...]`), never by a `$ref`, so a `$ref`-based
+    ///   unused check cannot see it. The forward direction (every *referenced*
+    ///   scheme is defined) is `every_security_requirement_references_a_defined_scheme`;
+    ///   the unused direction (every *defined* scheme is referenced) is this lint's
+    ///   `securitySchemes` half, handled by its own name-based slice
+    ///   ([`unreferenced_security_schemes`] / `every_defined_security_scheme_is_referenced`).
     /// - `schemas` — a schema is also reachable through a discriminator `mapping:`
     ///   value (a `#/components/schemas/…` string that is not a `$ref:` line), and
     ///   is sometimes defined purely to *document* a deferred notification payload
@@ -2303,6 +2307,45 @@ mod tests {
             }
         }
         None
+    }
+
+    /// Extract every security scheme a spec DEFINES under
+    /// `components.securitySchemes` that no `security` requirement in the same
+    /// document REFERENCES by name, returned sorted.
+    ///
+    /// The `securitySchemes` counterpart of [`unreferenced_reusable_components`]
+    /// (the reusable `responses`/`parameters`/`headers` sections) and
+    /// [`unreferenced_schema_components`] (the `schemas` section) — the third and
+    /// last section of the `oas3-unused-component` lint. A securityScheme is *never*
+    /// reached by a `$ref`; it is used by having its name appear in a `security`
+    /// requirement (`- openId: [...]`), so its used-ness is name-based, which is
+    /// exactly why the two `$ref`-based siblings both list `securitySchemes` as out
+    /// of scope and defer it here.
+    ///
+    /// A defined-but-unreferenced scheme is dead weight in the served spec: a
+    /// Redoc/Swagger/codegen client materialises an auth scheme no operation
+    /// demands (a CAMARA-template `oAuth2ClientCredentials`/`three_legged` pasted
+    /// into `securitySchemes` but never wired to an operation, or the last
+    /// `security` requirement naming it renamed away). The forward companion
+    /// [`security_requirement_schemes`]-based
+    /// `every_security_requirement_references_a_defined_scheme` proves the *other*
+    /// direction (every referenced scheme is defined) and never sees this.
+    ///
+    /// Built on the two already-unit-covered security helpers:
+    /// [`defined_security_schemes`] (the defined set — a scheme's own key, not its
+    /// cross-file `$ref` body) and [`security_requirement_schemes`] (the
+    /// name-referenced set). Scoped per document: a business spec's `openId` is a
+    /// `$ref` to the shared `camaraOAuth`, but it is *referenced* locally by each
+    /// operation's `security` block, so it is reached.
+    fn unreferenced_security_schemes(body: &str) -> Vec<String> {
+        let referenced: HashSet<String> =
+            security_requirement_schemes(body).into_iter().collect();
+        let mut out: Vec<String> = defined_security_schemes(body)
+            .into_iter()
+            .filter(|name| !referenced.contains(name))
+            .collect();
+        out.sort();
+        out
     }
 
     /// The `METHOD /path` label of every operation a spec declares whose
@@ -9304,6 +9347,162 @@ components:
         assert!(security_requirement_schemes(real)
             .iter()
             .all(|s| s == "openId"));
+    }
+
+    #[test]
+    fn every_defined_security_scheme_is_referenced() {
+        // Contract-harness invariant (OpenAPI 3 hygiene, Spectral's
+        // `oas3-unused-component` for the `securitySchemes` section): every security
+        // scheme a mounted spec DEFINES under `components.securitySchemes` MUST be
+        // REFERENCED by name in a `security` requirement of the same document. This
+        // is the third and final section of the unused-component lint — the one both
+        // `$ref`-based siblings deferred: `every_reusable_component_is_referenced`
+        // (responses/parameters/headers) and `every_defined_schema_is_reachable`
+        // (schemas) each list `securitySchemes` as out of scope because a scheme is
+        // reached by *name* in a `security` block (`- openId: [...]`), never by a
+        // `$ref`, so a `$ref`-based unused check cannot see it.
+        //
+        // The break this catches: an unreferenced securityScheme is dead weight in
+        // the served spec — a Redoc/Swagger/codegen client materialises an auth
+        // scheme no operation demands (a CAMARA-template `oAuth2ClientCredentials` /
+        // `three_legged` pasted into `securitySchemes` but never wired to an
+        // operation, or the last `security` requirement naming `openId` renamed
+        // away). It is the exact inverse of
+        // `every_security_requirement_references_a_defined_scheme`, which proves the
+        // other direction (every *referenced* scheme is defined) and so never sees a
+        // *defined* scheme awaiting an incoming reference; the reusable-component and
+        // schema-reachability tests exclude `securitySchemes` outright.
+        //
+        // No documented-orphan allowance is needed: the only defined-but-unreferenced
+        // scheme in the corpus is the shared `camaraOAuth` in `auth/openapi.yaml`
+        // (defined once as the single source of truth, referenced cross-file by every
+        // business spec's `openId` `$ref`, guarded by
+        // `every_spec_refs_the_shared_camara_oauth_scheme`), and `auth` is not a
+        // mounted API — so across `APIS` every defined scheme (each spec's `openId`)
+        // is referenced. Verified true across all mounted specs before asserting.
+        let mut checked = 0usize;
+        for api in APIS {
+            let defined = defined_security_schemes(api.body);
+            // Non-vacuous floor (per spec): every business spec defines the shared
+            // `openId` scheme, so an extractor that silently found none can't hide a
+            // vacuous pass here.
+            assert!(
+                defined.contains("openId"),
+                "{} spec defines no `openId` scheme under components.securitySchemes",
+                api.name
+            );
+            checked += defined.len();
+            let orphans = unreferenced_security_schemes(api.body);
+            assert!(
+                orphans.is_empty(),
+                "{} spec defines security scheme(s) that no `security` requirement \
+                 references — dead weight in the served spec (a client materialises \
+                 an auth scheme no operation demands): {:?}",
+                api.name,
+                orphans
+            );
+        }
+        // Non-vacuous floor (corpus): every mounted spec defines at least its
+        // `openId` scheme, so the extractor ran on real data for each.
+        assert!(
+            checked >= APIS.len(),
+            "expected at least one defined security scheme per mounted spec, saw \
+             {checked} across {} specs",
+            APIS.len()
+        );
+    }
+
+    #[test]
+    fn security_scheme_reference_extraction_rules() {
+        // Pin `unreferenced_security_schemes` so the contract test above can't pass
+        // vacuously and its defined-vs-referenced discrimination is exercised: a
+        // referenced scheme is cleared; defined-but-unreferenced schemes are flagged,
+        // sorted; and a scheme is counted referenced only via a real `security`
+        // requirement scheme key (a scope scalar is not a reference), so a scheme
+        // *named like a scope* is still flagged.
+        let body = "\
+openapi: 3.0.3
+paths:
+  /a:
+    post:
+      operationId: doA
+      security:
+        - openId:
+            - number-verification:verify
+components:
+  securitySchemes:
+    openId:
+      $ref: '../../auth/openapi.yaml#/components/securitySchemes/camaraOAuth'
+    unusedScheme:
+      type: http
+      scheme: bearer
+    anotherOrphan:
+      type: apiKey
+      name: X-Api-Key
+      in: header
+";
+        // `openId` is referenced by the operation's `security` block → cleared; the
+        // two defined-but-unreferenced schemes are flagged, sorted.
+        assert_eq!(
+            unreferenced_security_schemes(body),
+            vec!["anotherOrphan".to_string(), "unusedScheme".to_string()],
+            "flag exactly the two unreferenced schemes, sorted; `openId` (referenced) \
+             cleared"
+        );
+
+        // A spec whose only scheme is referenced (inline empty-scope form) → nothing
+        // flagged.
+        let clean = "\
+paths:
+  /a:
+    get:
+      security:
+        - openId: []
+components:
+  securitySchemes:
+    openId:
+      $ref: '../../auth/openapi.yaml#/components/securitySchemes/camaraOAuth'
+";
+        assert!(
+            unreferenced_security_schemes(clean).is_empty(),
+            "a referenced scheme must not be flagged"
+        );
+
+        // A body with no `components:` → empty (never panics on the section split).
+        assert!(unreferenced_security_schemes("openapi: 3.0.3\npaths: {}\n").is_empty());
+
+        // The scope scalar `number-verification:verify` (a `:` followed by a
+        // non-space) is not a scheme reference, so a *scheme* named `number-verification`
+        // is still an orphan — pins that we key off `security_requirement_schemes`
+        // (which skips scope scalars), not a raw substring match of the scope's prefix.
+        let scope_named = "\
+paths:
+  /a:
+    get:
+      security:
+        - openId: []
+components:
+  securitySchemes:
+    openId:
+      type: openIdConnect
+      openIdConnectUrl: https://example.com/.well-known/openid-configuration
+    number-verification:
+      type: http
+      scheme: bearer
+";
+        assert_eq!(
+            unreferenced_security_schemes(scope_named),
+            vec!["number-verification".to_string()],
+            "a scheme named like a scope prefix is still an orphan when unreferenced"
+        );
+
+        // The real vendored spec defines exactly `openId` and references it → no
+        // orphan.
+        let real = include_str!("../specs/number-verification/v1/openapi.yaml");
+        assert!(
+            unreferenced_security_schemes(real).is_empty(),
+            "the real spec's single `openId` scheme is referenced"
+        );
     }
 
     #[test]

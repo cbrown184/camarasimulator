@@ -3332,6 +3332,22 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - an **unused-securityScheme** contract test (`src/registry.rs`
+    `every_defined_security_scheme_is_referenced`) — the `securitySchemes` half of
+    Spectral's `oas3-unused-component`, the third and last section of that lint,
+    deferred by both `$ref`-based siblings (`every_reusable_component_is_referenced`,
+    `every_defined_schema_is_reachable`) because a scheme is reached by **name** in a
+    `security` block, never a `$ref`. Every scheme a spec defines under
+    `components.securitySchemes` must be referenced by a `security` requirement of the
+    same document; a defined-but-unreferenced scheme is dead weight (a client
+    materialises an auth scheme no operation demands). Exact inverse of
+    `every_security_requirement_references_a_defined_scheme`. New pure
+    `unreferenced_security_schemes` = `defined_security_schemes` −
+    `security_requirement_schemes`, sorted. Corpus: 60 specs, each defines+references
+    only `openId` → 0 orphans, no allowance (the sole corpus orphan, shared
+    `camaraOAuth` in `auth/openapi.yaml`, is not a mounted API). Unit-covered
+    (`security_scheme_reference_extraction_rules`; per-spec `openId` + corpus
+    `checked ≥ APIS.len()` floors). Test-only, no spec change.
   - an **error-example `code`-value well-formedness** contract test (`src/registry.rs`
     `every_error_example_code_is_a_well_formed_camara_code`) — the **VALUE companion**
     of `every_error_example_declares_code_and_message` (which checks a `code`/`message`
@@ -6025,6 +6041,36 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-22 — Contract-test harness: added an **unused-securityScheme** contract
+  test (`src/registry.rs` `every_defined_security_scheme_is_referenced`) — the
+  **`securitySchemes` half** of Spectral's `oas3-unused-component`, the third and
+  last section of that lint, which the two `$ref`-based siblings both deferred:
+  `every_reusable_component_is_referenced` (responses/parameters/headers) and
+  `every_defined_schema_is_reachable` (schemas) each list `securitySchemes` as out
+  of scope because a scheme is reached by **name** in a `security` block
+  (`- openId: [...]`), never by a `$ref`. Every scheme a mounted spec defines under
+  `components.securitySchemes` MUST be referenced by name in a `security`
+  requirement of the same document; a defined-but-unreferenced scheme is dead
+  weight (a Redoc/codegen client materialises an auth scheme no operation demands —
+  a CAMARA-template `oAuth2ClientCredentials`/`three_legged` pasted in but never
+  wired, or the last requirement naming `openId` renamed away). Exact **inverse** of
+  `every_security_requirement_references_a_defined_scheme` (which proves every
+  *referenced* scheme is *defined*, never the reverse). New pure
+  `unreferenced_security_schemes` = `defined_security_schemes` −
+  `security_requirement_schemes` (both already unit-covered), sorted. Surveyed the
+  corpus first (60 mounted specs): every one defines exactly the shared `openId`
+  scheme and references it from each operation → **0 orphans, no allowance needed**
+  — the only defined-but-unreferenced scheme anywhere is the shared `camaraOAuth` in
+  `auth/openapi.yaml` (referenced cross-file by every business spec's `openId`
+  `$ref`), and `auth` is not a mounted API. Also cross-linked the two siblings'
+  `securitySchemes`-out-of-scope notes to this slice. Tests: +2 (the contract test
+  with a per-spec `openId` floor + a `checked ≥ APIS.len()` corpus floor +
+  `security_scheme_reference_extraction_rules`: a referenced scheme cleared, two
+  defined-but-unreferenced flagged in sorted order, a scheme *named like a scope*
+  still flagged (keys off the requirement scheme name, not a substring), a
+  components-less body, and the real number-verification spec cleared). `cargo test`
+  2904 green (was 2902); `cargo build --release` succeeds. No new dependency;
+  test-only change. — binary: 5.1M (5,323,160 B; unchanged)
 - 2026-08-22 — Contract-test harness: added an **error-example `code`-value
   well-formedness** contract test (`src/registry.rs`
   `every_error_example_code_is_a_well_formed_camara_code`) — the **VALUE companion** of
