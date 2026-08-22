@@ -3335,6 +3335,22 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - a **security-requirement scope well-formedness** contract test (`src/registry.rs`
+    `every_security_requirement_scope_is_a_well_formed_camara_scope`) — the
+    **scope-shape** member of the security family, in the blind spot of
+    `every_security_requirement_declares_a_scope` (which checks only that a scope
+    list is *non-empty*) and `every_security_requirement_references_a_defined_scheme`
+    (which reads only the *scheme* name). Every scope a `security` requirement lists
+    MUST be a well-formed CAMARA scope: a DPV purpose scope `dpv:<Purpose>#<action>`
+    (the `auth::purpose::is_valid_token` grammar) or a `:`/`.`/`-`-namespaced kebab
+    technical scope from `[A-Za-z0-9.:-]` with no dangling/doubled separator. A
+    malformed scope is a gate the resource server's `require_scope` can never match.
+    New pure `security_requirement_scopes_malformed` (walks every `security:` block
+    at any indent — operation/path-item/root — via the trusted
+    `requirement_scheme_name`, parses block- and inline-flow scopes, skips an
+    `example:`-payload block). Corpus: 149 scopes / 60 specs (14 dotted/camelCase) →
+    0 drift. Unit-covered (`security_requirement_scope_extraction_rules`; ≥100-scope
+    floor). Test-only, no spec change.
   - a **static path-segment kebab-case** contract test (`src/registry.rs`
     `every_static_path_segment_is_kebab_case`) — CAMARA Commonalities fixes URL path
     segments to lowercase-hyphen words, so every *static* segment of a `paths:` key
@@ -6129,6 +6145,43 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-22 — Contract-test harness: guard every **security-requirement scope is a
+  well-formed CAMARA scope** (`src/registry.rs`
+  `every_security_requirement_scope_is_a_well_formed_camara_scope`). A `security`
+  requirement's scope list names the OAuth2 scopes an endpoint enforces
+  (`- openId:` → `- <scope>`); a well-formed scope is a DPV purpose scope
+  `dpv:<Purpose>#<action>` (the exact `auth::purpose::is_valid_token` grammar) or a
+  technical scope — a `:`/`.`/`-`-namespaced kebab token from `[A-Za-z0-9.:-]`
+  (`sim-swap:check`, `inhome.device.read`, `kyc-fill-in:familyName` styles the
+  corpus uses) with no leading/trailing separator and no empty (`::`/`..`) segment.
+  A malformed scope (a stray space/quote, an `_`, a `:read`/`sim-swap:` dangling
+  separator, an `api::action`, or a `dpv:` token missing `#action`) is a gate a
+  client/codegen/"try it" panel copy verbatim yet the resource server's scope
+  compare (`verify::Claims::require_scope`) can never match, so the endpoint
+  documents an authorization no token can satisfy. The **scope-shape** member of
+  the security family, in the blind spot of both siblings:
+  `every_security_requirement_declares_a_scope` (via
+  `operations_with_scopeless_security`) checks only that the scope list is
+  *non-empty*, and `every_security_requirement_references_a_defined_scheme` reads
+  only the *scheme* name — neither ever inspects a scope scalar's characters. New
+  pure `security_requirement_scopes_malformed`: walks every `security:` block
+  opener at any indent (operation-, path-item-, or document-level — traffic-influence
+  has a column-0 root block) until a dedent, classifies each `- ` item via the
+  trusted `requirement_scheme_name` (a scheme key `- openId:` skipped — its inline
+  flow `[a:b, c:d]` scopes still parsed — any other `- <scalar>` a block-form scope,
+  quote- and trailing-`#`-comment-stripped without cutting a `dpv:…#…` token's own
+  `#`), and skips a `security:` inside an `example:` payload. Surveyed the corpus
+  first (149 declared scopes across 60 specs; 14 use dotted/camelCase segments —
+  `inhome.device.read`, `kyc-fill-in:familyName`; none `dpv:`, none out of charset,
+  none with a dangling/doubled separator) → every scope well-formed → 0 drift.
+  Tests: +2 (the contract test + `security_requirement_scope_extraction_rules`:
+  block/dotted/camelCase/dpv/inline-flow scopes cleared; internal-space, `_`,
+  leading-`:`, empty-segment, `#`-less-`dpv:`, and a bad inline-flow token flagged
+  in document order; a scheme key, a scope-shaped item outside any `security:`
+  block, a `security:` in an `example:` payload, and a `security: []` opt-out all
+  skipped; ≥100 real-scope non-vacuity floor). `cargo test` 2920 green (was 2918);
+  `cargo build --release` succeeds. No new dependency; test-only change (no
+  spec/runtime edit). — binary (release): 5.1M (5,323,160 B; unchanged).
 - 2026-08-22 — Contract-test harness: guard every **static path segment is
   kebab-case** (`src/registry.rs` `every_static_path_segment_is_kebab_case`). CAMARA
   Commonalities fixes URL path segments to lowercase-hyphen words

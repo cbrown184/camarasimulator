@@ -9864,6 +9864,371 @@ components:
         );
     }
 
+    /// The 1-based line numbers, in document order, of every scope scalar listed
+    /// inside a `security:` requirement block whose value is not a well-formed
+    /// CAMARA scope, without a YAML dep.
+    ///
+    /// A `security` requirement's scope list names the OAuth2 scopes an endpoint
+    /// enforces (`- openId:` → `- <scope>`). A well-formed CAMARA scope is one of:
+    ///
+    /// * a **DPV purpose scope** `dpv:<Purpose>#<action>` — exactly one `#`, a
+    ///   non-empty alphanumeric purpose, and a non-empty action of `[A-Za-z0-9._:-]`,
+    ///   mirroring `auth::purpose::is_valid_token` (the grammar the token /
+    ///   authorize / bc-authorize entry points enforce), or
+    /// * a **technical scope** — a `:`/`.`/`-`-namespaced token drawn from
+    ///   `[A-Za-z0-9.:-]` (the `sim-swap:check`, `inhome.device.read`,
+    ///   `kyc-fill-in:familyName` styles the corpus uses) with no leading or
+    ///   trailing separator and no empty namespace segment (a doubled `::`/`..`).
+    ///
+    /// A scope that breaks that shape — a stray space or quote, an `_`
+    /// (non-kebab), a `:read` / `sim-swap:` with a dangling separator, an
+    /// `api::action` with an empty segment, or a `dpv:` token missing its
+    /// `#action` — is an authorization string a client, codegen tool, and the
+    /// served "try it" panel copy verbatim yet the resource server's scope
+    /// compare (`verify::Claims::require_scope`) can never match, so the endpoint
+    /// documents a gate no token can satisfy.
+    ///
+    /// The scope-*shape* companion of `every_security_requirement_declares_a_scope`
+    /// (which via `operations_with_scopeless_security` checks only that a
+    /// requirement's scope list is *non-empty*, never a listed scope's grammar)
+    /// and of `every_security_requirement_references_a_defined_scheme` (which reads
+    /// the *scheme* name, never its scopes). No existing test reads a scope
+    /// scalar's characters.
+    ///
+    /// Scoping: every `security:` block opener (a key `security` whose inline value
+    /// is empty) at any indent is walked — an operation's 6-space block, a
+    /// path-item block, or a document-level column-0 block (traffic-influence) are
+    /// handled uniformly by indent, until a line dedents to at-or-above the opener.
+    /// Within the block each `- ` sequence item is classified by
+    /// [`requirement_scheme_name`]: a scheme mapping key (`- openId:`) is skipped —
+    /// but its *inline flow* scopes (`- openId: [a:b, c:d]`) are parsed and
+    /// validated — while any other `- <scalar>` item is a block-form scope scalar
+    /// (quote-stripped, a trailing ` #` YAML comment trimmed — but never a `#` that
+    /// belongs to a `dpv:…#action` token) and validated. A `security:` that sits
+    /// inside an `example:`/`examples:` payload (sample data, not a real
+    /// requirement) is skipped.
+    fn security_requirement_scopes_malformed(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+
+        let is_sep = |b: u8| matches!(b, b':' | b'.' | b'-');
+        let is_well_formed_scope = |s: &str| -> bool {
+            if s.is_empty() {
+                return false;
+            }
+            if let Some(rest) = s.strip_prefix("dpv:") {
+                // DPV purpose scope: mirrors auth::purpose::is_valid_token.
+                if rest.bytes().filter(|&b| b == b'#').count() != 1 {
+                    return false;
+                }
+                let (purpose, action) = rest.split_once('#').expect("exactly one '#'");
+                let purpose_ok =
+                    !purpose.is_empty() && purpose.bytes().all(|b| b.is_ascii_alphanumeric());
+                let action_ok = !action.is_empty()
+                    && action.bytes().all(|b| {
+                        b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b':')
+                    });
+                return purpose_ok && action_ok;
+            }
+            // Technical scope: `:`/`.`/`-`-namespaced kebab tokens.
+            let b = s.as_bytes();
+            if !b.iter().all(|&c| c.is_ascii_alphanumeric() || is_sep(c)) {
+                return false;
+            }
+            if is_sep(b[0]) || is_sep(b[b.len() - 1]) {
+                return false;
+            }
+            !b.windows(2).any(|w| is_sep(w[0]) && is_sep(w[1]))
+        };
+
+        // Strip a trailing YAML line comment (` #…`) without cutting a `dpv:…#…`
+        // token's own `#` (which is never preceded by whitespace).
+        fn strip_comment(s: &str) -> &str {
+            match s.find(" #") {
+                Some(p) => s[..p].trim_end(),
+                None => s,
+            }
+        }
+        fn unquote(s: &str) -> &str {
+            s.trim().trim_matches('"').trim_matches('\'')
+        }
+
+        // Whether line `i` (indent `c`) sits inside an outer `example:`/`examples:`
+        // payload — an enclosing container key up the indent ladder is
+        // `example`/`examples` — so a `security` key there is sample data.
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            // A `security:` block opener: the key is exactly `security` and its
+            // inline value is empty (a block follows).
+            let Some(rest) = line.trim_start().strip_prefix("security:") else {
+                continue;
+            };
+            let rest = rest.trim();
+            if !rest.is_empty() && !rest.starts_with('#') {
+                continue; // inline `security: []`/`[ … ]` — no block scopes here
+            }
+            let sec_ind = indent(line);
+            if inside_example(i, sec_ind) {
+                continue;
+            }
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) <= sec_ind {
+                    break; // dedented out of the security block
+                }
+                if requirement_scheme_name(l).is_some() {
+                    // A scheme requirement item. Validate any inline flow scopes
+                    // (`- openId: [a:b, c:d]`); block-form scopes are the deeper
+                    // `- <scope>` items handled on their own lines below.
+                    let bare = l.trim_start().strip_prefix("- ").unwrap_or(l.trim_start());
+                    let after = &bare[bare.find(':').map(|p| p + 1).unwrap_or(bare.len())..];
+                    let after = after.trim();
+                    if let Some(inner) =
+                        after.strip_prefix('[').and_then(|s| s.strip_suffix(']'))
+                    {
+                        for tok in inner.split(',') {
+                            let s = unquote(strip_comment(tok));
+                            if s.is_empty() {
+                                continue;
+                            }
+                            if !is_well_formed_scope(s) {
+                                out.push(j + 1);
+                            }
+                        }
+                    }
+                } else if let Some(scope_raw) = l.trim_start().strip_prefix("- ") {
+                    // A block-form scope scalar.
+                    let s = unquote(strip_comment(scope_raw));
+                    if !s.is_empty() && !is_well_formed_scope(s) {
+                        out.push(j + 1);
+                    }
+                }
+                j += 1;
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_security_requirement_scope_is_a_well_formed_camara_scope() {
+        // Contract-harness invariant (CAMARA canonical auth + DESIGN §6/§7/§8):
+        // every scope a `security` requirement lists MUST be a well-formed CAMARA
+        // scope — a DPV purpose scope `dpv:<Purpose>#<action>` (the
+        // `auth::purpose::is_valid_token` grammar) or a technical scope, a
+        // `:`/`.`/`-`-namespaced kebab token from `[A-Za-z0-9.:-]` with no dangling
+        // or doubled separator (`sim-swap:check`, `inhome.device.read`,
+        // `kyc-fill-in:familyName`). A scope carrying a stray space/quote, an `_`, a
+        // `:read`/`sim-swap:`/`api::action`, or a `dpv:` token missing its
+        // `#action` is a gate string a client and codegen copy verbatim yet the
+        // resource server's scope compare (`verify::Claims::require_scope`) can
+        // never match, so the endpoint documents an authorization no token can
+        // satisfy.
+        //
+        // The scope-*shape* member of the security family, sitting in the blind
+        // spot of both siblings: `every_security_requirement_declares_a_scope`
+        // (via `operations_with_scopeless_security`) checks only that a
+        // requirement's scope list is *non-empty*, and
+        // `every_security_requirement_references_a_defined_scheme` reads only the
+        // *scheme* name — neither ever inspects a listed scope's characters.
+        // Verified true across all mounted specs before asserting (every one of
+        // the corpus's ~149 declared scopes is well-formed).
+        for api in APIS {
+            let offenders = security_requirement_scopes_malformed(api.body);
+            assert!(
+                offenders.is_empty(),
+                "{} spec lists a malformed scope in a `security` requirement (not a \
+                 well-formed CAMARA `dpv:<Purpose>#<action>` or `:`-namespaced \
+                 technical scope) at line(s): {:?}",
+                api.name,
+                offenders
+            );
+        }
+    }
+
+    #[test]
+    fn security_requirement_scope_extraction_rules() {
+        // Unit-cover `security_requirement_scopes_malformed` so the contract test
+        // above can't pass vacuously and its detection is pinned.
+        //
+        // Well-formed and skipped: a plain block scope (`sim-swap:check`), a
+        // dotted one (`inhome.device.read`), a camelCase-tail one
+        // (`kyc-fill-in:familyName`), a DPV purpose scope (`dpv:Foo#bar`), and an
+        // inline flow list of two good scopes. Flagged, in document order: a scope
+        // with an internal space, one with an `_`, a `:read` with a leading
+        // separator, an `api::action` with an empty segment, a `dpv:Foo` missing
+        // its `#action`, and a bad token inside an inline flow list. Not flagged:
+        // the `- openId:` scheme keys themselves (validated by their scopes, not as
+        // scopes); a `- widget:read` list item under `components.schemas` (outside
+        // any `security:` block); a `security:` block nested inside an `example:`
+        // payload; and a bare `security: []` opt-out (no scopes).
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /good:
+    post:
+      operationId: doGood
+      security:
+        - openId:
+            - sim-swap:check
+            - inhome.device.read
+            - kyc-fill-in:familyName
+            - dpv:Foo#bar
+      responses:
+        '200':
+          description: ok
+  /inline:
+    get:
+      operationId: doInline
+      security:
+        - openId: [some-api:read, other-api:write]
+      responses:
+        '200':
+          description: ok
+  /bad:
+    post:
+      operationId: doBad
+      security:
+        - openId:
+            - sim swap:check
+            - sim_swap:check
+            - :read
+            - api::action
+            - dpv:Foo
+      responses:
+        '200':
+          description: ok
+  /badinline:
+    get:
+      operationId: doBadInline
+      security:
+        - openId: [good:scope, bad token]
+      responses:
+        '200':
+          description: ok
+  /public:
+    get:
+      operationId: doPublic
+      security: []
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    Widget:
+      type: object
+      properties:
+        role:
+          type: string
+          example:
+            security:
+              - openId:
+                  - not:a:real:security:block
+      required:
+        - widget:read
+";
+        // Flagged, in document order: the five malformed scopes under `/bad`
+        // (`sim swap:check`, `sim_swap:check`, `:read`, `api::action`, `dpv:Foo`)
+        // and the one bad token in `/badinline`'s inline flow (reported at the
+        // scheme line).
+        let flagged = security_requirement_scopes_malformed(body);
+        let flagged_vals: Vec<String> = flagged
+            .iter()
+            .map(|&n| body.lines().nth(n - 1).unwrap().trim().to_string())
+            .collect();
+        assert_eq!(
+            flagged_vals,
+            vec![
+                "- sim swap:check".to_string(),
+                "- sim_swap:check".to_string(),
+                "- :read".to_string(),
+                "- api::action".to_string(),
+                "- dpv:Foo".to_string(),
+                "- openId: [good:scope, bad token]".to_string(),
+            ]
+        );
+
+        // Non-vacuous floor: across every registered spec every declared scope is
+        // well-formed (the invariant the contract test asserts), and the corpus
+        // actually declares many scopes — so the shape check runs on real data and
+        // a broken (always-empty) extractor can't hide behind a scope-less corpus.
+        // Count scopes with a same-block detector independent of the extractor's
+        // shape comparison.
+        let mut scopes = 0usize;
+        for api in APIS {
+            assert!(
+                security_requirement_scopes_malformed(api.body).is_empty(),
+                "{}: every security-requirement scope must be well-formed",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            for (i, line) in lines.iter().enumerate() {
+                let Some(rest) = line.trim_start().strip_prefix("security:") else {
+                    continue;
+                };
+                if !rest.trim().is_empty() {
+                    continue;
+                }
+                let sec_ind = indent(line);
+                let mut j = i + 1;
+                while j < lines.len() {
+                    let l = lines[j];
+                    if l.trim().is_empty() {
+                        j += 1;
+                        continue;
+                    }
+                    if indent(l) <= sec_ind {
+                        break;
+                    }
+                    if requirement_scheme_name(l).is_none()
+                        && l.trim_start().starts_with("- ")
+                    {
+                        scopes += 1;
+                    }
+                    j += 1;
+                }
+            }
+        }
+        assert!(
+            scopes >= 100,
+            "expected many security-requirement scopes across specs, got {scopes}"
+        );
+    }
+
     #[test]
     fn every_operation_declares_a_security_requirement() {
         // Contract-harness invariant (CAMARA canonical auth + DESIGN §8/§9): every
