@@ -3332,6 +3332,23 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - an **unused-schema-component** contract test (`src/registry.rs`
+    `every_defined_schema_is_reachable`) — the `schemas` half the reusable-component
+    slice deferred. Spectral's `oas3-unused-component` scoped to `components.schemas`:
+    every defined schema MUST be reached by a local `#/components/schemas/<Name>` `$ref`
+    **or** a Discriminator Object `mapping:` value (a schema's second, non-`$ref` reach
+    path — why the reusable test excluded `schemas`). New pure helpers
+    `discriminator_mapping_schema_targets` (a focused sibling of the mapping walk in
+    `discriminator_mapping_dangling_targets`; bare-name shorthand resolved, cross-file
+    targets skipped), `reached_schema_pointers` (its union with `ref_targets`'s local
+    schema `$ref`s), and `unreferenced_schema_components` (defined − reached, sorted).
+    Corpus: 513 defined schemas; `defined − $ref − mapping` = exactly 3 CloudEvents
+    envelopes defined purely to document a deferred `sink` callback (qos-booking's
+    `QosBookingEvent`, session-insights' `NetworkQualityScoreEvent`/`SessionEndedEvent`),
+    exempted by a documented-orphan allowance keyed by `(api, pointer)` → 0 remaining
+    drift; the 3 mapping-only variants (`Circle`/`CoverageZone`/`PostalCode`) now count
+    as reached. Unit-covered (`schema_reference_extraction_rules`; ≥300-schema floor).
+    Test-only, no spec change.
   - an **unused reusable-component** contract test (`src/registry.rs`
     `every_reusable_component_is_referenced`) — Spectral's `oas3-unused-component`,
     scoped to the reusable non-schema sections: every component defined under
@@ -5988,6 +6005,36 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-22 — Contract-test harness: added an **unused-schema-component** contract test
+  (`src/registry.rs` `every_defined_schema_is_reachable`) — the **`schemas` half** the
+  reusable-component slice (`every_reusable_component_is_referenced`) explicitly deferred
+  to "a later slice". Spectral's `oas3-unused-component`, scoped to `components.schemas`:
+  every defined schema MUST be REACHED within the same document — by a local
+  `#/components/schemas/<Name>` `$ref` **or** by a Discriminator Object `mapping:` value
+  that routes to it. A schema, unlike a reusable response/parameter/header, has a second,
+  non-`$ref` reach path (a discriminator `mapping` names a bare pointer/name, never a
+  `$ref`), which is exactly why the reusable-component test excluded `schemas` rather than
+  false-flag every mapping-only variant. Two new pure helpers:
+  `discriminator_mapping_schema_targets` (a focused sibling of
+  `discriminator_mapping_dangling_targets`'s mapping walk — resolves each `mapping:` target,
+  bare-name shorthand included, skips a cross-file `#`-bearing target, keeps local
+  `#/components/schemas/…` pointers) and `reached_schema_pointers` (its union with the local
+  schema-targeting `$ref`s from `ref_targets`); `unreferenced_schema_components` = defined
+  schemas − reached, sorted. Surveyed the corpus first (60 specs, **513** defined schemas):
+  `defined − $ref − mapping` = exactly **3** orphans, every one a CloudEvents envelope
+  defined purely to *document* a deferred `sink` callback (a documented cut) — qos-booking's
+  `QosBookingEvent`, session-insights' `NetworkQualityScoreEvent` / `SessionEndedEvent`.
+  These are intentional, not drift, so a **documented-orphan allowance** keyed by
+  `(api, pointer)` (never a bare name, so it can't mask a real orphan elsewhere) exempts
+  exactly those three; the 3 mapping-only schemas the earlier slice noted (`Circle`,
+  `CoverageZone`, `PostalCode`) are now correctly counted as reached → 0 remaining drift, a
+  live guard the moment a schema is stranded. Tests: +2 (the contract test with a ≥300-schema
+  non-vacuous floor + `schema_reference_extraction_rules`: a `$ref`-reached schema, a
+  `mapping`-pointer-reached and a bare-name-reached schema cleared; a cross-file-only
+  same-named schema and a truly-unreached schema flagged in sorted order; a reusable response
+  ignored; the mapping helper pinned on `#/…`/bare/cross-file targets; an empty/components-less
+  body). `cargo test` 2900 green (was 2898); `cargo build --release` succeeds. No new
+  dependency; test-only change. — binary: 5.1M (5,323,160 B; unchanged)
 - 2026-08-22 — Contract-test harness: added an **unused reusable-component** contract
   test (`src/registry.rs` `every_reusable_component_is_referenced`) — the OpenAPI 3
   hygiene lint Spectral names `oas3-unused-component`, scoped to the **reusable

@@ -1841,7 +1841,9 @@ mod tests {
     ///   is sometimes defined purely to *document* a deferred notification payload
     ///   (e.g. qos-booking's `QosBookingEvent`, a documented cut). A faithful
     ///   schema-usage test needs mapping-reachability plus a documented-orphan
-    ///   allowance, so it is left to a later slice rather than folded in here.
+    ///   allowance, so the `schemas` case is handled by its own slice
+    ///   ([`unreferenced_schema_components`] / `every_defined_schema_is_reachable`)
+    ///   rather than folded in here.
     ///
     /// Built on [`component_pointers`] (the defined set) and [`ref_targets`] (the
     /// referenced set), both already unit-covered; only top-level component pointers
@@ -8820,6 +8822,324 @@ components:
         // A spec with no reusable components at all → empty (never panics on the
         // section split of a components-less body).
         assert!(unreferenced_reusable_components("paths: {}\n").is_empty());
+    }
+
+    /// Return the set of local top-level schema pointers a spec's Discriminator
+    /// Objects ROUTE TO — every `#/components/schemas/<Name>` a `mapping:` entry
+    /// names, resolving the OpenAPI bare-name shorthand (`Circle` ⇒
+    /// `#/components/schemas/Circle`) exactly as
+    /// [`discriminator_mapping_dangling_targets`] does. A discriminator `mapping`
+    /// value is NOT a `$ref` (it is a bare pointer/name under `mapping:`), so
+    /// [`ref_targets`] never sees it; a schema reached only through a mapping (the
+    /// `Area`/`GeoReference` variants `Circle`/`CoverageZone`/`PostalCode`) is
+    /// genuinely used and must count as reached. A cross-file mapping target (a
+    /// `#`-bearing path) resolves into another file and is skipped, mirroring the
+    /// dangling-target walk. Written as a focused sibling of that walk rather than
+    /// refactored through it, to keep its unit-pinned behaviour untouched.
+    fn discriminator_mapping_schema_targets(body: &str) -> HashSet<String> {
+        // The target value of a `mapping:` entry `<key>: <target>`, unquoted; `None`
+        // for a sequence item, a block opener, or an empty value. The key may be
+        // quoted and itself contain a `:` (`"Wi-Fi:WPA": target`), so a quoted key
+        // is consumed up to its closing quote before the separating `:`. Mirrors
+        // `discriminator_mapping_dangling_targets`'s inner helper.
+        fn mapping_entry_target(s: &str) -> Option<String> {
+            let s = s.trim();
+            if s.starts_with('-') {
+                return None;
+            }
+            let after_colon = if let Some(r) = s.strip_prefix('"') {
+                let end = r.find('"')?;
+                r[end + 1..].trim_start().strip_prefix(':')?
+            } else if let Some(r) = s.strip_prefix('\'') {
+                let end = r.find('\'')?;
+                r[end + 1..].trim_start().strip_prefix(':')?
+            } else {
+                s.split_once(':')?.1
+            };
+            let v = after_colon.trim();
+            let v = if let Some(r) = v.strip_prefix('"') {
+                r.split('"').next().unwrap_or(r)
+            } else if let Some(r) = v.strip_prefix('\'') {
+                r.split('\'').next().unwrap_or(r)
+            } else {
+                v.split_whitespace().next().unwrap_or(v)
+            };
+            (!v.is_empty()).then(|| v.to_string())
+        }
+
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let mut out = HashSet::new();
+        for (i, line) in lines.iter().enumerate() {
+            if line.trim() != "discriminator:" {
+                continue;
+            }
+            let disc_indent = indent(line);
+            // Find this discriminator's `mapping:` child (indented past the
+            // discriminator, before the block dedents to a sibling/ancestor).
+            let mut j = i + 1;
+            let mut map_indent = None;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) <= disc_indent {
+                    break;
+                }
+                if l.trim() == "mapping:" {
+                    map_indent = Some(indent(l));
+                    break;
+                }
+                j += 1;
+            }
+            let Some(map_indent) = map_indent else {
+                continue;
+            };
+            // Read the mapping entries (indented past `mapping:`).
+            let mut k = j + 1;
+            while k < lines.len() {
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    k += 1;
+                    continue;
+                }
+                if indent(l) <= map_indent {
+                    break;
+                }
+                if let Some(target) = mapping_entry_target(l) {
+                    let pointer = if target.starts_with("#/") {
+                        target
+                    } else if target.contains('#') {
+                        k += 1;
+                        continue; // cross-file pointer: resolves into another file
+                    } else {
+                        // OpenAPI shorthand: a bare name ⇒ #/components/schemas/<name>.
+                        format!("#/components/schemas/{target}")
+                    };
+                    if pointer.split('/').count() == 4
+                        && pointer.starts_with("#/components/schemas/")
+                    {
+                        out.insert(pointer);
+                    }
+                }
+                k += 1;
+            }
+        }
+        out
+    }
+
+    /// The set of local `#/components/schemas/<Name>` pointers a spec REACHES: the
+    /// union of its schema-targeting local `$ref`s ([`ref_targets`]) and its
+    /// discriminator `mapping:` targets ([`discriminator_mapping_schema_targets`]).
+    /// A cross-file `$ref` (non-empty file half) resolves into another document, so
+    /// it never marks a *local* schema reached.
+    fn reached_schema_pointers(body: &str) -> HashSet<String> {
+        let mut out = discriminator_mapping_schema_targets(body);
+        for t in ref_targets(body) {
+            let Some((file, pointer)) = t.split_once('#') else {
+                continue;
+            };
+            if !file.is_empty() {
+                continue; // cross-file ref resolves into another document
+            }
+            let pointer = format!("#{pointer}");
+            if pointer.split('/').count() == 4
+                && pointer.starts_with("#/components/schemas/")
+            {
+                out.insert(pointer);
+            }
+        }
+        out
+    }
+
+    /// Return every locally-defined `components.schemas` entry that NOTHING in the
+    /// same document reaches — neither a local `$ref` nor a discriminator `mapping:`
+    /// target — as `#/components/schemas/<Name>` sorted. The `schemas` half of
+    /// [`unreferenced_reusable_components`], which covers the reference-bearing
+    /// non-schema sections and deliberately excludes `schemas` because a schema
+    /// needs both mapping-reachability (a discriminator routes to it without a
+    /// `$ref`) and a documented-orphan allowance. This returns the raw orphan set;
+    /// the contract test applies the documented allowance.
+    fn unreferenced_schema_components(body: &str) -> Vec<String> {
+        let reached = reached_schema_pointers(body);
+        let mut out: Vec<String> = component_pointers(body)
+            .into_iter()
+            .filter(|p| p.split('/').nth(2) == Some("schemas") && !reached.contains(p))
+            .collect();
+        out.sort();
+        out
+    }
+
+    #[test]
+    fn every_defined_schema_is_reachable() {
+        // Contract-harness invariant (OpenAPI 3 hygiene, Spectral's
+        // `oas3-unused-component` for the `schemas` section): every schema a mounted
+        // spec DEFINES under `components.schemas` MUST be REACHED within the same
+        // document — by a local `#/components/schemas/<Name>` `$ref`, or by a
+        // Discriminator Object `mapping:` value that routes to it. This is the
+        // `schemas` half that `every_reusable_component_is_referenced` deliberately
+        // left to "a later slice": a reusable response/parameter/header is reached
+        // only by a `$ref`, but a schema has a second, non-`$ref` reach path (a
+        // discriminator `mapping` names a bare pointer/name, never a `$ref`), so the
+        // reusable-component test excluded `schemas` rather than false-flag every
+        // mapping-only variant.
+        //
+        // The break this catches: an unreachable schema is dead weight in the served
+        // spec — a Redoc/Swagger/codegen client materialises a model object no
+        // operation, response, or discriminator ever uses. It is the residue of the
+        // same copy-paste drafting the ref tests guard from the other side (a schema
+        // pasted in with an operation, then stranded when its only `$ref`/`mapping`
+        // entry was renamed or the operation trimmed). No existing test sees it: the
+        // ref tests walk a `$ref` to its target (never a definition awaiting an
+        // incoming reference); the discriminator tests read a mapping's *targets* for
+        // danglers, never a schema *definition* for an incoming mapping; and the
+        // reusable-component test excludes `schemas` outright.
+        //
+        // Documented-orphan allowance (keyed by `(api, pointer)` so it can never
+        // mask a real orphan in another spec): three schemas are defined PURELY to
+        // document a deferred CloudEvents notification payload, wired to no callback
+        // `$ref` (a documented cut — the async `callbacks` blocks are not modelled).
+        // They are intentional, not drift, so they are exempt while every other
+        // defined schema must be reached.
+        const DOCUMENTED_EVENT_ORPHANS: &[(&str, &str)] = &[
+            // qos-booking: the `status-changed` envelope, described in-place; its
+            // `sink` callback is a documented cut.
+            ("qos-booking", "#/components/schemas/QosBookingEvent"),
+            // session-insights: the two `sink` notification envelopes, described
+            // in-place; their callbacks are documented cuts.
+            ("session-insights", "#/components/schemas/NetworkQualityScoreEvent"),
+            ("session-insights", "#/components/schemas/SessionEndedEvent"),
+        ];
+        let mut checked = 0usize;
+        for api in APIS {
+            checked += component_pointers(api.body)
+                .iter()
+                .filter(|p| p.split('/').nth(2) == Some("schemas"))
+                .count();
+            let orphans: Vec<String> = unreferenced_schema_components(api.body)
+                .into_iter()
+                .filter(|p| !DOCUMENTED_EVENT_ORPHANS.contains(&(api.name, p.as_str())))
+                .collect();
+            assert!(
+                orphans.is_empty(),
+                "{} spec defines schema(s) that no local $ref or discriminator \
+                 mapping reaches — dead weight in the served spec (a client \
+                 materialises a model object nothing uses): {:?}",
+                api.name,
+                orphans
+            );
+        }
+        // Non-vacuous floor: the corpus defines schemas in the hundreds, so the
+        // extractor runs on real data and reaches every one (bar the three
+        // documented event envelopes). Guards the test from passing because the
+        // extractor silently found nothing to check.
+        assert!(
+            checked >= 300,
+            "expected many defined schemas across the corpus, saw {checked}"
+        );
+    }
+
+    #[test]
+    fn schema_reference_extraction_rules() {
+        // Pin `unreferenced_schema_components` so the contract test above can't pass
+        // vacuously and each reach path / skip is exercised: a `$ref`-reached schema
+        // and a discriminator-`mapping`-reached schema (both a `#/…` pointer and the
+        // bare-name shorthand) are cleared; a schema reached only by a CROSS-FILE
+        // `$ref` of the same name is still flagged (that ref resolves into the other
+        // file, not this document); a truly unreached schema is flagged; a non-schema
+        // component (a reusable response) is ignored; all in sorted order.
+        let body = "\
+openapi: 3.0.3
+paths:
+  /a:
+    post:
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Poly'
+        '404':
+          $ref: '../../shared/errors.yaml#/components/schemas/OrphanNamedLikeCrossFile'
+components:
+  schemas:
+    Poly:
+      type: object
+      discriminator:
+        propertyName: kind
+        mapping:
+          circle: '#/components/schemas/MappedByPointer'
+          bare: BareMapped
+    MappedByPointer:
+      type: object
+    BareMapped:
+      type: object
+    OrphanNamedLikeCrossFile:
+      type: object
+    TrueOrphan:
+      type: object
+  responses:
+    NotASchema:
+      description: a reusable response, out of scope for the schema test
+";
+        assert_eq!(
+            unreferenced_schema_components(body),
+            vec![
+                "#/components/schemas/OrphanNamedLikeCrossFile".to_string(),
+                "#/components/schemas/TrueOrphan".to_string(),
+            ],
+            "flag exactly the unreached schemas, sorted: `Poly` ($ref'd), \
+             `MappedByPointer`/`BareMapped` (discriminator mapping) cleared; the \
+             cross-file-only `OrphanNamedLikeCrossFile` and the unreached \
+             `TrueOrphan` flagged; the `NotASchema` response ignored"
+        );
+
+        // A spec whose only schema is reached → nothing flagged.
+        let clean = "\
+paths:
+  /a:
+    get:
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Used'
+components:
+  schemas:
+    Used:
+      type: object
+";
+        assert!(
+            unreferenced_schema_components(clean).is_empty(),
+            "a reached schema must not be flagged"
+        );
+
+        // A components-less body → empty (never panics on the section split).
+        assert!(unreferenced_schema_components("paths: {}\n").is_empty());
+
+        // Pin the mapping-target helper directly: it resolves a `#/…` pointer and
+        // the bare-name shorthand, and skips a cross-file `#`-bearing target.
+        let mapping = "\
+components:
+  schemas:
+    Area:
+      discriminator:
+        propertyName: areaType
+        mapping:
+          CIRCLE: '#/components/schemas/Circle'
+          BARE: BareName
+          EXTERNAL: 'other.yaml#/components/schemas/Foreign'
+";
+        let targets = discriminator_mapping_schema_targets(mapping);
+        assert!(targets.contains("#/components/schemas/Circle"));
+        assert!(targets.contains("#/components/schemas/BareName"));
+        assert!(!targets.iter().any(|t| t.contains("Foreign")));
+        assert_eq!(targets.len(), 2);
     }
 
     #[test]
