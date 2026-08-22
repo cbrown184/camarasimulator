@@ -3332,6 +3332,29 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - a **path-parameter ↔ template-variable binding** contract test (`src/registry.rs`
+    `every_path_parameter_names_a_path_template_variable`) asserts the reverse of
+    `every_path_template_variable_has_a_declared_path_parameter`: every `in: path`
+    parameter *applied* to a path (inline in a `parameters:` block, or via a
+    `#/components/parameters/…` `$ref`) MUST name a `{…}` template variable of that path
+    (Spectral `path-params`, the unused/undefined-parameter break) — an orphaned path
+    parameter documents a URL segment that does not exist (a phantom Redoc parameter, a
+    codegen argument bound to nothing). No existing test sees it: the forward test walks a
+    key's variables against the *document-wide* `declared_path_parameter_names` (blind to
+    which path a parameter belongs to); `every_path_parameter_declares_required_true` reads
+    the `required:` flag, never the path; `every_path_template_key_is_well_formed` checks
+    only brace syntax. New pure `path_parameters_without_a_template_variable` walks `paths:`
+    per-path (current key + its template-var set) resolving each applied param's `name` — an
+    inline `in: path` object's `name` via the `declared_path_parameter_names` sibling scan,
+    or a `$ref` through the new `path_param_component_names` (a `components.parameters`
+    key→`name` map for `in: path` components; the ref addresses by *key*, the template
+    interpolates the *name*, and they differ) — flagging a name absent from the set; a
+    `$ref` to a non-path component (the `in: header` XCorrelator) is skipped. Corpus: every
+    applied path parameter binds a template variable → 0 drift. Unit-covered
+    (`path_parameter_template_binding_extraction_rules`: inline-bound/`$ref`-bound cleared;
+    inline-orphan/`$ref`-orphan flagged in document order; `in: query` and `in: header`
+    component `$ref` ignored; key→name keeps only `in: path`; ≥40-applied-param floor).
+    Test-only, no spec change.
   - a **numeric-bound ordering** contract test (`src/registry.rs`
     `every_numeric_range_has_minimum_not_above_maximum`) asserts that when a numeric
     schema declares both `minimum` and `maximum` they bound a closed interval
@@ -5897,6 +5920,42 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 ---
 
 ## Scan journal
+
+- 2026-08-22 — Contract-test harness: added a **path-parameter ↔ template-variable
+  binding** test (`src/registry.rs` `every_path_parameter_names_a_path_template_variable`)
+  — the exact **reverse** of `every_path_template_variable_has_a_declared_path_parameter`.
+  OpenAPI path templating is bidirectional: as well as every `{name}` in a path key
+  needing a Parameter Object (the direction already covered), **every** `in: path`
+  parameter *applied* to a path — inline in a path-item's/operation's `parameters:`, or
+  supplied by a `$ref: "#/components/parameters/<key>"` — MUST name a `{…}` template
+  variable of that path (Spectral's `path-params`, the unused/undefined-parameter break).
+  An orphaned path parameter (`name: paymentId, in: path` applied to a collection path
+  `/payments` with no `{paymentId}`) documents a URL segment that doesn't exist: Redoc/
+  Swagger renders a phantom parameter and a codegen client emits an argument that binds to
+  nothing. No existing test sees it: the forward test walks each *key's* variables against
+  the **document-wide** `declared_path_parameter_names` — deliberately blind to *which*
+  path a parameter belongs to, so it can never catch a parameter on the wrong path;
+  `every_path_parameter_declares_required_true` reads a path param's `required:` flag,
+  never its path; `every_path_template_key_is_well_formed` checks only brace *syntax*. New
+  pure `path_parameters_without_a_template_variable` walks the `paths:` block per-path
+  (tracking the current 2-space key and its template-var set; `x-` extension resets), and
+  for each applied path param resolves its `name` — an inline `in: path` object's `name`
+  via the same up-then-down sibling scan as `declared_path_parameter_names`, or a `$ref`
+  through the new `path_param_component_names` (a `components.parameters` key→`name` map for
+  `in: path` components only, scoped like `component_pointers`; the ref addresses a
+  component by *key*, the template interpolates the *name*, and the two differ) — flagging a
+  name absent from the set. A `$ref` to a non-path component (the `in: header` XCorrelator)
+  resolves to nothing and is skipped. Surveyed the corpus first: every applied `in: path`
+  parameter (both inline objects and component `$ref`s) names a template variable of its
+  path → **0** drift, a live guard that fires the moment a path param is pasted onto a
+  path lacking its `{…}` segment or the key's variable is renamed. Unit-covered
+  (`path_parameter_template_binding_extraction_rules`: an inline-bound and a `$ref`-bound
+  path param cleared; an inline orphan and a `$ref`ed orphan on a variable-less path
+  flagged in document order; an `in: query` param and an `in: header` component `$ref`
+  ignored; key→name resolution keeps only `in: path` components; ≥40 applied-param
+  non-vacuous floor). Test-only (`#[cfg(test)]`), no runtime/spec change. `cargo test`
+  2890 green (was 2888; +2); `cargo build --release` ok — binary (release): 5.1M
+  (5,323,160 B; unchanged — test-only code), no new deps.
 
 - 2026-08-22 — Contract-test harness: added a **numeric-bound ordering** test
   (`src/registry.rs` `every_numeric_range_has_minimum_not_above_maximum`) — when a

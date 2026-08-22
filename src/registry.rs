@@ -21772,6 +21772,442 @@ components:
         );
     }
 
+    /// Map every `components.parameters` entry that declares `in: path` to the
+    /// path-parameter **name** it carries (component key → `name`), so a
+    /// `$ref: "#/components/parameters/<key>"` used on a path can be resolved to
+    /// the template variable it must bind — without a YAML dep.
+    ///
+    /// A `$ref` addresses a component by its *key* (`PaymentId`), while the
+    /// template variable a path interpolates is the parameter's *name*
+    /// (`paymentId`); the two routinely differ, so [`path_parameters_without_a_
+    /// template_variable`] needs this key→name resolution to check a `$ref`ed path
+    /// parameter against its path. Scopes exactly like [`component_pointers`] (a
+    /// top-level `components:` → its 2-space `parameters` section → an
+    /// exact-4-space component key → that component's ≥6-space body), and reads a
+    /// component's own `in:`/`name:` only at its 6-space direct-child indent — a
+    /// `name:` nested deeper (e.g. a property inside the parameter's `schema:`) is
+    /// never miscredited. A component whose `in:` is not `path`, or that declares
+    /// no `name`, is omitted.
+    fn path_param_component_names(body: &str) -> std::collections::HashMap<String, String> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let mut map = std::collections::HashMap::new();
+        // Locate the top-level `components:` block, then its `parameters:` section.
+        let mut i = 0;
+        while i < lines.len() && !(indent(lines[i]) == 0 && lines[i].trim() == "components:") {
+            i += 1;
+        }
+        i += 1;
+        let mut params_start = None;
+        while i < lines.len() {
+            let l = lines[i];
+            if !l.trim().is_empty() && indent(l) == 0 {
+                break; // left the components block without a parameters section
+            }
+            if indent(l) == 2 && l.trim() == "parameters:" {
+                params_start = Some(i + 1);
+                break;
+            }
+            i += 1;
+        }
+        let Some(mut j) = params_start else {
+            return map;
+        };
+        // Each exact-4-space key is one component parameter; its body is deeper.
+        while j < lines.len() {
+            let l = lines[j];
+            if l.trim().is_empty() {
+                j += 1;
+                continue;
+            }
+            let ind = indent(l);
+            if ind <= 2 {
+                break; // dedented out of the parameters section
+            }
+            if ind != 4 {
+                j += 1;
+                continue;
+            }
+            let Some(key) = l.trim().strip_suffix(':') else {
+                j += 1;
+                continue;
+            };
+            let key = key.trim_matches('"').trim_matches('\'').to_string();
+            let mut name: Option<String> = None;
+            let mut is_path = false;
+            let mut k = j + 1;
+            while k < lines.len() {
+                let b = lines[k];
+                if b.trim().is_empty() {
+                    k += 1;
+                    continue;
+                }
+                if indent(b) <= 4 {
+                    break; // next component key or dedent
+                }
+                if indent(b) == 6 {
+                    let t = b.trim();
+                    if t == "in: path" {
+                        is_path = true;
+                    } else if let Some(v) = t.strip_prefix("name:") {
+                        let v = v.trim().trim_matches('"').trim_matches('\'');
+                        if !v.is_empty() {
+                            name = Some(v.to_string());
+                        }
+                    }
+                }
+                k += 1;
+            }
+            if is_path {
+                if let Some(n) = name {
+                    if !key.is_empty() {
+                        map.insert(key, n);
+                    }
+                }
+            }
+            j = k;
+        }
+        map
+    }
+
+    /// Extract a `path -> name` label for every **applied** path parameter whose
+    /// `name` is *not* interpolated as a `{…}` template variable of the path it is
+    /// applied to — without a YAML dep.
+    ///
+    /// OpenAPI path templating is bidirectional: as well as every `{name}` in a
+    /// path key needing a Parameter Object (the [`unbound_path_template_variables`]
+    /// direction), **every** `in: path` parameter applied to a path — inline in the
+    /// path item's or an operation's `parameters:`, or supplied by a
+    /// `$ref: "#/components/parameters/<key>"` — MUST correspond to a template
+    /// expression in that path (the well-known `path-params` /
+    /// `oas3-unused-component`-adjacent lint; the *unused/undefined path parameter*
+    /// break). An orphaned path parameter (`name: paymentId, in: path` applied to a
+    /// path with no `{paymentId}`) documents a URL segment that does not exist:
+    /// Redoc/Swagger renders a phantom parameter, and a codegen client emits a
+    /// function argument that binds to nothing. The routine hazard in these specs is
+    /// pasting a resource operation (or its shared `PaymentId` parameter `$ref`)
+    /// onto a *collection* path (`/payments`) that has no `{…}` segment, or renaming
+    /// the template variable in the key while leaving the parameter's `name` behind.
+    ///
+    /// This is the exact reverse of [`every_path_template_variable_has_a_declared_
+    /// path_parameter`], which no existing test covers: that test walks each path
+    /// *key's* variables and asks whether *some* declared parameter binds them,
+    /// using the document-wide [`declared_path_parameter_names`] — deliberately
+    /// blind to *which* path a parameter belongs to, so it can never see a parameter
+    /// applied to the wrong path. [`path_parameters_missing_required_true`] reads a
+    /// path parameter's `required:` flag, never its correspondence to a path; and
+    /// `every_path_template_key_is_well_formed` checks only the brace *syntax* of a
+    /// key. This extractor is per-path: it walks the `paths:` block tracking the
+    /// current path key (a 2-space direct child; an `x-` extension resets it) and
+    /// that key's template-variable set, then for each applied path parameter within
+    /// the block resolves its `name` — an inline `in: path` object's `name` via the
+    /// same up-then-down sibling scan as [`declared_path_parameter_names`] (CAMARA
+    /// lists `name` before `in`), or a `$ref` into `#/components/parameters/…`
+    /// through [`path_param_component_names`] — and flags a name absent from the set.
+    /// A `$ref` to a non-path component parameter (e.g. the `in: header` XCorrelator)
+    /// resolves to no entry and is skipped; results are deduped per `path -> name`
+    /// in document order.
+    fn path_parameters_without_a_template_variable(body: &str) -> Vec<String> {
+        let comp = path_param_component_names(body);
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        // Template variables interpolated by a path key (balanced, non-empty,
+        // whitespace-free `{…}` spans; an unbalanced/empty brace yields none).
+        let template_vars = |path: &str| -> HashSet<String> {
+            let mut set = HashSet::new();
+            let mut name = String::new();
+            let mut in_var = false;
+            for ch in path.chars() {
+                match ch {
+                    '{' => {
+                        in_var = true;
+                        name.clear();
+                    }
+                    '}' if in_var => {
+                        in_var = false;
+                        if !name.is_empty() && !name.contains(char::is_whitespace) {
+                            set.insert(name.clone());
+                        }
+                        name.clear();
+                    }
+                    _ if in_var => name.push(ch),
+                    _ => {}
+                }
+            }
+            set
+        };
+        // The `name` of the inline `in: path` parameter object whose `in:` key sits
+        // at line `i`, effective indent `ind` — a sibling `name:` (bare at `ind`, or
+        // a `- name:` sequence opener at `ind`-2), scanned up first then down and
+        // bounded by the object's edges, mirroring `declared_path_parameter_names`.
+        let name_key = |l: &str, ind: usize| -> Option<String> {
+            let li = indent(l);
+            if li != ind && li + 2 != ind {
+                return None;
+            }
+            let t = l.trim_start();
+            let t = t.strip_prefix("- ").unwrap_or(t);
+            let v = t.strip_prefix("name:")?.trim().trim_matches('"').trim_matches('\'');
+            (!v.is_empty() && !v.contains(char::is_whitespace)).then(|| v.to_string())
+        };
+        let inline_param_name = |i: usize, ind: usize| -> Option<String> {
+            for step in [-1i64, 1] {
+                let mut j = i as i64;
+                loop {
+                    j += step;
+                    if j < 0 || j as usize >= lines.len() {
+                        break;
+                    }
+                    let l = lines[j as usize];
+                    if l.trim().is_empty() {
+                        break;
+                    }
+                    let li = indent(l);
+                    if li + 2 < ind {
+                        break; // dedented out of this parameter object
+                    }
+                    let is_item_opener = li + 2 == ind && l.trim_start().starts_with("- ");
+                    if step == 1 && is_item_opener {
+                        break; // next sequence item, going down
+                    }
+                    if let Some(n) = name_key(l, ind) {
+                        return Some(n);
+                    }
+                    if step == -1 && is_item_opener {
+                        break; // this object's own opener, going up
+                    }
+                }
+            }
+            None
+        };
+        let mut out = Vec::new();
+        let mut in_paths = false;
+        let mut cur_path: Option<String> = None;
+        let mut cur_vars: HashSet<String> = HashSet::new();
+        for (i, line) in lines.iter().enumerate() {
+            let is_top_level_key = !line.is_empty() && !line.starts_with(char::is_whitespace);
+            if is_top_level_key {
+                in_paths = line.trim_end() == "paths:";
+                cur_path = None;
+                cur_vars.clear();
+                continue;
+            }
+            if !in_paths {
+                continue;
+            }
+            // A 2-space direct child of `paths:` opens a new path item.
+            if let Some(rest) = line.strip_prefix("  ") {
+                if !rest.starts_with(char::is_whitespace) {
+                    let key = rest.trim_end();
+                    let key = key.strip_suffix(':').unwrap_or(key);
+                    let key = key.trim_matches('"').trim_matches('\'');
+                    if key.is_empty() || key.starts_with("x-") {
+                        cur_path = None;
+                        cur_vars.clear();
+                    } else {
+                        cur_vars = template_vars(key);
+                        cur_path = Some(key.to_string());
+                    }
+                    continue;
+                }
+            }
+            let Some(path) = cur_path.as_deref() else {
+                continue;
+            };
+            let mut flag = |name: &str| {
+                if !cur_vars.contains(name) {
+                    let label = format!("{path} -> {name}");
+                    if !out.contains(&label) {
+                        out.push(label);
+                    }
+                }
+            };
+            // An inline `in: path` parameter object.
+            let bare = line.trim_start();
+            let keypart = bare.strip_prefix("- ").unwrap_or(bare);
+            if keypart.trim() == "in: path" {
+                let ind = indent(line) + if bare.len() != keypart.len() { 2 } else { 0 };
+                if let Some(n) = inline_param_name(i, ind) {
+                    flag(&n);
+                }
+                continue;
+            }
+            // A `$ref` into `#/components/parameters/…` (a parameter reference by
+            // pointer, whatever its nesting) supplying a path parameter.
+            let ref_line = keypart.trim();
+            if let Some(v) = ref_line.strip_prefix("$ref:") {
+                let ptr = v.trim().trim_matches('"').trim_matches('\'');
+                if let Some(compkey) = ptr.strip_prefix("#/components/parameters/") {
+                    if let Some(n) = comp.get(compkey) {
+                        flag(n);
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_path_parameter_names_a_path_template_variable() {
+        // Contract-harness invariant (OpenAPI path-templating rule, the
+        // `path-params` unused/undefined-parameter direction): every `in: path`
+        // parameter applied to a path — inline, or supplied by a
+        // `#/components/parameters/…` `$ref` — MUST name a `{…}` template variable
+        // of that path. An orphaned path parameter documents a URL segment that
+        // does not exist (a phantom Redoc/Swagger parameter, a codegen argument
+        // bound to nothing). This is the exact reverse of
+        // `every_path_template_variable_has_a_declared_path_parameter` (which walks
+        // a key's variables using the *document-wide* declared set, blind to which
+        // path a parameter belongs to) and of `every_path_parameter_declares_
+        // required_true` (which reads a path parameter's flag, never its path).
+        // Verified true across all mounted specs before asserting.
+        for api in APIS {
+            let orphans = path_parameters_without_a_template_variable(api.body);
+            assert!(
+                orphans.is_empty(),
+                "{} spec applies `in: path` parameter(s) that name no template \
+                 variable of their path (a phantom, unfillable path parameter): {:?}",
+                api.name,
+                orphans
+            );
+        }
+    }
+
+    #[test]
+    fn path_parameter_template_binding_extraction_rules() {
+        // Unit-cover `path_parameters_without_a_template_variable` (and the
+        // `path_param_component_names` key→name resolution it leans on) so the
+        // contract test above can't pass vacuously and its accept/flag boundary is
+        // pinned: an inline `in: path` parameter whose `name` matches the key's
+        // variable passes; one bound through a `components.parameters` `$ref` whose
+        // resolved `name` matches passes; an inline path parameter naming no
+        // variable of its path is flagged; a `$ref`ed path parameter whose resolved
+        // `name` is absent from the (variable-less) path is flagged; an `in: query`
+        // parameter (not a path parameter) is ignored even when off-path; and a
+        // `$ref` to a non-path component parameter (the `in: header` XCorrelator)
+        // resolves to nothing and is ignored. Flags are in document order.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /sessions/{sessionId}:
+    get:
+      operationId: getSession
+      parameters:
+        - name: sessionId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: ok
+  /payments/{paymentId}:
+    get:
+      operationId: getPayment
+      parameters:
+        - $ref: \"#/components/parameters/PaymentId\"
+        - $ref: \"#/components/parameters/XCorrelator\"
+      responses:
+        '200':
+          description: ok
+  /orders:
+    get:
+      operationId: listOrders
+      parameters:
+        - name: orderId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: ok
+  /payments:
+    get:
+      operationId: listPayments
+      parameters:
+        - $ref: \"#/components/parameters/PaymentId\"
+      responses:
+        '200':
+          description: ok
+  /q:
+    get:
+      operationId: getQ
+      parameters:
+        - name: qvar
+          in: query
+          schema:
+            type: string
+      responses:
+        '200':
+          description: ok
+components:
+  parameters:
+    XCorrelator:
+      name: x-correlator
+      in: header
+      required: false
+      schema:
+        type: string
+    PaymentId:
+      name: paymentId
+      in: path
+      required: true
+      schema:
+        type: string
+";
+        // Key→name resolution keeps only `in: path` components, mapping the
+        // component *key* to the parameter *name* (the two differ).
+        let comp = path_param_component_names(body);
+        assert_eq!(comp.get("PaymentId").map(String::as_str), Some("paymentId"));
+        assert_eq!(comp.get("XCorrelator"), None);
+
+        // Flagged, in document order: `/orders` (inline `orderId` with no
+        // `{orderId}` in the key) and `/payments` (the `PaymentId` component's
+        // `paymentId` with no `{paymentId}` in the collection path). NOT flagged:
+        // `/sessions/{sessionId}` and `/payments/{paymentId}` (bound), `/q` (an
+        // `in: query` parameter), and the XCorrelator `$ref` (an `in: header`
+        // component, absent from the resolution map).
+        assert_eq!(
+            path_parameters_without_a_template_variable(body),
+            vec![
+                "/orders -> orderId".to_string(),
+                "/payments -> paymentId".to_string(),
+            ]
+        );
+
+        // Non-vacuous floor: across every registered spec every applied path
+        // parameter binds a template variable (the invariant the contract test
+        // asserts), and the corpus actually applies many path parameters — both
+        // inline `in: path` objects and `#/components/parameters/…` `$ref`s — so
+        // the resolution path runs on real data and a broken (always-empty)
+        // extractor can't hide behind a corpus with no path parameters. Count
+        // `in: path` occurrences with a detection independent of the extractor.
+        let mut applied = 0usize;
+        for api in APIS {
+            assert!(
+                path_parameters_without_a_template_variable(api.body).is_empty(),
+                "{}: every applied `in: path` parameter must name a template \
+                 variable of its path",
+                api.name
+            );
+            for line in api.body.lines() {
+                let t = line.trim_start();
+                let t = t.strip_prefix("- ").unwrap_or(t);
+                if t.trim() == "in: path" {
+                    applied += 1;
+                }
+            }
+        }
+        assert!(
+            applied >= 40,
+            "expected many applied path parameters across specs, got {applied}"
+        );
+    }
+
     /// Extract a descriptor for every `properties:` object a spec declares that
     /// lists the **same property name twice** — without a YAML dep.
     ///
