@@ -3332,6 +3332,21 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - a **discriminator mapping-key distinctness** contract test (`src/registry.rs`
+    `every_discriminator_mapping_key_is_distinct`) — the discriminator member of the
+    distinct-keys family (components/properties/examples/parameters/paths/responses/
+    required/tags), none of which reach a `mapping:` block, and the key-side
+    complement of `every_discriminator_mapping_target_is_a_defined_component` (which
+    resolves each entry's *target*, never comparing *keys*). A Discriminator Object's
+    `mapping` is keyed by the discriminator value, so keys in one block MUST be
+    distinct; a duplicate is invalid YAML a parser collapses to one entry (last wins),
+    dropping the route for the repeated value. New pure
+    `discriminator_mappings_with_duplicate_keys` reuses
+    `discriminator_mapping_dangling_targets`' mapping walk + a `mapping_entry_key`
+    companion (a quoted key may contain a `:`, e.g. `"Wi-Fi:WPA_PERSONAL"`). Corpus:
+    3 `mapping:` blocks / 7 keys, every mapping's keys distinct → 0 drift.
+    Unit-covered (`discriminator_mapping_key_distinctness_extraction_rules`; ≥5
+    mapping-entry floor). Test-only, no spec change.
   - an **unused-securityScheme** contract test (`src/registry.rs`
     `every_defined_security_scheme_is_referenced`) — the `securitySchemes` half of
     Spectral's `oas3-unused-component`, the third and last section of that lint,
@@ -6041,6 +6056,39 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-22 — Contract-test harness: added a **discriminator mapping-key
+  distinctness** contract test (`src/registry.rs`
+  `every_discriminator_mapping_key_is_distinct`) — the discriminator member of the
+  distinct-keys family (`every_components_object_lists_distinct_component_keys`,
+  `every_properties_object_lists_distinct_property_names`,
+  `every_examples_map_lists_distinct_example_names`, and the parameters/paths/
+  responses/required/tags distinctness tests), none of which descend into a
+  `mapping:` block, and the **key-side complement** of
+  `every_discriminator_mapping_target_is_a_defined_component` (which resolves each
+  entry's *target* but never compares the *keys*). A Discriminator Object's
+  `mapping` is an object keyed by the discriminator value, so every key in one
+  `mapping:` block MUST be distinct; a duplicate is invalid YAML a parser silently
+  collapses to one entry (last wins), dropping the route for the repeated value — a
+  Redoc/codegen client maps that discriminating value to the wrong variant (or none)
+  and the polymorphism (`AccessDetail`/`Area`/`Device` families) breaks where a
+  caller deserialises the body. A realistic drift because the keys are hand-typed,
+  near-identical strings (`"Wi-Fi:WPA_PERSONAL"`/`"Wi-Fi:WPA_ENTERPRISE"`), so a
+  paste that duplicates an entry and half-edits only its target leaves two entries
+  sharing a key. New pure `discriminator_mappings_with_duplicate_keys` reuses the
+  exact mapping-block walk of `discriminator_mapping_dangling_targets` plus a
+  `mapping_entry_key` companion of its `mapping_entry_target` — a quoted key may
+  itself contain a `:` (`"Wi-Fi:WPA_PERSONAL"`), consumed to its closing quote
+  before the separating colon. Surveyed the corpus first (60 specs; 3 `mapping:`
+  blocks, 7 keys across iot-sim-fraud-prevention / most-frequent-location /
+  network-access-domains) → every mapping's keys are distinct → 0 drift, a live
+  guard the moment a duplicate is pasted in. Tests: +2 (the contract test +
+  `discriminator_mapping_key_distinctness_extraction_rules`: an all-distinct unquoted
+  mapping cleared; a repeated unquoted key and a repeated quoted colon-bearing key
+  flagged at the repeat's line in document order (only the repeat, not the first);
+  distinct quoted colon-bearing keys and a discriminator with no mapping cleared;
+  a ≥5 mapping-entry non-vacuous corpus floor). `cargo test` 2906 green (was 2904);
+  `cargo build --release` succeeds. No new dependency; test-only change. — binary:
+  5.1M (5,323,160 B; unchanged)
 - 2026-08-22 — Contract-test harness: added an **unused-securityScheme** contract
   test (`src/registry.rs` `every_defined_security_scheme_is_referenced`) — the
   **`securitySchemes` half** of Spectral's `oas3-unused-component`, the third and

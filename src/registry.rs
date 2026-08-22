@@ -20246,6 +20246,259 @@ components:
         );
     }
 
+    /// Extract, in document order, every DUPLICATE key a Discriminator Object's
+    /// `mapping` declares — a mapping entry `<key>: <target>` whose key already
+    /// appeared earlier in the *same* `mapping:` block — as `<key>@line <n>` (the
+    /// line of the offending repeat), without a YAML dep.
+    ///
+    /// A Discriminator Object's optional `mapping` is a JSON object keyed by the
+    /// discriminator value; two entries sharing a key are a duplicate mapping key.
+    /// YAML mandates distinct keys within a mapping, so a duplicate is an invalid
+    /// document a parser silently collapses to one entry (the last wins) — the route
+    /// for the dropped value is lost, so a Redoc/Swagger/codegen client handed that
+    /// discriminating value maps it to the wrong variant (or none). A live hazard in
+    /// these specs where the keys are hand-typed, near-identical strings
+    /// (`"Wi-Fi:WPA_PERSONAL"` / `"Wi-Fi:WPA_ENTERPRISE"`): a paste that duplicates an
+    /// entry and only half-edits its target, or a value typed twice.
+    ///
+    /// The discriminator member of the distinct-keys family
+    /// (`every_components_object_lists_distinct_component_keys`,
+    /// `every_properties_object_lists_distinct_property_names`,
+    /// `every_examples_map_lists_distinct_example_names`, …), none of which reach a
+    /// `mapping:` block, and the *key-side* complement of
+    /// `every_discriminator_mapping_target_is_a_defined_component` (which resolves each
+    /// entry's *target*, never comparing the *keys*). Reuses the exact mapping-block
+    /// walk of [`discriminator_mapping_dangling_targets`] and a `mapping_entry_key`
+    /// companion of its `mapping_entry_target` — a quoted key may itself contain a `:`
+    /// (`"Wi-Fi:WPA_PERSONAL"`), so a quoted key is consumed to its closing quote
+    /// before the separating colon.
+    fn discriminator_mappings_with_duplicate_keys(body: &str) -> Vec<String> {
+        // The key of a `mapping:` entry `<key>: <target>`, unquoted; `None` for a
+        // sequence item or a line with no `key:` structure. The key may be single/
+        // double quoted and itself contain a `:` (`"Wi-Fi:WPA": target`), so a quoted
+        // key is consumed up to its closing quote, which the separating `:` must
+        // follow — mirroring `mapping_entry_target`'s acceptance from the value side.
+        fn mapping_entry_key(s: &str) -> Option<String> {
+            let s = s.trim();
+            if s.starts_with('-') {
+                return None; // a YAML sequence item, not a mapping entry
+            }
+            if let Some(r) = s.strip_prefix('"') {
+                let end = r.find('"')?;
+                r[end + 1..].trim_start().strip_prefix(':')?; // must be `"key": …`
+                let key = &r[..end];
+                (!key.is_empty()).then(|| key.to_string())
+            } else if let Some(r) = s.strip_prefix('\'') {
+                let end = r.find('\'')?;
+                r[end + 1..].trim_start().strip_prefix(':')?;
+                let key = &r[..end];
+                (!key.is_empty()).then(|| key.to_string())
+            } else {
+                let (k, _v) = s.split_once(':')?;
+                let key = k.trim();
+                (!key.is_empty()).then(|| key.to_string())
+            }
+        }
+
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            if line.trim() != "discriminator:" {
+                continue;
+            }
+            let disc_indent = indent(line);
+            // Find this discriminator's `mapping:` child (a key indented past the
+            // discriminator, before the block dedents to a sibling/ancestor).
+            let mut j = i + 1;
+            let mut map_indent = None;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) <= disc_indent {
+                    break; // discriminator block closed with no `mapping`
+                }
+                if l.trim() == "mapping:" {
+                    map_indent = Some(indent(l));
+                    break;
+                }
+                j += 1;
+            }
+            let Some(map_indent) = map_indent else {
+                continue;
+            };
+            // Read the mapping entries (indented past `mapping:`), flagging each key
+            // already seen in THIS block. Mapping values are inline scalars (pointers/
+            // names), so every entry is one line — mirroring the sibling target walk.
+            let mut seen: HashSet<String> = HashSet::new();
+            let mut k = j + 1;
+            while k < lines.len() {
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    k += 1;
+                    continue;
+                }
+                if indent(l) <= map_indent {
+                    break; // mapping block closed
+                }
+                if let Some(key) = mapping_entry_key(l) {
+                    if !seen.insert(key.clone()) {
+                        out.push(format!("{key}@line {}", k + 1));
+                    }
+                }
+                k += 1;
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_discriminator_mapping_key_is_distinct() {
+        // Contract-harness invariant (OpenAPI 3.0.x Discriminator Object + YAML
+        // mapping rule): a Discriminator Object's `mapping` is an object keyed by the
+        // discriminator value, so every key in one `mapping:` block MUST be distinct.
+        // A duplicate key is an invalid document a YAML parser silently collapses to a
+        // single entry (the last occurrence wins), dropping the route for the repeated
+        // value — a Redoc/Swagger/codegen client handed that discriminating value maps
+        // it to the wrong variant (or none), so the polymorphism (CamaraSim's
+        // `AccessDetail`/`Area`/`Device` families) breaks exactly where a caller
+        // deserialises the body.
+        //
+        // The discriminator member of the distinct-keys family
+        // (`every_components_object_lists_distinct_component_keys`,
+        // `every_properties_object_lists_distinct_property_names`,
+        // `every_examples_map_lists_distinct_example_names`, the parameters/paths/
+        // responses/required/tags distinctness tests) — none of which descend into a
+        // `mapping:` block — and the *key-side* complement of
+        // `every_discriminator_mapping_target_is_a_defined_component`, which resolves
+        // each entry's *target* but never compares the *keys*. A realistic drift here:
+        // the keys are hand-typed near-identical strings (`"Wi-Fi:WPA_PERSONAL"` /
+        // `"Wi-Fi:WPA_ENTERPRISE"`), so a paste that duplicates an entry and half-edits
+        // only its target leaves two entries sharing a key. Verified true across all
+        // mounted specs before asserting.
+        for api in APIS {
+            let dups = discriminator_mappings_with_duplicate_keys(api.body);
+            assert!(
+                dups.is_empty(),
+                "{} spec declares a `discriminator.mapping` with a duplicate key (a \
+                 duplicate mapping key is invalid YAML — a parser keeps one entry and \
+                 silently drops the route for the repeated value): {:?}",
+                api.name,
+                dups
+            );
+        }
+    }
+
+    #[test]
+    fn discriminator_mapping_key_distinctness_extraction_rules() {
+        // Unit-cover `discriminator_mappings_with_duplicate_keys` so the contract test
+        // above can't pass vacuously and its detection is pinned: an all-distinct
+        // unquoted mapping passes; a repeated unquoted key is flagged at the repeat's
+        // line; a repeated *quoted* colon-bearing key (`"Wi-Fi:WPA_PERSONAL"` twice) is
+        // flagged with the colon-bearing key unquoted; distinct quoted colon-bearing
+        // keys pass; and a discriminator with no `mapping` contributes nothing. All in
+        // document order (only the *repeat* is flagged, not the first occurrence).
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    Distinct:
+      discriminator:
+        propertyName: kind
+        mapping:
+          circle: '#/components/schemas/Circle'
+          poly: '#/components/schemas/Poly'
+    DupUnquoted:
+      discriminator:
+        propertyName: kind
+        mapping:
+          circle: '#/components/schemas/Circle'
+          poly: '#/components/schemas/Poly'
+          circle: '#/components/schemas/Other'
+    DupQuoted:
+      discriminator:
+        propertyName: accessType
+        mapping:
+          \"Wi-Fi:WPA_PERSONAL\": '#/components/schemas/A'
+          \"Wi-Fi:WPA_ENTERPRISE\": '#/components/schemas/B'
+          \"Wi-Fi:WPA_PERSONAL\": '#/components/schemas/C'
+    DistinctQuoted:
+      discriminator:
+        propertyName: accessType
+        mapping:
+          \"Thread:STRUCTURED\": '#/components/schemas/A'
+          \"Thread:TLV\": '#/components/schemas/B'
+    NoMapping:
+      discriminator:
+        propertyName: kind
+";
+        // Flagged, in document order: `DupUnquoted`'s second `circle` (line 26) and
+        // `DupQuoted`'s second `Wi-Fi:WPA_PERSONAL` (line 33, the quoted colon-bearing
+        // key unquoted). Not flagged: `Distinct`'s two distinct keys, `DistinctQuoted`'s
+        // two distinct colon-bearing keys, and `NoMapping` (no mapping block).
+        assert_eq!(
+            discriminator_mappings_with_duplicate_keys(body),
+            vec![
+                "circle@line 26".to_string(),
+                "Wi-Fi:WPA_PERSONAL@line 33".to_string(),
+            ]
+        );
+
+        // Non-vacuous floor: across every registered spec every discriminator mapping
+        // declares distinct keys (the invariant the contract test asserts), and the
+        // corpus actually declares several mapping entries (the `AccessDetail`/`Area`/
+        // `GeoReference` discriminators), so the distinctness path runs on real keys and
+        // a broken (always-empty) extractor can't hide behind a corpus that never maps a
+        // discriminator. Count mapping entries with a detector independent of the
+        // extractor's key parsing.
+        let mut mapping_entries = 0usize;
+        for api in APIS {
+            assert!(
+                discriminator_mappings_with_duplicate_keys(api.body).is_empty(),
+                "{}: every discriminator mapping must declare distinct keys",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            for (i, l) in lines.iter().enumerate() {
+                if l.trim() != "mapping:" {
+                    continue;
+                }
+                let mi = indent(l);
+                let mut k = i + 1;
+                while k < lines.len() {
+                    let x = lines[k];
+                    if x.trim().is_empty() {
+                        k += 1;
+                        continue;
+                    }
+                    if indent(x) <= mi {
+                        break;
+                    }
+                    mapping_entries += 1;
+                    k += 1;
+                }
+            }
+        }
+        assert!(
+            mapping_entries >= 5,
+            "expected several discriminator mapping entries across specs, got {mapping_entries}"
+        );
+    }
+
     /// Extract the 1-based line number of every `oneOf`/`anyOf`/`allOf` keyword a
     /// spec declares whose value is **not a sequence** (an array of schemas) —
     /// without a YAML dep.
