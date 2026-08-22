@@ -3332,6 +3332,25 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - a **scenario error-result code well-formedness** contract test (`src/registry.rs`
+    `every_scenario_error_result_names_a_well_formed_camara_code`) — the
+    **scenario-result companion** of `every_error_example_code_is_a_well_formed_camara_code`
+    (which validates the code of a structured CamaraError *example*, never a scenario
+    string) and of `every_scenario_result_status_is_a_declared_response` (which
+    validates a scenario result's *status* against `responses:`, never the code that
+    follows it). A CamaraSim error scenario (DESIGN §7/§9) reads `"<4xx/5xx> <CODE>"`;
+    the `<CODE>` is the same UPPER_SNAKE (optionally dot-namespaced) token the shared
+    `CamaraError` enum types (DESIGN §8), so a mis-cased/hyphenated code
+    (`"400 INVALID-ARGUMENT"`) makes the `/docs` scenario table name an error the served
+    body can never carry. New pure `scenario_result_error_code` (reuses
+    `leading_http_status`' quote-stripping; error-class only; handles the parenthesised
+    and space-less `/`-joined code alternations, skips prose/em-dash outcomes) +
+    `scenario_results_with_malformed_error_code` (walker mirroring
+    `scenario_result_status_declarations`' scoping); validates each `/`-alternative with
+    the existing `is_well_formed_camara_error_code`. Corpus: every `4xx`/`5xx` scenario
+    result names a well-formed code → 0 drift. Unit-covered
+    (`scenario_result_error_code_extraction_rules`; ≥200 error-result floor). Test-only,
+    no spec change.
   - a **discriminator mapping-key distinctness** contract test (`src/registry.rs`
     `every_discriminator_mapping_key_is_distinct`) — the discriminator member of the
     distinct-keys family (components/properties/examples/parameters/paths/responses/
@@ -6056,6 +6075,46 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-22 — Contract-test harness: added a **scenario error-result code
+  well-formedness** contract test (`src/registry.rs`
+  `every_scenario_error_result_names_a_well_formed_camara_code`) — the
+  **scenario-result companion** of `every_error_example_code_is_a_well_formed_camara_code`,
+  which validates the code of a structured CamaraError response *example* (an
+  integer `status:` beside a `code:`) but never a scenario `result:` string, and of
+  `every_scenario_result_status_is_a_declared_response`, which validates a scenario
+  result's *status* against the `responses:` set but never inspects the code that
+  follows it. A CamaraSim error scenario (DESIGN §7/§9) documents its outcome as
+  `"<status> <CODE>"` (`"400 INVALID_ARGUMENT"`, `"422 CARRIER_BILLING.UNAUTHORIZED_AMOUNT"`);
+  the `<CODE>` is the same UPPER_SNAKE (optionally dot-namespaced) token the shared
+  `CamaraError` enum types (DESIGN §8), so a code typed in the wrong case or
+  hyphenated (`"400 INVALID-ARGUMENT"`, `"422 Invalid_Argument"`) makes the
+  human-readable `/docs` scenario table name an error body the served CamaraError
+  schema rejects — the behaviour notes and the error contract disagree exactly where
+  a caller reads which code an input yields. A live hazard in these
+  scenario-table-heavy specs, where each error case is one hand-typed string copied
+  from a sibling. Two new pure helpers: `scenario_result_error_code` (reuses
+  `leading_http_status`' one-layer quote-stripping so the two agree on the opener;
+  returns the code token only for an **error-class** `4xx`/`5xx` result that presents
+  one — a `2xx` body descriptor / `204 No Content` note, a prose reserved-suffix
+  result naming no status, and an error status documented in prose `"409 — duplicate
+  name"` all return `None`; handles the parenthesised `"(INVALID_ARGUMENT /
+  OUT_OF_RANGE)"` and space-less `"INVALID_ARGUMENT/OUT_OF_RANGE"` code alternations)
+  and `scenario_results_with_malformed_error_code` (a walker mirroring
+  `scenario_result_status_declarations`' operation/scenarios-block scoping exactly, so
+  a schema property literally named `result` is never read as a case), validating each
+  `/`-separated alternative with the existing `is_well_formed_camara_error_code`.
+  Surveyed the corpus first (60 specs, 491 error-status scenario results carrying a
+  code — the whole `INVALID_ARGUMENT`/`OUT_OF_RANGE`/`NOT_FOUND`/… set plus the dotted
+  API-namespaced codes and the two alternation forms): every one is well-formed → 0
+  drift, a live guard the moment a malformed code is pasted into a scenario. Tests: +2
+  (the contract test + `scenario_result_error_code_extraction_rules`: bare/namespaced/
+  parenthesised/`/`-alternation/prose-trailed codes and mis-cased/hyphenated codes
+  extracted; `2xx`/no-status/em-dash-prose/bare-status results skipped; the walker
+  flags a hyphenated and a mis-cased code at their `result:` line in document order,
+  clears a `/`-alternation and a request-body `result` property, with a ≥200
+  error-result non-vacuous floor). `cargo test` 2908 green (was 2906); `cargo build
+  --release` succeeds. No new dependency; test-only change. — binary: 5.1M
+  (5,323,160 B; unchanged)
 - 2026-08-22 — Contract-test harness: added a **discriminator mapping-key
   distinctness** contract test (`src/registry.rs`
   `every_discriminator_mapping_key_is_distinct`) — the discriminator member of the

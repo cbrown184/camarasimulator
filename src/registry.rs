@@ -56842,6 +56842,358 @@ components:
         );
     }
 
+    /// For a scenario case `result:` value that opens with an **error-class**
+    /// (`4xx`/`5xx`) HTTP status, the CAMARA error-code token convention places
+    /// immediately after the status — for validation by
+    /// [`is_well_formed_camara_error_code`] — or `None` when the value is not an
+    /// error result that names a code.
+    ///
+    /// A CamaraSim error scenario (DESIGN §7/§9) documents its outcome as
+    /// `"<status> <CODE>"` (`"400 INVALID_ARGUMENT"`,
+    /// `"422 CARRIER_BILLING.UNAUTHORIZED_AMOUNT"`), optionally trailed by a prose
+    /// note (`"400 OUT_OF_RANGE (checked first)"`) or with the code wrapped in a
+    /// parenthesised alternation (`"400 (INVALID_ARGUMENT / OUT_OF_RANGE) — checked
+    /// first"`) or a space-less `/`-joined alternation
+    /// (`"400 INVALID_ARGUMENT/OUT_OF_RANGE for the base field"`). The token returned
+    /// is the first whitespace-delimited run after the three status digits, with one
+    /// optional leading `(` and one optional trailing `)` stripped (the parenthesised
+    /// form) — so a `/`-joined pair is returned whole, for the caller to validate each
+    /// `/`-separated alternative. Reuses [`leading_http_status`]'s one-layer
+    /// quote-stripping so the two agree on the opener; no YAML/regex dep.
+    ///
+    /// `None` — the value names no error code to judge — when: it opens with no HTTP
+    /// status (a prose reserved-suffix result, "the canonical CAMARA error for that
+    /// status"), the status is not `4xx`/`5xx` (a `2xx` result carries a body
+    /// descriptor `"200 { … }"` / a `"204 No Content"` note, not an error code), or
+    /// the post-status content does not present a code — its first non-space char
+    /// (after an optional `(`) is not an ASCII uppercase letter, so the outcome is
+    /// documented in prose (`"409 — duplicate name for the service"`), not a token.
+    /// A leading-lowercase token is likewise read as prose and left to the
+    /// presence-only siblings; only a code-shaped opener is judged, keeping the
+    /// corpus false-positive-free while still catching a mis-cased or mis-punctuated
+    /// UPPER-opening code (`"400 INVALID-ARGUMENT"`, `"422 Invalid_Argument"`).
+    fn scenario_result_error_code(value: &str) -> Option<String> {
+        let status = leading_http_status(value)?;
+        // Only error-class (`4xx`/`5xx`) results name a CAMARA error code; a `1xx`/
+        // `2xx`/`3xx` result documents a body/outcome, never an error code.
+        if !matches!(status.as_bytes()[0], b'4' | b'5') {
+            return None;
+        }
+        // Re-derive the same inner string leading_http_status validated (one layer of
+        // matching surrounding quotes stripped), then read the content after the three
+        // status digits (bytes 0..3 are ASCII, so the slice is a valid boundary).
+        let v = value.trim();
+        let inner = if v.len() >= 2
+            && ((v.starts_with('"') && v.ends_with('"'))
+                || (v.starts_with('\'') && v.ends_with('\'')))
+        {
+            &v[1..v.len() - 1]
+        } else {
+            v
+        };
+        let after = inner.trim_start()[3..].trim_start();
+        // Drop one leading `(` (the parenthesised-alternation form) before reading the
+        // token; the code must then present as an ASCII-uppercase opener, else the
+        // result documents its outcome in prose (an em-dash note), not a code.
+        let after = after.strip_prefix('(').unwrap_or(after);
+        let first = after.split_whitespace().next().unwrap_or("");
+        let token = first.strip_suffix(')').unwrap_or(first);
+        match token.chars().next() {
+            Some(c) if c.is_ascii_uppercase() => Some(token.to_string()),
+            _ => None,
+        }
+    }
+
+    /// The 1-based line numbers, in document order, of every `x-camarasim-scenarios`
+    /// case whose `result:` opens with an error-class status but names a
+    /// **malformed** CAMARA error code — [`scenario_result_error_code`] returns a
+    /// token [`is_well_formed_camara_error_code`] rejects — without a YAML dep.
+    ///
+    /// A CamaraSim scenario table (DESIGN §7/§9) documents each error outcome as
+    /// `"<status> <CODE>"`; the `<CODE>` is the same UPPER_SNAKE (optionally
+    /// dot-namespaced) CAMARA error code the `CamaraError` schema's enum types
+    /// (`specs/shared/errors.yaml`, DESIGN §8). A code typed in the wrong case,
+    /// hyphenated, or otherwise malformed (`"400 INVALID-ARGUMENT"`,
+    /// `"422 Invalid_Argument"`) makes the human-readable `/docs` scenario table
+    /// name an error the served CamaraError body can never carry — a live hazard in
+    /// these scenario-table-heavy specs, where each error case is one hand-typed
+    /// string copied from a sibling.
+    ///
+    /// This is the **scenario-result companion** of `error_example_codes_malformed`:
+    /// both validate a code against the *same* [`is_well_formed_camara_error_code`]
+    /// predicate, but that sibling reads a structured CamaraError response *example*
+    /// (an integer `status:` beside a `code:`), never a scenario `result:` string,
+    /// while `scenario_result_status_declarations` reads a scenario result's *status*
+    /// against the `responses:` set but never inspects the code that follows it. This
+    /// is the join: the code half of the scenario result. Scoping mirrors
+    /// [`scenario_result_status_declarations`] exactly (a 4-space HTTP-verb key under
+    /// a 2-space `/…` path item beneath top-level `paths:`, then the `result:` case
+    /// values under that operation's 6-space `x-camarasim-scenarios:` block), so a
+    /// schema property literally named `result` elsewhere in the operation is never
+    /// read as a case.
+    fn scenario_results_with_malformed_error_code(body: &str) -> Vec<usize> {
+        const METHODS: [&str; 8] =
+            ["get", "put", "post", "delete", "patch", "options", "head", "trace"];
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let mut out = Vec::new();
+        let mut in_paths = false;
+        let mut path: Option<String> = None;
+        for (i, line) in lines.iter().enumerate() {
+            let is_top_level_key =
+                !line.is_empty() && !line.starts_with(char::is_whitespace);
+            if is_top_level_key {
+                in_paths = line.trim_end() == "paths:";
+                path = None;
+                continue;
+            }
+            if !in_paths {
+                continue;
+            }
+            if let Some(rest) = line.strip_prefix("  ") {
+                if !rest.starts_with(char::is_whitespace) && rest.starts_with('/') {
+                    let key = rest.trim_end().strip_suffix(':').unwrap_or(rest.trim_end());
+                    path = Some(key.to_string());
+                    continue;
+                }
+            }
+            if path.is_none() {
+                continue;
+            }
+            if indent(line) != 4 {
+                continue;
+            }
+            let key = line.trim_start();
+            let Some(name) = key.strip_suffix(':') else { continue };
+            if name.contains(char::is_whitespace) || !METHODS.contains(&name) {
+                continue;
+            }
+            // A single downward pass over this operation's block; `result:` values are
+            // read only while inside its `x-camarasim-scenarios:` sub-block (a sibling
+            // of `responses:` at 6-space indent), so a `result` schema property is never
+            // taken as a case.
+            let mut in_scenarios = false;
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                let li = indent(l);
+                if li <= 4 {
+                    break; // dedented out of this operation
+                }
+                if li == 6 {
+                    in_scenarios = l.trim_start().starts_with("x-camarasim-scenarios:");
+                    j += 1;
+                    continue;
+                }
+                if in_scenarios {
+                    if let Some(v) = l.trim_start().strip_prefix("result:") {
+                        if let Some(code) = scenario_result_error_code(v) {
+                            // A code may be a `/`-joined alternation of two canonical
+                            // codes (`"400 INVALID_ARGUMENT/OUT_OF_RANGE for the base
+                            // field"`), so every `/`-separated alternative must be a
+                            // well-formed CAMARA code.
+                            if !code.split('/').all(is_well_formed_camara_error_code) {
+                                out.push(j + 1);
+                            }
+                        }
+                    }
+                }
+                j += 1;
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_scenario_error_result_names_a_well_formed_camara_code() {
+        // Contract-harness invariant (CAMARA error model + DESIGN §7/§8/§9): every
+        // `x-camarasim-scenarios` case whose `result:` documents an error outcome by
+        // an explicit `4xx`/`5xx` status names a well-formed CAMARA error code after
+        // it — the same UPPER_SNAKE (optionally dot-namespaced) token the shared
+        // `CamaraError` enum types. A malformed code in the scenario table
+        // (`"400 INVALID-ARGUMENT"`, `"422 Invalid_Argument"`) makes the `/docs`
+        // scenario panel advertise an error body the served CamaraError schema
+        // rejects, so the human-readable behaviour notes and the machine-readable
+        // error contract disagree exactly where a caller reads which code an input
+        // yields.
+        //
+        // The scenario-result companion of
+        // `every_error_example_code_is_a_well_formed_camara_code` (which validates the
+        // code of a structured CamaraError response *example*, never a scenario
+        // string) and of `every_scenario_result_status_is_a_declared_response` (which
+        // validates a scenario result's *status* against the `responses:` set, never
+        // the code that follows it). Verified true across all mounted specs before
+        // asserting.
+        for api in APIS {
+            let bad = scenario_results_with_malformed_error_code(api.body);
+            assert!(
+                bad.is_empty(),
+                "{} spec has an x-camarasim-scenarios error result whose CAMARA code is \
+                 not a well-formed UPPER_SNAKE (optionally dot-namespaced) token — a \
+                 code the CamaraError enum rejects — at `result:` line(s): {:?}",
+                api.name,
+                bad
+            );
+        }
+    }
+
+    #[test]
+    fn scenario_result_error_code_extraction_rules() {
+        // Pin `scenario_result_error_code`'s parse/scoping so the contract test above
+        // can't pass vacuously and its accept/skip boundary is fixed.
+
+        // Error-class results naming a code → the code token (for validation):
+        // a bare code, a namespaced code, a code wrapped in a parenthesised
+        // alternation, a code trailed by a prose note, and — so the guard has teeth —
+        // a mis-cased and a hyphenated code (returned so the caller can reject them).
+        assert_eq!(
+            scenario_result_error_code("\"400 INVALID_ARGUMENT\"").as_deref(),
+            Some("INVALID_ARGUMENT")
+        );
+        assert_eq!(
+            scenario_result_error_code(" '422 CARRIER_BILLING.UNAUTHORIZED_AMOUNT'").as_deref(),
+            Some("CARRIER_BILLING.UNAUTHORIZED_AMOUNT")
+        );
+        assert_eq!(
+            scenario_result_error_code("\"400 (INVALID_ARGUMENT / OUT_OF_RANGE) — checked first\"")
+                .as_deref(),
+            Some("INVALID_ARGUMENT")
+        );
+        assert_eq!(
+            scenario_result_error_code("'404 NOT_FOUND (single-use eviction)'").as_deref(),
+            Some("NOT_FOUND")
+        );
+        assert_eq!(
+            scenario_result_error_code("\"400 INVALID-ARGUMENT\"").as_deref(),
+            Some("INVALID-ARGUMENT")
+        );
+        assert_eq!(
+            scenario_result_error_code("'422 Invalid_Argument'").as_deref(),
+            Some("Invalid_Argument")
+        );
+        // A space-less `/`-joined alternation is returned whole (each alternative is
+        // validated by the caller).
+        assert_eq!(
+            scenario_result_error_code("\"400 INVALID_ARGUMENT/OUT_OF_RANGE for the base field\"")
+                .as_deref(),
+            Some("INVALID_ARGUMENT/OUT_OF_RANGE")
+        );
+
+        // Not an error result naming a code → None (skipped): a `2xx` result carrying
+        // a body descriptor or a `No Content` note, a prose reserved-suffix result
+        // naming no status, an error status documented in prose (em-dash), and a bare
+        // error status with no following code.
+        assert_eq!(scenario_result_error_code("'200 { swapped: true }'"), None);
+        assert_eq!(scenario_result_error_code("\"204 No Content\""), None);
+        assert_eq!(
+            scenario_result_error_code("the canonical CAMARA error for that status"),
+            None
+        );
+        assert_eq!(
+            scenario_result_error_code("\"409 — duplicate name for the service\""),
+            None
+        );
+        assert_eq!(scenario_result_error_code("\"500\""), None);
+
+        // The walker: within an operation's `x-camarasim-scenarios:` block, a
+        // well-formed error code and a `2xx`/prose/em-dash result are cleared while a
+        // hyphenated and a mis-cased code are flagged at their `result:` line in
+        // document order; a schema property literally named `result` inside the
+        // request body (not the scenarios block) is never read as a case.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    post:
+      operationId: postA
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                result:
+                  type: string
+                  example: 400 NOT_A_SCENARIO
+      responses:
+        '200':
+          description: ok
+        '400':
+          description: bad
+      x-camarasim-scenarios:
+        description: cases
+        cases:
+          - input: happy
+            result: '200 { ok: true }'
+          - input: bad range
+            result: \"400 OUT_OF_RANGE\"
+          - input: typod code
+            result: \"400 INVALID-ARGUMENT\"
+          - input: reserved suffix
+            result: the canonical CAMARA error for that status
+  /b:
+    get:
+      operationId: getB
+      responses:
+        '422':
+          description: u
+      x-camarasim-scenarios:
+        description: cases
+        cases:
+          - input: mixed case
+            result: '422 Invalid_Argument'
+          - input: prose 409
+            result: \"409 — duplicate name\"
+          - input: base field alternation
+            result: \"400 INVALID_ARGUMENT/OUT_OF_RANGE for the base field\"
+";
+        // Flagged, in document order: line 31 (`400 INVALID-ARGUMENT`, hyphenated) and
+        // line 44 (`422 Invalid_Argument`, mis-cased). Not flagged: the `200 { … }`
+        // result (not error-class), the prose reserved-suffix result (no status), the
+        // `409 — duplicate name` result (error status, prose outcome), the well-formed
+        // `400 OUT_OF_RANGE`, the `/`-joined `400 INVALID_ARGUMENT/OUT_OF_RANGE`
+        // alternation (both alternatives well-formed), and the request-body `result`
+        // property (outside the scenarios block).
+        assert_eq!(
+            scenario_results_with_malformed_error_code(body),
+            vec![31, 44]
+        );
+
+        // Non-vacuous floor: across every registered spec every error-result code is a
+        // well-formed token (the invariant the contract test asserts), and the corpus
+        // documents many `"<4xx/5xx> <CODE>"` scenario results, so the accept path runs
+        // on real data and a broken (always-empty) walker can't hide behind a corpus
+        // that never documents an error result.
+        for api in APIS {
+            assert!(
+                scenario_results_with_malformed_error_code(api.body).is_empty(),
+                "{}: every scenario error result must name a well-formed CAMARA code",
+                api.name
+            );
+        }
+        let mut error_result_codes = 0usize;
+        for api in APIS {
+            for line in api.body.lines() {
+                if let Some(v) = line.trim_start().strip_prefix("result:") {
+                    if scenario_result_error_code(v).is_some() {
+                        error_result_codes += 1;
+                    }
+                }
+            }
+        }
+        assert!(
+            error_result_codes >= 200,
+            "expected many error-status scenario results across specs, got {error_result_codes}"
+        );
+    }
+
     /// The 1-based line numbers, in document order, of every **External
     /// Documentation Object** an `externalDocs:` field opens that does not declare
     /// a non-empty `url`, without a YAML dep.
