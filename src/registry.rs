@@ -8369,6 +8369,372 @@ paths: {}
         }
     }
 
+    /// The canonical HTTP status of each reusable response the shared error model
+    /// (`shared/errors.yaml#/components/responses/*`) defines, as `(name, status)`
+    /// pairs — derived from the embedded fragment itself (each named response's
+    /// example `status:` field), not hard-coded, so adding a shared response
+    /// automatically widens the map and the contract test never needs editing when
+    /// the shared model grows. Pure and YAML-dep-free.
+    ///
+    /// Walks the top-level `components:` → `responses:` map (the same block-scoping
+    /// as [`shared_error_responses_missing_x_correlator`]): each response is a `Name:`
+    /// block opener at indent 4, and the first integer `status:` inside its block is
+    /// that response's canonical status.
+    fn shared_error_response_statuses(errors_body: &str) -> Vec<(String, i64)> {
+        let lines: Vec<&str> = errors_body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let mut out: Vec<(String, i64)> = Vec::new();
+        let Some(cs) = lines
+            .iter()
+            .position(|l| l.trim_end() == "components:" && !l.starts_with(char::is_whitespace))
+        else {
+            return out;
+        };
+        let ce = (cs + 1..lines.len())
+            .find(|&i| !lines[i].trim().is_empty() && !lines[i].starts_with(char::is_whitespace))
+            .unwrap_or(lines.len());
+        let Some(rs) =
+            (cs + 1..ce).find(|&i| indent(lines[i]) == 2 && lines[i].trim() == "responses:")
+        else {
+            return out;
+        };
+        let re = (rs + 1..ce)
+            .find(|&i| !lines[i].trim().is_empty() && indent(lines[i]) <= 2)
+            .unwrap_or(ce);
+        let mut current: Option<String> = None;
+        for i in rs + 1..re {
+            let l = lines[i];
+            if l.trim().is_empty() || l.trim_start().starts_with('#') {
+                continue;
+            }
+            if indent(l) == 4 {
+                // A new response-object name key (a block opener).
+                current = l
+                    .trim()
+                    .strip_suffix(':')
+                    .map(|n| n.trim_matches(|c| c == '"' || c == '\'').to_string());
+            } else if indent(l) > 4 {
+                if let Some(name) = &current {
+                    // The first integer `status:` inside this response's block is its
+                    // canonical HTTP status (the CamaraError body carries it).
+                    if let Some((k, v)) = l.trim_start().split_once(':') {
+                        if k.trim() == "status" {
+                            let v = v
+                                .split('#')
+                                .next()
+                                .unwrap_or(v)
+                                .trim()
+                                .trim_matches('"')
+                                .trim_matches('\'');
+                            if let Ok(n) = v.parse::<i64>() {
+                                if !out.iter().any(|(existing, _)| existing == name) {
+                                    out.push((name.clone(), n));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            // indent < 4 inside the responses block cannot happen (block bounded above).
+        }
+        out
+    }
+
+    /// The 1-based line numbers, in document order, of every `$ref` into the shared
+    /// error model's **responses** (`shared/errors.yaml#/components/responses/<Name>`)
+    /// that sits under a numeric HTTP status-code key which disagrees with that shared
+    /// response's own canonical status (from [`shared_error_response_statuses`]) — pure
+    /// and YAML-dep-free.
+    ///
+    /// A business spec keys each standard error by its HTTP status and points the value
+    /// at the matching shared response: `"404": { $ref: …/responses/NotFound }`. Because
+    /// the shared model carries the status into the body (a `CamaraError.status`), a
+    /// status key that `$ref`s the wrong shared response — a `"404"` pointing at
+    /// `TooManyRequests`, or a key edited to `"429"` while its `$ref` still names
+    /// `NotFound` — is a self-contradictory document: a client (Redoc/Swagger/codegen)
+    /// selecting the `404` branch is handed the 429 response object, so the generated
+    /// error type, description and example all disagree with the status they live under.
+    ///
+    /// A response ref that names a shared response the fragment does not define is left
+    /// to [`shared_error_refs_resolve_to_defined_components`] (its concern is a dangling
+    /// name, not a status mismatch); a response ref with no numeric enclosing key — a
+    /// named `components.responses.<Name>` re-export or a `default:` response — is skipped
+    /// (no status code to compare against). Only a ref into `…/components/responses/…` is
+    /// considered; a `…/schemas/CamaraError` content ref is not a response ref.
+    fn shared_error_refs_with_status_key_mismatch(
+        body: &str,
+        statuses: &[(String, i64)],
+    ) -> Vec<usize> {
+        const MARKER: &str = "shared/errors.yaml#/components/responses/";
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        // The shared-error response NAME a `$ref:` line targets, else `None`.
+        let ref_response_name = |l: &str| -> Option<String> {
+            let rest = l.trim_start().strip_prefix("$ref:")?;
+            let idx = rest.find(MARKER)?;
+            let after = &rest[idx + MARKER.len()..];
+            let name: String = after
+                .chars()
+                .take_while(|&c| c.is_ascii_alphanumeric() || c == '_')
+                .collect();
+            (!name.is_empty()).then_some(name)
+        };
+        // The numeric HTTP status-code key of the Response Object enclosing line `i`
+        // (indent `c`): walk up the indent ladder (strictly decreasing levels,
+        // dedent-tracked like the suite's ancestor walks); the first shallower key that
+        // is a bare 3-digit status → its value; a `responses:` container reached first →
+        // `None` (the enclosing response key is non-numeric — a named entry or `default`).
+        let enclosing_status = |i: usize, c: usize| -> Option<i64> {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    let key = l
+                        .trim_start()
+                        .split_once(':')
+                        .map(|(x, _)| x.trim())
+                        .unwrap_or("");
+                    if key == "responses" {
+                        return None;
+                    }
+                    let bare = key.trim_matches('"').trim_matches('\'');
+                    if bare.len() == 3 && bare.chars().all(|ch| ch.is_ascii_digit()) {
+                        return bare.parse::<i64>().ok();
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            None
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some(name) = ref_response_name(line) else {
+                continue;
+            };
+            let Some(&(_, canonical)) = statuses.iter().find(|(n, _)| *n == name) else {
+                continue; // an undefined name is the resolve test's concern
+            };
+            let c = indent(line);
+            if let Some(key) = enclosing_status(i, c) {
+                if key != canonical {
+                    out.push(i + 1);
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_shared_error_ref_matches_its_response_status_key() {
+        // Contract-harness invariant (CAMARA error model, DESIGN §8/§9): a business
+        // spec keys each standard error response by its HTTP status and points the value
+        // at the shared error model's matching response
+        // (`"404": { $ref: …/shared/errors.yaml#/components/responses/NotFound }`). The
+        // shared model carries the status into the body (`CamaraError.status`), so the
+        // numeric status-code KEY MUST equal the canonical status of the shared response
+        // it `$ref`s. A `"404"` pointing at `TooManyRequests`, or a key retyped to `"429"`
+        // while its `$ref` still names `NotFound`, is a self-contradictory document: a
+        // client (Redoc/Swagger/codegen) selecting the `404` branch is handed the 429
+        // response object, so the generated error type, description and example all
+        // disagree with the status they live under.
+        //
+        // A live copy-paste hazard in these error-block-heavy specs: each API's
+        // nine-status error set is drafted by pasting a sibling's block, so a status key
+        // can be re-tuned while its `$ref` is left pointing at the sibling's response (or
+        // vice versa). Invisible to every existing test:
+        // `shared_error_refs_resolve_to_defined_components` proves the ref names a
+        // *defined* shared response but never that its NAME matches the status KEY;
+        // `every_responses_object_key_is_a_valid_status` reads the key's shape;
+        // `every_error_example_status_matches_its_response_key` links an *inline*
+        // example's `status` body field to its key, but the shared responses' examples
+        // live in errors.yaml, out of that test's reach. This is the only test that
+        // pairs a status-keyed shared-response ref with the referenced response's own
+        // status. The canonical name→status map is derived from the embedded shared
+        // fragment (not hard-coded), so it tracks the shared model automatically.
+        const SHARED_ERRORS: &str = include_str!("../specs/shared/errors.yaml");
+        let statuses = shared_error_response_statuses(SHARED_ERRORS);
+        // Non-vacuous floor on the derived map: the canonical CAMARA statuses (9 today),
+        // with two representative anchors so a broken derivation can't pass silently.
+        assert!(
+            statuses.len() >= 9,
+            "expected the shared error model to define ≥9 status-bearing responses, \
+             got {}: {statuses:?}",
+            statuses.len()
+        );
+        assert_eq!(
+            statuses.iter().find(|(n, _)| n == "NotFound").map(|(_, s)| *s),
+            Some(404),
+            "shared NotFound response is expected to carry status 404; map: {statuses:?}"
+        );
+        assert_eq!(
+            statuses
+                .iter()
+                .find(|(n, _)| n == "TooManyRequests")
+                .map(|(_, s)| *s),
+            Some(429),
+            "shared TooManyRequests response is expected to carry status 429; map: {statuses:?}"
+        );
+        for api in APIS {
+            let bad = shared_error_refs_with_status_key_mismatch(api.body, &statuses);
+            assert!(
+                bad.is_empty(),
+                "{} spec keys a response by one HTTP status but `$ref`s the shared error \
+                 response whose canonical status differs (a status key pointing at the \
+                 wrong shared response) at `$ref` line(s): {:?}",
+                api.name,
+                bad
+            );
+        }
+    }
+
+    #[test]
+    fn shared_error_ref_status_key_extraction_rules() {
+        // Unit-cover the derivation and the mismatch extractor so the contract test above
+        // can't pass vacuously and their scoping is pinned.
+
+        // The name→status map is derived from the shared fragment: each named response's
+        // example `status:` field, keyed by the response name.
+        const SHARED_ERRORS: &str = include_str!("../specs/shared/errors.yaml");
+        let statuses = shared_error_response_statuses(SHARED_ERRORS);
+        let get = |n: &str| statuses.iter().find(|(k, _)| k == n).map(|(_, s)| *s);
+        assert_eq!(get("InvalidArgument"), Some(400));
+        assert_eq!(get("Unauthenticated"), Some(401));
+        assert_eq!(get("PermissionDenied"), Some(403));
+        assert_eq!(get("NotFound"), Some(404));
+        assert_eq!(get("Conflict"), Some(409));
+        assert_eq!(get("ServiceNotApplicable"), Some(422));
+        assert_eq!(get("TooManyRequests"), Some(429));
+        assert_eq!(get("Internal"), Some(500));
+        assert_eq!(get("Unavailable"), Some(503));
+
+        // A synthetic business spec exercising every branch of the extractor.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                $ref: '../../shared/errors.yaml#/components/schemas/CamaraError'
+        '404':
+          $ref: '../../shared/errors.yaml#/components/responses/NotFound'
+        '429':
+          $ref: '../../shared/errors.yaml#/components/responses/NotFound'
+        '404':
+          $ref: '../../shared/errors.yaml#/components/responses/TooManyRequests'
+        default:
+          $ref: '../../shared/errors.yaml#/components/responses/Internal'
+components:
+  responses:
+    Reexport:
+      $ref: '../../shared/errors.yaml#/components/responses/Conflict'
+";
+        // Flagged, in document order: the `429`→NotFound ref (NotFound is 404) and the
+        // `404`→TooManyRequests ref (TooManyRequests is 429). Not flagged: the `404`→
+        // NotFound ref (match); the `schemas/CamaraError` content ref (not a response
+        // ref); the `default:`→Internal ref (no numeric enclosing key); and the named
+        // `components.responses.Reexport`→Conflict ref (its up-walk reaches `responses:`
+        // before any numeric key, so there is no status to compare).
+        let flagged = shared_error_refs_with_status_key_mismatch(body, &statuses);
+        let lines: Vec<&str> = body.lines().collect();
+        let at = |needle: &str| -> usize {
+            lines
+                .iter()
+                .position(|l| l.contains(needle))
+                .map(|i| i + 1)
+                .expect("needle present")
+        };
+        // The two mismatched `$ref` lines, in document order.
+        let bad_first = at("responses/NotFound"); // the FIRST NotFound ref line…
+        // …but the mismatch is the SECOND NotFound ref (under '429'); find it explicitly.
+        let nf_lines: Vec<usize> = lines
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| l.contains("responses/NotFound"))
+            .map(|(i, _)| i + 1)
+            .collect();
+        assert_eq!(nf_lines.len(), 2, "two NotFound refs expected: {nf_lines:?}");
+        let mismatch_nf = nf_lines[1]; // the one under '429'
+        let mismatch_tmr = at("responses/TooManyRequests");
+        assert_eq!(
+            flagged,
+            vec![mismatch_nf, mismatch_tmr],
+            "flagged {flagged:?}; expected the 429→NotFound and 404→TooManyRequests refs \
+             (first NotFound ref at line {bad_first} is a correct 404 match and must not \
+             be flagged)"
+        );
+
+        // Non-vacuous floor: across every registered spec every status-keyed shared-error
+        // response ref matches its response's canonical status (the invariant the contract
+        // test asserts), and the corpus actually declares hundreds of such refs — so the
+        // key↔status comparison runs on real data and a broken (always-empty) extractor
+        // can't hide behind a corpus that never pairs a status key with a shared response.
+        // Count status-keyed shared-response refs with a detector independent of the
+        // extractor's status comparison.
+        let mut status_keyed_refs = 0usize;
+        for api in APIS {
+            assert!(
+                shared_error_refs_with_status_key_mismatch(api.body, &statuses).is_empty(),
+                "{}: every status-keyed shared-error response ref must match its status",
+                api.name
+            );
+            let alines: Vec<&str> = api.body.lines().collect();
+            let aindent = |l: &str| l.len() - l.trim_start().len();
+            for (i, l) in alines.iter().enumerate() {
+                if !l.contains("shared/errors.yaml#/components/responses/") {
+                    continue;
+                }
+                if !l.trim_start().starts_with("$ref:") {
+                    continue;
+                }
+                // Its immediate parent (first shallower non-blank line) is a 3-digit key.
+                let c = aindent(l);
+                let mut k = i;
+                while k > 0 {
+                    k -= 1;
+                    let p = alines[k];
+                    if p.trim().is_empty() {
+                        continue;
+                    }
+                    if aindent(p) < c {
+                        let key = p
+                            .trim_start()
+                            .split_once(':')
+                            .map(|(x, _)| x.trim())
+                            .unwrap_or("")
+                            .trim_matches('"')
+                            .trim_matches('\'');
+                        if key.len() == 3 && key.chars().all(|ch| ch.is_ascii_digit()) {
+                            status_keyed_refs += 1;
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+        assert!(
+            status_keyed_refs >= 500,
+            "expected many status-keyed shared-error response refs across specs, got {status_keyed_refs}"
+        );
+    }
+
     /// The names of the reusable error responses in the shared error model
     /// (`shared/errors.yaml#/components/responses/*`) that do **not** document an
     /// `x-correlator` response header — pure and YAML-dep-free.

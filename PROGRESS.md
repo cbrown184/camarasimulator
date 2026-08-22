@@ -3335,6 +3335,22 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - a **shared-error ref status-key match** contract test (`src/registry.rs`
+    `every_shared_error_ref_matches_its_response_status_key`) — a business spec keys
+    each standard error by its HTTP status and points the value at the shared error
+    model's matching response (`"404": {$ref: …/responses/NotFound}`); since the shared
+    model carries the status into the body (`CamaraError.status`), the numeric status-code
+    KEY MUST equal the canonical status of the shared response it `$ref`s. Blind spot of
+    `shared_error_refs_resolve_to_defined_components` (proves the ref names a *defined*
+    response, never that its name matches the key) and
+    `every_error_example_status_matches_its_response_key` (links an *inline* example's
+    `status` to its key, but the shared responses' examples live in errors.yaml). New pure
+    `shared_error_refs_with_status_key_mismatch` + `shared_error_response_statuses` (the
+    name→status map derived from the embedded shared fragment, not hard-coded, so it tracks
+    the model automatically); a named `components.responses` re-export / `default:` (no
+    numeric key) and a `schemas/CamaraError` content ref are skipped. Corpus: 1057
+    status-keyed shared-response refs across 59 specs → 0 drift. Unit-covered
+    (`shared_error_ref_status_key_extraction_rules`; ≥500-ref floor). Test-only, no spec change.
   - a **Path Item / Operation `parameters` is-a-sequence** contract test
     (`src/registry.rs` `every_parameters_field_is_a_sequence`) — the `parameters`
     member of the is-a-sequence shape family (`every_enum_field_is_a_sequence` /
@@ -6174,6 +6190,37 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-22 — Contract-test harness: guard that every **status-keyed shared-error
+  response `$ref` matches its response's canonical status** (`src/registry.rs`
+  `every_shared_error_ref_matches_its_response_status_key`). A business spec keys each
+  standard error by its HTTP status and points the value at the shared error model's
+  matching response (`"404": {$ref: …/shared/errors.yaml#/components/responses/NotFound}`);
+  because the shared model carries the status into the body (`CamaraError.status`), the
+  numeric status-code KEY MUST equal the canonical status of the shared response it
+  `$ref`s. A `"404"` pointing at `TooManyRequests`, or a key retyped to `"429"` while its
+  `$ref` still names `NotFound`, is a self-contradictory document: a client selecting the
+  `404` branch is handed the 429 response object, so the generated error type/description/
+  example all disagree with the status they live under — a live copy-paste hazard in these
+  error-block-heavy specs (each API's nine-status set is pasted from a sibling). Blind spot
+  of two siblings: `shared_error_refs_resolve_to_defined_components` proves the ref names a
+  *defined* shared response but never that its NAME matches the KEY, and
+  `every_error_example_status_matches_its_response_key` links an *inline* example's
+  `status` body field to its key but the shared responses' examples live in errors.yaml,
+  out of its reach. New pure `shared_error_refs_with_status_key_mismatch` (per-`$ref`
+  up-walk to the nearest shallower 3-digit status key; a `responses:` container reached
+  first → skip, so a named `components.responses` re-export / `default:` response with no
+  numeric key is left out; a `schemas/CamaraError` content ref is not a response ref) +
+  `shared_error_response_statuses` (the name→status map derived from the embedded shared
+  fragment's own example `status:` fields — not hard-coded — so it tracks the model
+  automatically). Surveyed the corpus first (1057 status-keyed shared-response refs across
+  59 specs; the 9 canonical statuses 400/401/403/404/409/422/429/500/503) → 0 drift.
+  Tests: +2 (the contract test + `shared_error_ref_status_key_extraction_rules`: a
+  429→NotFound and a 404→TooManyRequests ref flagged in document order while a correct
+  404→NotFound, a `schemas/CamaraError` content ref, a `default:`→Internal ref and a named
+  `components.responses` re-export are cleared; the derived map pinned to all 9 canonical
+  names; ≥500-ref non-vacuity floor). `cargo test` 2928 green (was 2926); `cargo build
+  --release` succeeds. No new dependency; test-only change (no spec/runtime edit). —
+  binary (release): 5.1M (5,323,160 B; unchanged).
 - 2026-08-22 — Contract-test harness: guard every **Path Item / Operation
   `parameters` field is a sequence** (`src/registry.rs`
   `every_parameters_field_is_a_sequence`). A Path Item / Operation Object's
