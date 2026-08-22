@@ -55941,6 +55941,455 @@ components:
         );
     }
 
+    /// Whether `code` is a well-formed CAMARA error-code token: one or more
+    /// `.`-separated segments, each an UPPER_SNAKE identifier
+    /// (`[A-Z][A-Z0-9_]*`). This is the shape every CAMARA error `code` takes —
+    /// a bare canonical name (`INVALID_ARGUMENT`, `NOT_FOUND`, `OUT_OF_RANGE`) or
+    /// an API-namespaced one (`QUALITY_ON_DEMAND.DURATION_OUT_OF_RANGE`,
+    /// `CARRIER_BILLING.INVALID_CODE`, `KNOW_YOUR_CUSTOMER.INVALID_PARAM_COMBINATION`).
+    /// A lowercase letter, a leading digit, a hyphen/space, an empty segment
+    /// (a leading/trailing/doubled `.`), or an empty string is rejected.
+    fn is_well_formed_camara_error_code(code: &str) -> bool {
+        !code.is_empty()
+            && code.split('.').all(|seg| {
+                let mut chars = seg.chars();
+                match chars.next() {
+                    Some(c) if c.is_ascii_uppercase() => {}
+                    _ => return false,
+                }
+                chars.all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+            })
+    }
+
+    /// The 1-based line numbers, in document order, of every CamaraError response
+    /// **example** whose `code:` sibling carries a value that is not a well-formed
+    /// CAMARA error-code token ([`is_well_formed_camara_error_code`]), without a
+    /// YAML dep.
+    ///
+    /// The CAMARA error model (`specs/shared/errors.yaml` `CamaraError`, DESIGN §8)
+    /// types `code` as an UPPER_SNAKE enum of canonical names — bare
+    /// (`INVALID_ARGUMENT`) or API-namespaced (`QUALITY_ON_DEMAND.DURATION_OUT_OF_RANGE`)
+    /// — never free prose. An error example whose `code` reads `invalidArgument`,
+    /// `Invalid_Argument`, `INVALID-ARGUMENT`, or a stray sentence — a value pasted
+    /// from a `summary:`/`message:`, or hand-typed in the wrong case — is a
+    /// self-contradictory spec: the documented sample is a body the CamaraError
+    /// schema's own enum rejects, so a Redoc/Swagger "try it" prefill and a codegen
+    /// client's generated sample hand a caller a `code` that can never legally
+    /// validate. A routine hazard in these scenario-table-heavy specs, where each
+    /// error case is one hand-written example copied from a sibling.
+    ///
+    /// This is the VALUE companion of [`error_examples_missing_code_or_message`]
+    /// (which flags a *missing* `code`/`message`, never inspecting the `code`'s
+    /// value) — it recognises an error example exactly the same way (an inline
+    /// **integer** `status:` scalar inside an `example:`/`examples:`/`value:`
+    /// payload), then reads that example's same-indent `code:` sibling. Because the
+    /// gate is an integer `status`, a non-error `code` field — the eSIM CMP
+    /// envelope's numeric `code: 0` success acknowledgement, which carries no
+    /// `status` sibling — is never inspected. A `code:` that is absent (handled by
+    /// the presence companion) or an empty block-opener (no inline scalar) is
+    /// skipped; only a present, non-empty, malformed value is flagged.
+    fn error_example_codes_malformed(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        // The inline integer value of a `status:` line (inline comment + surrounding
+        // quotes stripped); `None` when the line is a different key, opens a block, or
+        // carries a non-integer scalar. Identical to the presence companion's gate.
+        let status_int = |l: &str| -> Option<i64> {
+            let (k, v) = l.trim_start().split_once(':')?;
+            if k.trim() != "status" {
+                return None;
+            }
+            let v = v
+                .split('#')
+                .next()
+                .unwrap_or(v)
+                .trim()
+                .trim_matches('"')
+                .trim_matches('\'');
+            v.parse::<i64>().ok()
+        };
+        // True when line `i` (indent `c`) sits inside an `example:`/`examples:`/`value:`
+        // payload — some enclosing container key up the indent ladder is one of those.
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" || key == "value" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        // The (line index, cleaned value) of the `code:` sibling of the example
+        // mapping containing line `i` (indent `c`): scan down through the mapping's
+        // block then up, each bounded by the first line indented *below* `c` (the
+        // dedent that closes the mapping), matching a key at *exactly* `c`. The value
+        // has its inline comment stripped and surrounding quotes trimmed. `None` when
+        // no `code:` sibling exists.
+        let sibling_code = |i: usize, c: usize| -> Option<(usize, String)> {
+            let clean = |v: &str| -> String {
+                v.split('#')
+                    .next()
+                    .unwrap_or(v)
+                    .trim()
+                    .trim_matches('"')
+                    .trim_matches('\'')
+                    .to_string()
+            };
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c {
+                    if let Some((k, v)) = l.trim_start().split_once(':') {
+                        if k.trim() == "code" {
+                            return Some((j, clean(v)));
+                        }
+                    }
+                }
+                j += 1;
+            }
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c {
+                    if let Some((kk, v)) = l.trim_start().split_once(':') {
+                        if kk.trim() == "code" {
+                            return Some((k, clean(v)));
+                        }
+                    }
+                }
+            }
+            None
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            if status_int(line).is_none() {
+                continue;
+            }
+            let c = indent(line);
+            if !inside_example(i, c) {
+                continue;
+            }
+            if let Some((code_line, value)) = sibling_code(i, c) {
+                // An absent `code:` is the presence companion's business; an empty
+                // block-opener carries no inline scalar to judge. Only a present,
+                // non-empty, malformed value is drift.
+                if !value.is_empty() && !is_well_formed_camara_error_code(&value) {
+                    out.push(code_line + 1);
+                }
+            }
+        }
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+
+    #[test]
+    fn every_error_example_code_is_a_well_formed_camara_code() {
+        // Contract-harness invariant (CAMARA error model, DESIGN §8): the CamaraError
+        // `code` is an UPPER_SNAKE enum of canonical names — bare (`INVALID_ARGUMENT`)
+        // or API-namespaced (`QUALITY_ON_DEMAND.DURATION_OUT_OF_RANGE`) — so where a
+        // response example illustrates an error body (marked by an integer `status`),
+        // its `code` MUST be a well-formed token. A value in the wrong case, hyphenated,
+        // or free prose — pasted from a `summary`/`message`, or hand-typed — is a body
+        // the CamaraError enum rejects, so a Redoc/Swagger "try it" prefill and a codegen
+        // sample hand a caller a `code` that can never legally validate. The VALUE
+        // companion of `every_error_example_declares_code_and_message` (which checks the
+        // field's presence, never its value). Verified true across all mounted specs
+        // before asserting.
+        for api in APIS {
+            let bad = error_example_codes_malformed(api.body);
+            assert!(
+                bad.is_empty(),
+                "{} spec declares a CamaraError response example whose `code` is not a \
+                 well-formed UPPER_SNAKE (optionally dot-namespaced) CAMARA error code \
+                 — a value the CamaraError enum rejects — at `code:` line(s): {:?}",
+                api.name,
+                bad
+            );
+        }
+    }
+
+    #[test]
+    fn error_example_code_wellformedness_extraction_rules() {
+        // Pin `is_well_formed_camara_error_code`'s accept/reject boundary.
+        for good in [
+            "INVALID_ARGUMENT",
+            "NOT_FOUND",
+            "OUT_OF_RANGE",
+            "QUALITY_ON_DEMAND.DURATION_OUT_OF_RANGE",
+            "KNOW_YOUR_CUSTOMER.INVALID_PARAM_COMBINATION",
+            "A",
+            "A1_B2",
+        ] {
+            assert!(
+                is_well_formed_camara_error_code(good),
+                "{good} should be a well-formed code"
+            );
+        }
+        for bad in [
+            "",
+            "invalidArgument",
+            "Invalid_Argument",
+            "INVALID-ARGUMENT",
+            "1INVALID",
+            "INVALID ARGUMENT",
+            ".INVALID",
+            "INVALID.",
+            "QUALITY_ON_DEMAND..DURATION",
+            "quality_on_demand.INVALID",
+        ] {
+            assert!(
+                !is_well_formed_camara_error_code(bad),
+                "{bad} should be rejected"
+            );
+        }
+
+        // Unit-cover `error_example_codes_malformed` so the contract test above can't
+        // pass vacuously and its accept/reject boundary is pinned: a well-formed bare
+        // code and a well-formed namespaced code pass; a lowercase code and a hyphenated
+        // code are flagged in document order; a `default:` response's malformed code is
+        // flagged (the enclosing key is irrelevant); an absent `code:` (presence
+        // companion's business) and a non-error numeric `code` with no integer `status`
+        // sibling (the eSIM `code: 0` shape) are skipped; a non-integer lifecycle
+        // `status` is skipped; and a schema property literally named `code` (opening a
+        // block outside any example) is skipped.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '400':
+          description: bad
+          content:
+            application/json:
+              example:
+                status: 400
+                code: INVALID_ARGUMENT
+                message: bad input
+        '409':
+          description: c
+          content:
+            application/json:
+              example:
+                status: 409
+                code: QUALITY_ON_DEMAND.DURATION_OUT_OF_RANGE
+                message: dup
+        '404':
+          description: nf
+          content:
+            application/json:
+              example:
+                status: 404
+                code: notFound
+                message: nope
+        '422':
+          description: u
+          content:
+            application/json:
+              examples:
+                bad:
+                  value:
+                    status: 422
+                    code: INVALID-ARGUMENT
+                    message: hyphenated
+        default:
+          description: d
+          content:
+            application/json:
+              example:
+                status: 500
+                code: internal_error
+                message: boom
+  /b:
+    post:
+      operationId: postB
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              example:
+                status: 200
+                message: no code sibling
+        '201':
+          description: created
+          content:
+            application/json:
+              example:
+                code: 0
+                message: eSIM CMP success, no status sibling
+        '202':
+          description: acc
+          content:
+            application/json:
+              example:
+                status: ACTIVE
+                code: not-checked-non-integer-status
+components:
+  schemas:
+    Info:
+      type: object
+      properties:
+        code:
+          type: string
+";
+        // Flagged, in document order: line 32 (`code: notFound` — lowercase), line 42
+        // (`code: INVALID-ARGUMENT` under a named `examples` entry — hyphenated), and
+        // line 50 (`code: internal_error` under the `default:` response — lowercase).
+        // Not flagged: line 16 (`INVALID_ARGUMENT`, well-formed), line 24
+        // (`QUALITY_ON_DEMAND.DURATION_OUT_OF_RANGE`, namespaced), the `status: 200`
+        // error example with no `code:` sibling (line 61), `code: 0` with no integer
+        // `status` sibling — the eSIM shape (line 68), `status: ACTIVE` is non-integer
+        // so its `code` is never inspected (line 76), and a schema property named `code`
+        // outside any example (line 82).
+        assert_eq!(error_example_codes_malformed(body), vec![32, 42, 50]);
+
+        // Non-vacuous floor: across every registered spec every CamaraError response
+        // example's `code` is a well-formed token (the invariant), and the corpus
+        // actually inlines many integer-`status` error examples that carry a `code`, so
+        // the completeness path runs on real data and a broken (always-empty) extractor
+        // can't hide behind a corpus that never inlines an error code.
+        let mut error_example_codes = 0usize;
+        for api in APIS {
+            assert!(
+                error_example_codes_malformed(api.body).is_empty(),
+                "{}: every CamaraError response example `code` must be a well-formed token",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            for (i, l) in lines.iter().enumerate() {
+                let Some((k, v)) = l.trim_start().split_once(':') else {
+                    continue;
+                };
+                if k.trim() != "status" {
+                    continue;
+                }
+                let v = v
+                    .split('#')
+                    .next()
+                    .unwrap_or(v)
+                    .trim()
+                    .trim_matches('"')
+                    .trim_matches('\'');
+                if v.parse::<i64>().is_err() {
+                    continue;
+                }
+                let c = indent(l);
+                // Independent inside-example ancestor walk (no reuse of the extractor's).
+                let mut level = c;
+                let mut j = i;
+                let mut in_ex = false;
+                while j > 0 {
+                    j -= 1;
+                    let x = lines[j];
+                    if x.trim().is_empty() {
+                        continue;
+                    }
+                    let li = indent(x);
+                    if li < level {
+                        let key = x
+                            .trim_start()
+                            .split_once(':')
+                            .map(|(a, _)| a.trim())
+                            .unwrap_or("");
+                        if key == "example" || key == "examples" || key == "value" {
+                            in_ex = true;
+                        }
+                        level = li;
+                        if li == 0 {
+                            break;
+                        }
+                    }
+                }
+                if !in_ex {
+                    continue;
+                }
+                // Count this error example only when it carries a same-indent `code:`.
+                let mut has_code = false;
+                let mut d = i + 1;
+                while d < lines.len() {
+                    let x = lines[d];
+                    if x.trim().is_empty() {
+                        d += 1;
+                        continue;
+                    }
+                    if indent(x) < c {
+                        break;
+                    }
+                    if indent(x) == c
+                        && x.trim_start().split_once(':').map(|(a, _)| a.trim()) == Some("code")
+                    {
+                        has_code = true;
+                        break;
+                    }
+                    d += 1;
+                }
+                if !has_code {
+                    let mut u = i;
+                    while u > 0 {
+                        u -= 1;
+                        let x = lines[u];
+                        if x.trim().is_empty() {
+                            continue;
+                        }
+                        if indent(x) < c {
+                            break;
+                        }
+                        if indent(x) == c
+                            && x.trim_start().split_once(':').map(|(a, _)| a.trim()) == Some("code")
+                        {
+                            has_code = true;
+                            break;
+                        }
+                    }
+                }
+                if has_code {
+                    error_example_codes += 1;
+                }
+            }
+        }
+        assert!(
+            error_example_codes >= 100,
+            "expected many CamaraError response example codes across specs, got {error_example_codes}"
+        );
+    }
+
     /// The 1-based line numbers, in document order, of every **External
     /// Documentation Object** an `externalDocs:` field opens that does not declare
     /// a non-empty `url`, without a YAML dep.

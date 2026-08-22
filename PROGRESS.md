@@ -3332,6 +3332,26 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - an **error-example `code`-value well-formedness** contract test (`src/registry.rs`
+    `every_error_example_code_is_a_well_formed_camara_code`) — the **VALUE companion**
+    of `every_error_example_declares_code_and_message` (which checks a `code`/`message`
+    is *present*, never its value). The CAMARA error model (DESIGN §8) types
+    `CamaraError.code` as an UPPER_SNAKE enum of canonical names — bare
+    (`INVALID_ARGUMENT`) or API-namespaced (`QUALITY_ON_DEMAND.DURATION_OUT_OF_RANGE`)
+    — so an error example whose `code` is lowercase/hyphenated/free prose documents a
+    body the enum rejects. Recognises an error example exactly like the presence
+    companion (an inline **integer** `status:` inside an `example:`/`examples:`/`value:`
+    payload), then reads that example's same-indent `code:` sibling and flags a present,
+    non-empty value that is not `^[A-Z][A-Z0-9_]*(\.[A-Z][A-Z0-9_]*)*$`. The integer-
+    `status` gate means the eSIM CMP envelope's numeric `code: 0` success ack (no
+    `status` sibling) is never inspected. New pure `is_well_formed_camara_error_code` +
+    `error_example_codes_malformed`. Corpus: every error-example code (INVALID_ARGUMENT,
+    MISSING_IDENTIFIER, …, and the dotted API-namespaced set) is well-formed → 0 drift.
+    Unit-covered (`error_example_code_wellformedness_extraction_rules`: lowercase/
+    hyphenated/`default:`-response codes flagged in order; well-formed bare + namespaced,
+    a no-`code` example, the `code: 0`/no-status eSIM shape, a non-integer `status`, and
+    a schema property named `code` all cleared; ≥100-code non-vacuous floor). Test-only,
+    no spec change.
   - an **unused-schema-component** contract test (`src/registry.rs`
     `every_defined_schema_is_reachable`) — the `schemas` half the reusable-component
     slice deferred. Spectral's `oas3-unused-component` scoped to `components.schemas`:
@@ -6005,6 +6025,37 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-22 — Contract-test harness: added an **error-example `code`-value
+  well-formedness** contract test (`src/registry.rs`
+  `every_error_example_code_is_a_well_formed_camara_code`) — the **VALUE companion** of
+  `every_error_example_declares_code_and_message`, which asserts a `code`/`message` is
+  *present* but never inspects the `code`'s value. The CAMARA error model (DESIGN §8)
+  types `CamaraError.code` as an UPPER_SNAKE enum of canonical names — bare
+  (`INVALID_ARGUMENT`, `NOT_FOUND`, `OUT_OF_RANGE`) or API-namespaced
+  (`QUALITY_ON_DEMAND.DURATION_OUT_OF_RANGE`, `CARRIER_BILLING.INVALID_CODE`) — never
+  free prose, so an error example whose `code` reads `invalidArgument`,
+  `INVALID-ARGUMENT`, or a stray sentence documents a body the enum rejects (a Redoc
+  "try it" prefill / codegen sample the caller can never legally validate). Recognises
+  an error example exactly like the presence companion — an inline **integer** `status:`
+  inside an `example:`/`examples:`/`value:` payload — then reads that example's
+  same-indent `code:` sibling and flags a present, non-empty value not matching
+  `^[A-Z][A-Z0-9_]*(\.[A-Z][A-Z0-9_]*)*$`. Because the gate is an integer `status`, the
+  eSIM CMP envelope's numeric `code: 0` success acknowledgement (which carries no
+  `status` sibling) is never inspected — a survey confirmed it is the corpus's only
+  non-error `code` value. Two new pure helpers: `is_well_formed_camara_error_code`
+  (dot-separated UPPER_SNAKE segments) and `error_example_codes_malformed` (mirrors the
+  presence companion's `status_int`/`inside_example`/sibling scan, reading the `code`
+  value). Surveyed the corpus first (60 specs): every integer-`status` error example's
+  `code` — the whole `INVALID_ARGUMENT`/`MISSING_IDENTIFIER`/… set plus the dotted
+  API-namespaced codes — is well-formed → 0 drift, a live guard the moment a malformed
+  code is pasted in. Tests: +2 (the contract test + `error_example_code_wellformedness_
+  extraction_rules`: lowercase / hyphenated / `default:`-response codes flagged in
+  document order; well-formed bare + namespaced, a no-`code` example, the `code: 0`/
+  no-status eSIM shape, a non-integer lifecycle `status`, and a schema property named
+  `code` all cleared; the token helper pinned on bare/namespaced/leading-digit/empty-
+  segment cases; ≥100-code non-vacuous floor). `cargo test` 2902 green (was 2900);
+  `cargo build --release` succeeds. No new dependency; test-only change. — binary: 5.1M
+  (5,323,160 B; unchanged)
 - 2026-08-22 — Contract-test harness: added an **unused-schema-component** contract test
   (`src/registry.rs` `every_defined_schema_is_reachable`) — the **`schemas` half** the
   reusable-component slice (`every_reusable_component_is_referenced`) explicitly deferred
