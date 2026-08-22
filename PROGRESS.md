@@ -6190,6 +6190,37 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-22 — Contract-test harness: guard that every **CAMARA-generic error example
+  `code` sits under its canonical HTTP status** (`src/registry.rs`
+  `every_generic_error_example_code_matches_its_response_status`). CAMARA Commonalities
+  (DESIGN §8) binds each *generic* error code to exactly one HTTP status —
+  `UNAUTHENTICATED`→401, `PERMISSION_DENIED`→403, `NOT_FOUND`/`IDENTIFIER_NOT_FOUND`→404,
+  `CONFLICT`/`ABORTED`/`ALREADY_EXISTS`→409, `MISSING_IDENTIFIER`/`UNNECESSARY_IDENTIFIER`/
+  `SERVICE_NOT_APPLICABLE`→422, `TOO_MANY_REQUESTS`/`QUOTA_EXCEEDED`→429,
+  `INVALID_ARGUMENT`/`OUT_OF_RANGE`→400, `INTERNAL`→500, `UNAVAILABLE`→503, `TIMEOUT`→504
+  — so an error example whose `code:` names a generic code MUST sit under a response
+  keyed by that code's canonical status. A `"403"` sample reading `code: UNAUTHENTICATED`
+  (a 401 code left behind when a sibling 401 example was pasted and its `status` retargeted)
+  is a self-contradictory document: the code names one status while the response it
+  illustrates names another, a live copy-paste hazard in these error-block-heavy specs.
+  Complement of `every_error_example_status_matches_its_response_key` (the numeric
+  `status:`-field-vs-key leg — it never reads `code`, so an example whose `status` was
+  retargeted while its `code` was not passes it untouched) and distinct from
+  `every_error_example_code_is_a_well_formed_camara_code` (code *shape* only, never which
+  status it belongs under). New pure `generic_error_example_code_status_mismatches` reuses
+  the sibling's exact `example`/`examples`/`value` + numeric-response-key up-walk (API-
+  specific/dotted codes, `default:` responses, `code:` schema properties and schema-level
+  examples all skipped) + a fixed generic-code→status map
+  (`generic_error_code_canonical_status`). Surveyed the corpus first (181 status-bearing
+  generic-code example occurrences across the mounted specs) → 0 drift. Tests: +2 (the
+  contract test + `generic_error_example_code_status_extraction_rules`: a 401 code under a
+  403, a 403 code under a 429's named `wrong` example, and a 404 code under a 200 flagged
+  in document order; a matching NOT_FOUND/404 and TOO_MANY_REQUESTS/429, an API-specific
+  dotted code, an `INTERNAL` under `default:`, a `code:` schema property opening a block,
+  and a schema-level example code cleared; the derived pairing pinned; ≥100-pair
+  non-vacuity floor). `cargo test` 2930 green (was 2928); `cargo build --release`
+  succeeds. No new dependency; test-only change (no spec/runtime edit). — binary
+  (release): 5.1M (5,323,160 B; unchanged).
 - 2026-08-22 — Contract-test harness: guard that every **status-keyed shared-error
   response `$ref` matches its response's canonical status** (`src/registry.rs`
   `every_shared_error_ref_matches_its_response_status_key`). A business spec keys each

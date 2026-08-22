@@ -57734,6 +57734,343 @@ components:
         );
     }
 
+    /// The single canonical HTTP status a **CAMARA-generic** error `code` is bound to,
+    /// or `None` for an API-specific code. The generic codes are the ones CAMARA
+    /// Commonalities fixes to one status across every API (DESIGN §8): they never
+    /// carry an API prefix and each names exactly one status, so a generic code
+    /// paired with any other status is a contradiction. An API-specific code
+    /// (`CARRIER_BILLING.UNAUTHORIZED_AMOUNT`, `SERVICE_NOT_APPLICABLE`'s per-API
+    /// dotted siblings) can legitimately sit under a range of statuses, so it is not
+    /// judged here.
+    fn generic_error_code_canonical_status(code: &str) -> Option<i64> {
+        Some(match code {
+            "INVALID_ARGUMENT" | "OUT_OF_RANGE" => 400,
+            "UNAUTHENTICATED" => 401,
+            "PERMISSION_DENIED" | "INVALID_TOKEN_CONTEXT" => 403,
+            "NOT_FOUND" | "IDENTIFIER_NOT_FOUND" => 404,
+            "CONFLICT" | "ABORTED" | "ALREADY_EXISTS" => 409,
+            "MISSING_IDENTIFIER" | "UNNECESSARY_IDENTIFIER" | "SERVICE_NOT_APPLICABLE" => 422,
+            "TOO_MANY_REQUESTS" | "QUOTA_EXCEEDED" => 429,
+            "INTERNAL" => 500,
+            "NOT_IMPLEMENTED" => 501,
+            "UNAVAILABLE" => 503,
+            "TIMEOUT" => 504,
+            _ => return None,
+        })
+    }
+
+    /// The 1-based line numbers, in document order, of every CamaraError response
+    /// **example** whose `code:` names a CAMARA-generic code but sits under a
+    /// Response Object keyed by a numeric HTTP status that is NOT that code's
+    /// canonical status (`generic_error_code_canonical_status`), without a YAML dep.
+    ///
+    /// The CAMARA error model (DESIGN §8) binds each generic `code` to exactly one
+    /// HTTP status: `UNAUTHENTICATED` is a 401, `PERMISSION_DENIED` a 403, `NOT_FOUND`
+    /// a 404, `TOO_MANY_REQUESTS` a 429, and so on. So an error example under a `"403"`
+    /// response whose body reads `code: UNAUTHENTICATED` — a sample pasted from the
+    /// 401 sibling and only half-retargeted — is a self-contradictory document: the
+    /// `code` names one status while the response it illustrates names another, so a
+    /// Redoc/Swagger "try it" prefill and a codegen client's generated sample hand a
+    /// caller an error whose code and status can never legally co-occur.
+    ///
+    /// The complement of `every_error_example_status_matches_its_response_key`: that
+    /// sibling pins the example's own `status` *field* to the response key (the
+    /// numeric-vs-numeric leg) but never reads `code`, so an example whose `status`
+    /// was retargeted while its `code` was left behind (a `"403"` example carrying
+    /// `status: 403` yet `code: UNAUTHENTICATED`) passes it untouched. This is the
+    /// code-vs-status leg. `every_error_example_code_is_a_well_formed_camara_code`
+    /// checks the code's *shape* (UPPER_SNAKE) but never which status it belongs
+    /// under; `every_scenario_error_result_names_a_well_formed_camara_code` reads the
+    /// prose `result:` strings, not example bodies. None compares a generic code to
+    /// its enclosing response status.
+    ///
+    /// Scope mirrors the status-match sibling exactly: only a `code:` inline scalar
+    /// reached from inside an `example`/`examples`/`value` payload with a numeric
+    /// enclosing response key is judged. An API-specific (prefixed / non-generic)
+    /// code, a `code` under a `default:` response (no numeric key), and a `code:`
+    /// schema property opening a block or living in a schema-level example outside any
+    /// `responses:` block are all skipped.
+    fn generic_error_example_code_status_mismatches(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        // The inline value of a `code:` line (inline comment + surrounding quotes
+        // stripped); `None` when the line is a different key or opens a block (empty
+        // inline value — a schema `code:` property).
+        let code_value = |l: &str| -> Option<String> {
+            let (k, v) = l.trim_start().split_once(':')?;
+            if k.trim() != "code" {
+                return None;
+            }
+            let v = v
+                .split('#')
+                .next()
+                .unwrap_or(v)
+                .trim()
+                .trim_matches('"')
+                .trim_matches('\'');
+            if v.is_empty() {
+                return None;
+            }
+            Some(v.to_string())
+        };
+        // The numeric HTTP status-code key of the Response Object enclosing line `i`
+        // (indent `c`), paired with whether the path from `i` up to it passed through
+        // an `example`/`examples`/`value` container — the identical up-walk
+        // `error_example_status_mismatches` uses, so the two tests judge the same
+        // example scope. A `responses:` container reached first → `None` (a `default`
+        // or named `components.responses` entry with no numeric key).
+        let enclosing = |i: usize, c: usize| -> (Option<i64>, bool) {
+            let mut level = c;
+            let mut k = i;
+            let mut in_example = false;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    let key = l
+                        .trim_start()
+                        .split_once(':')
+                        .map(|(x, _)| x.trim())
+                        .unwrap_or("");
+                    if key == "example" || key == "examples" || key == "value" {
+                        in_example = true;
+                    }
+                    if key == "responses" {
+                        return (None, in_example);
+                    }
+                    let bare = key.trim_matches('"').trim_matches('\'');
+                    if bare.len() == 3 && bare.chars().all(|ch| ch.is_ascii_digit()) {
+                        return (bare.parse::<i64>().ok(), in_example);
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            (None, in_example)
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some(code) = code_value(line) else {
+                continue;
+            };
+            let Some(expected) = generic_error_code_canonical_status(&code) else {
+                continue; // API-specific / non-generic code — not judged here
+            };
+            let c = indent(line);
+            let (key, in_example) = enclosing(i, c);
+            if !in_example {
+                continue; // a `code` field outside any example payload
+            }
+            if let Some(kval) = key {
+                if kval != expected {
+                    out.push(i + 1);
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_generic_error_example_code_matches_its_response_status() {
+        // Contract-harness invariant (CAMARA error model, DESIGN §8): a CAMARA-generic
+        // error `code` is bound to exactly one HTTP status, so an error example whose
+        // `code:` names a generic code MUST sit under a response keyed by that code's
+        // canonical status. A `"403"` sample reading `code: UNAUTHENTICATED` (a 401
+        // code) contradicts the response it documents. Verified true across all mounted
+        // specs (181 status-bearing generic-code example occurrences, 0 drift) before
+        // asserting.
+        for api in APIS {
+            let bad = generic_error_example_code_status_mismatches(api.body);
+            assert!(
+                bad.is_empty(),
+                "{} spec declares an error example whose generic CAMARA `code` names a \
+                 canonical HTTP status different from the numeric response key that \
+                 encloses it (a code/status pair that can never legally co-occur) at \
+                 `code:` line(s): {:?}",
+                api.name,
+                bad
+            );
+        }
+    }
+
+    #[test]
+    fn generic_error_example_code_status_extraction_rules() {
+        // Unit-cover `generic_error_example_code_status_mismatches` so the contract test
+        // above can't pass vacuously and its accept/reject boundary is pinned: a generic
+        // code under its canonical status (under a numeric key or a named `examples`
+        // entry) passes; a generic code under the wrong status (a single `example:` and a
+        // named `examples`/`value:` entry) is flagged in document order; an API-specific
+        // (prefixed) code, a code under a `default:` response, a `code:` schema property
+        // opening a block, and a schema-level example `code` outside any `responses:`
+        // block are all skipped.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '404':
+          description: nf
+          content:
+            application/json:
+              example:
+                status: 404
+                code: NOT_FOUND
+        '403':
+          description: pd
+          content:
+            application/json:
+              example:
+                status: 403
+                code: UNAUTHENTICATED
+        '429':
+          description: tmr
+          content:
+            application/json:
+              examples:
+                ok:
+                  value:
+                    code: TOO_MANY_REQUESTS
+                wrong:
+                  value:
+                    code: PERMISSION_DENIED
+        '422':
+          description: ka
+          content:
+            application/json:
+              example:
+                code: KNOW_YOUR_CUSTOMER.INVALID_PARAM_COMBINATION
+        default:
+          description: d
+          content:
+            application/json:
+              example:
+                code: INTERNAL
+  /b:
+    post:
+      operationId: postB
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  code:
+                    type: string
+              example:
+                code: NOT_FOUND
+components:
+  schemas:
+    Info:
+      type: object
+      properties:
+        code:
+          type: string
+      example:
+        code: PERMISSION_DENIED
+";
+        // Flagged, in document order: line 23 (`code: UNAUTHENTICATED`, a 401 code, under
+        // the `'403'` response), line 34 (`code: PERMISSION_DENIED`, a 403 code, under the
+        // `'429'` response's `wrong` example), and line 61 (`code: NOT_FOUND`, a 404 code,
+        // under the `'200'` response — see note below). Not flagged: line 16 (`NOT_FOUND`
+        // under `'404'`, a match); line 31 (`TOO_MANY_REQUESTS` under `'429'`, a match);
+        // line 40 (an API-specific dotted code — not generic); line 46 (`INTERNAL` under
+        // `default:` — no numeric key); line 58 (a `code:` schema property opening a
+        // block, no inline value); and line 70 (`PERMISSION_DENIED` under a schema's own
+        // `example`, outside any `responses:` block).
+        //
+        // Line 61 subtlety: `code: NOT_FOUND` sits under `'200'` via that response's
+        // `example`, so the up-walk finds a numeric key (200) that differs from
+        // NOT_FOUND's 404 → it IS flagged. That is correct: a 404-only code documented
+        // under a 200 response is exactly the code/status contradiction this test exists
+        // to catch. So the expected set is {23, 34, 61}.
+        assert_eq!(
+            generic_error_example_code_status_mismatches(body),
+            vec![23, 34, 61]
+        );
+
+        // Non-vacuous floor: across every registered spec every generic-code error
+        // example agrees with its response status (the invariant the contract test
+        // asserts), and the corpus actually declares many such generic-code+numeric-key
+        // pairs — so the comparison path runs on real data and a broken (always-empty)
+        // extractor can't hide behind a corpus that never pairs a generic code with a
+        // numeric response key. Count pairs with an independent ancestor walk that never
+        // performs the extractor's equality comparison.
+        let mut code_pairs = 0usize;
+        for api in APIS {
+            assert!(
+                generic_error_example_code_status_mismatches(api.body).is_empty(),
+                "{}: every generic error example `code` must match its response status",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            for (i, l) in lines.iter().enumerate() {
+                let Some((k, v)) = l.trim_start().split_once(':') else {
+                    continue;
+                };
+                if k.trim() != "code" {
+                    continue;
+                }
+                let v = v.split('#').next().unwrap_or(v).trim().trim_matches('"').trim_matches('\'');
+                if generic_error_code_canonical_status(v).is_none() {
+                    continue;
+                }
+                // Independent up-walk: numeric enclosing response key + an example ancestor.
+                let c = indent(l);
+                let mut level = c;
+                let mut j = i;
+                let mut in_example = false;
+                let mut numeric_key = false;
+                while j > 0 {
+                    j -= 1;
+                    let x = lines[j];
+                    if x.trim().is_empty() {
+                        continue;
+                    }
+                    let li = indent(x);
+                    if li < level {
+                        let key = x.trim_start().split_once(':').map(|(a, _)| a.trim()).unwrap_or("");
+                        if key == "example" || key == "examples" || key == "value" {
+                            in_example = true;
+                        }
+                        if key == "responses" {
+                            break;
+                        }
+                        let bare = key.trim_matches('"').trim_matches('\'');
+                        if bare.len() == 3 && bare.chars().all(|ch| ch.is_ascii_digit()) {
+                            numeric_key = true;
+                            break;
+                        }
+                        level = li;
+                        if li == 0 {
+                            break;
+                        }
+                    }
+                }
+                if in_example && numeric_key {
+                    code_pairs += 1;
+                }
+            }
+        }
+        assert!(
+            code_pairs >= 100,
+            "expected many generic error example code+status pairs across specs, got {code_pairs}"
+        );
+    }
+
     /// The 1-based line numbers, in document order, of every CamaraError response
     /// **example** whose body declares an integer `status:` field but omits a `code:`
     /// or `message:` sibling in the same example mapping, without a YAML dep.
