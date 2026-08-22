@@ -8567,6 +8567,244 @@ components:
         assert!(shared_error_responses_missing_x_correlator(SHARED_ERRORS).is_empty());
     }
 
+    /// The shared error model's **authentication-failure** response names
+    /// (`shared/errors.yaml#/components/responses/{Unauthenticated,PermissionDenied}`)
+    /// that do **not** document a `WWW-Authenticate` response header — pure and
+    /// YAML-dep-free.
+    ///
+    /// Same structural scan as `shared_error_responses_missing_x_correlator`, but
+    /// restricted to exactly the two auth-failure responses and looking for a
+    /// `WWW-Authenticate:` header key. A response is flagged only when it neither
+    /// declares the header (a `WWW-Authenticate:` key whose nearest enclosing key
+    /// is `headers:`, which rejects the string appearing inside an
+    /// `example:`/`examples:` payload) nor is a whole-response `$ref` (which
+    /// inherits its headers from the referenced component). Only the two target
+    /// names are considered — the other canonical errors (400/404/409/…) carry no
+    /// challenge and must not claim one. Names are returned in document order.
+    fn auth_error_responses_missing_www_authenticate(body: &str) -> Vec<String> {
+        const AUTH_RESPONSES: [&str; 2] = ["Unauthenticated", "PermissionDenied"];
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let mut out = Vec::new();
+        // Top-level `components:` block bounds.
+        let Some(cs) = lines
+            .iter()
+            .position(|l| l.trim_end() == "components:" && !l.starts_with(char::is_whitespace))
+        else {
+            return out;
+        };
+        let ce = (cs + 1..lines.len())
+            .find(|&i| !lines[i].trim().is_empty() && !lines[i].starts_with(char::is_whitespace))
+            .unwrap_or(lines.len());
+        // The `responses:` key at indent 2 inside components.
+        let Some(rs) =
+            (cs + 1..ce).find(|&i| indent(lines[i]) == 2 && lines[i].trim() == "responses:")
+        else {
+            return out;
+        };
+        let re = (rs + 1..ce)
+            .find(|&i| !lines[i].trim().is_empty() && indent(lines[i]) <= 2)
+            .unwrap_or(ce);
+        let mut i = rs + 1;
+        while i < re {
+            let l = lines[i];
+            // Each response name is a `Name:` block opener at indent 4.
+            if l.trim().is_empty() || indent(l) != 4 || l.trim_start().starts_with('#') {
+                i += 1;
+                continue;
+            }
+            let Some(name) = l.trim().strip_suffix(':') else {
+                i += 1;
+                continue;
+            };
+            let name = name.trim_matches(|c| c == '"' || c == '\'');
+            if !AUTH_RESPONSES.contains(&name) {
+                i += 1;
+                continue;
+            }
+            // Response block: lines after the key with indent > 4, until a dedent to <= 4.
+            let mut has_challenge = false;
+            let mut direct_ref = false;
+            let mut child_indent = None;
+            let mut j = i + 1;
+            while j < re {
+                let m = lines[j];
+                if m.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(m) <= 4 {
+                    break;
+                }
+                let child = *child_indent.get_or_insert(indent(m));
+                let t = m.trim_start();
+                if indent(m) == child && t.starts_with("$ref:") {
+                    direct_ref = true;
+                }
+                // A `WWW-Authenticate:` counts only as a response header — its nearest
+                // enclosing key (the first line above it at a strictly smaller indent)
+                // must be `headers:`. This rejects the string appearing as data inside
+                // an `example:`/`examples:` payload.
+                if t.starts_with("WWW-Authenticate:") {
+                    let mut k = j;
+                    while k > i + 1 {
+                        k -= 1;
+                        if lines[k].trim().is_empty() {
+                            continue;
+                        }
+                        if indent(lines[k]) < indent(m) {
+                            if lines[k].trim() == "headers:" {
+                                has_challenge = true;
+                            }
+                            break;
+                        }
+                    }
+                }
+                j += 1;
+            }
+            if !has_challenge && !direct_ref {
+                out.push(name.to_string());
+            }
+            i = j; // advance past this response's block
+        }
+        out
+    }
+
+    #[test]
+    fn every_shared_auth_error_response_declares_a_www_authenticate_header() {
+        // Contract-harness invariant (RFC 6750 / CAMARA auth): the shared error
+        // model's two **authentication-failure** responses —
+        // `shared/errors.yaml#/components/responses/Unauthenticated` (401) and
+        // `.../PermissionDenied` (403) — MUST document a `WWW-Authenticate` response
+        // header. CamaraSim's `verify::Claims` extractor answers a failed Bearer
+        // credential with an RFC 6750 `WWW-Authenticate` challenge on BOTH paths
+        // (`src/auth/verify.rs`: a bare `Bearer` when none was presented,
+        // `error="invalid_token"` on a 401, `error="insufficient_scope"` on the 403),
+        // so a shared auth response that omits the header under-states the wire
+        // contract for the whole corpus at once — every business spec's 401/403 is a
+        // `$ref` into this fragment (`served_error_responses_missing_x_correlator`
+        // exempts a `$ref`'d response precisely because it inherits the shared
+        // component's headers). The sibling `auth/openapi.yaml` already documents this
+        // exact header on its own `Unauthenticated`/`PermissionDenied` responses; this
+        // test keeps the shared fragment — the one the business specs actually
+        // reference — telling the same truth, and no existing test looks inside these
+        // responses for the challenge header
+        // (`every_shared_error_response_declares_an_x_correlator_header` checks the
+        // `x-correlator` header, which every canonical error carries, never the
+        // auth-only `WWW-Authenticate`).
+        const SHARED_ERRORS: &str = include_str!("../specs/shared/errors.yaml");
+        let missing = auth_error_responses_missing_www_authenticate(SHARED_ERRORS);
+        assert!(
+            missing.is_empty(),
+            "shared/errors.yaml auth-failure response(s) with no `WWW-Authenticate` \
+             response header: {missing:?}"
+        );
+        // Non-vacuous floor: the fragment defines both auth-failure responses, so the
+        // extractor's per-response header scan runs on real data and a broken
+        // (always-empty) extractor can't hide behind a fragment that declares neither.
+        // Confirm both target names are present at indent 4 under `responses:`.
+        let lines: Vec<&str> = SHARED_ERRORS.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let rs = lines
+            .iter()
+            .position(|l| indent(l) == 2 && l.trim() == "responses:")
+            .expect("shared/errors.yaml declares a components.responses map");
+        let re = (rs + 1..lines.len())
+            .find(|&i| !lines[i].trim().is_empty() && indent(lines[i]) <= 2)
+            .unwrap_or(lines.len());
+        for target in ["Unauthenticated:", "PermissionDenied:"] {
+            assert!(
+                (rs + 1..re).any(|i| indent(lines[i]) == 4 && lines[i].trim() == target),
+                "expected the shared error model to define the `{target}` response"
+            );
+        }
+    }
+
+    #[test]
+    fn shared_auth_www_authenticate_extraction_rules() {
+        // Unit-cover `auth_error_responses_missing_www_authenticate` so the contract
+        // test above can't pass vacuously: an auth response documenting the header
+        // passes, one omitting it is flagged by name, a non-auth response missing the
+        // header is ignored (only the two auth responses are in scope), a deeper
+        // `WWW-Authenticate` inside an example payload does not count, and a
+        // whole-response `$ref` (which inherits the header) is exempt.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths: {}
+components:
+  headers:
+    XCorrelator:
+      schema:
+        type: string
+    WWWAuthenticate:
+      schema:
+        type: string
+  responses:
+    # a comment line, not a response
+    Unauthenticated:
+      description: ok
+      headers:
+        x-correlator:
+          $ref: \"#/components/headers/XCorrelator\"
+        WWW-Authenticate:
+          $ref: \"#/components/headers/WWWAuthenticate\"
+      content:
+        application/json:
+          schema:
+            type: object
+    PermissionDenied:
+      description: missing the challenge
+      content:
+        application/json:
+          schema:
+            type: object
+          example:
+            WWW-Authenticate: not-a-header-here
+    NotFound:
+      description: a non-auth error carries no challenge, and that is fine
+      content:
+        application/json:
+          schema:
+            type: object
+";
+        // Only `PermissionDenied` is flagged: `Unauthenticated` declares the header,
+        // the `WWW-Authenticate` under `PermissionDenied`'s `example:` is data (not a
+        // header), and `NotFound` is out of scope.
+        assert_eq!(
+            auth_error_responses_missing_www_authenticate(body),
+            vec!["PermissionDenied".to_string()]
+        );
+
+        // A whole-response `$ref` inherits its headers, so a `$ref`'d auth response is
+        // exempt while its non-`$ref` sibling missing the header is still flagged.
+        let ref_body = "\
+openapi: 3.0.3
+paths: {}
+components:
+  responses:
+    Unauthenticated:
+      description: missing the challenge
+      content:
+        application/json:
+          schema:
+            type: object
+    PermissionDenied:
+      $ref: \"#/components/responses/Unauthenticated\"
+";
+        assert_eq!(
+            auth_error_responses_missing_www_authenticate(ref_body),
+            vec!["Unauthenticated".to_string()]
+        );
+
+        // Non-vacuity floor against the real fragment: both auth responses declare the
+        // header, so the extractor returns nothing but the scan runs on genuine content.
+        const SHARED_ERRORS: &str = include_str!("../specs/shared/errors.yaml");
+        assert!(auth_error_responses_missing_www_authenticate(SHARED_ERRORS).is_empty());
+    }
+
     #[test]
     fn shared_auth_refs_resolve_to_defined_components() {
         // Contract-harness invariant (DESIGN §8/§9 + `apis::openapi` serving): a
@@ -9287,9 +9525,9 @@ paths: {}
         // A body with no `components:` block yields nothing.
         assert!(component_pointers("openapi: 3.0.3\npaths: {}\n").is_empty());
         // The real shared fragment defines the CamaraError schema, the XCorrelator
-        // response header, and 9 error responses.
+        // and WWWAuthenticate response headers, and 9 error responses.
         let shared = component_pointers(include_str!("../specs/shared/errors.yaml"));
-        assert_eq!(shared.len(), 11, "shared components: {shared:?}");
+        assert_eq!(shared.len(), 12, "shared components: {shared:?}");
     }
 
     #[test]

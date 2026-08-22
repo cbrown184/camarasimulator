@@ -3308,7 +3308,10 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
         200/400/404). No new dep. **Completes the Trust Domain Device CRUD.**
 
 ## Cross-cutting (do alongside the item that needs it)
-- [~] `errors.rs`: base CAMARA error model done (`src/errors.rs`, `specs/shared/errors.yaml`); per-version catalogs still TODO (DESIGN §8)
+- [~] `errors.rs`: base CAMARA error model done (`src/errors.rs`, `specs/shared/errors.yaml`); per-version catalogs still TODO (DESIGN §8).
+  Shared error responses now also document the RFC 6750 `WWW-Authenticate`
+  header on `Unauthenticated` (401) / `PermissionDenied` (403), matching what
+  `verify::Claims` serves; a contract test guards it.
   <!-- format-example family now covers uuid / date-time / date / uri / uri-reference /
        int32 / int64 / double / float / ipv4 / ipv6 / email / byte
        (`every_byte_format_example_is_a_well_formed_byte`). This exhausts the standard
@@ -6075,6 +6078,36 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-22 — Shared error model spec accuracy: the shared **auth-failure**
+  responses now document the RFC 6750 `WWW-Authenticate` response header.
+  `verify::Claims` (`src/auth/verify.rs`) answers a failed Bearer credential with
+  a `WWW-Authenticate` challenge on **both** paths — a bare `Bearer` when none was
+  presented, `error="invalid_token"` on the 401 `UNAUTHENTICATED`,
+  `error="insufficient_scope"` on the 403 `PERMISSION_DENIED` — and the sibling
+  `specs/auth/openapi.yaml` already documents that exact header on its own
+  `Unauthenticated`/`PermissionDenied` responses, but the **shared**
+  `specs/shared/errors.yaml` responses — the `$ref` target every business spec's
+  401/403 resolves to — declared only `x-correlator`, so the whole corpus
+  under-stated the wire contract at once. Added a reusable
+  `components.headers.WWWAuthenticate` header (mirroring `XCorrelator`) and
+  referenced it (key `WWW-Authenticate`) from `Unauthenticated` + `PermissionDenied`
+  only (the other canonical errors — 400/404/409/… — carry no challenge and must
+  not claim one); this propagates to every business spec through their existing
+  `$ref`s, no per-spec edit. Guarded by a new contract test
+  (`src/registry.rs every_shared_auth_error_response_declares_a_www_authenticate_header`,
+  the auth-only companion of `every_shared_error_response_declares_an_x_correlator_header`,
+  which only ever checks the `x-correlator` header every error carries) + a new
+  pure extractor `auth_error_responses_missing_www_authenticate` (the
+  `shared_error_responses_missing_x_correlator` structural scan restricted to the
+  two auth response names, looking for a `WWW-Authenticate:` key under `headers:`,
+  so an `example:`-payload mention doesn't count and a whole-response `$ref` is
+  exempt) with a unit-cover test (`shared_auth_www_authenticate_extraction_rules`:
+  header-present passes, header-absent flagged, non-auth response ignored,
+  example-payload noise not counted, `$ref` exempt; + a non-vacuity floor on the
+  real fragment). Updated `component_pointer_extraction_rules`' shared-component
+  count 11 → 12 (the new header). Spec-only + test-only, no behaviour change (the
+  code already sent the header). `cargo test` 2910 green (was 2908); `cargo build
+  --release` succeeds. No new dependency. — binary: 5.1M (5,323,160 B; unchanged)
 - 2026-08-22 — Contract-test harness: added a **scenario error-result code
   well-formedness** contract test (`src/registry.rs`
   `every_scenario_error_result_names_a_well_formed_camara_code`) — the

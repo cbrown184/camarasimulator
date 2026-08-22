@@ -92,6 +92,15 @@ components:
       required: false
       schema:
         type: string
+    WWWAuthenticate:
+      description: >-
+        RFC 6750 Bearer challenge — a bare `Bearer` when no credential was
+        presented, or `Bearer error="invalid_token"` (401) / `Bearer
+        error="insufficient_scope"` (403) when the presented token failed
+        verification or lacked the required scope.
+      required: false
+      schema:
+        type: string
 
   responses:
     # Reusable responses for the standard CAMARA statuses. Each is selectable via
@@ -114,6 +123,8 @@ components:
       headers:
         x-correlator:
           $ref: "#/components/headers/XCorrelator"
+        WWW-Authenticate:
+          $ref: "#/components/headers/WWWAuthenticate"
       content:
         application/json:
           schema:
@@ -127,6 +138,8 @@ components:
       headers:
         x-correlator:
           $ref: "#/components/headers/XCorrelator"
+        WWW-Authenticate:
+          $ref: "#/components/headers/WWWAuthenticate"
       content:
         application/json:
           schema:
