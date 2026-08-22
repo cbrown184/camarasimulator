@@ -3332,6 +3332,21 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - an **unused reusable-component** contract test (`src/registry.rs`
+    `every_reusable_component_is_referenced`) — Spectral's `oas3-unused-component`,
+    scoped to the reusable non-schema sections: every component defined under
+    `components.responses`/`.parameters`/`.headers` (+ `.requestBodies`/`.examples`/
+    `.links`/`.callbacks`) MUST be reached by a local `#/components/…` `$ref`. The
+    exact inverse of `local_component_refs_resolve_within_their_own_spec`; an
+    unreferenced reusable component is dead weight in the served spec (a client
+    materialises a response/parameter/header object no operation uses). `schemas`
+    (also mapping-reachable + intentional event-doc orphans) and `securitySchemes`
+    (referenced by name in a `security` requirement) are out of scope, documented on
+    the helper. New pure `unreferenced_reusable_components` (on `component_pointers` +
+    `ref_targets`); sound because `cross_file_refs_to_unserved_files` proves no served
+    file points back into a business spec. Corpus: 145 reusable components, every one
+    referenced → 0 drift. Unit-covered (`reusable_component_reference_extraction_rules`;
+    ≥100 floor). Test-only, no spec change.
   - a **schema-slot `$ref` section-typing** contract test (`src/registry.rs`
     `every_schema_ref_targets_the_schemas_section`) asserts every `$ref` a spec uses as
     the value of a `schema:` field (Parameter / Media Type / Header Object) targets the
@@ -5973,6 +5988,48 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-22 — Contract-test harness: added an **unused reusable-component** contract
+  test (`src/registry.rs` `every_reusable_component_is_referenced`) — the OpenAPI 3
+  hygiene lint Spectral names `oas3-unused-component`, scoped to the **reusable
+  non-schema** sections. Every component a mounted spec *defines* under
+  `components.responses`/`.parameters`/`.headers` (and `.requestBodies`/`.examples`/
+  `.links`/`.callbacks`, none present today) MUST be reached by at least one local
+  `#/components/<section>/<Name>` `$ref` in the same document. The exact **inverse** of
+  `local_component_refs_resolve_within_their_own_spec` (which proves every local ref
+  finds a defined component; this proves every reusable defined component is reached by
+  a ref). An unreferenced reusable component is dead weight in the served spec — a
+  shared `NotFound` response / an `XCorrelator` request-parameter or response-header
+  defined but wired to no operation, so a Redoc/Swagger/codegen client materialises an
+  object nothing uses; the residue of the same copy-paste drafting the ref tests guard
+  from the other side (a component pasted in with an operation, then stranded when its
+  only `$ref` was renamed or the operation trimmed). No existing test sees it — every
+  ref test walks a *ref* to its target (never a *definition* awaiting an incoming ref),
+  and the unused-*tag* / unused-server-variable tests cover other object kinds. Two
+  sections are deliberately out of scope (documented on the helper): `securitySchemes`
+  (referenced by *name* inside a `security` requirement, never by `$ref` — guarded by
+  `every_security_requirement_references_a_defined_scheme`), and `schemas` (also
+  reachable via a discriminator `mapping:` value, and sometimes defined solely to
+  document a deferred notification payload — e.g. qos-booking's `QosBookingEvent`, a
+  documented cut; a faithful schema-usage test needs mapping-reachability + a
+  documented-orphan allowance, left to a later slice). New pure
+  `unreferenced_reusable_components` (built on `component_pointers` + `ref_targets`,
+  both already unit-covered): the referenced set = local top-level component pointers
+  (empty file half, 4 `/`-segments), the defined set filtered to non-schema/
+  non-securityScheme sections, difference sorted. Sound because
+  `cross_file_refs_to_unserved_files` proves no served file points back into a business
+  spec, so a locally-defined reusable component can only be reached locally. Surveyed
+  the corpus first (60 business specs: **145** reusable components defined —
+  headers 60, parameters 70, responses 15 — every one locally referenced → 0 drift; the
+  only defined-but-un-`$ref`'d components are the excluded `securitySchemes/openId`
+  ×60 and 6 `schemas`, of which 3 are discriminator-`mapping:`-reached and 3 are
+  intentional event-doc cuts), a live guard the moment a reusable component is stranded.
+  Tests: +2 (the contract test with a ≥100-component non-vacuous floor +
+  `reusable_component_reference_extraction_rules`: a referenced header cleared, an
+  orphaned parameter/response flagged in sorted order, a schema + securityScheme
+  ignored, a cross-file ref to a same-named target not counted as local, an
+  empty/components-less body). `cargo test` 2898 green (was 2896); `cargo build
+  --release` succeeds. No new dependency; test-only change. — binary: 5.1M
+  (5,323,160 B; unchanged)
 - 2026-08-22 — Contract-test harness: added a **schema-slot `$ref` section-typing**
   contract test (`src/registry.rs` `every_schema_ref_targets_the_schemas_section`) —
   every `$ref` a spec uses as the value of a `schema:` field MUST target the `schemas`

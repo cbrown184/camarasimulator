@@ -1813,6 +1813,72 @@ mod tests {
         out
     }
 
+    /// Return every locally-defined component in a **reference-bearing** section
+    /// (`responses`, `parameters`, `headers`, `requestBodies`, `examples`, `links`,
+    /// `callbacks` — every `components:` section *except* `schemas` and
+    /// `securitySchemes`) that **no** local `#/components/<section>/<Name>` `$ref`
+    /// in the same document targets, as `#/components/<section>/<Name>` sorted.
+    ///
+    /// The inverse of [`local_component_refs_resolve_within_their_own_spec`]: that
+    /// test proves every local `$ref` finds a component it defines; this one proves
+    /// every reusable component it defines is reached by some local `$ref` — the
+    /// `oas3-unused-component` lint. A reusable component (a shared error `responses`
+    /// entry, an `XCorrelator` request `parameters` entry or response `headers`
+    /// entry) that nothing `$ref`s is dead weight in the served spec: a
+    /// Redoc/Swagger/codegen client materialises an unused response/parameter/header
+    /// object no operation ever uses. It is the routine residue of the same
+    /// copy-paste drafting the ref tests guard from the other side — a component
+    /// pasted in with an operation, then left behind when its only `$ref` was
+    /// renamed or the operation trimmed.
+    ///
+    /// Two sections are deliberately out of scope, because "no `$ref` targets it"
+    /// does **not** mean "unused" for them:
+    /// - `securitySchemes` — a scheme is referenced by *name* inside a `security`
+    ///   requirement (`- openId: [...]`), never by a `$ref`; its used-ness is the
+    ///   contract of `every_security_requirement_references_a_defined_scheme`.
+    /// - `schemas` — a schema is also reachable through a discriminator `mapping:`
+    ///   value (a `#/components/schemas/…` string that is not a `$ref:` line), and
+    ///   is sometimes defined purely to *document* a deferred notification payload
+    ///   (e.g. qos-booking's `QosBookingEvent`, a documented cut). A faithful
+    ///   schema-usage test needs mapping-reachability plus a documented-orphan
+    ///   allowance, so it is left to a later slice rather than folded in here.
+    ///
+    /// Built on [`component_pointers`] (the defined set) and [`ref_targets`] (the
+    /// referenced set), both already unit-covered; only top-level component pointers
+    /// `#/components/<section>/<Name>` (4 slash-separated segments) are considered,
+    /// the granularity `component_pointers` resolves. A cross-file `$ref` (non-empty
+    /// file half) never marks a *local* component used — but by
+    /// `cross_file_refs_to_unserved_files` no served file points back into a business
+    /// spec, so a locally-defined reusable component can only be reached locally,
+    /// making the local-ref check sound.
+    fn unreferenced_reusable_components(body: &str) -> Vec<String> {
+        let referenced: HashSet<String> = ref_targets(body)
+            .into_iter()
+            .filter_map(|t| {
+                let (file, pointer) = t.split_once('#')?;
+                // Local intra-document refs only (empty file half).
+                if !file.is_empty() {
+                    return None;
+                }
+                let pointer = format!("#{pointer}");
+                // Top-level component pointers only (`#/components/<sec>/<name>`).
+                (pointer.split('/').count() == 4 && pointer.starts_with("#/components/"))
+                    .then_some(pointer)
+            })
+            .collect();
+        let mut out: Vec<String> = component_pointers(body)
+            .into_iter()
+            .filter(|pointer| {
+                // The section is the 3rd `/`-segment of `#/components/<sec>/<name>`.
+                let section = pointer.split('/').nth(2).unwrap_or_default();
+                !matches!(section, "schemas" | "securitySchemes")
+                    && !referenced.contains(pointer)
+            })
+            .collect();
+        out.sort();
+        out
+    }
+
     /// Extract every component whose *key* — its name under a `components.<section>:`
     /// map — violates the OpenAPI 3 Components Object key rule, returned as
     /// `#/components/<section>/<name>` in document order.
@@ -8601,6 +8667,159 @@ components:
                 );
             }
         }
+    }
+
+    #[test]
+    fn every_reusable_component_is_referenced() {
+        // Contract-harness invariant (OpenAPI 3 hygiene, Spectral's
+        // `oas3-unused-component`): every **reusable** component a mounted spec
+        // DEFINES — an entry under `components.responses` / `.parameters` /
+        // `.headers` (and `.requestBodies` / `.examples` / `.links` / `.callbacks`,
+        // none present today) — MUST be reached by at least one local
+        // `#/components/<section>/<Name>` `$ref` in the same document. The exact
+        // inverse of `local_component_refs_resolve_within_their_own_spec` (which
+        // proves every local ref finds a defined component; this proves every
+        // reusable defined component is reached by a ref).
+        //
+        // The break this catches: an unreferenced reusable component is dead weight
+        // in the served spec — a shared `NotFound` response, an `XCorrelator`
+        // request parameter or response header defined but wired to no operation, so
+        // a Redoc/Swagger/codegen client materialises a response/parameter/header
+        // object nothing uses. It is the residue of the copy-paste drafting the ref
+        // tests already guard from the other side: a component pasted in with an
+        // operation, then stranded when its only `$ref` was renamed or the operation
+        // trimmed. No existing test sees it — every ref test walks a *ref* to its
+        // target (never a *definition* for an incoming ref), and the unused-*tag* /
+        // unused-server-variable tests cover other object kinds entirely.
+        //
+        // `schemas` and `securitySchemes` are out of scope on purpose (see
+        // `unreferenced_reusable_components`): a securityScheme is referenced by
+        // *name* in a `security` requirement (guarded by
+        // `every_security_requirement_references_a_defined_scheme`), and a schema is
+        // also reachable via a discriminator `mapping:` value and is sometimes
+        // defined solely to document a deferred notification payload — both need
+        // handling a later slice can add. Verified true across all mounted specs
+        // before asserting: 145 reusable components defined, every one referenced.
+        let mut checked = 0usize;
+        for api in APIS {
+            checked += component_pointers(api.body)
+                .iter()
+                .filter(|pointer| {
+                    let section = pointer.split('/').nth(2).unwrap_or_default();
+                    !matches!(section, "schemas" | "securitySchemes")
+                })
+                .count();
+            let orphans = unreferenced_reusable_components(api.body);
+            assert!(
+                orphans.is_empty(),
+                "{} spec defines reusable component(s) that no local $ref targets — \
+                 dead weight in the served spec (a client materialises a response/\
+                 parameter/header object no operation uses): {:?}",
+                api.name,
+                orphans
+            );
+        }
+        // Non-vacuous floor: the corpus defines a per-spec `XCorrelator`
+        // request-parameter + response-header pair plus shared error responses, so
+        // reusable components number in the hundreds. Guards the test from passing
+        // because the extractor silently found nothing to check.
+        assert!(
+            checked >= 100,
+            "expected many reusable components across the corpus, saw {checked}"
+        );
+    }
+
+    #[test]
+    fn reusable_component_reference_extraction_rules() {
+        // Pin `unreferenced_reusable_components`: it flags a reusable component
+        // (`responses`/`parameters`/`headers`/…) that no local top-level `$ref`
+        // reaches, in sorted order, while (a) clearing one that is referenced, (b)
+        // never flagging a `schemas` or `securitySchemes` component (out of scope),
+        // and (c) treating a cross-file `$ref` as not-a-local-reference.
+        //
+        // A referenced header + an orphaned parameter, an orphaned response, an
+        // unreferenced schema (must be ignored), an unreferenced securityScheme
+        // (must be ignored), and a local response whose *name* matches a cross-file
+        // ref's target (the local one must still be flagged — a cross-file `$ref`
+        // resolves into the other file, never this document's same-named component):
+        let body = "\
+openapi: 3.0.3
+paths:
+  /a:
+    get:
+      parameters:
+        - $ref: '#/components/parameters/XCorrelator'
+      responses:
+        '200':
+          description: ok
+          headers:
+            x-correlator:
+              $ref: '#/components/headers/XCorrelator'
+        '404':
+          $ref: '../../shared/errors.yaml#/components/responses/NotFound'
+components:
+  responses:
+    UsedNowhere:
+      description: an orphaned reusable response
+    NotFound:
+      description: same name as the cross-file target, but never locally $ref'd
+  parameters:
+    XCorrelator:
+      name: x-correlator
+      in: header
+    StrayParam:
+      name: stray
+      in: query
+  headers:
+    XCorrelator:
+      schema:
+        type: string
+  schemas:
+    OrphanSchema:
+      type: object
+  securitySchemes:
+    openId:
+      type: openIdConnect
+      openIdConnectUrl: /x
+";
+        let orphans = unreferenced_reusable_components(body);
+        assert_eq!(
+            orphans,
+            vec![
+                "#/components/parameters/StrayParam".to_string(),
+                "#/components/responses/NotFound".to_string(),
+                "#/components/responses/UsedNowhere".to_string(),
+            ],
+            "should flag exactly the unreferenced reusable components, sorted; the \
+             referenced headers/XCorrelator is cleared, the schema + securityScheme \
+             are out of scope, and a cross-file ref to a same-named target does not \
+             count as a local reference"
+        );
+
+        // A spec whose only reusable component is referenced → nothing flagged.
+        let clean = "\
+paths:
+  /a:
+    get:
+      parameters:
+        - $ref: '#/components/parameters/XCorrelator'
+      responses:
+        '200':
+          description: ok
+components:
+  parameters:
+    XCorrelator:
+      name: x-correlator
+      in: header
+";
+        assert!(
+            unreferenced_reusable_components(clean).is_empty(),
+            "a referenced reusable component must not be flagged"
+        );
+
+        // A spec with no reusable components at all → empty (never panics on the
+        // section split of a components-less body).
+        assert!(unreferenced_reusable_components("paths: {}\n").is_empty());
     }
 
     #[test]
