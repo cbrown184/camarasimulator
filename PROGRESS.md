@@ -6145,6 +6145,31 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-22 — Contract-test harness: guard that no **path/operation-level `servers`
+  override** exists (`src/registry.rs`
+  `no_operation_or_path_item_declares_a_servers_override`). CAMARA Commonalities fixes
+  each API to EXACTLY ONE server, declared once at the document root
+  (`{apiRoot}/{api}/{version}`); OpenAPI lets a Path Item or Operation Object carry its
+  own `servers` array to override that base URL, but CAMARA forbids the endpoint-scoped
+  override — it hands Redoc/Swagger's "try it" panel and a codegen client a second
+  origin that never resolves to a simulator route and silently contradicts the single
+  root server every sibling API pins. The **placement** member of the servers family, in
+  the blind spot of both siblings: `every_spec_declares_exactly_one_server` and
+  `every_spec_declares_a_non_empty_servers_array` read only the indent-0 root array
+  (`servers_array_state` explicitly skips an indented `servers:`), so a nested override
+  is invisible to the whole family. New pure `servers_override_lines`: flags an
+  **indented** (non-root) `servers:` key whose value is a Server *array* — an inline
+  non-empty flow (`servers: [ {url:…} ]`) or a block whose first deeper non-empty line is
+  a `- ` entry — while skipping a schema property named `servers` (mapping- or empty-`[]`-
+  valued) and a `servers:` inside an `example:`/`examples:` payload (ancestor walk).
+  Surveyed the corpus first (all 61 `servers:` keys column-0; zero indented) → 0 drift.
+  Tests: +2 (the contract test + `servers_override_extraction_rules`: root array,
+  example-payload `servers`, and mapping-valued schema-property `servers` all skipped;
+  a path-item block override and an operation inline-flow override flagged in document
+  order `[6, 10]`; empty inline `servers: []` not flagged; ≥50 document-root `servers:`
+  non-vacuity floor). `cargo test` 2922 green (was 2920); `cargo build --release`
+  succeeds. No new dependency; test-only change (no spec/runtime edit). — binary
+  (release): 5.1M (5,323,160 B; unchanged).
 - 2026-08-22 — Contract-test harness: guard every **security-requirement scope is a
   well-formed CAMARA scope** (`src/registry.rs`
   `every_security_requirement_scope_is_a_well_formed_camara_scope`). A `security`

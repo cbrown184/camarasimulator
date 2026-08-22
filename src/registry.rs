@@ -62970,4 +62970,226 @@ paths:
             "expected many hyphenated static segments (exercising the kebab grammar), got {hyphenated}"
         );
     }
+
+    /// The 1-based line numbers, in document order, of every **indented** (non
+    /// document-root) `servers:` key that introduces a Server Array — i.e. a
+    /// Path-Item-level or Operation-level `servers` override — without a YAML dep.
+    ///
+    /// CAMARA Commonalities fixes each API to EXACTLY ONE server, declared once at
+    /// the document root (`{apiRoot}/{api}/{version}`). OpenAPI lets a Path Item or
+    /// an Operation Object carry its own `servers` array to override that base URL,
+    /// but CAMARA forbids the per-path / per-operation override: it hands a
+    /// Redoc/Swagger "try it" panel and a codegen client a second, endpoint-specific
+    /// origin that never resolves to a route the simulator serves, and silently
+    /// contradicts the single root server every sibling API pins.
+    ///
+    /// The *placement* complement of `every_spec_declares_exactly_one_server` and
+    /// `every_spec_declares_a_non_empty_servers_array`: both read only the
+    /// document-root (indent-0) `servers:` via `servers_array_state`, which
+    /// deliberately skips an indented `servers:` — so a second, overriding array
+    /// nested under a path or operation is invisible to the whole servers family.
+    ///
+    /// Scoping: a `servers:` key at indent > 0 whose value is a Server *array* — an
+    /// inline non-empty flow (`servers: [ {url: …} ]`) or a block form whose first
+    /// deeper non-empty line is a `- ` entry — is flagged. A schema property literally
+    /// named `servers` (value a mapping — `type:`/`items:` — or an empty inline `[]`)
+    /// is not an override array, so it is skipped, as is a `servers:` that sits inside
+    /// an `example:`/`examples:` payload (sample data, not a real Server Object).
+    fn servers_override_lines(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+
+        // Whether line `i` (indent `c`) sits inside an outer `example:`/`examples:`
+        // payload — an enclosing container key up the indent ladder is
+        // `example`/`examples` — so a `servers` key there is sample data.
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            // A `servers:` key. `strip_prefix("servers:")` on the trimmed line pins
+            // the whole key + colon, so a `serversFoo:` / `x-servers:` / `- servers:`
+            // list item never matches.
+            let Some(rest) = line.trim_start().strip_prefix("servers:") else {
+                continue;
+            };
+            let sec_ind = indent(line);
+            if sec_ind == 0 {
+                continue; // the document-root server array — the servers-count tests' concern
+            }
+            if inside_example(i, sec_ind) {
+                continue;
+            }
+            let val = rest.trim();
+            // Inline-flow form: only a *non-empty* `[ … ]` is a Server array override;
+            // an empty `[]` (a schema-property default) is not.
+            if let Some(after) = val.strip_prefix('[') {
+                let inner = match after.rfind(']') {
+                    Some(end) => &after[..end],
+                    None => after,
+                };
+                if !inner.trim().is_empty() {
+                    out.push(i + 1);
+                }
+                continue;
+            }
+            // A non-empty, non-flow scalar (`servers: something`) is not a Server array.
+            if !val.is_empty() && !val.starts_with('#') {
+                continue;
+            }
+            // Block form: the first deeper-indented non-empty line decides — a `- `
+            // entry is a Server array override; a `key:` mapping is a schema property.
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) <= sec_ind {
+                    break; // empty block, dedented out
+                }
+                if l.trim_start().starts_with("- ") {
+                    out.push(i + 1);
+                }
+                break; // first deeper line decides
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn no_operation_or_path_item_declares_a_servers_override() {
+        // Contract-harness invariant (CAMARA Commonalities "Servers" rule): a mounted
+        // vendored spec declares its ONE `{apiRoot}/{api}/{version}` server only at the
+        // document root — never a Path-Item-level or Operation-level `servers`
+        // override. OpenAPI permits such overrides, but CAMARA pins the single base URL
+        // to the root; an endpoint-scoped `servers` array hands Redoc/Swagger and a
+        // codegen client a second origin that never resolves to a simulator route.
+        //
+        // The *placement* companion of `every_spec_declares_exactly_one_server` /
+        // `every_spec_declares_a_non_empty_servers_array`, which read only the
+        // indent-0 root array (`servers_array_state` explicitly skips an indented
+        // `servers:`) — so a nested override is in the blind spot of the whole servers
+        // family. Verified every mounted spec declares its server only at the root
+        // before asserting.
+        for api in APIS {
+            let overrides = servers_override_lines(api.body);
+            assert!(
+                overrides.is_empty(),
+                "{} spec declares a path/operation-level `servers` override at line(s) \
+                 {:?}; CAMARA pins the single server to the document root",
+                api.name,
+                overrides
+            );
+        }
+    }
+
+    #[test]
+    fn servers_override_extraction_rules() {
+        // Unit-cover the `servers_override_lines` extractor so the contract test above
+        // can't pass vacuously and its root-skip / block / inline-flow / schema-property
+        // / example-payload discrimination is pinned.
+        let body = "\
+openapi: 3.0.3
+servers:
+  - url: \"{apiRoot}/x/v1\"
+paths:
+  /a:
+    servers:
+      - url: \"https://alt.example/a\"
+    get:
+      operationId: getA
+      servers: [ { url: \"https://op.example/a\" } ]
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              example:
+                servers:
+                  - url: \"https://ex.example\"
+components:
+  schemas:
+    Widget:
+      type: object
+      properties:
+        servers:
+          type: array
+          items:
+            type: string
+";
+        // Flagged, in document order: the Path-Item override `servers:` block (line 6)
+        // and the Operation-level inline-flow override `servers: [ … ]` (line 10).
+        // Not flagged: the document-root `servers:` (line 2, indent 0), the `servers:`
+        // inside the `example:` payload (line 17), and the schema property named
+        // `servers` whose value is a mapping (line 24).
+        assert_eq!(servers_override_lines(body), vec![6, 10]);
+
+        // An empty inline `servers: []` under a path is a schema-property default, not
+        // a Server array override → not flagged.
+        let empty_flow = "\
+openapi: 3.0.3
+servers:
+  - url: \"{apiRoot}/x/v1\"
+paths:
+  /a:
+    get:
+      operationId: getA
+      servers: []
+      responses:
+        '200':
+          description: ok
+";
+        assert!(servers_override_lines(empty_flow).is_empty());
+
+        // Non-vacuous floor: across every registered spec, no path/operation declares a
+        // `servers` override (the invariant the contract test asserts), and the corpus
+        // actually declares a document-root `servers:` on essentially every spec — so
+        // the extractor's root-skip branch runs on real data and a broken (always-empty)
+        // scan can't hide behind a corpus that never mentions `servers`. Count the
+        // document-root `servers:` keys independently of the extractor.
+        let mut root_servers = 0usize;
+        for api in APIS {
+            assert!(
+                servers_override_lines(api.body).is_empty(),
+                "{}: no path/operation may declare a `servers` override",
+                api.name
+            );
+            if api
+                .body
+                .lines()
+                .any(|l| l == "servers:" || l.starts_with("servers:"))
+            {
+                root_servers += 1;
+            }
+        }
+        assert!(
+            root_servers >= 50,
+            "expected a document-root `servers:` on most specs, got {root_servers}"
+        );
+    }
 }
