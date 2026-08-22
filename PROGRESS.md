@@ -3335,6 +3335,17 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - an **array-`default` item-bounds** contract test (`src/registry.rs`
+    `every_array_default_respects_its_item_bounds`) — the `default`-side twin of
+    `every_array_example_respects_its_item_bounds`: an array `default` (inline flow or `- `
+    block) beside a `minItems`/`maxItems` sibling must have an element count within those
+    bounds, else the schema's own validator rejects the value it pre-supplies. Completes the
+    array-item-count corner of the example/default symmetry (numeric-bound, string-length,
+    enum-membership, schema-type already paired). New pure
+    `array_defaults_outside_their_item_bounds` (mirrors the array-example extractor). Corpus
+    declares no array defaults → 0 drift; asserts clean + guards future drift (string-length-
+    default posture). Unit-covered (`array_default_item_bound_extraction_rules`;
+    `bounded_array_defaults == 0` floor). Test-only, no spec change.
   - a **shared-error ref status-key match** contract test (`src/registry.rs`
     `every_shared_error_ref_matches_its_response_status_key`) — a business spec keys
     each standard error by its HTTP status and points the value at the shared error
@@ -6210,6 +6221,34 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-22 — Contract-test harness: guard that every **array `default` respects its
+  item bounds** (`src/registry.rs` `every_array_default_respects_its_item_bounds`). In
+  OpenAPI 3.0.x (JSON Schema) a `default` is a fall-back *instance* of the schema, so
+  where a Schema Object bounds an array with `minItems`/`maxItems`, an array default with
+  fewer than `minItems` or more than `maxItems` elements is a self-contradictory schema
+  whose own validator rejects the value it pre-supplies (a Redoc/Swagger form pre-fills an
+  out-of-range default; a codegen client's default fails the size bound). The
+  **`default`-side twin of `every_array_example_respects_its_item_bounds`**, completing
+  the array-item-count corner of the example/default symmetry the harness already keeps
+  for the numeric-bound (`every_default_is_within_its_numeric_bounds`), string-length
+  (`every_default_respects_its_string_length_bounds`), enum-membership and schema-type
+  families — none of which compare an array default's *element count* against its bounds
+  (the type test reads the default's type, the enum test its membership, and the size-bound
+  tests only the bounds' own domain/ordering). New pure
+  `array_defaults_outside_their_item_bounds` (mirrors the array-example extractor: counts
+  an inline flow `default: [a, b]` or a `- ` block sequence, pairs a same-object
+  dedent-bounded `minItems`/`maxItems` sibling, skips a scalar default, a property literally
+  named `default`, a multi-line flow, a default with no size-bound sibling, and one nested
+  inside an `example:`/`examples:` payload). Surveyed the corpus first — it declares **no**
+  array defaults at all — so the contract test asserts clean across all specs and guards
+  future drift (the same posture as the string-length-default twin). Tests: +2 (the contract
+  test + `array_default_item_bound_extraction_rules`: a within-bounds flow default and one
+  equal to its bounds cleared; below-`minItems` flow and block forms, above-`maxItems`, and
+  an empty flow flagged in document order; scalar / no-bound / in-`example:` / cross-dedent
+  / property-named-`default` cases skipped; a `bounded_array_defaults == 0` corpus floor
+  documenting the future-drift posture). `cargo test` 2934 green (was 2932); `cargo build
+  --release` succeeds. No new dependency; test-only change (no spec/runtime edit). — binary
+  (release): 5.1M (5,323,160 B; unchanged).
 - 2026-08-22 — Contract-test harness: guard that every **`properties:` entry carries a
   Schema Object value** (`src/registry.rs` `every_property_value_is_a_schema_object`). A
   `properties:` mapping is keyed by property name and each value MUST be a Schema Object —

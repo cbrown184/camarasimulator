@@ -31577,6 +31577,494 @@ components:
         );
     }
 
+    /// The 1-based line numbers, in document order, of every array `default` (an inline
+    /// flow `[...]` or a `- ` block sequence) whose element count falls outside a sibling
+    /// `minItems`/`maxItems` array-size bound declared in the same Schema Object, without
+    /// a YAML dep. The `default`-side twin of `array_examples_outside_their_item_bounds`.
+    ///
+    /// In OpenAPI 3.0.x (JSON Schema) a `default` is a fall-back *instance* of the schema,
+    /// so it MUST satisfy the schema's own constraints. Where the object bounds an array
+    /// with `minItems`/`maxItems`, a default with fewer than `minItems` or more than
+    /// `maxItems` elements is a self-contradictory schema whose own validator rejects the
+    /// value it pre-supplies, so a Redoc/Swagger form pre-fills a control with an
+    /// out-of-range default and a codegen client's default fails the size bound at the
+    /// point a caller reads or builds the payload.
+    ///
+    /// Only a `default` whose value is a YAML **sequence** — an inline flow array
+    /// (`default: [a, b]`) or a block sequence (`default:` opening a block whose first
+    /// child is a `- ` item) — and that declares at least one same-object array-size bound
+    /// sibling is inspected; each bound is scanned at the default's own indent, down
+    /// through the object's block then up, dedent-bounded exactly like
+    /// `array_examples_outside_their_item_bounds`, so a nested or following sibling
+    /// object's bound never pairs, and read only when it is a non-negative-integer scalar.
+    /// Skipped: a scalar default (a number/string/boolean — the numeric-bound / length /
+    /// type tests' concern); a block-opening `default:` whose first child is *not* a
+    /// sequence item (a property literally named `default`, or an object/block-scalar
+    /// default); an inline flow array that never closes on its line (a multi-line flow,
+    /// left un-counted rather than miscounted); a default with no array-size-bound
+    /// sibling; and a `default:` nested inside an outer `example:`/`examples:` payload
+    /// (sample data, not a schema keyword). The comparison is inclusive — only a count
+    /// strictly below `minItems` or strictly above `maxItems` is flagged.
+    fn array_defaults_outside_their_item_bounds(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        // The inline scalar of a `name:` key (inline comment stripped; surrounding
+        // quotes preserved); `None` when the line is a different key or opens a block.
+        let raw_inline = |l: &str, name: &str| -> Option<String> {
+            let (k, v) = l.trim_start().split_once(':')?;
+            if k.trim() != name {
+                return None;
+            }
+            let v = v.split('#').next().unwrap_or(v).trim();
+            if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            }
+        };
+        // A same-indent non-negative-integer array-size bound sibling `key` in the same
+        // object as line `i` (indent `c`): scan down through the object's block then up,
+        // dedent-bounded so a nested or following object's bound never pairs. A quoted or
+        // non-integer bound has no count to compare against and is treated as absent (its
+        // own domain is `every_size_bound_is_a_non_negative_integer`'s concern).
+        let sibling_int = |i: usize, c: usize, key: &str| -> Option<usize> {
+            let parse_int = |l: &str| -> Option<usize> {
+                let raw = raw_inline(l, key)?;
+                if raw.starts_with('"') || raw.starts_with('\'') {
+                    return None; // quoted → not a plain integer
+                }
+                raw.parse::<usize>().ok()
+            };
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c {
+                    if let Some(n) = parse_int(l) {
+                        return Some(n);
+                    }
+                }
+                j += 1;
+            }
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c {
+                    if let Some(n) = parse_int(l) {
+                        return Some(n);
+                    }
+                }
+            }
+            None
+        };
+        // True when line `i` (indent `c`) sits inside an outer `example:`/`examples:`
+        // payload — some enclosing container key up the indent ladder is
+        // `example`/`examples` — so a `default` key there is sample data, not a schema
+        // keyword (mirroring `defaults_outside_their_length_bounds`).
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        // The element count of an inline flow sequence whose text starts with `[` — top-
+        // level commas (bracket/brace depth 0 inside the outer array, quotes respected)
+        // plus one when the array holds any content; `None` when the flow never closes on
+        // its line (a multi-line flow, left un-counted). Anything after the outer `]` is
+        // ignored.
+        let flow_count = |v: &str| -> Option<usize> {
+            let mut depth: i32 = 0;
+            let mut in_s = false;
+            let mut in_d = false;
+            let mut commas = 0usize;
+            let mut nonempty = false;
+            for ch in v.chars() {
+                if in_s {
+                    if ch == '\'' {
+                        in_s = false;
+                    }
+                    continue;
+                }
+                if in_d {
+                    if ch == '"' {
+                        in_d = false;
+                    }
+                    continue;
+                }
+                match ch {
+                    '[' | '{' => depth += 1,
+                    ']' | '}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            return Some(if nonempty { commas + 1 } else { 0 });
+                        }
+                    }
+                    '\'' => {
+                        in_s = true;
+                        if depth >= 1 {
+                            nonempty = true;
+                        }
+                    }
+                    '"' => {
+                        in_d = true;
+                        if depth >= 1 {
+                            nonempty = true;
+                        }
+                    }
+                    ',' if depth == 1 => commas += 1,
+                    c if depth >= 1 && !c.is_whitespace() => nonempty = true,
+                    _ => {}
+                }
+            }
+            None
+        };
+        // The element count of a block sequence opened by a `default:` at line `i` (indent
+        // `c`): the number of `- ` items at the first child's indent, bounded by the dedent
+        // that closes the block. `None` when the first non-empty child is not a sequence
+        // item (a property literally named `default`, or an object/block-scalar default) —
+        // those are not arrays and out of scope.
+        let block_count = |i: usize, c: usize| -> Option<usize> {
+            let mut child_indent: Option<usize> = None;
+            let mut count = 0usize;
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                let li = indent(l);
+                if li <= c {
+                    break;
+                }
+                let t = l.trim_start();
+                let is_item = t == "-" || t.starts_with("- ");
+                match child_indent {
+                    None => {
+                        if !is_item {
+                            return None; // first child is not a sequence item
+                        }
+                        child_indent = Some(li);
+                        count += 1;
+                    }
+                    Some(ci) => {
+                        if li == ci && is_item {
+                            count += 1;
+                        }
+                    }
+                }
+                j += 1;
+            }
+            child_indent.map(|_| count)
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some((k, v)) = line.trim_start().split_once(':') else {
+                continue;
+            };
+            if k.trim() != "default" {
+                continue;
+            }
+            let c = indent(line);
+            if inside_example(i, c) {
+                continue;
+            }
+            let min = sibling_int(i, c, "minItems");
+            let max = sibling_int(i, c, "maxItems");
+            if min.is_none() && max.is_none() {
+                continue;
+            }
+            let inline = v.split('#').next().unwrap_or(v).trim();
+            let count = if inline.is_empty() {
+                // opens a block — an array only when its first child is a `- ` item
+                match block_count(i, c) {
+                    Some(n) => n,
+                    None => continue,
+                }
+            } else if inline.starts_with('[') {
+                match flow_count(inline) {
+                    Some(n) => n,
+                    None => continue, // multi-line flow — not counted
+                }
+            } else {
+                continue; // scalar default — not an array (numeric/length/type tests' concern)
+            };
+            let below = min.is_some_and(|m| count < m);
+            let above = max.is_some_and(|m| count > m);
+            if below || above {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_array_default_respects_its_item_bounds() {
+        // Contract-harness invariant (OpenAPI 3.0.x / JSON-Schema structural rule):
+        // where a Schema Object declares an array `default` beside a `minItems` and/or
+        // `maxItems`, the default's element count MUST lie within those bounds. A
+        // `default` is a fall-back *instance* of the schema, so an array with fewer than
+        // `minItems` or more than `maxItems` elements — a placeholder emptied below a
+        // raised floor, a list pasted past a tightened cap — is a self-contradictory
+        // schema whose own validator rejects the value it pre-supplies, so a Redoc/Swagger
+        // form pre-fills a control with an out-of-range default and a codegen client's
+        // default fails the size bound at the point a caller reads or builds the payload.
+        //
+        // The `default`-side twin of `every_array_example_respects_its_item_bounds`,
+        // completing the array-item-count corner of the example/default symmetry the
+        // harness already keeps for the numeric-bound (`every_default_is_within_its_
+        // numeric_bounds`), string-length (`every_default_respects_its_string_length_
+        // bounds`), enum-membership and schema-type families. No existing test compares an
+        // array default's *element count* against its size bounds:
+        // `every_default_matches_its_schema_type` checks the default's type,
+        // `every_default_is_a_member_of_its_enum` checks it against a sibling enum, and the
+        // size-bound tests (`every_size_bound_is_a_non_negative_integer`,
+        // `every_numeric_bound_is_ordered_low_to_high`) check the bounds' own domain and
+        // ordering, never against a default.
+        //
+        // The mounted corpus declares no array default paired with an item bound today (it
+        // declares no array defaults at all), so this asserts clean across every spec and
+        // guards future drift — the same posture as
+        // `every_default_respects_its_string_length_bounds`; the unit test below pins the
+        // extractor's detection so the pass is never vacuous.
+        for api in APIS {
+            let offenders = array_defaults_outside_their_item_bounds(api.body);
+            assert!(
+                offenders.is_empty(),
+                "{} spec declares an array `default` whose element count falls outside its \
+                 sibling `minItems`/`maxItems` bound (a value the bound's own validator \
+                 would reject) at `default:` line(s): {:?}",
+                api.name,
+                offenders
+            );
+        }
+    }
+
+    #[test]
+    fn array_default_item_bound_extraction_rules() {
+        // Unit-cover `array_defaults_outside_their_item_bounds` so the contract test above
+        // can't pass vacuously and its detection is pinned: an array default whose element
+        // count is within its bounds passes; one below a `minItems` (inline flow and
+        // block-sequence forms) and one above a `maxItems` are flagged in document order;
+        // an empty flow array below `minItems` is flagged; a count equal to a bound passes
+        // (inclusive); a scalar default is skipped (not an array); a default with no
+        // size-bound sibling is skipped; a `default:` nested inside an outer `example:`
+        // payload is skipped; a default in one property never pairs with a following
+        // property's bound across the dedent; and a property literally named `default`
+        // (opening a schema block, first child not a `- ` item) is skipped.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    GoodFlow:
+      type: array
+      minItems: 1
+      maxItems: 3
+      items:
+        type: integer
+      default: [1, 2]
+    TooFew:
+      type: array
+      minItems: 2
+      items:
+        type: string
+      default: [\"only\"]
+    TooMany:
+      type: array
+      maxItems: 2
+      items:
+        type: integer
+      default: [1, 2, 3]
+    EmptyBelow:
+      type: array
+      minItems: 1
+      items:
+        type: integer
+      default: []
+    EqualBound:
+      type: array
+      minItems: 2
+      maxItems: 2
+      items:
+        type: integer
+      default: [7, 8]
+    BlockFew:
+      type: array
+      minItems: 3
+      items:
+        type: string
+      default:
+        - a
+        - b
+    ScalarDefault:
+      type: array
+      minItems: 5
+      default: \"notarray\"
+    NoBound:
+      type: array
+      items:
+        type: integer
+      default: [1]
+    InExample:
+      type: object
+      example:
+        minItems: 5
+        default: [1]
+    Split:
+      type: object
+      properties:
+        a:
+          default: [1]
+        b:
+          type: array
+          minItems: 5
+    NamedDefault:
+      type: object
+      properties:
+        default:
+          type: array
+          minItems: 5
+          items:
+            type: integer
+";
+        // Flagged, in document order: line 26 (`TooFew.default: [\"only\"]`, 1 element <
+        // its `minItems: 2` sibling above), line 32 (`TooMany.default: [1, 2, 3]`, 3 > its
+        // `maxItems: 2`), line 38 (`EmptyBelow.default: []`, 0 < `minItems: 1`), and line
+        // 51 (`BlockFew.default:` block sequence of 2 items < `minItems: 3`). Not flagged:
+        // `GoodFlow` (2 in [1,3]); `EqualBound` (2 == both bounds, inclusive);
+        // `ScalarDefault` (`\"notarray\"` is a scalar, not an array — left to the type
+        // test); `NoBound` (no `minItems`/`maxItems` sibling); `InExample` (its inner
+        // `default: [1]` sits inside the outer `example:` payload); `Split.a.default: [1]`,
+        // whose only candidate `minItems: 5` sits in the following property `Split.b` past
+        // a dedent, so the two never pair; and `NamedDefault` (a `default:` opening a
+        // schema block whose first child is `type:`, not a `- ` item — a property literally
+        // named `default`, not an array).
+        assert_eq!(
+            array_defaults_outside_their_item_bounds(body),
+            vec![26, 32, 38, 51]
+        );
+
+        // The mounted corpus declares no array default at all (its defaults are scalar —
+        // enum-valued, numeric or boolean), so — unlike the array-example twin — there is
+        // no positive corpus floor to assert; the synthetic body above is what proves the
+        // count-comparison path runs and a broken (always-empty) extractor cannot hide.
+        // Confirm the contract invariant holds across the corpus here too, and that the
+        // corpus indeed pairs no array default with a size bound (documenting the
+        // future-drift posture).
+        let mut bounded_array_defaults = 0usize;
+        for api in APIS {
+            assert!(
+                array_defaults_outside_their_item_bounds(api.body).is_empty(),
+                "{}: every array default must lie within its sibling minItems/maxItems \
+                 bound",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            let is_key = |l: &str, name: &str| {
+                l.trim_start()
+                    .split_once(':')
+                    .is_some_and(|(k, _)| k.trim() == name)
+            };
+            for (i, l) in lines.iter().enumerate() {
+                let Some((k, v)) = l.trim_start().split_once(':') else {
+                    continue;
+                };
+                if k.trim() != "default" {
+                    continue;
+                }
+                let c = indent(l);
+                let vt = v.split('#').next().unwrap_or(v).trim();
+                // An array default is an inline flow (`[...]`) or a block whose first
+                // non-empty deeper child is a `- ` sequence item.
+                let is_array = if vt.starts_with('[') {
+                    true
+                } else if vt.is_empty() {
+                    let mut arr = false;
+                    let mut j = i + 1;
+                    while j < lines.len() {
+                        let x = lines[j];
+                        if x.trim().is_empty() {
+                            j += 1;
+                            continue;
+                        }
+                        if indent(x) <= c {
+                            break;
+                        }
+                        let t = x.trim_start();
+                        arr = t == "-" || t.starts_with("- ");
+                        break;
+                    }
+                    arr
+                } else {
+                    false
+                };
+                if !is_array {
+                    continue;
+                }
+                let lo = i.saturating_sub(8);
+                let hi = (i + 8).min(lines.len());
+                let has_bound = (lo..hi).any(|j| {
+                    j != i
+                        && indent(lines[j]) == c
+                        && (is_key(lines[j], "minItems") || is_key(lines[j], "maxItems"))
+                });
+                if has_bound {
+                    bounded_array_defaults += 1;
+                }
+            }
+        }
+        assert_eq!(
+            bounded_array_defaults, 0,
+            "expected the mounted corpus to pair no array default with an item bound (its \
+             defaults are scalar); found {bounded_array_defaults} — if a bounded array \
+             default is added, drop this floor and the \
+             every_array_default_respects_its_item_bounds test now guards it"
+        );
+    }
+
     /// The 1-based line numbers, in document order, of every array `example` (an inline
     /// flow `[...]` or a `- ` block sequence) at least one of whose elements is NOT a
     /// member of the `enum` its sibling `items` schema declares — without a YAML dep.
