@@ -3332,6 +3332,31 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - a **response-header `$ref` target-section** contract test (`src/registry.rs`
+    `every_response_header_ref_targets_the_headers_section`) asserts that every
+    `$ref` used as a Response Object `headers:` entry's value targets the `headers`
+    component section (`#/components/headers/<name>`) — the `headers:` map maps a
+    header name to a Header Object *or a reference to one*, so a `$ref` into
+    `#/components/parameters/…` / `#/components/schemas/…` is a type-mismatched
+    reference a resolver reads as the wrong kind of component (a Redoc/codegen
+    client mis-binds or drops the header). The break is a copy-paste hazard unique
+    to these specs, which define both a request `#/components/parameters/XCorrelator`
+    Parameter and a response `#/components/headers/XCorrelator` Header Object — two
+    names differing only by section. No existing test sees it:
+    `local_component_refs_resolve_within_their_own_spec` checks a local `$ref` finds
+    *some* target, never that its section fits the slot; the reserved-`Content-Type`
+    / x-correlator header tests read a header map's *keys*, never a header value's
+    ref; the ref-shape tests read a `$ref`'s siblings/fragment form, never section
+    vs. use. New pure `response_header_ref_targets` reuses
+    `response_headers_named_content_type`'s response-`headers:` scoping, then reads a
+    header value's `$ref` — inline flow or the header object's own direct-child
+    indent (a deeper `$ref` under the header's `schema:` is skipped) — as
+    `(line, pointer, section)`. Corpus: 320 response-header refs, all on
+    `#/components/headers/XCorrelator` → 0 drift. Unit-covered
+    (`response_header_ref_target_extraction_rules`: good/`parameters`-mis-ref/
+    cross-file refs in document order; schema-ref, examples-payload, and
+    `components.headers` component all skipped; inline flow read; ≥100-ref floor).
+    Test-only, no spec change.
   - a **scenario-result-status ↔ declared-response** contract test (`src/registry.rs`
     `every_scenario_result_status_is_a_declared_response`) asserts that when an
     `x-camarasim-scenarios` case documents an outcome by an explicit HTTP status
@@ -5855,6 +5880,46 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 ---
 
 ## Scan journal
+
+- 2026-08-22 — Contract-test harness: added a **response-header `$ref` target
+  section** test (`src/registry.rs`
+  `every_response_header_ref_targets_the_headers_section`) — every `$ref` a spec
+  uses as a Response Object `headers:` entry's value MUST target the `headers`
+  component section (`#/components/headers/<name>`). In an OpenAPI 3.0.x Response
+  Object the `headers:` map maps a header name to a Header Object *or a reference
+  to one*, so a `$ref` there into `#/components/parameters/…` or
+  `#/components/schemas/…` is a type-mismatched reference: a resolver is handed a
+  Parameter/Schema Object where a Header Object is required, and a
+  Redoc/Swagger/codegen client mis-binds or drops the header. The break is a live
+  copy-paste hazard **unique to these specs**: each defines *both* a request
+  `#/components/parameters/XCorrelator` Parameter and a response
+  `#/components/headers/XCorrelator` Header Object — two names differing only by
+  their section — so a `$ref` pasted from the parameter slot into a response
+  header slot resolves to a real component of the wrong kind. No existing test
+  sees it: `local_component_refs_resolve_within_their_own_spec` checks a local
+  `$ref` finds *some* target, never that its section fits the slot it fills; the
+  reserved-`Content-Type` and x-correlator header tests read a header map's
+  *keys*, never a header value's ref; the ref-shape tests
+  (`every_ref_object_stands_alone` / `every_ref_target_is_a_fragment_pointer`)
+  read a `$ref`'s siblings and fragment form, never its section against its use.
+  New pure `response_header_ref_targets` extractor reuses
+  `response_headers_named_content_type`'s response-`headers:` scoping (immediate
+  parent a status key, a `responses:` ancestor, `example`/`examples` payloads
+  excluded), then for each direct-child header entry reads a `$ref` value — inline
+  in a flow mapping (`x-correlator: { $ref: … }`) or at the header object's own
+  direct-child indent (a `$ref` nested deeper, under the header's `schema:`, is
+  that schema's ref and is skipped) — and reports `(line, pointer, section)`.
+  Surveyed the corpus first: **320** response-header refs across the business
+  specs, every one on `#/components/headers/XCorrelator` → **0** drift, a live
+  guard that fires the moment a parameter/schema ref is pasted into a
+  response-header slot. Unit-covered (`response_header_ref_target_extraction_rules`:
+  a good headers ref, a `parameters` mis-ref, and a cross-file headers ref
+  reported in document order; a header's own `schema:` ref, an `examples`-payload
+  ref, and a `components.headers` component ref all skipped; an inline flow-mapping
+  ref read; ≥100-ref non-vacuous floor). Test-only (`#[cfg(test)]`), no
+  runtime/spec change. `cargo test` 2886 green (was 2884; +2); `cargo build
+  --release` ok — binary (release): 5.1M (5,323,160 B; unchanged — test-only
+  code), no new deps.
 
 - 2026-08-21 — Contract-test harness: added a **scenario-result-status ↔
   declared-response** test (`src/registry.rs`

@@ -5010,6 +5010,200 @@ mod tests {
         out
     }
 
+    /// Every Response Object `headers:` entry whose value is a Reference Object
+    /// (`$ref`), as `(line, pointer, component-section)`: the 1-based line of the
+    /// `$ref`, the pointer string, and the component section its fragment names
+    /// (`headers`, `parameters`, `schemas`, …). A `$ref` whose fragment is not a
+    /// `#/…/components/<section>/<name>` pointer (a whole-file or non-components
+    /// ref — none exist here, and the ref-shape tests police malformed refs)
+    /// yields no entry.
+    ///
+    /// The section a **response header** ref names MUST be `headers`: in an OpenAPI
+    /// Response Object the `headers:` map maps a header name to its Header Object
+    /// *or a reference to one*, so a `$ref` there into `#/components/parameters/…`
+    /// or `#/components/schemas/…` is a type-mismatched reference — a resolver is
+    /// handed a Parameter/Schema Object where a Header Object is required, and a
+    /// Redoc/Swagger/codegen client mis-binds or drops the header. It is a live
+    /// copy-paste hazard precisely here: these specs define both a request
+    /// `#/components/parameters/XCorrelator` Parameter Object and a response
+    /// `#/components/headers/XCorrelator` Header Object — two component names
+    /// differing *only* by their section — so a `$ref` pasted from the parameter
+    /// slot into a response header slot resolves to a real component of the wrong
+    /// kind.
+    ///
+    /// No existing test sees this: `local_component_refs_resolve_within_their_own_spec`
+    /// checks a local `$ref` finds *some* target, never that its section matches the
+    /// slot it fills; the reserved-`Content-Type` and x-correlator header tests read
+    /// a header map's *keys*, never a header value's ref; the ref-shape tests
+    /// (`every_ref_object_stands_alone`, `every_ref_target_is_a_fragment_pointer`)
+    /// read a `$ref`'s siblings and fragment form, never the section against its use.
+    ///
+    /// Scope is a real Response Object `headers:` map (identical to
+    /// [`response_headers_named_content_type`]): a `headers:` block-opener under
+    /// `paths:` whose immediate parent is a response status key and whose ancestor
+    /// chain includes `responses:`, excluding an `example:`/`examples:` payload. Each
+    /// direct child of the map is a header name; the header's value is a Reference
+    /// when a `$ref` sits inline in a flow mapping on the header-name line
+    /// (`x-correlator: { $ref: … }`) or at the header object's own direct-child
+    /// indent — a `$ref` nested deeper (under the header's `schema:`) is that
+    /// schema's ref, not the header's, and is skipped. Pure and YAML-dep-free.
+    fn response_header_ref_targets(body: &str) -> Vec<(usize, String, String)> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+
+        let Some(ps) = lines
+            .iter()
+            .position(|l| l.trim_end() == "paths:" && !l.starts_with(char::is_whitespace))
+        else {
+            return Vec::new();
+        };
+        let pe = (ps + 1..lines.len())
+            .find(|&i| !lines[i].trim().is_empty() && !lines[i].starts_with(char::is_whitespace))
+            .unwrap_or(lines.len());
+
+        let is_status_key = |k: &str| -> bool {
+            let s = k.trim_matches(|c| c == '"' || c == '\'');
+            s == "default"
+                || (s.len() == 3
+                    && matches!(s.as_bytes()[0], b'1'..=b'5')
+                    && s.as_bytes()[1..]
+                        .iter()
+                        .all(|&c| c.is_ascii_digit() || c == b'X'))
+        };
+
+        // The pointer string of a `$ref` occurrence in `s` (a standalone `$ref:`
+        // line or a flow `{ $ref: … }`): the value after `$ref:`, one surrounding
+        // quote pair stripped, a bare token bounded by whitespace/`}`/`,`. `None`
+        // when `s` carries no `$ref` or no non-empty value.
+        let ref_pointer = |s: &str| -> Option<String> {
+            let after = &s[s.find("$ref")? + 4..];
+            let after = after.trim_start().strip_prefix(':')?.trim_start();
+            let val = if let Some(r) = after.strip_prefix('"') {
+                r.split('"').next()?
+            } else if let Some(r) = after.strip_prefix('\'') {
+                r.split('\'').next()?
+            } else {
+                after
+                    .split(|c: char| c.is_whitespace() || c == '}' || c == ',')
+                    .next()?
+            };
+            (!val.is_empty()).then(|| val.to_string())
+        };
+
+        // The `<section>` of a `…#/…/components/<section>/<name>` pointer, or `None`
+        // for a fragment naming no `components/<section>`.
+        let component_section = |pointer: &str| -> Option<String> {
+            let frag = pointer.split_once('#')?.1;
+            let mut segs = frag.split('/').filter(|s| !s.is_empty());
+            while let Some(s) = segs.next() {
+                if s == "components" {
+                    return segs.next().map(str::to_string);
+                }
+            }
+            None
+        };
+
+        let mut out = Vec::new();
+        for i in (ps + 1)..pe {
+            if lines[i].trim() != "headers:" {
+                continue;
+            }
+            let c = indent(lines[i]);
+
+            // Same scoping gate as `response_headers_named_content_type`: immediate
+            // parent a status key, a `responses:` ancestor, not an example payload.
+            let mut level = c;
+            let mut immediate_parent: Option<&str> = None;
+            let mut has_responses = false;
+            let mut excluded = false;
+            let mut k = i;
+            while k > ps && level > 0 {
+                k -= 1;
+                let a = lines[k];
+                if a.trim().is_empty() {
+                    continue;
+                }
+                let ai = indent(a);
+                if ai < level {
+                    level = ai;
+                    let akey = a.trim().strip_suffix(':').unwrap_or("");
+                    if immediate_parent.is_none() {
+                        immediate_parent = Some(akey);
+                    }
+                    match akey {
+                        "responses" => has_responses = true,
+                        "example" | "examples" => {
+                            excluded = true;
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            if excluded || !has_responses || !immediate_parent.is_some_and(is_status_key) {
+                continue;
+            }
+
+            // The map's direct children are header-name keys.
+            let mut child_indent = None;
+            let mut j = i + 1;
+            while j < pe {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                let li = indent(l);
+                if li <= c {
+                    break;
+                }
+                let child = *child_indent.get_or_insert(li);
+                if li == child {
+                    // `l` is a header-name key. Its value is a Reference when a
+                    // `$ref` is inline on this line or the header object's own
+                    // direct child (block form).
+                    let after_key = l.trim_start().split_once(':').map(|(_, v)| v.trim());
+                    match after_key {
+                        Some(v) if v.contains("$ref") => {
+                            if let Some(p) = ref_pointer(v) {
+                                if let Some(sec) = component_section(&p) {
+                                    out.push((j + 1, p, sec));
+                                }
+                            }
+                        }
+                        Some(v) if v.is_empty() => {
+                            let mut obj_indent = None;
+                            let mut m = j + 1;
+                            while m < pe {
+                                let hl = lines[m];
+                                if hl.trim().is_empty() {
+                                    m += 1;
+                                    continue;
+                                }
+                                let hi = indent(hl);
+                                if hi <= child {
+                                    break;
+                                }
+                                let oi = *obj_indent.get_or_insert(hi);
+                                if hi == oi && hl.trim_start().starts_with("$ref") {
+                                    if let Some(p) = ref_pointer(hl.trim_start()) {
+                                        if let Some(sec) = component_section(&p) {
+                                            out.push((m + 1, p, sec));
+                                        }
+                                    }
+                                }
+                                m += 1;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                j += 1;
+            }
+        }
+        out
+    }
+
     /// The `METHOD /path` label of every operation a spec declares whose
     /// `requestBody` object carries neither a `content` field nor a `$ref` —
     /// without a YAML dep.
@@ -15854,6 +16048,181 @@ components:
         assert!(
             header_keys >= 100,
             "expected many response header keys across specs, got {header_keys}"
+        );
+    }
+
+    #[test]
+    fn every_response_header_ref_targets_the_headers_section() {
+        // Contract-harness invariant (OpenAPI 3.0.x Response Object rule): a
+        // Response Object's `headers:` map maps a header name to a Header Object
+        // *or a reference to one*, so every `$ref` a spec uses as a response
+        // header's value MUST target the `headers` component section
+        // (`#/components/headers/<name>`). A `$ref` there into
+        // `#/components/parameters/…` or `#/components/schemas/…` is a
+        // type-mismatched reference: a resolver is handed a Parameter/Schema Object
+        // where a Header Object is required, so a Redoc/Swagger/codegen client
+        // mis-binds or drops the header.
+        //
+        // The break this catches is a live copy-paste hazard unique to these specs:
+        // each defines *both* a request `#/components/parameters/XCorrelator`
+        // Parameter Object and a response `#/components/headers/XCorrelator` Header
+        // Object — two component names that differ only by their section — so a
+        // `$ref` pasted from the parameter slot into a response header slot
+        // resolves to a real component of the wrong kind. No existing test sees it:
+        // `local_component_refs_resolve_within_their_own_spec` checks a local `$ref`
+        // finds *some* target, never that its section fits the slot it fills; the
+        // reserved-`Content-Type` and x-correlator header tests read a header map's
+        // *keys*, never a header value's ref; the ref-shape tests read a `$ref`'s
+        // siblings and fragment form, never its section against its use. Verified
+        // true across every mounted spec before asserting (every response-header ref
+        // targets `#/components/headers/XCorrelator`).
+        for api in APIS {
+            for (line, pointer, section) in response_header_ref_targets(api.body) {
+                assert_eq!(
+                    section, "headers",
+                    "{} spec: the response-header `$ref` `{}` (line {}) targets the \
+                     `{}` component section, not `headers` — a Response Object's \
+                     `headers:` value must reference a Header Object \
+                     (`#/components/headers/<name>`); a parameter/schema ref pasted \
+                     into a response-header slot resolves to the wrong kind of component",
+                    api.name, pointer, line, section
+                );
+            }
+        }
+        // Non-vacuous floor: the corpus declares many response-header refs (every
+        // business 2xx echoes `x-correlator` via `#/components/headers/XCorrelator`),
+        // so a broken extractor can't hide behind an empty scan.
+        let total: usize = APIS
+            .iter()
+            .map(|a| response_header_ref_targets(a.body).len())
+            .sum();
+        assert!(
+            total >= 100,
+            "expected many response-header refs across specs, got {total}"
+        );
+    }
+
+    #[test]
+    fn response_header_ref_target_extraction_rules() {
+        // Unit-cover `response_header_ref_targets` so the contract test above can't
+        // pass vacuously and its scoping/section reading is pinned: a `'200'`
+        // response header `x-correlator` refs the `headers` section (good); a
+        // `Location` header whose ref sits under its own `schema:` is that schema's
+        // ref, not the header's, and is skipped (deeper than the header object's
+        // direct-child indent); a `'201'` response header ref into
+        // `#/components/parameters/…` reads section `parameters` (the drift the
+        // contract test turns into a failure); an `x-correlator` ref inside an
+        // `examples:` payload's literal `headers:` mapping is excluded (an
+        // `examples` ancestor); a cross-file `errors.yaml#/components/headers/…` ref
+        // reads `headers`; and a `components.headers` component defined via a ref
+        // (outside `paths:`) is out of scope. All in document order.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+          headers:
+            x-correlator:
+              $ref: \"#/components/headers/XCorrelator\"
+            Location:
+              schema:
+                $ref: \"#/components/schemas/Loc\"
+        '201':
+          description: made
+          headers:
+            x-correlator:
+              $ref: \"#/components/parameters/XCorrelator\"
+          content:
+            application/json:
+              examples:
+                sample:
+                  value:
+                    headers:
+                      x-correlator:
+                        $ref: \"#/components/schemas/Nope\"
+    post:
+      operationId: postA
+      responses:
+        '200':
+          description: ok
+          headers:
+            x-correlator:
+              $ref: \"../../shared/errors.yaml#/components/headers/XCorrelator\"
+components:
+  headers:
+    XCorrelator:
+      $ref: \"#/components/parameters/Wrong\"
+";
+        // Flagged, in document order: the `'200'` x-correlator ref (line 14,
+        // `headers`); the `'201'` x-correlator ref (line 22, `parameters` — the
+        // drift); and the `post` `'200'` cross-file ref (line 38, `headers`). Not
+        // returned: `Location`'s `schema:` ref (line 17, deeper than the header
+        // object's direct-child indent); the `x-correlator` inside the `examples:`
+        // payload (line 30, an `examples` ancestor); and the `components.headers`
+        // component `$ref` (line 42, outside `paths:`).
+        assert_eq!(
+            response_header_ref_targets(body),
+            vec![
+                (14, "#/components/headers/XCorrelator".to_string(), "headers".to_string()),
+                (22, "#/components/parameters/XCorrelator".to_string(), "parameters".to_string()),
+                (
+                    38,
+                    "../../shared/errors.yaml#/components/headers/XCorrelator".to_string(),
+                    "headers".to_string(),
+                ),
+            ]
+        );
+        // The section-drift filter finds exactly the `parameters` mis-ref.
+        let drift: Vec<_> = response_header_ref_targets(body)
+            .into_iter()
+            .filter(|(_, _, sec)| sec != "headers")
+            .collect();
+        assert_eq!(
+            drift,
+            vec![(22, "#/components/parameters/XCorrelator".to_string(), "parameters".to_string())]
+        );
+        // An inline flow-mapping header ref is read too.
+        let inline = "\
+paths:
+  /a:
+    get:
+      responses:
+        '200':
+          headers:
+            x-correlator: { $ref: \"#/components/parameters/X\" }
+";
+        assert_eq!(
+            response_header_ref_targets(inline),
+            vec![(7, "#/components/parameters/X".to_string(), "parameters".to_string())]
+        );
+        // A body with no `paths:` yields nothing.
+        assert!(response_header_ref_targets("components:\n  headers: {}\n").is_empty());
+
+        // Non-vacuous floor: across every registered spec every response-header ref
+        // targets the `headers` section (the invariant the contract test asserts),
+        // yet the corpus declares many such refs, so a broken extractor can't hide
+        // behind an empty scan.
+        let mut total = 0usize;
+        for api in APIS {
+            for (_, _, section) in response_header_ref_targets(api.body) {
+                assert_eq!(
+                    section, "headers",
+                    "{}: every response-header ref must target the headers section",
+                    api.name
+                );
+                total += 1;
+            }
+        }
+        assert!(
+            total >= 100,
+            "expected many response-header refs across specs, got {total}"
         );
     }
 
