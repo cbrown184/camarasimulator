@@ -63192,4 +63192,243 @@ paths:
             "expected a document-root `servers:` on most specs, got {root_servers}"
         );
     }
+
+    /// Line numbers (1-based), in document order, of every `x-camarasim-scenarios`
+    /// case whose `input:` value **repeats** an earlier case's `input:` within the
+    /// SAME block — the second and any later occurrence is returned. Pure and
+    /// YAML-dep-free; block/case walking mirrors [`scenario_cases_with_empty_value`],
+    /// and folded (`>-`/`|`) inputs are gathered via [`value_opens_block_scalar`] /
+    /// [`block_scalar_end`].
+    ///
+    /// A block's `cases:` sequence is the machine-readable record of the simulator's
+    /// parameter-driven behaviour (DESIGN §7): each `{ input, result }` names a
+    /// distinct stimulus and the deterministic outcome it produces. The simulator is
+    /// deterministic — one input maps to exactly one output — so two cases naming the
+    /// *same* input either contradict each other (two different `result:`s for one
+    /// stimulus, an impossible behaviour) or are a redundant copy-paste (a case
+    /// duplicated and never re-edited); the `/docs` scenario table then renders the
+    /// same stimulus twice, one row silently shadowing the other.
+    ///
+    /// Each case's input is normalised before comparison: an inline scalar has its
+    /// surrounding quotes stripped, a folded/literal block scalar's continuation
+    /// lines are joined, and all runs of whitespace collapse to one space (so a
+    /// re-wrapped fold compares equal to the same text on one line). Comparison is
+    /// exact (case-sensitive) on that normal form. An **empty** input is skipped —
+    /// that is `scenario_cases_with_empty_value`'s concern, and two empties are not a
+    /// meaningful duplicate. The seen-set resets at each block boundary, so the same
+    /// input under two different operations (two blocks) is never flagged — only a
+    /// repeat *within one block* is.
+    ///
+    /// A folded input is gathered with the KEY's indent as the block-scalar's parent
+    /// (a `- input:` dash line's key sits two columns in), so a sibling `result:` —
+    /// indented past the dash but level with the key — closes the input scalar and is
+    /// never folded into the input text. Any block scalar under a non-`input` key
+    /// (`result:`/`description:`) has its continuation skipped whole, so folded prose
+    /// can never be misread as a nested `input:` case key.
+    fn scenario_cases_with_duplicate_input(body: &str) -> Vec<usize> {
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let lines: Vec<&str> = body.lines().collect();
+        let n = lines.len();
+        // Normal form of a scenario input: quotes stripped, whitespace collapsed.
+        let normalise = |raw: &str| -> String {
+            let v = raw.trim();
+            let unq = v
+                .strip_prefix('"')
+                .and_then(|s| s.strip_suffix('"'))
+                .or_else(|| v.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')))
+                .unwrap_or(v);
+            unq.split_whitespace().collect::<Vec<_>>().join(" ")
+        };
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < n {
+            if !lines[i].trim_start().starts_with("x-camarasim-scenarios:") {
+                i += 1;
+                continue;
+            }
+            let block_indent = indent(lines[i]);
+            i += 1;
+            let mut seen: HashSet<String> = HashSet::new();
+            while i < n {
+                let l = lines[i];
+                if l.trim().is_empty() {
+                    i += 1;
+                    continue;
+                }
+                if indent(l) <= block_indent {
+                    break; // dedented out of the block
+                }
+                let trimmed = l.trim_start();
+                let is_dash = trimmed.starts_with("- ");
+                let after = trimmed.strip_prefix("- ").unwrap_or(trimmed);
+                // The key's own indent — a leading `- ` dash pushes it two columns in.
+                // A block scalar's continuation must be indented past THIS, so a
+                // sibling `result:` (level with the key) does not fold into the input.
+                let key_indent = indent(l) + if is_dash { 2 } else { 0 };
+                if let Some((k, v)) = after.split_once(':') {
+                    let key = k.trim();
+                    let v = v.trim();
+                    let opens = value_opens_block_scalar(v);
+                    if key == "input" {
+                        let value = if opens {
+                            let end = block_scalar_end(&lines, i, key_indent);
+                            lines[i + 1..end]
+                                .iter()
+                                .filter(|x| !x.trim().is_empty())
+                                .map(|x| x.trim())
+                                .collect::<Vec<_>>()
+                                .join(" ")
+                        } else {
+                            v.to_string()
+                        };
+                        let norm = normalise(&value);
+                        if !norm.is_empty() && !seen.insert(norm) {
+                            out.push(i + 1);
+                        }
+                    }
+                    // Skip any block scalar's continuation whole (bounded by the key's
+                    // indent), so folded prose is never re-read as a case key.
+                    if opens {
+                        i = block_scalar_end(&lines, i, key_indent);
+                        continue;
+                    }
+                }
+                i += 1;
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_scenario_block_lists_distinct_case_inputs() {
+        // Contract-harness invariant (DESIGN §7, §9): within one
+        // `x-camarasim-scenarios` block, no two cases may declare the same `input:`.
+        // The simulator is deterministic — a given stimulus produces exactly one
+        // outcome — so a repeated input either contradicts itself (two `result:`s for
+        // one stimulus, a behaviour the server can't have) or is a redundant paste; the
+        // `/docs` scenario table then lists the same input twice, one row shadowing the
+        // other, at exactly the panel a caller reads to learn how to reach each case.
+        //
+        // The distinctness member of the scenario family, and the case-to-case
+        // complement of the trio that reads each case (or block) in isolation:
+        // `every_scenario_block_is_well_formed` proves the `cases:` sequence holds
+        // `{ input, result }` cases, `every_scenario_case_documents_a_non_empty_value`
+        // proves each case's input/result is non-blank, and
+        // `every_scenario_block_declares_a_non_empty_description` reads the block's own
+        // prose — none ever compares one case's input against another's, so a duplicated
+        // stimulus satisfies all three. Mirrors the distinct-keys family
+        // (properties/examples/parameters/response-headers/…), one level into the
+        // scenario record. Verified true across all mounted specs (1053 case inputs,
+        // 168 blocks) before asserting.
+        for api in APIS {
+            let dups = scenario_cases_with_duplicate_input(api.body);
+            assert!(
+                dups.is_empty(),
+                "{} spec has an x-camarasim-scenarios block with a duplicate case \
+                 `input:` (a deterministic sim maps one stimulus to one outcome — \
+                 DESIGN §7, §9) at line(s): {:?}",
+                api.name,
+                dups
+            );
+        }
+    }
+
+    #[test]
+    fn scenario_case_input_distinctness_extraction_rules() {
+        // Unit-cover `scenario_cases_with_duplicate_input` so the contract test above
+        // can't pass vacuously and its detection is pinned: distinct inline inputs pass;
+        // an exact repeat (line noted at the repeat) and a repeat that differs only by
+        // surrounding quotes are both flagged; a folded (`>-`) input equal to an earlier
+        // inline input is flagged (fold gathered, whitespace collapsed); a folded input
+        // whose text differs is cleared; a sibling `result:` folded scalar is never
+        // folded into the input; the seen-set resets across blocks (the same input in a
+        // second block is not a duplicate); and an empty input is not treated as a
+        // duplicate.
+        let body = "\
+openapi: 3.0.3
+paths:
+  /a:
+    post:
+      operationId: postA
+      x-camarasim-scenarios:
+        description: cases
+        cases:
+          - input: identifier ending in a reserved error suffix
+            result: the canonical CAMARA error
+          - input: \"identifier ending in a reserved error suffix\"
+            result: also an error
+          - input: a distinct stimulus
+            result: ok
+          - input: >-
+              a distinct
+              stimulus
+            result: >-
+              a folded result that repeats
+              text: a distinct stimulus
+          - input: >-
+              a wholly different folded stimulus
+            result: fine
+  /b:
+    post:
+      operationId: postB
+      x-camarasim-scenarios:
+        description: cases
+        cases:
+          - input: identifier ending in a reserved error suffix
+            result: reset across blocks — not a duplicate
+";
+        // Flagged, in document order:
+        //  * line 11 — the quoted repeat of the line-9 inline input (quotes stripped);
+        //  * line 15 — the folded `>-` input ("a distinct / stimulus" → "a distinct
+        //    stimulus") repeating the line-13 inline input, proving the fold is
+        //    gathered, whitespace-collapsed, and that the sibling `result: >-` at
+        //    line 18 (whose own folded text contains "a distinct stimulus") is NOT
+        //    folded into the input.
+        // Not flagged: line 13 (first "a distinct stimulus"), line 21 (a different
+        // folded stimulus), and the /b block's line-30 input (seen-set reset per block).
+        assert_eq!(scenario_cases_with_duplicate_input(body), vec![11, 15]);
+
+        // An empty input is the empty-value test's concern, never a duplicate: two
+        // blank inputs are not flagged here.
+        let empties = "\
+openapi: 3.0.3
+paths:
+  /a:
+    post:
+      operationId: postA
+      x-camarasim-scenarios:
+        description: cases
+        cases:
+          - input:
+            result: one
+          - input: \"\"
+            result: two
+";
+        assert!(scenario_cases_with_duplicate_input(empties).is_empty());
+
+        // Non-vacuous floor: across every registered spec no block repeats an input
+        // (the invariant the contract test asserts), and the corpus actually declares
+        // many scenario inputs — so the equality path runs on real data and a broken
+        // (always-empty) extractor can't hide behind a corpus that never lists inputs.
+        // Count case inputs with a detector independent of the extractor's seen-set.
+        let mut inputs = 0usize;
+        for api in APIS {
+            assert!(
+                scenario_cases_with_duplicate_input(api.body).is_empty(),
+                "{}: every scenario block must list distinct case inputs",
+                api.name
+            );
+            for l in api.body.lines() {
+                let t = l.trim_start();
+                let after = t.strip_prefix("- ").unwrap_or(t);
+                if after.starts_with("input:") {
+                    inputs += 1;
+                }
+            }
+        }
+        assert!(
+            inputs >= 800,
+            "expected many scenario case inputs across specs, got {inputs}"
+        );
+    }
 }

@@ -3335,6 +3335,21 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - a **scenario case-input distinctness** contract test (`src/registry.rs`
+    `every_scenario_block_lists_distinct_case_inputs`) — the distinctness member of the
+    scenario family. Within one `x-camarasim-scenarios` block no two cases may declare
+    the same `input:`; the sim is deterministic (one stimulus → one outcome), so a
+    repeated input contradicts itself or is a redundant paste, and `/docs` lists it
+    twice. The case-to-case complement of the trio that reads each case/block alone
+    (`every_scenario_block_is_well_formed` / `…case_documents_a_non_empty_value` /
+    `…block_declares_a_non_empty_description`), none of which compares one input to
+    another. New pure `scenario_cases_with_duplicate_input` (per-block seen-set walk
+    reusing `value_opens_block_scalar`/`block_scalar_end`; each input normalised —
+    quotes stripped, folded `>-`/`|` continuation joined at the KEY's indent so a
+    sibling `result:` isn't folded in, whitespace collapsed; empties skipped). Corpus:
+    168 blocks / 1053 inputs → 0 drift. Unit-covered
+    (`scenario_case_input_distinctness_extraction_rules`; ≥800-input floor). Test-only,
+    no spec change.
   - a **security-requirement scope well-formedness** contract test (`src/registry.rs`
     `every_security_requirement_scope_is_a_well_formed_camara_scope`) — the
     **scope-shape** member of the security family, in the blind spot of
@@ -6145,6 +6160,39 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-22 — Contract-test harness: guard every **`x-camarasim-scenarios` block
+  lists distinct case `input:`s** (`src/registry.rs`
+  `every_scenario_block_lists_distinct_case_inputs`). A block's `cases:` sequence is
+  the machine-readable record of the simulator's parameter-driven behaviour (DESIGN
+  §7/§9): each `{ input, result }` names a distinct stimulus and its deterministic
+  outcome. The sim is deterministic — one input → one output — so two cases naming the
+  same input either contradict each other (two `result:`s for one stimulus, an
+  impossible behaviour) or are a redundant copy-paste, and the `/docs` scenario table
+  then renders the same stimulus twice with one row silently shadowing the other. The
+  **distinctness member of the scenario family** and the case-to-case complement of the
+  trio that reads each case/block in isolation: `every_scenario_block_is_well_formed`
+  (the `cases:` sequence holds `{input,result}` cases),
+  `every_scenario_case_documents_a_non_empty_value` (each input/result non-blank), and
+  `every_scenario_block_declares_a_non_empty_description` (the block's own prose) —
+  none compares one case's input against another's, so a duplicated stimulus satisfies
+  all three. New pure `scenario_cases_with_duplicate_input` (per-block seen-set walk
+  mirroring `scenario_cases_with_empty_value`; reuses `value_opens_block_scalar` /
+  `block_scalar_end`): each input is normalised — surrounding quotes stripped, a folded
+  (`>-`/`|`) input's continuation joined, all whitespace collapsed — then compared
+  exactly, with the seen-set reset per block. A folded input is gathered with the
+  KEY's indent as the scalar parent (a `- input:` dash line's key sits two columns in),
+  so a sibling `result:` — level with the key — closes the input scalar and is never
+  folded into it; empty inputs are skipped (the empty-value test's concern). Surveyed
+  the corpus first (168 blocks, 1053 case inputs; the only apparent repeats were folded
+  `>-` indicators, distinct once their continuations are gathered) → 0 drift. Tests: +2
+  (the contract test + `scenario_case_input_distinctness_extraction_rules`: an exact
+  inline repeat and a quotes-only-differing repeat flagged; a folded input equal to an
+  earlier inline one flagged while the sibling `result: >-` stays out of the fold; a
+  differing folded input, the first occurrence, and a same input in a second block all
+  cleared; two empty inputs not flagged; ≥800 case-input non-vacuity floor). `cargo
+  test` 2924 green (was 2922); `cargo build --release` succeeds. No new dependency;
+  test-only change (no spec/runtime edit). — binary (release): 5.1M (5,323,160 B;
+  unchanged).
 - 2026-08-22 — Contract-test harness: guard that no **path/operation-level `servers`
   override** exists (`src/registry.rs`
   `no_operation_or_path_item_declares_a_servers_override`). CAMARA Commonalities fixes
