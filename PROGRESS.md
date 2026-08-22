@@ -3335,8 +3335,30 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - a **path-template variable distinctness** contract test (`src/registry.rs`
+    `every_path_template_variable_is_distinct_within_its_path`) asserts that within
+    one `paths:` key every `{name}` template expression is unique — OpenAPI paths
+    follow RFC 6570, whose variable list MUST NOT repeat a name, and `/a/{id}/b/{id}`
+    declares two path parameters of one name for a single operation (a router can't
+    bind both to distinct values, a codegen tool emits two same-named arguments). A
+    gap no existing path test sees: the distinct-*key* tests
+    (`every_paths_object_lists_distinct_path_keys`, `no_two_path_keys_are_equivalent_
+    after_template_normalization`) compare one whole key against another;
+    `every_path_template_variable_has_a_declared_path_parameter` /
+    `every_path_parameter_names_a_path_template_variable` join the key's variable
+    *set* to the declared `in: path` params (set membership, blind to a repeat);
+    `every_path_template_key_is_well_formed` checks only brace syntax. New pure
+    `path_keys_with_repeated_template_variable` (per-key brace walk on the trusted
+    `path_item_keys`, keeping duplicates, flags each repeated name once). Corpus: 7
+    multi-variable paths (`/sponsorship/{sponsorId}/{campaignId}/{sessionId}/…`,
+    `/trust-domains/{trustDomainId}/devices/{deviceId}`, …), every variable distinct
+    → 0 drift. Unit-covered (`path_template_variable_distinctness_extraction_rules`:
+    twice-/thrice-repeat flagged once in document order; distinct multi-var, single-
+    and no-variable paths cleared; ≥40 path-template-variable floor). Test-only, no
+    spec change.
   - a **scenario error-result code well-formedness** contract test (`src/registry.rs`
     `every_scenario_error_result_names_a_well_formed_camara_code`) — the
+    **scenario-result companion** of `every_error_example_code_is_a_well_formed_camara_code`
     **scenario-result companion** of `every_error_example_code_is_a_well_formed_camara_code`
     (which validates the code of a structured CamaraError *example*, never a scenario
     string) and of `every_scenario_result_status_is_a_declared_response` (which
@@ -6078,6 +6100,24 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-22 — Contract test: guard every path-template variable is distinct
+  **within its own path** (`registry::tests::every_path_template_variable_is_
+  distinct_within_its_path`). Within one `paths:` key each `{name}` MUST be unique
+  (OpenAPI / RFC 6570) — `/a/{id}/b/{id}` binds two path parameters of one name for
+  a single operation (a router can't disambiguate, codegen emits two same-named
+  args). A gap no path test saw: the distinct-*key* tests
+  (`every_paths_object_lists_distinct_path_keys`, `no_two_path_keys_are_equivalent_
+  after_template_normalization`) compare whole keys; the binding tests join the
+  key's variable *set* to declared `in: path` params (blind to a repeat);
+  `every_path_template_key_is_well_formed` checks only brace syntax. New pure
+  `path_keys_with_repeated_template_variable` (per-key brace walk on the trusted
+  `path_item_keys`, flags each repeated name once). Corpus: 7 multi-variable paths
+  (`/sponsorship/{sponsorId}/{campaignId}/{sessionId}/…`, trust-domain devices, …),
+  every variable distinct → 0 drift. Unit-covered
+  (`path_template_variable_distinctness_extraction_rules`: twice/thrice-repeat
+  flagged once in document order; distinct multi-var / single / no-var cleared;
+  ≥40 path-template-var floor). Test-only, no spec/runtime change. `cargo test`
+  green (2912 tests); `cargo build --release` ok. — binary: 5.1M (5323160 B)
 - 2026-08-22 — Shared error model spec accuracy: the shared **auth-failure**
   responses now document the RFC 6750 `WWW-Authenticate` response header.
   `verify::Claims` (`src/auth/verify.rs`) answers a failed Bearer credential with

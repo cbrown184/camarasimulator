@@ -11962,6 +11962,144 @@ paths:
         );
     }
 
+    /// Labels (`"<path> {<var>}"`) of every template variable name that appears
+    /// more than once **within a single `paths:` key**. Built on the trusted
+    /// `path_item_keys` scan (all path-item keys in document order); for each key
+    /// the `{…}` spans are walked in order — mirroring `path_template_params`'
+    /// brace parse, but *per key* and keeping duplicates — and a name seen a second
+    /// time is reported once (a name repeated three times still yields one label).
+    /// An unterminated `{` (a malformed template) ends that key's walk. No YAML/
+    /// regex dep.
+    fn path_keys_with_repeated_template_variable(body: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        for key in path_item_keys(body) {
+            let mut seen = HashSet::new();
+            let mut flagged = HashSet::new();
+            let mut s = key.as_str();
+            while let Some(open) = s.find('{') {
+                let Some(close) = s[open + 1..].find('}') else { break };
+                let name = &s[open + 1..open + 1 + close];
+                if !name.is_empty()
+                    && !seen.insert(name.to_string())
+                    && flagged.insert(name.to_string())
+                {
+                    out.push(format!("{key} {{{name}}}"));
+                }
+                s = &s[open + 1 + close + 1..];
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_path_template_variable_is_distinct_within_its_path() {
+        // Contract-harness invariant (OpenAPI / RFC 6570 rule): within one `paths:`
+        // key every `{name}` template expression MUST be unique. A path template
+        // that names the same variable twice — `/a/{id}/b/{id}` — declares two path
+        // parameters of one name for a single operation: a server/router cannot bind
+        // both occurrences to distinct values, a codegen tool emits two function
+        // arguments of the same name (a compile error or a silent shadow), and
+        // RFC 6570 — the URI-template grammar an OpenAPI path follows — forbids a
+        // variable list from repeating a name.
+        //
+        // No existing path test sees it. The distinct-*key* tests
+        // (`every_paths_object_lists_distinct_path_keys`,
+        // `no_two_path_keys_are_equivalent_after_template_normalization`) compare one
+        // whole key against another, never a key's variables against each other;
+        // `every_path_template_variable_has_a_declared_path_parameter` /
+        // `every_path_parameter_names_a_path_template_variable` join the key's
+        // variable *set* to the declared `in: path` parameters (a set membership blind
+        // to a repeat); `every_path_template_key_is_well_formed` checks only brace
+        // syntax. These specs template several multi-segment paths
+        // (`/sponsorship/{sponsorId}/{campaignId}/{sessionId}/…`,
+        // `/trust-domains/{trustDomainId}/devices/{deviceId}`), where a segment
+        // copy-pasted and left unrenamed would repeat a name — the exact drift this
+        // guards. Verified true across all mounted specs before asserting.
+        for api in APIS {
+            let dups = path_keys_with_repeated_template_variable(api.body);
+            assert!(
+                dups.is_empty(),
+                "{} spec declares a `paths:` key that repeats a template variable \
+                 name (each `{{name}}` in one path template must be unique — a \
+                 duplicate collides two path parameters of one name): {:?}",
+                api.name,
+                dups
+            );
+        }
+    }
+
+    #[test]
+    fn path_template_variable_distinctness_extraction_rules() {
+        // Unit-cover `path_keys_with_repeated_template_variable` so the contract test
+        // above can't pass vacuously and its detection is pinned: a variable repeated
+        // within one key is flagged exactly once (not once per extra occurrence) and
+        // reported with its path; a multi-segment path of *distinct* variables is
+        // cleared; a single- or no-variable path is cleared; and offending keys are
+        // reported in document order.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a/{id}/b/{id}:
+    get:
+      operationId: dupTwice
+      responses:
+        '200':
+          description: ok
+  /owners/{ownerId}/pets/{petId}:
+    get:
+      operationId: distinct
+      responses:
+        '200':
+          description: ok
+  /x/{k}/y/{k}/z/{k}:
+    get:
+      operationId: dupThrice
+      responses:
+        '200':
+          description: ok
+  /health:
+    get:
+      operationId: none
+      responses:
+        '200':
+          description: ok
+";
+        // `/a/{id}/b/{id}` repeats `id` (flagged once); `/owners/{ownerId}/pets/{petId}`
+        // has two *distinct* variables (cleared); `/x/{k}/y/{k}/z/{k}` repeats `k`
+        // three times but is still flagged exactly once; `/health` has no variable.
+        assert_eq!(
+            path_keys_with_repeated_template_variable(body),
+            vec![
+                "/a/{id}/b/{id} {id}".to_string(),
+                "/x/{k}/y/{k}/z/{k} {k}".to_string(),
+            ]
+        );
+
+        // Non-vacuous floor: across every registered spec no path template repeats a
+        // variable name (the invariant the contract test asserts), and the corpus
+        // declares many template variables in its path keys — so the per-key
+        // duplicate scan runs on real data and a broken (always-empty) extractor
+        // can't hide behind a corpus with no templated paths.
+        let mut vars = 0usize;
+        for api in APIS {
+            assert!(
+                path_keys_with_repeated_template_variable(api.body).is_empty(),
+                "{}: every template variable within a path must be distinct",
+                api.name
+            );
+            for key in path_item_keys(api.body) {
+                vars += key.matches('{').count();
+            }
+        }
+        assert!(
+            vars >= 40,
+            "expected many path template variables across specs, got {vars}"
+        );
+    }
+
     #[test]
     fn every_declared_response_has_a_description() {
         // Contract-harness invariant (OpenAPI structural rule): every response a
