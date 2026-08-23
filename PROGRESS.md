@@ -3335,6 +3335,23 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - an **E.164 `pattern`-`default` conformance** contract test (`src/registry.rs`
+    `every_e164_pattern_default_conforms_to_the_e164_pattern`) — the `default`-side twin of
+    `every_e164_pattern_example_conforms_to_the_e164_pattern` and the **first member of a
+    `pattern`-*default* family**: the `pattern`-side echo of the exhausted format-default
+    family (uuid / ipv4 / ipv6 / date-time / …, each example↔default paired). The
+    `pattern`-example family (E.164 / IMEI / ICCID / … 40-odd members) had no default-side
+    twin until now; E.164 — the corpus's dominant pattern (62 fields) — opens the family, as
+    it did the pattern-example side. A `default` beside a same-indent
+    `pattern: '^\+[1-9][0-9]{4,14}$'` must match that pattern, else the schema's own
+    validator rejects the fall-back it pre-supplies. New pure `e164_pattern_defaults_malformed`
+    (the `e164_pattern_examples_malformed` extractor with its trigger key swapped
+    `example:`→`default:` and a block-scalar opener skipped; reuses `matches_e164_pattern` /
+    `E164_PATTERN`). Corpus declares 62 `format`-less E.164 `pattern` fields but pairs none
+    with a default (they carry examples) → asserts clean `== 0` genuine-pair count
+    (future-drift posture, mirroring the ipv4-/uuid-default twins) + guards future drift;
+    floor reuses the dedent-bounded sibling scan. Unit-covered
+    (`e164_pattern_default_extraction_rules`). Test-only, no spec change.
   - a **`byte`-`default` format-conformance** contract test (`src/registry.rs`
     `every_byte_format_default_is_a_well_formed_byte`) — the `default`-side twin of
     `every_byte_format_example_is_a_well_formed_byte` and the **`byte` member of the
@@ -6428,6 +6445,26 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-23 — Contract-test harness: guard that every **E.164 `pattern` `default` matches
+  the pattern** (`src/registry.rs` `every_e164_pattern_default_conforms_to_the_e164_pattern`).
+  Opens a **`pattern`-*default* family** — the `pattern`-side echo of the exhausted
+  `format`-default family (uuid / ipv4 / ipv6 / date-time / …, each example↔default paired): the
+  `pattern`-example family (E.164 / IMEI / ICCID / … 40-odd members) had **no default-side twin**
+  until now. In OpenAPI 3.0.x (JSON Schema) a `default` is the schema's fall-back *instance*, so a
+  field constrained by `pattern: '^\+[1-9][0-9]{4,14}$'` MUST carry a default the pattern accepts;
+  a phone-number default the pattern rejects (a digit dropped, a missing `+`, a placeholder) is a
+  self-contradictory schema whose own validator rejects the fall-back it pre-supplies (a
+  Redoc/Swagger form pre-fills a phone control with an unusable value; a codegen client carries a
+  value no E.164-constrained field can legally hold). New pure `e164_pattern_defaults_malformed` —
+  the `e164_pattern_examples_malformed` extractor with its trigger key swapped `example:`→`default:`
+  and a block-scalar opener (`default: |`/`>-`) skipped (reuses `matches_e164_pattern`, `E164_PATTERN`);
+  same dedent-bounded same-indent sibling scan, so a nested/following object's `pattern` never pairs,
+  and a `default` inside an outer `example:` payload is skipped. Corpus declares 62 E.164 `pattern`
+  fields but pairs **none** with a default (they carry examples) → asserts a clean `== 0`
+  genuine-pair count (future-drift posture, mirroring the ipv4-/uuid-default twins) + guards future
+  drift; floor reuses the dedent-bounded sibling scan. Unit-covered
+  (`e164_pattern_default_extraction_rules`, flags lines 25/29/32 in a synthetic body). Test-only,
+  no spec change. `cargo test` 2968 pass; `cargo build --release` OK, binary 5.1M (5,323,160 B).
 - 2026-08-23 — Contract-test harness: guard that every **`format: byte` `default` is a
   well-formed base64 string** (`src/registry.rs` `every_byte_format_default_is_a_well_formed_byte`).
   In OpenAPI 3.0.x (JSON Schema) a `default` is the schema's fall-back *instance*, so where a

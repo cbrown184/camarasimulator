@@ -38502,6 +38502,359 @@ components:
         );
     }
 
+    /// The 1-based line numbers, in document order, of every `default:` keyword whose
+    /// inline scalar value sits in a Schema Object declaring a *same-indent*
+    /// `pattern: '^\+[1-9][0-9]{4,14}$'` sibling yet does not match that E.164 pattern,
+    /// without a YAML dep. The **`default`-side twin** of `e164_pattern_examples_malformed`
+    /// and the `pattern`-family analogue of `ipv4_format_defaults_malformed` (which guards a
+    /// `format` field's fall-back against the format's shape); this guards an E.164-`pattern`
+    /// field's fall-back against the pattern's own regex — the first member of a
+    /// `pattern`-*default* family, opened where the `pattern`-example family began.
+    ///
+    /// In OpenAPI 3.0.x (JSON Schema) a `default` is the schema's fall-back *instance*, so a
+    /// field constrained by `pattern` MUST carry a default the pattern accepts (the same
+    /// Spectral `oas3-valid-schema-example` posture that validates an example against its
+    /// schema applies to a `default` — it is a schema-level instance too). A phone-number
+    /// default that does not match — a digit dropped, a missing `+`, a placeholder pasted
+    /// beside the pattern — advertises a fall-back the schema's own validator rejects, so a
+    /// Redoc/Swagger form pre-fills a phone-number control with an unusable value and a
+    /// codegen client carries a value no field constrained by this pattern can legally hold.
+    ///
+    /// Structurally identical to `e164_pattern_examples_malformed`, with the trigger key
+    /// swapped `example:`→`default:` and a block-scalar opener (`default: >-` / `default: |`)
+    /// skipped (it opens no inline value) — mirroring how each `format`-default extractor was
+    /// derived from its `format`-example twin. Scoping is otherwise unchanged: only a
+    /// `default` carrying an inline scalar with a same-indent `pattern` sibling *equal to*
+    /// `E164_PATTERN` in the same Schema Object is inspected — the sibling is scanned at the
+    /// default's own indent, down through the object's block then up, dedent-bounded, so a
+    /// nested or following object's `pattern` never pairs. A `default:` nested inside an outer
+    /// `example:`/`examples:` payload (sample data, not a schema keyword) is skipped. Only the
+    /// E.164 pattern is matched; other patterns are out of scope.
+    fn e164_pattern_defaults_malformed(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let raw_inline = |l: &str, name: &str| -> Option<String> {
+            let (k, v) = l.trim_start().split_once(':')?;
+            if k.trim() != name {
+                return None;
+            }
+            let v = v.split('#').next().unwrap_or(v).trim();
+            if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            }
+        };
+        // Whether a same-indent `pattern:` sibling of line `i` (indent `c`) in the same
+        // Schema Object equals the E.164 pattern: scan down through the object's block
+        // then up, dedent-bounded so a nested or following object's `pattern` never pairs.
+        let sibling_is_e164_pattern = |i: usize, c: usize| -> bool {
+            let is_e164_pattern = |l: &str| -> bool {
+                raw_inline(l, "pattern")
+                    .map(|v| v.trim_matches('"').trim_matches('\'') == E164_PATTERN)
+                    .unwrap_or(false)
+            };
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_e164_pattern(l) {
+                    return true;
+                }
+                j += 1;
+            }
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_e164_pattern(l) {
+                    return true;
+                }
+            }
+            false
+        };
+        // True when line `i` (indent `c`) sits inside an outer `example:`/`examples:`
+        // payload — some enclosing container key up the indent ladder is
+        // `example`/`examples`, so an inner `default` key there is sample data.
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some(raw) = raw_inline(line, "default") else {
+                continue;
+            };
+            // A block-scalar opener (`>`/`|`, optionally with a chomping indicator)
+            // carries its value on the following lines, not inline — skip it.
+            if raw.starts_with('>') || raw.starts_with('|') {
+                continue;
+            }
+            let c = indent(line);
+            if inside_example(i, c) {
+                continue;
+            }
+            if !sibling_is_e164_pattern(i, c) {
+                continue;
+            }
+            let value = raw.trim_matches('"').trim_matches('\'');
+            if !matches_e164_pattern(value) {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_e164_pattern_default_conforms_to_the_e164_pattern() {
+        // Contract-harness invariant (OpenAPI 3.0.x / JSON-Schema structural rule): where
+        // a Schema Object declares an inline `default` beside a same-indent
+        // `pattern: '^\+[1-9][0-9]{4,14}$'` (the E.164 phone-number pattern the CAMARA
+        // specs use verbatim), the default MUST match that pattern. A `default` is the
+        // schema's fall-back *instance*, so a value the `pattern` rejects — a digit dropped,
+        // a missing `+`, a placeholder pasted beside the pattern — is a self-contradictory
+        // schema whose own validator rejects the fall-back it pre-supplies, so a
+        // Redoc/Swagger form pre-fills a phone-number control with an unusable value and a
+        // codegen client's generated instance carries a value no field constrained by this
+        // pattern can legally hold.
+        //
+        // The **`default` twin** of `every_e164_pattern_example_conforms_to_the_e164_pattern`
+        // and the first member of a `pattern`-*default* family — the `pattern`-side echo of
+        // the `format`-default family (uuid / ipv4 / ipv6 / … each paired example↔default).
+        // Future-drift posture (like the ipv4- and uuid-default twins): the corpus declares
+        // many `format`-less E.164 `pattern` fields but pairs **none** with a `default` today
+        // (they carry examples, not defaults), so the guard asserts clean across all specs
+        // and holds the line against a future E.164 default drifting to a placeholder or a
+        // malformed number; the synthetic unit body in `e164_pattern_default_extraction_rules`
+        // keeps the detection path live. Verified true across all mounted specs before
+        // asserting.
+        for api in APIS {
+            let offenders = e164_pattern_defaults_malformed(api.body);
+            assert!(
+                offenders.is_empty(),
+                "{} spec declares a `default` beside a same-indent E.164 \
+                 `pattern: '^\\+[1-9][0-9]{{4,14}}$'` that does not match that pattern (a \
+                 fall-back the pattern's own validator would reject) at `default:` line(s): {:?}",
+                api.name,
+                offenders
+            );
+        }
+    }
+
+    #[test]
+    fn e164_pattern_default_extraction_rules() {
+        // Unit-cover `e164_pattern_defaults_malformed` so the contract test above can't pass
+        // vacuously and its detection is pinned (`matches_e164_pattern` itself is already
+        // covered by `e164_pattern_example_extraction_rules`).
+        //
+        // Extractor: a valid number beside a same-indent E.164 `pattern` passes; a too-short
+        // value, a `+`-less value, and a value with the pattern *below* it (down-scan) are
+        // flagged; a value with no `pattern` sibling and one whose sibling is a *different*
+        // pattern are skipped; a default in one property never pairs with a *following*
+        // property's E.164 `pattern` across the dedent; a block-scalar default is skipped; an
+        // inner `default` inside an outer `example:` payload is skipped; and a property
+        // literally named `default` (opening a block) is skipped.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    GoodQuoted:
+      type: string
+      pattern: '^\\+[1-9][0-9]{4,14}$'
+      default: \"+123456789012\"
+    GoodUnquoted:
+      type: string
+      pattern: '^\\+[1-9][0-9]{4,14}$'
+      default: +123456789012
+    TooShort:
+      type: string
+      pattern: '^\\+[1-9][0-9]{4,14}$'
+      default: \"+1234\"
+    NoPlus:
+      type: string
+      pattern: '^\\+[1-9][0-9]{4,14}$'
+      default: \"123456789012\"
+    PatternBelow:
+      type: string
+      default: \"nope\"
+      pattern: '^\\+[1-9][0-9]{4,14}$'
+    NoPattern:
+      type: string
+      default: \"not-a-number-but-no-pattern\"
+    OtherPattern:
+      type: string
+      pattern: '^[0-9]{15}$'
+      default: \"123456789012345\"
+    BlockDefault:
+      type: string
+      pattern: '^\\+[1-9][0-9]{4,14}$'
+      default: |
+        nope
+    InExample:
+      type: object
+      example:
+        pattern: '^\\+[1-9][0-9]{4,14}$'
+        default: \"bad\"
+    Split:
+      type: object
+      properties:
+        a:
+          default: \"bad\"
+        b:
+          type: string
+          pattern: '^\\+[1-9][0-9]{4,14}$'
+    NamedDefault:
+      type: object
+      properties:
+        default:
+          type: string
+          pattern: '^\\+[1-9][0-9]{4,14}$'
+";
+        // Flagged, in document order: TooShort.default (line 25, 4 digits), NoPlus.default
+        // (line 29, no leading `+`), PatternBelow.default (line 32, value `nope` with its
+        // E.164 `pattern` a line below — down-scan pairs it). Not flagged: GoodQuoted/
+        // GoodUnquoted (valid); NoPattern (no `pattern` sibling); OtherPattern (sibling is
+        // `^[0-9]{15}$`, not E.164); BlockDefault (block-scalar opener `|`, no inline value);
+        // InExample's inner `default: \"bad\"` (sits inside the outer `example:` payload);
+        // Split.a.default, whose only E.164 `pattern` is in the following property Split.b
+        // past a dedent; and NamedDefault's `default:` property opening a block (no inline
+        // value).
+        assert_eq!(e164_pattern_defaults_malformed(body), vec![25, 29, 32]);
+
+        // Non-vacuous floor (future-drift posture, mirroring the ipv4- and uuid-default
+        // twins): across every registered spec every `default` beside a same-indent E.164
+        // `pattern` matches it (the invariant the contract test asserts). The corpus declares
+        // many E.164 `pattern` fields but pairs **none** with a `default` in the *same* Schema
+        // Object today (they carry examples, not defaults) — so this asserts a clean `== 0`
+        // genuine-pair count and guards future drift; the synthetic body above is what keeps
+        // the detection path live. The pair count reuses the extractor's own
+        // **dedent-bounded** same-indent sibling scan — the genuine-Schema-Object pairing —
+        // rather than a crude window, and stays independent of the extractor's *validity*
+        // (`matches_e164_pattern`) comparison.
+        let mut e164_defaults = 0usize;
+        for api in APIS {
+            assert!(
+                e164_pattern_defaults_malformed(api.body).is_empty(),
+                "{}: every default beside a same-indent E.164 `pattern` must match it",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            let raw_inline = |l: &str, name: &str| -> Option<String> {
+                let (k, v) = l.trim_start().split_once(':')?;
+                if k.trim() != name {
+                    return None;
+                }
+                let v = v.split('#').next().unwrap_or(v).trim();
+                if v.is_empty() { None } else { Some(v.to_string()) }
+            };
+            // A genuine same-Schema-Object E.164 `pattern` sibling of the `default` on line
+            // `i` (indent `c`): scan down through the object's block then up, dedent-bounded
+            // exactly like the extractor's `sibling_is_e164_pattern`, so a *following*
+            // property's E.164 `pattern` past a dedent never counts.
+            let sibling_is_e164 = |i: usize, c: usize| -> bool {
+                let is_e164 = |l: &str| -> bool {
+                    raw_inline(l, "pattern")
+                        .map(|v| v.trim_matches('"').trim_matches('\'') == E164_PATTERN)
+                        .unwrap_or(false)
+                };
+                let mut j = i + 1;
+                while j < lines.len() {
+                    let l = lines[j];
+                    if l.trim().is_empty() {
+                        j += 1;
+                        continue;
+                    }
+                    if indent(l) < c {
+                        break;
+                    }
+                    if indent(l) == c && is_e164(l) {
+                        return true;
+                    }
+                    j += 1;
+                }
+                let mut k = i;
+                while k > 0 {
+                    k -= 1;
+                    let l = lines[k];
+                    if l.trim().is_empty() {
+                        continue;
+                    }
+                    if indent(l) < c {
+                        break;
+                    }
+                    if indent(l) == c && is_e164(l) {
+                        return true;
+                    }
+                }
+                false
+            };
+            for (i, l) in lines.iter().enumerate() {
+                let Some(v) = raw_inline(l, "default") else {
+                    continue;
+                };
+                // Inline scalar only (skip block-scalar openers), mirroring the extractor
+                // so the floor counts exactly the pairs it inspects.
+                if v.starts_with('>') || v.starts_with('|') {
+                    continue;
+                }
+                let c = indent(l);
+                if sibling_is_e164(i, c) {
+                    e164_defaults += 1;
+                }
+            }
+        }
+        assert_eq!(
+            e164_defaults, 0,
+            "expected no genuine default + same-Schema-Object E.164 `pattern` pairs across \
+             specs (the future-drift posture; a new pair means switch this guard to a \
+             `>= 1` floor like the example side), got {e164_defaults}"
+        );
+    }
+
     /// The IMEI `pattern` the CAMARA device specs use verbatim (written in YAML as
     /// `'^[0-9]{15}$'`): exactly 15 decimal digits. After E.164 it is the corpus's
     /// most-declared *fixed-shape* `pattern` (a device `imei` field recurs across the
