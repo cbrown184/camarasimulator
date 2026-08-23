@@ -6445,6 +6445,29 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-23 — Contract-test harness: guard that every **ICCID `pattern` `default` matches the
+  pattern** (`src/registry.rs` `every_iccid_pattern_default_conforms_to_the_iccid_pattern`). The
+  **third member of the `pattern`-default family** after E.164 and IMEI (both landed earlier
+  today), the `default`-side twin of `every_iccid_pattern_example_conforms_to_the_iccid_pattern`,
+  and the **first pattern-default member with a variable-length shape** (`^[0-9]{19,20}$` — 19
+  **or** 20 digits, so a value 18 or 21 digits long is the fault the fixed-length IMEI-default
+  check cannot express). In OpenAPI 3.0.x a `default` is the schema's fall-back *instance*, so an
+  `iccid` field constrained by `pattern: '^[0-9]{19,20}$'` (carries no `format`, so otherwise
+  unchecked) MUST carry a default the pattern accepts; an ICCID default the pattern rejects (a
+  digit dropped/added, a placeholder) advertises a fall-back the schema's own validator rejects.
+  New pure `iccid_pattern_defaults_malformed` (the `imei_pattern_defaults_malformed` extractor
+  keyed on `ICCID_PATTERN` + judged by `matches_iccid_pattern`, both already present from the
+  example side; trigger key `default:`, block-scalar opener skipped, dedent-bounded same-indent
+  sibling scan, in-`example:` payload excluded). Corpus declares several ICCID `pattern` fields
+  but pairs none with a default (they carry examples) → asserts a clean `== 0` genuine-pair count
+  (future-drift posture, mirroring the E.164/IMEI-default twins) + guards future drift; floor
+  reuses the dedent-bounded sibling scan. Unit-covered (`iccid_pattern_default_extraction_rules`:
+  valid 19/20-digit cleared; 18-digit/21-digit/non-digit/pattern-below flagged in document order
+  [25, 29, 33, 36]; no-pattern / different-pattern (IMEI) / block-scalar / in-`example:` /
+  following-property-across-dedent / property-named-`default` skipped). Test-only, no spec change.
+  cargo test 2972 pass (+2); cargo build --release clean, no new dep. — binary (release):
+  5,323,160 bytes (~5.08 MiB; unchanged by a test-only change).
+
 - 2026-08-23 — Contract-test harness: guard that every **IMEI `pattern` `default` matches the
   pattern** (`src/registry.rs` `every_imei_pattern_default_conforms_to_the_imei_pattern`). The
   **second member of the `pattern`-default family** after E.164 (landed last pass), and the

@@ -39899,6 +39899,370 @@ components:
         );
     }
 
+    /// The 1-based line numbers, in document order, of every `default:` keyword whose
+    /// inline scalar value sits in a Schema Object declaring a *same-indent*
+    /// `pattern: '^[0-9]{19,20}$'` sibling yet does not match that ICCID pattern, without a
+    /// YAML dep. The **`default`-side twin** of `iccid_pattern_examples_malformed` and the
+    /// third member of the `pattern`-*default* family after `e164_pattern_defaults_malformed`
+    /// and `imei_pattern_defaults_malformed` — the `pattern`-side echo of the `format`-default
+    /// family, keyed on `ICCID_PATTERN`.
+    ///
+    /// In OpenAPI 3.0.x (JSON Schema) a `default` is the schema's fall-back *instance*, so a
+    /// field constrained by `pattern` MUST carry a default the pattern accepts (the same
+    /// Spectral `oas3-valid-schema-example` posture that validates an example against its
+    /// schema applies to a `default` — it is a schema-level instance too). An ICCID default
+    /// that is not 19 or 20 digits — a digit dropped or added, a placeholder pasted beside the
+    /// pattern — advertises a fall-back the schema's own validator rejects, so a Redoc/Swagger
+    /// form pre-fills an `iccid` control with an unusable value and a codegen client carries a
+    /// value no field constrained by this pattern can legally hold. Like the ICCID-example twin
+    /// (and unlike the UUID patterns, which sit beside a `format: uuid` already guarded), the
+    /// ICCID pattern carries no `format`, so such a default is otherwise unchecked; and — the
+    /// first pattern-default member with a *variable-length* shape — a value 18 or 21 digits
+    /// long is the fault the fixed-length IMEI-default check cannot express.
+    ///
+    /// Structurally identical to `imei_pattern_defaults_malformed`, keyed on `ICCID_PATTERN`
+    /// and judged by `matches_iccid_pattern`: the trigger key is `default:` and a block-scalar
+    /// opener (`default: >-` / `default: |`) is skipped (it opens no inline value). Scoping is
+    /// otherwise unchanged: only a `default` carrying an inline scalar with a same-indent
+    /// `pattern` sibling *equal to* `ICCID_PATTERN` in the same Schema Object is inspected — the
+    /// sibling is scanned at the default's own indent, down through the object's block then up,
+    /// dedent-bounded, so a nested or following object's `pattern` never pairs (in particular
+    /// the adjacent `imei` property's `^[0-9]{15}$` pattern is a *different* pattern and never
+    /// pairs). A `default:` nested inside an outer `example:`/`examples:` payload (sample data,
+    /// not a schema keyword) is skipped. Only the ICCID pattern is matched; other patterns are
+    /// out of scope.
+    fn iccid_pattern_defaults_malformed(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let raw_inline = |l: &str, name: &str| -> Option<String> {
+            let (k, v) = l.trim_start().split_once(':')?;
+            if k.trim() != name {
+                return None;
+            }
+            let v = v.split('#').next().unwrap_or(v).trim();
+            if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            }
+        };
+        // Whether a same-indent `pattern:` sibling of line `i` (indent `c`) in the same
+        // Schema Object equals the ICCID pattern: scan down through the object's block then
+        // up, dedent-bounded so a nested or following object's `pattern` never pairs.
+        let sibling_is_iccid_pattern = |i: usize, c: usize| -> bool {
+            let is_iccid_pattern = |l: &str| -> bool {
+                raw_inline(l, "pattern")
+                    .map(|v| v.trim_matches('"').trim_matches('\'') == ICCID_PATTERN)
+                    .unwrap_or(false)
+            };
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_iccid_pattern(l) {
+                    return true;
+                }
+                j += 1;
+            }
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_iccid_pattern(l) {
+                    return true;
+                }
+            }
+            false
+        };
+        // True when line `i` (indent `c`) sits inside an outer `example:`/`examples:`
+        // payload — some enclosing container key up the indent ladder is
+        // `example`/`examples`, so an inner `default` key there is sample data.
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some(raw) = raw_inline(line, "default") else {
+                continue;
+            };
+            // A block-scalar opener (`>`/`|`, optionally with a chomping indicator)
+            // carries its value on the following lines, not inline — skip it.
+            if raw.starts_with('>') || raw.starts_with('|') {
+                continue;
+            }
+            let c = indent(line);
+            if inside_example(i, c) {
+                continue;
+            }
+            if !sibling_is_iccid_pattern(i, c) {
+                continue;
+            }
+            let value = raw.trim_matches('"').trim_matches('\'');
+            if !matches_iccid_pattern(value) {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_iccid_pattern_default_conforms_to_the_iccid_pattern() {
+        // Contract-harness invariant (OpenAPI 3.0.x / JSON-Schema structural rule): where
+        // a Schema Object declares an inline `default` beside a same-indent
+        // `pattern: '^[0-9]{19,20}$'` (the ICCID pattern the CAMARA eSIM specs use verbatim),
+        // the default MUST match that pattern. A `default` is the schema's fall-back
+        // *instance*, so a value the `pattern` rejects — an ICCID with a digit dropped or
+        // added (18 or 21 digits), or a placeholder pasted beside the pattern — is a
+        // self-contradictory schema whose own validator rejects the fall-back it pre-supplies,
+        // so a Redoc/Swagger form pre-fills an `iccid` control with an unusable value and a
+        // codegen client's generated instance carries a value no field constrained by this
+        // pattern can legally hold.
+        //
+        // The **`default` twin** of `every_iccid_pattern_example_conforms_to_the_iccid_pattern`
+        // and the third member of the `pattern`-*default* family after
+        // `every_e164_pattern_default_conforms_to_the_e164_pattern` and
+        // `every_imei_pattern_default_conforms_to_the_imei_pattern`, and the first
+        // pattern-default member whose shape is a *variable-length* digit run (the fixed-length
+        // IMEI-default check cannot express the 19-or-20 fault). Future-drift posture (like the
+        // E.164/IMEI-default twins): the corpus declares several ICCID `pattern` fields but
+        // pairs **none** with a `default` today (they carry examples, not defaults), so the
+        // guard asserts clean across all specs and holds the line against a future ICCID default
+        // drifting to a placeholder or a mis-lengthed value; the synthetic unit body in
+        // `iccid_pattern_default_extraction_rules` keeps the detection path live. Verified true
+        // across all mounted specs before asserting.
+        for api in APIS {
+            let offenders = iccid_pattern_defaults_malformed(api.body);
+            assert!(
+                offenders.is_empty(),
+                "{} spec declares a `default` beside a same-indent ICCID \
+                 `pattern: '^[0-9]{{19,20}}$'` that does not match that pattern (a fall-back the \
+                 pattern's own validator would reject) at `default:` line(s): {:?}",
+                api.name,
+                offenders
+            );
+        }
+    }
+
+    #[test]
+    fn iccid_pattern_default_extraction_rules() {
+        // Unit-cover `iccid_pattern_defaults_malformed` so the contract test above can't pass
+        // vacuously and its detection is pinned (`matches_iccid_pattern` itself is already
+        // covered by `iccid_pattern_example_extraction_rules`).
+        //
+        // Extractor: a valid quoted 19-digit and a valid unquoted 20-digit ICCID beside a
+        // same-indent ICCID `pattern` pass; an 18-digit, a 21-digit, and a non-digit value are
+        // flagged; a bad value with the pattern *below* it (down-scan) is flagged; a value with
+        // no `pattern` sibling and one whose sibling is a *different* pattern (the fixed-length
+        // IMEI `^[0-9]{15}$`) are skipped; a default in one property never pairs with a
+        // *following* property's ICCID `pattern` across the dedent; a block-scalar default is
+        // skipped; an inner `default` inside an outer `example:` payload is skipped; and a
+        // property literally named `default` (opening a block) is skipped.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    GoodQuoted:
+      type: string
+      pattern: '^[0-9]{19,20}$'
+      default: \"8931089011234567890\"
+    GoodUnquoted:
+      type: string
+      pattern: '^[0-9]{19,20}$'
+      default: 89310890112345678901
+    TooShort:
+      type: string
+      pattern: '^[0-9]{19,20}$'
+      default: \"893108901123456789\"
+    TooLong:
+      type: string
+      pattern: '^[0-9]{19,20}$'
+      default: \"893108901123456789012\"
+    NonDigit:
+      type: string
+      pattern: '^[0-9]{19,20}$'
+      default: \"893108901123456789X\"
+    PatternBelow:
+      type: string
+      default: \"nope\"
+      pattern: '^[0-9]{19,20}$'
+    NoPattern:
+      type: string
+      default: \"8931089011234567890-but-no-pattern\"
+    OtherPattern:
+      type: string
+      pattern: '^[0-9]{15}$'
+      default: \"490154203237518\"
+    BlockDefault:
+      type: string
+      pattern: '^[0-9]{19,20}$'
+      default: |
+        nope
+    InExample:
+      type: object
+      example:
+        pattern: '^[0-9]{19,20}$'
+        default: \"bad\"
+    Split:
+      type: object
+      properties:
+        a:
+          default: \"bad\"
+        b:
+          type: string
+          pattern: '^[0-9]{19,20}$'
+    NamedDefault:
+      type: object
+      properties:
+        default:
+          type: string
+          pattern: '^[0-9]{19,20}$'
+";
+        // Flagged, in document order: TooShort.default (line 25, 18 digits), TooLong.default
+        // (line 29, 21 digits), NonDigit.default (line 33, an embedded `X`), and
+        // PatternBelow.default (line 36, value `nope` with its ICCID `pattern` a line below —
+        // down-scan pairs it). Not flagged: GoodQuoted/GoodUnquoted (valid 19/20-digit);
+        // NoPattern (no `pattern` sibling); OtherPattern (sibling is the fixed-length IMEI
+        // pattern, not ICCID); BlockDefault (block-scalar opener `|`, no inline value);
+        // InExample's inner `default: \"bad\"` (sits inside the outer `example:` payload);
+        // Split.a.default, whose only ICCID `pattern` is in the following property Split.b past
+        // a dedent; and NamedDefault's `default:` property opening a block (no inline value).
+        assert_eq!(iccid_pattern_defaults_malformed(body), vec![25, 29, 33, 36]);
+
+        // Non-vacuous floor (future-drift posture, mirroring the E.164/IMEI-default twins):
+        // across every registered spec every `default` beside a same-indent ICCID `pattern`
+        // matches it (the invariant the contract test asserts). The corpus declares several
+        // ICCID `pattern` fields but pairs **none** with a `default` in the *same* Schema Object
+        // today (they carry examples, not defaults) — so this asserts a clean `== 0`
+        // genuine-pair count and guards future drift; the synthetic body above keeps the
+        // detection path live. The pair count reuses the extractor's own **dedent-bounded**
+        // same-indent sibling scan — the genuine-Schema-Object pairing — rather than a crude
+        // window, and stays independent of the extractor's *validity* (`matches_iccid_pattern`)
+        // comparison.
+        let mut iccid_defaults = 0usize;
+        for api in APIS {
+            assert!(
+                iccid_pattern_defaults_malformed(api.body).is_empty(),
+                "{}: every default beside a same-indent ICCID `pattern` must match it",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            let raw_inline = |l: &str, name: &str| -> Option<String> {
+                let (k, v) = l.trim_start().split_once(':')?;
+                if k.trim() != name {
+                    return None;
+                }
+                let v = v.split('#').next().unwrap_or(v).trim();
+                if v.is_empty() { None } else { Some(v.to_string()) }
+            };
+            // A genuine same-Schema-Object ICCID `pattern` sibling of the `default` on line
+            // `i` (indent `c`): scan down through the object's block then up, dedent-bounded
+            // exactly like the extractor's `sibling_is_iccid_pattern`, so a *following*
+            // property's ICCID `pattern` past a dedent never counts.
+            let sibling_is_iccid = |i: usize, c: usize| -> bool {
+                let is_iccid = |l: &str| -> bool {
+                    raw_inline(l, "pattern")
+                        .map(|v| v.trim_matches('"').trim_matches('\'') == ICCID_PATTERN)
+                        .unwrap_or(false)
+                };
+                let mut j = i + 1;
+                while j < lines.len() {
+                    let l = lines[j];
+                    if l.trim().is_empty() {
+                        j += 1;
+                        continue;
+                    }
+                    if indent(l) < c {
+                        break;
+                    }
+                    if indent(l) == c && is_iccid(l) {
+                        return true;
+                    }
+                    j += 1;
+                }
+                let mut k = i;
+                while k > 0 {
+                    k -= 1;
+                    let l = lines[k];
+                    if l.trim().is_empty() {
+                        continue;
+                    }
+                    if indent(l) < c {
+                        break;
+                    }
+                    if indent(l) == c && is_iccid(l) {
+                        return true;
+                    }
+                }
+                false
+            };
+            for (i, l) in lines.iter().enumerate() {
+                let Some(v) = raw_inline(l, "default") else {
+                    continue;
+                };
+                // Inline scalar only (skip block-scalar openers), mirroring the extractor
+                // so the floor counts exactly the pairs it inspects.
+                if v.starts_with('>') || v.starts_with('|') {
+                    continue;
+                }
+                let c = indent(l);
+                if sibling_is_iccid(i, c) {
+                    iccid_defaults += 1;
+                }
+            }
+        }
+        assert_eq!(
+            iccid_defaults, 0,
+            "expected no genuine default + same-Schema-Object ICCID `pattern` pairs across \
+             specs (the future-drift posture; a new pair means switch this guard to a \
+             `>= 1` floor like the example side), got {iccid_defaults}"
+        );
+    }
+
     const NAME_PATTERN: &str = r"^[a-zA-Z0-9_.-]+$";
 
     /// True when `s` matches the name `pattern` `^[a-zA-Z0-9_.-]+$` exactly: one or more
