@@ -6319,6 +6319,41 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-23 — Contract-test harness: guard that every **`format: float` `default` is a
+  well-formed single-precision value** (`src/registry.rs`
+  `every_float_format_default_is_a_well_formed_float`). In OpenAPI 3.0.x (JSON Schema) a
+  `default` is a fall-back *instance* of the schema, so where a Schema Object declares an
+  inline `default` beside a same-indent `format: float`, the default MUST be a finite
+  IEEE-754 single-precision value — else the schema's own validator rejects the fall-back it
+  pre-supplies (a Redoc/Swagger form pre-fills a monetary `amount`/`taxAmount` control with
+  an unusable value; a codegen client that maps `float` onto a 32-bit float carries a
+  default no `float`-typed field can hold). The **`default`-side twin of
+  `every_float_format_example_is_a_well_formed_float`** and the single-precision companion
+  of `every_double_format_default_is_a_well_formed_double`: it **completes the numeric
+  format-default family** (int32 / int64 / double / float) — `float` was the last numeric
+  format-example guard still without a default counterpart. New pure
+  `float_format_defaults_malformed`: the `double_format_defaults_malformed` extractor with
+  its format anchor swapped `double`→`float` and validator `is_well_formed_double`→
+  `is_well_formed_float` (parses as `f32`, stricter than double: `1e40` is a finite `f64`
+  but a non-finite `f32`), reusing unchanged its inline-scalar reader, its dedent-bounded
+  same-indent `format: float` sibling probe (matched exactly, so `double` never pairs — the
+  analogue of the int32/int64 mutual exclusion), its `example:`/`examples:` payload
+  ancestor-walk exclusion, and its block-scalar-opener skip. Surveyed the corpus first — 4
+  `format: float` fields (carrier-billing `amount`/`taxAmount`), **none** paired with a
+  `default` in the same Schema Object — so the contract test asserts clean across all specs.
+  The corpus's only `default`s near a `format: float` are the adjacent `isChargedToTax`
+  boolean's `default: false` (a *different* property), which a crude ±window would miscount
+  as a pair (it did — the double-twin's window floor tripped at 2), so the future-drift
+  floor was written to reuse the extractor's own **dedent-bounded** genuine-Schema-Object
+  sibling scan (genuine pairs `== 0`) rather than a ±window. Tests: +2 (the contract test +
+  `float_format_default_extraction_rules`: a valid `9.99` beside `format: float` cleared; a
+  `TODO` placeholder, a single-precision overflow `1e40`, and a `nope` with its
+  `format: float` a line below (down-scan) flagged in document order `[21, 25, 28]`;
+  no-format / different-format (`double`) / following-property-across-dedent / block-scalar
+  / in-`example:` / property-named-`default` cases skipped; `float_defaults == 0`
+  genuine-pair floor). `cargo test` 2952 green (was 2950); `cargo build --release`
+  succeeds. No new dependency; test-only change (no spec/runtime edit). — binary (release):
+  5.1M (5,323,160 B; unchanged).
 - 2026-08-23 — Contract-test harness: guard that every **`format: double` `default` is a
   well-formed double-precision value** (`src/registry.rs`
   `every_double_format_default_is_a_well_formed_double`). In OpenAPI 3.0.x (JSON Schema) a

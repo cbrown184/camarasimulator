@@ -56296,6 +56296,368 @@ components:
         );
     }
 
+    /// The 1-based line numbers, in document order, of every `default:` keyword whose
+    /// inline scalar value sits in a Schema Object declaring a *same-indent*
+    /// `format: float` sibling yet is not a well-formed single-precision value, without a
+    /// YAML dep. The `default` twin of `float_format_examples_malformed` and the
+    /// single-precision companion of `double_format_defaults_malformed`: an `example` is a
+    /// sample instance of the schema and a `default` is its fall-back instance, so both
+    /// must honour the finite-`float` shape the format fixes; the example side was already
+    /// guarded, the default side was not.
+    ///
+    /// Scoping mirrors `double_format_defaults_malformed` / `float_format_examples_malformed`
+    /// exactly — only a `default` carrying an inline scalar (a block-scalar
+    /// `default: >-`/`|` opens no inline value and is skipped; a numeric default never
+    /// takes that form, but the guard mirrors the sibling) with a same-indent
+    /// `format: float` sibling (matched **exactly**, so `double` — the double-precision
+    /// format — never pairs, the analogue of the `int32`/`int64` mutual exclusion) in the
+    /// same Schema Object is inspected. The sibling is scanned at the default's own indent,
+    /// down through the object's block then up, dedent-bounded exactly like the sibling
+    /// extractor, so a *following* property's `format: float` past a dedent never pairs
+    /// with this property's default. A `default:` nested inside an outer
+    /// `example:`/`examples:` payload (sample data, not a schema keyword) is skipped.
+    /// Float shape + finiteness is judged by the shared `is_well_formed_float`.
+    fn float_format_defaults_malformed(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let raw_inline = |l: &str, name: &str| -> Option<String> {
+            let (k, v) = l.trim_start().split_once(':')?;
+            if k.trim() != name {
+                return None;
+            }
+            let v = v.split('#').next().unwrap_or(v).trim();
+            if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            }
+        };
+        // Whether a same-indent `format:` sibling of line `i` (indent `c`) in the same
+        // Schema Object names `float` (exactly — not `double`): scan down through the
+        // object's block then up, dedent-bounded so a nested or following object's
+        // `format` never pairs.
+        let sibling_is_float_format = |i: usize, c: usize| -> bool {
+            let is_float_format = |l: &str| -> bool {
+                raw_inline(l, "format")
+                    .map(|v| v.trim_matches('"').trim_matches('\'') == "float")
+                    .unwrap_or(false)
+            };
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_float_format(l) {
+                    return true;
+                }
+                j += 1;
+            }
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_float_format(l) {
+                    return true;
+                }
+            }
+            false
+        };
+        // True when line `i` (indent `c`) sits inside an outer `example:`/`examples:`
+        // payload — some enclosing container key up the indent ladder is
+        // `example`/`examples`, so an inner `default` key there is sample data.
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some(raw) = raw_inline(line, "default") else {
+                continue;
+            };
+            // A block-scalar opener (`>`/`|`, optionally with a chomping indicator)
+            // carries its value on the following lines, not inline — skip it.
+            if raw.starts_with('>') || raw.starts_with('|') {
+                continue;
+            }
+            let c = indent(line);
+            if inside_example(i, c) {
+                continue;
+            }
+            if !sibling_is_float_format(i, c) {
+                continue;
+            }
+            let value = raw.trim_matches('"').trim_matches('\'');
+            if !is_well_formed_float(value) {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_float_format_default_is_a_well_formed_float() {
+        // Contract-harness invariant (OpenAPI 3.0.x / JSON-Schema structural rule):
+        // where a Schema Object declares an inline `default` beside a same-indent
+        // `format: float`, the default MUST be a finite single-precision value. A
+        // `default` is the schema's fall-back *instance*, so a value that is not a valid
+        // float — a placeholder, trailing junk from a fat-fingered decimal, or a magnitude
+        // that overflows the single-precision range to a non-finite value — is a
+        // self-contradictory schema whose own validator rejects the fall-back it
+        // pre-supplies, so a Redoc/Swagger form pre-fills a control (a monetary
+        // `amount` / `taxAmount` field with a `default`) with an unusable value and a
+        // codegen client that maps `float` onto a 32-bit float carries a default no
+        // `float`-typed field can legally hold.
+        //
+        // The **`default` twin** of `every_float_format_example_is_a_well_formed_float`
+        // and the single-precision companion of
+        // `every_double_format_default_is_a_well_formed_double`: together with the double /
+        // int32 / int64 format-default guards it **completes the numeric format-default
+        // family** (int32 / int64 / double / float) over the four numeric formats a CAMARA
+        // schema uses — the `float` row was the last numeric format-example guard still
+        // without a default counterpart. Future-drift posture (like the double-default
+        // twin): the corpus declares `format: float` fields (the carrier-billing monetary
+        // `amount` / `taxAmount`) but pairs **none** with a `default` today, so the guard
+        // asserts clean across all specs and holds the line against a future float default
+        // drifting to a non-finite or non-numeric value; the synthetic unit body in
+        // `float_format_default_extraction_rules` keeps the detection path live. Verified
+        // true across all mounted specs before asserting.
+        for api in APIS {
+            let offenders = float_format_defaults_malformed(api.body);
+            assert!(
+                offenders.is_empty(),
+                "{} spec declares a `default` beside a same-indent `format: float` that \
+                 is not a well-formed single-precision value (a fall-back the format's own \
+                 validator would reject) at `default:` line(s): {:?}",
+                api.name,
+                offenders
+            );
+        }
+    }
+
+    #[test]
+    fn float_format_default_extraction_rules() {
+        // Unit-cover `float_format_defaults_malformed` so the contract test above can't
+        // pass vacuously and its detection is pinned (`is_well_formed_float` itself is
+        // already covered by `float_format_example_extraction_rules`).
+        //
+        // Extractor: a valid float beside a same-indent `format: float` passes; a
+        // placeholder, a single-precision overflow-to-infinity, and a value with the format
+        // *below* it (down-scan) are flagged; a value with no `format` sibling and one whose
+        // sibling is a *different* format (`double`) are skipped; a default in one property
+        // never pairs with a *following* property's `format: float` across the dedent; a
+        // block-scalar default is skipped; an inner `default` inside an outer `example:`
+        // payload is skipped; and a property literally named `default` (opening a block) is
+        // skipped.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    GoodFloat:
+      type: number
+      format: float
+      default: 9.99
+    BadPlaceholder:
+      type: number
+      format: float
+      default: TODO
+    BadOverflow:
+      type: number
+      format: float
+      default: 1e40
+    FormatBelow:
+      type: number
+      default: nope
+      format: float
+    NoFormat:
+      type: number
+      default: 42
+    DoubleFmt:
+      type: number
+      format: double
+      default: nope
+    Split:
+      type: object
+      properties:
+        a:
+          type: string
+          enum: [DAY, NIGHT]
+          default: DAY
+        b:
+          type: number
+          format: float
+          default: 51.5
+    Folded:
+      type: number
+      format: float
+      default: >-
+        3.14
+    InExample:
+      type: object
+      example:
+        format: float
+        default: notanumber
+    NamedDefault:
+      type: object
+      properties:
+        default:
+          type: number
+          format: float
+";
+        // Flagged, in document order: BadPlaceholder.default (line 21, `TODO` is not
+        // numeric), BadOverflow.default (line 25, `1e40` overflows the single-precision
+        // range to a non-finite infinity — finite as `f64` but not `f32`, the
+        // stricter-than-double case), and FormatBelow.default (line 28, value `nope` with
+        // its `format: float` a line below — down-scan pairs it). Not flagged: GoodFloat
+        // (valid `9.99`); NoFormat (no `format` sibling); DoubleFmt (sibling is `double`,
+        // not `float` — so its `nope` is out of scope, the analogue of the int32/int64
+        // mutual exclusion); Split.a.default `DAY` (its only `format: float` is the
+        // *following* property Split.b, past a dedent); Split.b.default (valid `51.5`);
+        // Folded (block-scalar opener `>-`, no inline value); InExample's inner
+        // `default: notanumber` (inside the outer `example:` payload); NamedDefault's
+        // `default:` property (opens a block, no inline value).
+        assert_eq!(float_format_defaults_malformed(body), vec![21, 25, 28]);
+
+        // Non-vacuous floor (future-drift posture, mirroring the double-default twin):
+        // across every registered spec every `default` beside a same-indent
+        // `format: float` is a well-formed float (the invariant the contract test asserts).
+        // The corpus declares `format: float` fields (the carrier-billing monetary
+        // `amount`/`taxAmount`) but pairs **none** with a `default` in the *same* Schema
+        // Object today — the only `default`s sitting near a `format: float` are the
+        // adjacent `isChargedToTax` boolean's `default: false`, a *different* property the
+        // dedent-bounded sibling scan correctly does not pair — so this asserts a clean
+        // `== 0` genuine-pair count and guards future drift; the synthetic body above is
+        // what keeps the detection path live. Unlike the double-default twin (whose corpus
+        // has no `default` within a crude ±window of a `format: double`), a plain
+        // same-indent ±window over-counts here (it would miscount that cross-property
+        // boolean default), so the pair count reuses the extractor's own **dedent-bounded**
+        // same-indent sibling scan — the genuine-Schema-Object pairing — rather than a crude
+        // window, and stays independent of the extractor's *validity* (`is_well_formed_float`)
+        // comparison.
+        let mut float_defaults = 0usize;
+        for api in APIS {
+            assert!(
+                float_format_defaults_malformed(api.body).is_empty(),
+                "{}: every default beside a same-indent `format: float` must be a \
+                 well-formed single-precision value",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            let raw_inline = |l: &str, name: &str| -> Option<String> {
+                let (k, v) = l.trim_start().split_once(':')?;
+                if k.trim() != name {
+                    return None;
+                }
+                let v = v.split('#').next().unwrap_or(v).trim();
+                if v.is_empty() { None } else { Some(v.to_string()) }
+            };
+            // A genuine same-Schema-Object `format: float` sibling of the `default` on line
+            // `i` (indent `c`): scan down through the object's block then up, dedent-bounded
+            // exactly like the extractor's `sibling_is_float_format`, so a *following*
+            // property's `format: float` past a dedent (the cross-property boolean-default
+            // case) never counts.
+            let sibling_is_float = |i: usize, c: usize| -> bool {
+                let is_float = |l: &str| -> bool {
+                    raw_inline(l, "format")
+                        .map(|v| v.trim_matches('"').trim_matches('\'') == "float")
+                        .unwrap_or(false)
+                };
+                let mut j = i + 1;
+                while j < lines.len() {
+                    let l = lines[j];
+                    if l.trim().is_empty() {
+                        j += 1;
+                        continue;
+                    }
+                    if indent(l) < c {
+                        break;
+                    }
+                    if indent(l) == c && is_float(l) {
+                        return true;
+                    }
+                    j += 1;
+                }
+                let mut k = i;
+                while k > 0 {
+                    k -= 1;
+                    let l = lines[k];
+                    if l.trim().is_empty() {
+                        continue;
+                    }
+                    if indent(l) < c {
+                        break;
+                    }
+                    if indent(l) == c && is_float(l) {
+                        return true;
+                    }
+                }
+                false
+            };
+            for (i, l) in lines.iter().enumerate() {
+                let Some(v) = raw_inline(l, "default") else {
+                    continue;
+                };
+                // Inline scalar only (skip block-scalar openers), mirroring the extractor
+                // so the floor counts exactly the pairs it inspects.
+                if v.starts_with('>') || v.starts_with('|') {
+                    continue;
+                }
+                let c = indent(l);
+                if sibling_is_float(i, c) {
+                    float_defaults += 1;
+                }
+            }
+        }
+        assert_eq!(
+            float_defaults, 0,
+            "expected no genuine default + same-Schema-Object `format: float` pairs across \
+             specs (the future-drift posture; a new pair means switch this guard to a \
+             `>= 1` floor like the example side), got {float_defaults}"
+        );
+    }
+
     /// Whether `s` is a well-formed IPv4 address instance — the sample an OpenAPI
     /// `format: ipv4` field advertises. True iff `s` is dotted-quad decimal: exactly
     /// four `.`-separated octets, each a run of 1–3 ASCII digits whose value is in
