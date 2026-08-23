@@ -3335,6 +3335,23 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - a **result-code `pattern`-`default` conformance** contract test (`src/registry.rs`
+    `every_result_code_pattern_default_conforms_to_the_result_code_pattern`) — the `default`-side
+    twin of `every_result_code_pattern_example_conforms_to_the_result_code_pattern` and the
+    **eighth member of the `pattern`-default family** after E.164 / IMEI / ICCID / name / token /
+    32-hex / MAC, the **first over a fixed literal-alpha prefix + fixed-length digit run**
+    (`^B[0-9]{6}$`, the eSIM Remote Management `resultCode` pattern the `BaseCmpResp…` envelopes
+    use verbatim). A wrong-prefix / wrong-length / non-digit-tail fault is one none of the seven
+    prior members can express (they carry no leading alpha sentinel followed by a decimal-only
+    tail). A `default` beside a same-indent result-code `pattern` must match it, else the schema's
+    own validator rejects the fall-back it pre-supplies. New pure
+    `result_code_pattern_defaults_malformed` (the `mac_pattern_defaults_malformed` shape keyed on
+    `RESULT_CODE_PATTERN` equality + judged by `matches_result_code_pattern`, both already present
+    from the example side; trigger key `default:`, block-scalar opener skipped). Corpus declares
+    two result-code `pattern` fields but pairs neither with a default (they carry examples) →
+    asserts clean `== 0` genuine-pair count (future-drift posture) + guards future drift; floor
+    reuses the dedent-bounded sibling scan. Unit-covered
+    (`result_code_pattern_default_extraction_rules`). Test-only, no spec change.
   - a **MAC `pattern`-`default` conformance** contract test (`src/registry.rs`
     `every_mac_pattern_default_conforms_to_the_mac_pattern`) — the `default`-side twin of
     `every_mac_pattern_example_conforms_to_the_mac_pattern` and the **seventh member of the
@@ -6492,6 +6509,34 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-23 — Contract-test harness: guard that every **result-code `pattern` `default` matches
+  the pattern** (`src/registry.rs`
+  `every_result_code_pattern_default_conforms_to_the_result_code_pattern`). The **eighth member of
+  the `pattern`-default family** after E.164, IMEI, ICCID, name, token, 32-hex, and MAC, the
+  `default`-side twin of `every_result_code_pattern_example_conforms_to_the_result_code_pattern`,
+  and the **first pattern-default member over a fixed literal-alpha prefix + fixed-length digit
+  run** (`^B[0-9]{6}$` — the eSIM Remote Management `resultCode` pattern the `BaseCmpResp…`
+  envelopes use verbatim: a literal `B` sentinel then exactly six decimal digits, `B100000` =
+  success). A wrong-prefix, wrong-digit-count, or non-digit-tail fault is one none of the seven
+  prior members can express: the single-run E.164/IMEI/ICCID checks carry no alpha anchor, the
+  name/token classes have no mandatory leading literal, and the 32-hex/MAC members carry no alpha
+  *sentinel* + decimal-only tail. In OpenAPI 3.0.x a `default` is the schema's fall-back *instance*,
+  so a field constrained by this `pattern` (carries no `format`, so otherwise unchecked) MUST carry
+  a default the pattern accepts; a result-code default the pattern rejects advertises a fall-back
+  the schema's own validator rejects. New pure `result_code_pattern_defaults_malformed` (the
+  `mac_pattern_defaults_malformed` shape keyed on `RESULT_CODE_PATTERN` equality + judged by
+  `matches_result_code_pattern`, both already present from the example side; trigger key `default:`,
+  block-scalar opener skipped, dedent-bounded same-indent sibling scan, in-`example:` payload
+  excluded). Surveyed the corpus first — both result-code `pattern` schemas (the `resultCode` of
+  the eSIM `BaseCmpResp…` envelopes) pair with an `example`, **neither** with a `default` → asserts
+  a clean `== 0` genuine-pair count (future-drift posture, mirroring the
+  E.164/IMEI/ICCID/name/token/32-hex/MAC-default twins) + guards future drift; floor reuses the
+  dedent-bounded sibling scan. Unit-covered (`result_code_pattern_default_extraction_rules`: valid
+  quoted / unquoted result codes cleared; wrong-prefix/too-few-digits/non-digit-tail/pattern-below
+  flagged in document order [25, 29, 33, 36]; no-pattern / different-pattern (ICCID) / block-scalar
+  / in-`example:` / following-property-across-dedent / property-named-`default` skipped). Test-only,
+  no spec change. `cargo test` 2982 pass (+2); `cargo build --release` clean, no new dep. — binary
+  (release): 5,323,160 bytes (~5.08 MiB; unchanged by a test-only change).
 - 2026-08-23 — Contract-test harness: guard that every **MAC `pattern` `default` matches the
   pattern** (`src/registry.rs` `every_mac_pattern_default_conforms_to_the_mac_pattern`). The
   **seventh member of the `pattern`-default family** after E.164, IMEI, ICCID, name, token, and
