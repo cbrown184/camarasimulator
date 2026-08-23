@@ -42836,6 +42836,370 @@ components:
         );
     }
 
+    /// The 1-based line numbers, in document order, of every `default:` keyword whose inline
+    /// scalar value sits in a Schema Object declaring a *same-indent* MAC `pattern` sibling yet
+    /// does not match that pattern, without a YAML dep. The `default` twin of
+    /// `mac_pattern_examples_malformed`: identical scoping, keyed on `MAC_PATTERN`.
+    ///
+    /// In OpenAPI 3.0.x (JSON Schema) a `default` is the schema's fall-back *instance*, so a
+    /// field constrained by `pattern` MUST carry a default the pattern accepts (the same Spectral
+    /// `oas3-valid-schema-example` posture that validates an example against its schema applies to
+    /// a `default` — it is a schema-level instance too). A MAC default with the wrong group count,
+    /// a non-hex nibble, a bad separator, or a placeholder pasted beside the pattern advertises a
+    /// fall-back the schema's own validator rejects, so a Redoc/Swagger form pre-fills a
+    /// hardware-address control with an unusable value and a codegen client carries a value no
+    /// field constrained by this pattern can legally hold. Like the MAC-example twin (and the
+    /// IMEI/ICCID/32-hex/token patterns, unlike the UUID patterns which sit beside a `format: uuid`
+    /// already guarded), the MAC pattern carries no `format` sibling, so such a default is
+    /// otherwise unchecked; and — the first pattern-default member over a *separator-delimited
+    /// group structure* — a grouped-shape fault (wrong group count, a stray separator) is one the
+    /// single-run E.164/IMEI/ICCID-default and the name/token/32-hex-default checks cannot express.
+    ///
+    /// Structurally identical to `hex32_pattern_defaults_malformed`, keyed on `MAC_PATTERN`
+    /// equality and judged by `matches_mac_pattern`: the trigger key is `default:` and a
+    /// block-scalar opener (`default: >-` / `default: |`) is skipped (it opens no inline value).
+    /// Scoping is otherwise unchanged: only a `default` carrying an inline scalar with a
+    /// same-indent `pattern` sibling *equal to* `MAC_PATTERN`, in the same Schema Object, is
+    /// inspected — the sibling is scanned at the default's own indent, down through the object's
+    /// block then up, dedent-bounded, so a nested or following object's `pattern` never pairs. A
+    /// `default:` nested inside an outer `example:`/`examples:` payload (sample data, not a schema
+    /// keyword) is skipped. Only the MAC pattern is matched; other patterns are out of scope. The
+    /// `:` inside the pattern's own value never confuses the key split — `split_once(':')` keys on
+    /// the first colon (after `default`/`pattern`), keeping the bracket expression `[:-]` in the
+    /// value.
+    fn mac_pattern_defaults_malformed(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let raw_inline = |l: &str, name: &str| -> Option<String> {
+            let (k, v) = l.trim_start().split_once(':')?;
+            if k.trim() != name {
+                return None;
+            }
+            let v = v.split('#').next().unwrap_or(v).trim();
+            if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            }
+        };
+        // Whether a same-indent `pattern:` sibling of line `i` (indent `c`) in the same Schema
+        // Object equals the MAC pattern: scan down through the object's block then up,
+        // dedent-bounded so a nested or following object's `pattern` never pairs.
+        let sibling_is_mac_pattern = |i: usize, c: usize| -> bool {
+            let is_mac_pattern = |l: &str| -> bool {
+                raw_inline(l, "pattern")
+                    .map(|v| v.trim_matches('"').trim_matches('\'') == MAC_PATTERN)
+                    .unwrap_or(false)
+            };
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_mac_pattern(l) {
+                    return true;
+                }
+                j += 1;
+            }
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_mac_pattern(l) {
+                    return true;
+                }
+            }
+            false
+        };
+        // True when line `i` (indent `c`) sits inside an outer `example:`/`examples:` payload —
+        // some enclosing container key up the indent ladder is `example`/`examples`, so an inner
+        // `default` key there is sample data.
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some(raw) = raw_inline(line, "default") else {
+                continue;
+            };
+            // A block-scalar opener (`>`/`|`, optionally with a chomping indicator) carries its
+            // value on the following lines, not inline — skip it.
+            if raw.starts_with('>') || raw.starts_with('|') {
+                continue;
+            }
+            let c = indent(line);
+            if inside_example(i, c) {
+                continue;
+            }
+            if !sibling_is_mac_pattern(i, c) {
+                continue;
+            }
+            let value = raw.trim_matches('"').trim_matches('\'');
+            if !matches_mac_pattern(value) {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_mac_pattern_default_conforms_to_the_mac_pattern() {
+        // Contract-harness invariant (OpenAPI 3.0.x / JSON-Schema structural rule): where a Schema
+        // Object declares an inline `default` beside a same-indent MAC `pattern`
+        // (`^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$`, the EUI-48 hardware-address pattern the
+        // CAMARA network-access specs use verbatim), the default MUST match that pattern. A
+        // `default` is the schema's fall-back *instance*, so a value the `pattern` rejects — a MAC
+        // with the wrong group count, a non-hex nibble, a bad separator, or a placeholder pasted
+        // beside the pattern — is a self-contradictory schema whose own validator rejects the
+        // fall-back it pre-supplies, so a Redoc/Swagger form pre-fills a hardware-address control
+        // with an unusable value and a codegen client's generated instance carries a value no
+        // field constrained by this pattern can legally hold.
+        //
+        // The **`default` twin** of `every_mac_pattern_example_conforms_to_the_mac_pattern` and
+        // the seventh member of the `pattern`-*default* family after the E.164 / IMEI / ICCID /
+        // name / token / 32-hex default twins, and the first pattern-default member over a
+        // *separator-delimited group structure*: neither the single-run E.164/IMEI/ICCID-default
+        // checks nor the name/token/32-hex-default checks can express a grouped-shape fault (a
+        // wrong group count, a stray separator) — the six prior members each accept one
+        // uninterrupted run of a single character class. Future-drift posture (like the
+        // E.164/IMEI/ICCID/name/token/32-hex-default twins): the corpus declares two MAC `pattern`
+        // fields (Network Access Domains + Network Access Devices) but pairs **neither** with a
+        // `default` today (they carry examples, not defaults), so the guard asserts clean across
+        // all specs and holds the line against a future MAC `default` drifting to a placeholder or
+        // a mis-grouped value; the synthetic unit body in `mac_pattern_default_extraction_rules`
+        // keeps the detection path live. Verified true across all mounted specs before asserting.
+        for api in APIS {
+            let offenders = mac_pattern_defaults_malformed(api.body);
+            assert!(
+                offenders.is_empty(),
+                "{} spec declares a `default` beside a same-indent MAC \
+                 `pattern: '^([0-9A-Fa-f]{{2}}[:-]){{5}}([0-9A-Fa-f]{{2}})$'` that does not match \
+                 that pattern (a fall-back the pattern's own validator would reject) at \
+                 `default:` line(s): {:?}",
+                api.name,
+                offenders
+            );
+        }
+    }
+
+    #[test]
+    fn mac_pattern_default_extraction_rules() {
+        // Unit-cover `mac_pattern_defaults_malformed` so the contract test above can't pass
+        // vacuously and its detection is pinned (`matches_mac_pattern` is already covered by
+        // `mac_pattern_example_extraction_rules`).
+        //
+        // Extractor: a valid quoted colon MAC and a valid unquoted hyphen MAC (each beside a
+        // same-indent MAC `pattern`) pass; a too-few-groups, a non-hex, and a bad-separator value
+        // are flagged; a bad value with the `pattern` *below* it (down-scan) is flagged; a value
+        // with no `pattern` sibling and one whose sibling is a *different* pattern (the ICCID
+        // `^[0-9]{19,20}$`) are skipped; a block-scalar default is skipped; a default in one
+        // property never pairs with a *following* property's MAC `pattern` across the dedent; an
+        // inner `default` inside an outer `example:` payload is skipped; and a property literally
+        // named `default` (opening a block) is skipped.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    GoodColon:
+      type: string
+      pattern: \"^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$\"
+      default: \"00:11:22:33:44:55\"
+    GoodHyphen:
+      type: string
+      pattern: \"^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$\"
+      default: 00-11-22-33-44-55
+    TooFewGroups:
+      type: string
+      pattern: \"^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$\"
+      default: \"00:11:22:33:44\"
+    TooManyGroups:
+      type: string
+      pattern: \"^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$\"
+      default: \"00:11:22:33:44:55:66\"
+    NonHex:
+      type: string
+      pattern: \"^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$\"
+      default: \"00:11:22:33:44:5G\"
+    PatternBelow:
+      type: string
+      default: \"nope\"
+      pattern: \"^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$\"
+    NoPattern:
+      type: string
+      default: \"00:11:22:33:44:55\"
+    OtherPattern:
+      type: string
+      pattern: '^[0-9]{19,20}$'
+      default: \"8988303000000000001\"
+    BlockDefault:
+      type: string
+      pattern: \"^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$\"
+      default: |
+        nope
+    InExample:
+      type: object
+      example:
+        pattern: \"^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$\"
+        default: \"bad\"
+    Split:
+      type: object
+      properties:
+        a:
+          default: \"bad\"
+        b:
+          type: string
+          pattern: \"^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$\"
+    NamedDefault:
+      type: object
+      properties:
+        default:
+          type: string
+          pattern: \"^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$\"
+";
+        // Flagged, in document order: TooFewGroups.default (line 25, 5 groups), TooManyGroups
+        // .default (line 29, 7 groups), NonHex.default (line 33, an embedded `G`), and
+        // PatternBelow.default (line 36, value `nope` with its MAC `pattern` a line below —
+        // down-scan pairs it). Not flagged: GoodColon/GoodHyphen (valid MACs, quoted and
+        // unquoted); NoPattern (no `pattern` sibling); OtherPattern (sibling is the ICCID pattern,
+        // not MAC); BlockDefault (block-scalar opener `|`, no inline value); InExample's inner
+        // `default: \"bad\"` (sits inside the outer `example:` payload); Split.a.default, whose only
+        // MAC `pattern` is in the following property Split.b past a dedent; and NamedDefault's
+        // `default:` property opening a block (no inline value).
+        assert_eq!(mac_pattern_defaults_malformed(body), vec![25, 29, 33, 36]);
+
+        // Non-vacuous floor (future-drift posture, mirroring the E.164/IMEI/ICCID/name/token/32-hex
+        // -default twins): across every registered spec every `default` beside a same-indent MAC
+        // `pattern` matches it (the invariant the contract test asserts). The corpus declares two
+        // MAC `pattern` fields but pairs **neither** with a `default` in the *same* Schema Object
+        // today (they carry examples, not defaults) — so this asserts a clean `== 0` genuine-pair
+        // count and guards future drift; the synthetic body above keeps the detection path live.
+        // The pair count reuses the extractor's own **dedent-bounded** same-indent sibling scan —
+        // the genuine-Schema-Object pairing — rather than a crude window, and stays independent of
+        // the extractor's *validity* (`matches_mac_pattern`) comparison.
+        let mut mac_defaults = 0usize;
+        for api in APIS {
+            assert!(
+                mac_pattern_defaults_malformed(api.body).is_empty(),
+                "{}: every default beside a same-indent MAC `pattern` must match it",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            let raw_inline = |l: &str, name: &str| -> Option<String> {
+                let (k, v) = l.trim_start().split_once(':')?;
+                if k.trim() != name {
+                    return None;
+                }
+                let v = v.split('#').next().unwrap_or(v).trim();
+                if v.is_empty() { None } else { Some(v.to_string()) }
+            };
+            // A genuine same-Schema-Object MAC `pattern` sibling of the `default` on line `i`
+            // (indent `c`): scan down through the object's block then up, dedent-bounded exactly
+            // like the extractor's `sibling_is_mac_pattern`, so a *following* property's MAC
+            // `pattern` past a dedent never counts.
+            let sibling_is_mac = |i: usize, c: usize| -> bool {
+                let is_mac = |l: &str| -> bool {
+                    raw_inline(l, "pattern")
+                        .map(|v| v.trim_matches('"').trim_matches('\'') == MAC_PATTERN)
+                        .unwrap_or(false)
+                };
+                let mut j = i + 1;
+                while j < lines.len() {
+                    let l = lines[j];
+                    if l.trim().is_empty() {
+                        j += 1;
+                        continue;
+                    }
+                    if indent(l) < c {
+                        break;
+                    }
+                    if indent(l) == c && is_mac(l) {
+                        return true;
+                    }
+                    j += 1;
+                }
+                let mut k = i;
+                while k > 0 {
+                    k -= 1;
+                    let l = lines[k];
+                    if l.trim().is_empty() {
+                        continue;
+                    }
+                    if indent(l) < c {
+                        break;
+                    }
+                    if indent(l) == c && is_mac(l) {
+                        return true;
+                    }
+                }
+                false
+            };
+            for (i, l) in lines.iter().enumerate() {
+                let Some(v) = raw_inline(l, "default") else {
+                    continue;
+                };
+                // Inline scalar only (skip block-scalar openers), mirroring the extractor so the
+                // floor counts exactly the pairs it inspects.
+                if v.starts_with('>') || v.starts_with('|') {
+                    continue;
+                }
+                let c = indent(l);
+                if sibling_is_mac(i, c) {
+                    mac_defaults += 1;
+                }
+            }
+        }
+        assert_eq!(
+            mac_defaults, 0,
+            "expected no genuine default + same-Schema-Object MAC `pattern` pairs across specs \
+             (the future-drift posture; a new pair means switch this guard to a `>= 1` floor like \
+             the example side), got {mac_defaults}"
+        );
+    }
+
     /// The eSIM result-code `pattern` the eSIM Remote Management spec uses verbatim
     /// (written in YAML as `'^B[0-9]{6}$'`): a literal ASCII `B` followed by exactly six
     /// decimal digits (`B100000` — success; any other value — failure). It is the corpus's

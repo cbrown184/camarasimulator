@@ -3335,6 +3335,22 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - a **MAC `pattern`-`default` conformance** contract test (`src/registry.rs`
+    `every_mac_pattern_default_conforms_to_the_mac_pattern`) — the `default`-side twin of
+    `every_mac_pattern_example_conforms_to_the_mac_pattern` and the **seventh member of the
+    `pattern`-default family** after E.164 / IMEI / ICCID / name / token / 32-hex, the **first
+    over a separator-delimited group structure** (`^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$`,
+    the EUI-48 MAC pattern the Network Access Domains / Network Access Devices specs use
+    verbatim). A grouped-shape fault (wrong group count, a stray separator, a non-hex nibble) is
+    one the single-run E.164/IMEI/ICCID-default and the name/token/32-hex-default checks can't
+    express. A `default` beside a same-indent MAC `pattern` must match it, else the schema's own
+    validator rejects the fall-back it pre-supplies. New pure `mac_pattern_defaults_malformed`
+    (the `hex32_pattern_defaults_malformed` shape keyed on `MAC_PATTERN` equality + judged by
+    `matches_mac_pattern`, both already present from the example side; trigger key `default:`,
+    block-scalar opener skipped). Corpus declares two MAC `pattern` fields but pairs neither with
+    a default (they carry examples) → asserts clean `== 0` genuine-pair count (future-drift
+    posture) + guards future drift; floor reuses the dedent-bounded sibling scan. Unit-covered
+    (`mac_pattern_default_extraction_rules`). Test-only, no spec change.
   - a **32-hex `pattern`-`default` conformance** contract test (`src/registry.rs`
     `every_hex32_pattern_default_conforms_to_the_hex32_pattern`) — the `default`-side twin of
     `every_hex32_pattern_example_conforms_to_the_hex32_pattern` and the **sixth member of the
@@ -6476,6 +6492,33 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-23 — Contract-test harness: guard that every **MAC `pattern` `default` matches the
+  pattern** (`src/registry.rs` `every_mac_pattern_default_conforms_to_the_mac_pattern`). The
+  **seventh member of the `pattern`-default family** after E.164, IMEI, ICCID, name, token, and
+  32-hex, the `default`-side twin of `every_mac_pattern_example_conforms_to_the_mac_pattern`, and
+  the **first pattern-default member over a separator-delimited group structure**
+  (`^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$` — the EUI-48 hardware-address pattern the Network
+  Access Domains / Network Access Devices specs use verbatim: six 2-hex-digit groups joined by
+  five `:`/`-` separators). A grouped-shape fault — a wrong group count, a stray separator, a
+  non-hex nibble — is one the single-run decimal/hex E.164/IMEI/ICCID-default checks and the
+  name/token/32-hex-default checks cannot express, since each of the six prior members accepts one
+  uninterrupted run of a single character class. In OpenAPI 3.0.x a `default` is the schema's
+  fall-back *instance*, so a field constrained by this `pattern` (carries no `format`, so otherwise
+  unchecked) MUST carry a default the pattern accepts; a MAC default the pattern rejects advertises
+  a fall-back the schema's own validator rejects. New pure `mac_pattern_defaults_malformed` (the
+  `hex32_pattern_defaults_malformed` shape keyed on `MAC_PATTERN` equality + judged by
+  `matches_mac_pattern`, both already present from the example side; trigger key `default:`,
+  block-scalar opener skipped, dedent-bounded same-indent sibling scan, in-`example:` payload
+  excluded). Surveyed the corpus first — both MAC `pattern` schemas (`value` of the EUI-48
+  `MacAddress`) pair with an `example`, **neither** with a `default` → asserts a clean `== 0`
+  genuine-pair count (future-drift posture, mirroring the E.164/IMEI/ICCID/name/token/32-hex
+  -default twins) + guards future drift; floor reuses the dedent-bounded sibling scan. Unit-covered
+  (`mac_pattern_default_extraction_rules`: valid quoted-colon / unquoted-hyphen MACs cleared;
+  too-few-groups/too-many-groups/non-hex/pattern-below flagged in document order [25, 29, 33, 36];
+  no-pattern / different-pattern (ICCID) / block-scalar / in-`example:` /
+  following-property-across-dedent / property-named-`default` skipped). Test-only, no spec change.
+  `cargo test` 2980 pass (+2); `cargo build --release` clean, no new dep. — binary (release):
+  5,323,160 bytes (~5.08 MiB; unchanged by a test-only change).
 - 2026-08-23 — Contract-test harness: guard that every **32-hex `pattern` `default` matches the
   pattern** (`src/registry.rs` `every_hex32_pattern_default_conforms_to_the_hex32_pattern`). The
   **sixth member of the `pattern`-default family** after E.164, IMEI, ICCID, name, and token, the
