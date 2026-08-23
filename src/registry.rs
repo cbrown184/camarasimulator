@@ -58438,6 +58438,363 @@ components:
         );
     }
 
+    /// The 1-based line numbers, in document order, of every `default:` keyword whose
+    /// inline scalar value sits in a Schema Object declaring a *same-indent*
+    /// `format: ipv6` sibling yet is not a well-formed IPv6 address, without a YAML dep.
+    /// The **`default`-side twin** of `ipv6_format_examples_malformed` and the IPv6
+    /// address-family companion of `ipv4_format_defaults_malformed`, over the corpus's
+    /// device/endpoint `format: ipv6` fields (an `ipv6Address` on the device object, an
+    /// app-instance's exposed IPv6 address, an endpoint's IPv6 address).
+    ///
+    /// In OpenAPI 3.0.x (JSON Schema) a `default` is the schema's fall-back *instance*,
+    /// so a `format: ipv6` field's default MUST be a value the `ipv6` format admits: an
+    /// RFC 4291 IPv6 address. A malformed one — a placeholder beside the format, a group
+    /// over four hex digits, too few groups without `::`, or an IPv4 literal pasted into
+    /// an IPv6 slot — advertises a fall-back the format's own validator rejects, so a
+    /// Redoc/Swagger form pre-fills an address control with an unusable value and a
+    /// codegen client carries a value no `ipv6`-typed field can legally hold.
+    ///
+    /// Structurally identical to `ipv4_format_defaults_malformed`, with the format anchor
+    /// swapped `ipv4`→`ipv6` (matched **exactly**, so `ipv4` — a different address family
+    /// — never pairs, the analogue of the int32/int64 and double/float mutual exclusions)
+    /// and the validity judge `is_well_formed_ipv4`→`is_well_formed_ipv6`. Only a `default`
+    /// carrying an **inline scalar** with a same-indent `format: ipv6` sibling in the same
+    /// Schema Object is inspected; a block-scalar default (`default: >-` / `default: |`)
+    /// opens no inline value and is skipped; a `default` nested inside an outer
+    /// `example:`/`examples:` payload (sample data, not a schema keyword) is skipped; the
+    /// sibling `format: ipv6` is scanned at the default's own indent down through the
+    /// object's block then up, dedent-bounded, so a *following* property's `format: ipv6`
+    /// past a dedent never pairs.
+    fn ipv6_format_defaults_malformed(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let raw_inline = |l: &str, name: &str| -> Option<String> {
+            let (k, v) = l.trim_start().split_once(':')?;
+            if k.trim() != name {
+                return None;
+            }
+            let v = v.split('#').next().unwrap_or(v).trim();
+            if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            }
+        };
+        // Whether a same-indent `format:` sibling of line `i` (indent `c`) in the same
+        // Schema Object names `ipv6` (exactly — not `ipv4`): scan down through the
+        // object's block then up, dedent-bounded so a nested or following object's
+        // `format` never pairs.
+        let sibling_is_ipv6_format = |i: usize, c: usize| -> bool {
+            let is_ipv6_format = |l: &str| -> bool {
+                raw_inline(l, "format")
+                    .map(|v| v.trim_matches('"').trim_matches('\'') == "ipv6")
+                    .unwrap_or(false)
+            };
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_ipv6_format(l) {
+                    return true;
+                }
+                j += 1;
+            }
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_ipv6_format(l) {
+                    return true;
+                }
+            }
+            false
+        };
+        // True when line `i` (indent `c`) sits inside an outer `example:`/`examples:`
+        // payload — some enclosing container key up the indent ladder is
+        // `example`/`examples`, so an inner `default` key there is sample data.
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some(raw) = raw_inline(line, "default") else {
+                continue;
+            };
+            // A block-scalar opener (`>`/`|`, optionally with a chomping indicator)
+            // carries its value on the following lines, not inline — skip it.
+            if raw.starts_with('>') || raw.starts_with('|') {
+                continue;
+            }
+            let c = indent(line);
+            if inside_example(i, c) {
+                continue;
+            }
+            if !sibling_is_ipv6_format(i, c) {
+                continue;
+            }
+            let value = raw.trim_matches('"').trim_matches('\'');
+            if !is_well_formed_ipv6(value) {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_ipv6_format_default_is_a_well_formed_ipv6() {
+        // Contract-harness invariant (OpenAPI 3.0.x / JSON-Schema structural rule): where
+        // a Schema Object declares an inline `default` beside a same-indent
+        // `format: ipv6`, the default MUST be an RFC 4291 IPv6 address. A `default` is the
+        // schema's fall-back *instance*, so a value that is not a valid IPv6 address — a
+        // placeholder beside the format, a group over four hex digits, too few groups
+        // without `::`, or an IPv4 literal pasted into an IPv6 slot — is a
+        // self-contradictory schema whose own validator rejects the fall-back it
+        // pre-supplies, so a Redoc/Swagger form pre-fills an address control with an
+        // unusable value and a codegen client carries a value no `ipv6`-typed field (an
+        // `ipv6Address`) can hold.
+        //
+        // The **`default` twin** of `every_ipv6_format_example_is_a_well_formed_ipv6` and
+        // the IPv6 address-family companion of
+        // `every_ipv4_format_default_is_a_well_formed_ipv4`, carrying the format-default
+        // guard onto the device/endpoint IPv6 address fields. Future-drift posture (like
+        // the ipv4- and uuid-default twins): the corpus declares eight `format: ipv6`
+        // fields but pairs **none** with a `default` today (they carry examples, not
+        // defaults), so the guard asserts clean across all specs and holds the line
+        // against a future ipv6 default drifting to a placeholder or a malformed address;
+        // the synthetic unit body in `ipv6_format_default_extraction_rules` keeps the
+        // detection path live. Verified true across all mounted specs before asserting.
+        for api in APIS {
+            let offenders = ipv6_format_defaults_malformed(api.body);
+            assert!(
+                offenders.is_empty(),
+                "{} spec declares a `default` beside a same-indent `format: ipv6` that \
+                 is not a well-formed IPv6 address (a fall-back the format's own validator \
+                 would reject) at `default:` line(s): {:?}",
+                api.name,
+                offenders
+            );
+        }
+    }
+
+    #[test]
+    fn ipv6_format_default_extraction_rules() {
+        // Unit-cover `ipv6_format_defaults_malformed` so the contract test above can't
+        // pass vacuously and its detection is pinned (`is_well_formed_ipv6` itself is
+        // already covered by `ipv6_format_example_extraction_rules`).
+        //
+        // Extractor: a valid address beside a same-indent `format: ipv6` passes; an
+        // over-long hex group, a too-few-groups shape, and a value with the format *below*
+        // it (down-scan) are flagged; a value with no `format` sibling and one whose
+        // sibling is a *different* format (`ipv4`) are skipped; a default in one property
+        // never pairs with a *following* property's `format: ipv6` across the dedent; a
+        // block-scalar default is skipped; an inner `default` inside an outer `example:`
+        // payload is skipped; and a property literally named `default` (opening a block)
+        // is skipped.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    GoodIpv6:
+      type: string
+      format: ipv6
+      default: \"2001:db8::11\"
+    BadGroup:
+      type: string
+      format: ipv6
+      default: \"12345::1\"
+    BadShape:
+      type: string
+      format: ipv6
+      default: \"2001:db8\"
+    FormatBelow:
+      type: string
+      default: nope
+      format: ipv6
+    NoFormat:
+      type: string
+      default: \"::1\"
+    Ipv4Fmt:
+      type: string
+      format: ipv4
+      default: notanip
+    BlockDefault:
+      type: string
+      format: ipv6
+      default: |
+        ::1
+    Split:
+      type: object
+      properties:
+        a:
+          type: string
+          enum: [DAY, NIGHT]
+          default: DAY
+        b:
+          type: string
+          format: ipv6
+          default: \"::1\"
+    InExample:
+      type: object
+      example:
+        format: ipv6
+        default: notanip
+    NamedDefault:
+      type: object
+      properties:
+        default:
+          type: string
+          format: ipv6
+";
+        // Flagged, in document order: BadGroup.default (line 21, `12345::1` has a group
+        // over four hex digits), BadShape.default (line 25, `2001:db8` is too few groups
+        // with no `::`), and FormatBelow.default (line 28, value `nope` with its
+        // `format: ipv6` a line below — down-scan pairs it). Not flagged: GoodIpv6 (valid
+        // `2001:db8::11`); NoFormat (no `format` sibling); Ipv4Fmt (sibling is `ipv4`, not
+        // `ipv6` — so its `notanip` is out of scope, the analogue of the int32/int64 and
+        // double/float mutual exclusions); BlockDefault (block-scalar opener `|`, no inline
+        // value); Split.a.default `DAY` (its only `format: ipv6` is the *following*
+        // property Split.b, past a dedent); Split.b.default (valid `::1`); InExample's
+        // inner `default: notanip` (inside the outer `example:` payload); NamedDefault's
+        // `default:` property (opens a block, no inline value).
+        assert_eq!(ipv6_format_defaults_malformed(body), vec![21, 25, 28]);
+
+        // Non-vacuous floor (future-drift posture, mirroring the ipv4- and uuid-default
+        // twins): across every registered spec every `default` beside a same-indent
+        // `format: ipv6` is a well-formed IPv6 address (the invariant the contract test
+        // asserts). The corpus declares eight `format: ipv6` fields (the device/endpoint
+        // address fields) but pairs **none** with a `default` in the *same* Schema Object
+        // today (they carry examples, not defaults) — so this asserts a clean `== 0`
+        // genuine-pair count and guards future drift; the synthetic body above is what
+        // keeps the detection path live. The pair count reuses the extractor's own
+        // **dedent-bounded** same-indent sibling scan — the genuine-Schema-Object pairing —
+        // rather than a crude window, and stays independent of the extractor's *validity*
+        // (`is_well_formed_ipv6`) comparison.
+        let mut ipv6_defaults = 0usize;
+        for api in APIS {
+            assert!(
+                ipv6_format_defaults_malformed(api.body).is_empty(),
+                "{}: every default beside a same-indent `format: ipv6` must be a \
+                 well-formed IPv6 address",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            let raw_inline = |l: &str, name: &str| -> Option<String> {
+                let (k, v) = l.trim_start().split_once(':')?;
+                if k.trim() != name {
+                    return None;
+                }
+                let v = v.split('#').next().unwrap_or(v).trim();
+                if v.is_empty() { None } else { Some(v.to_string()) }
+            };
+            // A genuine same-Schema-Object `format: ipv6` sibling of the `default` on line
+            // `i` (indent `c`): scan down through the object's block then up,
+            // dedent-bounded exactly like the extractor's `sibling_is_ipv6_format`, so a
+            // *following* property's `format: ipv6` past a dedent never counts.
+            let sibling_is_ipv6 = |i: usize, c: usize| -> bool {
+                let is_ipv6 = |l: &str| -> bool {
+                    raw_inline(l, "format")
+                        .map(|v| v.trim_matches('"').trim_matches('\'') == "ipv6")
+                        .unwrap_or(false)
+                };
+                let mut j = i + 1;
+                while j < lines.len() {
+                    let l = lines[j];
+                    if l.trim().is_empty() {
+                        j += 1;
+                        continue;
+                    }
+                    if indent(l) < c {
+                        break;
+                    }
+                    if indent(l) == c && is_ipv6(l) {
+                        return true;
+                    }
+                    j += 1;
+                }
+                let mut k = i;
+                while k > 0 {
+                    k -= 1;
+                    let l = lines[k];
+                    if l.trim().is_empty() {
+                        continue;
+                    }
+                    if indent(l) < c {
+                        break;
+                    }
+                    if indent(l) == c && is_ipv6(l) {
+                        return true;
+                    }
+                }
+                false
+            };
+            for (i, l) in lines.iter().enumerate() {
+                let Some(v) = raw_inline(l, "default") else {
+                    continue;
+                };
+                // Inline scalar only (skip block-scalar openers), mirroring the extractor
+                // so the floor counts exactly the pairs it inspects.
+                if v.starts_with('>') || v.starts_with('|') {
+                    continue;
+                }
+                let c = indent(l);
+                if sibling_is_ipv6(i, c) {
+                    ipv6_defaults += 1;
+                }
+            }
+        }
+        assert_eq!(
+            ipv6_defaults, 0,
+            "expected no genuine default + same-Schema-Object `format: ipv6` pairs across \
+             specs (the future-drift posture; a new pair means switch this guard to a \
+             `>= 1` floor like the example side), got {ipv6_defaults}"
+        );
+    }
+
     /// Whether `s` is a well-formed IPv6 address instance — the sample an OpenAPI
     /// `format: ipv6` field advertises. True iff `s` parses as an RFC 4291 IPv6
     /// address: eight `:`-separated groups of 1–4 hex digits, with at most one `::`

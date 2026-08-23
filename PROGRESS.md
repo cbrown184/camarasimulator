@@ -3335,6 +3335,21 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - an **`ipv6`-`default` format-conformance** contract test (`src/registry.rs`
+    `every_ipv6_format_default_is_a_well_formed_ipv6`) — the `default`-side twin of
+    `every_ipv6_format_example_is_a_well_formed_ipv6` and the IPv6 address-family
+    companion of `every_ipv4_format_default_is_a_well_formed_ipv4` (completed last
+    pass); it carries the format-default guard from the IPv4 address fields onto the
+    corpus's `format: ipv6` device/endpoint fields. A `default` beside a same-indent
+    `format: ipv6` must be an RFC 4291 IPv6 address, else the schema's own validator
+    rejects the fall-back it pre-supplies. New pure `ipv6_format_defaults_malformed`
+    (structurally identical to `ipv4_format_defaults_malformed` with the format anchor
+    swapped `ipv4`→`ipv6`, matched exactly so `ipv4` never pairs, and the judge
+    `is_well_formed_ipv4`→`is_well_formed_ipv6`). Corpus declares 8 `format: ipv6`
+    fields but pairs none with a default (they carry examples) → asserts clean `== 0`
+    genuine-pair count + guards future drift; floor reuses the dedent-bounded sibling
+    scan (mirrors the ipv4-default twin). Unit-covered (`ipv6_format_default_extraction_rules`).
+    Test-only, no spec change.
   - an **`ipv4`-`default` format-conformance** contract test (`src/registry.rs`
     `every_ipv4_format_default_is_a_well_formed_ipv4`) — the `default`-side twin of
     `every_ipv4_format_example_is_a_well_formed_ipv4` and the network-address member of
@@ -6382,6 +6397,34 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-23 — Contract-test harness: guard that every **`format: ipv6` `default` is a
+  well-formed IPv6 address** (`src/registry.rs` `every_ipv6_format_default_is_a_well_formed_ipv6`).
+  In OpenAPI 3.0.x (JSON Schema) a `default` is the schema's fall-back *instance*, so where a
+  Schema Object declares an inline `default` beside a same-indent `format: ipv6`, the default
+  MUST be an RFC 4291 IPv6 address — else the schema's own validator rejects the fall-back it
+  pre-supplies (a Redoc/Swagger form pre-fills an `ipv6Address` control with an unusable value;
+  a codegen client carries a value no `ipv6`-typed field can legally hold). The **`default`-side
+  twin of `every_ipv6_format_example_is_a_well_formed_ipv6`** and the **IPv6 address-family
+  companion of `every_ipv4_format_default_is_a_well_formed_ipv4`** (completed last pass): it
+  carries the format-default guard from the IPv4 address fields onto the corpus's scheme-sibling
+  IPv6 address form. New pure `ipv6_format_defaults_malformed`: the `ipv4_format_defaults_malformed`
+  extractor with its format anchor swapped `ipv4`→`ipv6` (matched exactly, so `ipv4` — a different
+  address family — never pairs, mirroring the int32/int64 and double/float mutual exclusions) and
+  validity judge `is_well_formed_ipv4`→`is_well_formed_ipv6` (std `Ipv6Addr::from_str`, no dep),
+  reusing unchanged its inline-scalar reader, its dedent-bounded same-indent `format: ipv6`
+  sibling probe, its `example:`/`examples:` payload ancestor-walk exclusion, and its
+  block-scalar-opener skip. Surveyed the corpus first — 8 `format: ipv6` fields but **none**
+  paired with a `default` in the same Schema Object (they carry examples) — so the contract test
+  asserts clean `== 0` across all specs and guards future drift; the future-drift floor reuses
+  the extractor's own **dedent-bounded** genuine-Schema-Object sibling scan (genuine pairs
+  `== 0`) rather than a crude ±window. Tests: +2 (the contract test +
+  `ipv6_format_default_extraction_rules`: a valid `2001:db8::11` beside `format: ipv6` cleared;
+  a `12345::1` over-long group, a `2001:db8` too-few-groups shape, and a `nope` with its
+  `format: ipv6` a line below (down-scan) flagged in document order `[21, 25, 28]`; no-format /
+  different-format (`ipv4`) / following-property-across-dedent / block-scalar / in-`example:` /
+  property-named-`default` cases skipped; `ipv6_defaults == 0` genuine-pair floor). `cargo test`
+  2962 green (was 2960); `cargo build --release` succeeds. No new dependency; test-only change
+  (no spec/runtime edit). — binary (release): 5.1M (5,323,160 B; unchanged).
 - 2026-08-23 — Contract-test harness: guard that every **`format: ipv4` `default` is a
   well-formed IPv4 address** (`src/registry.rs` `every_ipv4_format_default_is_a_well_formed_ipv4`).
   In OpenAPI 3.0.x (JSON Schema) a `default` is the schema's fall-back *instance*, so where a
