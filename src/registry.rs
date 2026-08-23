@@ -53567,6 +53567,366 @@ components:
         );
     }
 
+    /// The 1-based line numbers, in document order, of every `default:` keyword whose
+    /// inline scalar value sits in a Schema Object declaring a *same-indent*
+    /// `format: uri-reference` sibling yet is not a well-formed RFC 3986 URI-reference,
+    /// without a YAML dep. The **`default`-side twin** of
+    /// `uri_reference_format_examples_malformed`, over the corpus's CloudEvent `source`
+    /// fields (the `//camarasimulator/<api>` event contexts a `format: uri-reference`
+    /// describes).
+    ///
+    /// In OpenAPI 3.0.x (JSON Schema) a `default` is a fall-back *instance* of the
+    /// schema, so a `format: uri-reference` field's default MUST be a syntactically valid
+    /// URI-reference. A malformed one — a placeholder pasted beside the format, a value
+    /// with stray whitespace, a bad scheme from a fat-fingered `://` — advertises a
+    /// fall-back the format's own validator rejects, so a Redoc/Swagger form pre-fills a
+    /// control with an unusable value and a codegen client carries a value no
+    /// `uri-reference`-typed field (a CloudEvent `source` a consumer keys on) can legally
+    /// hold.
+    ///
+    /// Structurally identical to `uri_format_defaults_malformed` with the format anchor
+    /// swapped `uri`→`uri-reference` and the validator `is_well_formed_absolute_uri`→
+    /// `is_well_formed_uri_reference` (strictly looser: a scheme-relative
+    /// `//camarasimulator/<api>` a bare `uri` slot rejects for lacking a scheme is a valid
+    /// `uri-reference` here — the string-format analogue of `ipv6`/`ipv4` and int64/int32):
+    /// only a `default` carrying an **inline scalar** (quoted or unquoted) with a
+    /// same-indent `format: uri-reference` sibling is inspected; a block-scalar default
+    /// (`>-`/`|`, whose value continues on the following lines) opens no inline value and
+    /// is skipped; the `format: uri-reference` sibling is matched **exactly** (`uri`, which
+    /// demands an absolute URI, is a different format and never pairs) and scanned
+    /// dedent-bounded so a *following* property's `format: uri-reference` never pairs; a
+    /// `default` nested inside an outer `example:`/`examples:` payload is skipped; and a
+    /// property literally named `default` (under `properties:`) opens a block, so its empty
+    /// inline value is skipped naturally.
+    fn uri_reference_format_defaults_malformed(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let raw_inline = |l: &str, name: &str| -> Option<String> {
+            let (k, v) = l.trim_start().split_once(':')?;
+            if k.trim() != name {
+                return None;
+            }
+            let v = v.split('#').next().unwrap_or(v).trim();
+            if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            }
+        };
+        // Whether a same-indent `format:` sibling of line `i` (indent `c`) in the same
+        // Schema Object names `uri-reference` (exactly — not `uri`): scan down through the
+        // object's block then up, dedent-bounded so a nested or following object's
+        // `format` never pairs.
+        let sibling_is_uri_reference_format = |i: usize, c: usize| -> bool {
+            let is_uri_reference_format = |l: &str| -> bool {
+                raw_inline(l, "format")
+                    .map(|v| v.trim_matches('"').trim_matches('\'') == "uri-reference")
+                    .unwrap_or(false)
+            };
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_uri_reference_format(l) {
+                    return true;
+                }
+                j += 1;
+            }
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_uri_reference_format(l) {
+                    return true;
+                }
+            }
+            false
+        };
+        // True when line `i` (indent `c`) sits inside an outer `example:`/`examples:`
+        // payload — some enclosing container key up the indent ladder is
+        // `example`/`examples`, so an inner `default` key there is sample data.
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some(raw) = raw_inline(line, "default") else {
+                continue;
+            };
+            // A block-scalar opener (`>`/`|`, optionally with a chomping indicator)
+            // carries its value on the following lines, not inline — skip it.
+            if raw.starts_with('>') || raw.starts_with('|') {
+                continue;
+            }
+            let c = indent(line);
+            if inside_example(i, c) {
+                continue;
+            }
+            if !sibling_is_uri_reference_format(i, c) {
+                continue;
+            }
+            let value = raw.trim_matches('"').trim_matches('\'');
+            if !is_well_formed_uri_reference(value) {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_uri_reference_format_default_is_a_well_formed_uri_reference() {
+        // Contract-harness invariant (OpenAPI 3.0.x / JSON-Schema structural rule):
+        // where a Schema Object declares an inline `default` beside a same-indent
+        // `format: uri-reference`, the default MUST be a syntactically valid RFC 3986
+        // URI-reference. A `default` is the schema's fall-back *instance*, so a value that
+        // is not a well-formed URI-reference — a placeholder pasted beside the format, a
+        // value with stray whitespace, a bad scheme from a fat-fingered `://` — is a
+        // self-contradictory schema whose own validator rejects the fall-back it
+        // pre-supplies, so a Redoc/Swagger form pre-fills a control (a CloudEvent `source`
+        // with a `default`) with an unusable value and a codegen client carries a value no
+        // `uri-reference`-typed field can legally hold.
+        //
+        // The **`default` twin** of
+        // `every_uri_reference_format_example_is_a_well_formed_uri_reference` and the
+        // relative-URI companion of `every_uri_format_default_is_a_well_formed_uri`
+        // (completed last pass): it carries the format-default guard from the absolute-URI
+        // `sink`/`webhookUrl` fields onto the scheme-relative CloudEvent `source` form.
+        // Future-drift posture (like the uri-default twin): the corpus declares
+        // `format: uri-reference` fields (the CloudEvent `source` contexts) but pairs
+        // **none** with a `default` today, so the guard asserts clean across all specs and
+        // holds the line against a future URI-reference default drifting to a
+        // whitespace-bearing or bad-scheme value; the synthetic unit body in
+        // `uri_reference_format_default_extraction_rules` keeps the detection path live.
+        // Verified true across all mounted specs before asserting.
+        for api in APIS {
+            let offenders = uri_reference_format_defaults_malformed(api.body);
+            assert!(
+                offenders.is_empty(),
+                "{} spec declares a `default` beside a same-indent \
+                 `format: uri-reference` that is not a well-formed URI-reference (a \
+                 fall-back the format's own validator would reject) at `default:` \
+                 line(s): {:?}",
+                api.name,
+                offenders
+            );
+        }
+    }
+
+    #[test]
+    fn uri_reference_format_default_extraction_rules() {
+        // Unit-cover `uri_reference_format_defaults_malformed` so the contract test above
+        // can't pass vacuously and its detection is pinned (`is_well_formed_uri_reference`
+        // itself is already covered by `uri_reference_format_example_extraction_rules`).
+        //
+        // Extractor: a valid scheme-relative reference beside a same-indent
+        // `format: uri-reference` passes; a bad-scheme value and a whitespace value with
+        // the format *below* it (down-scan) are flagged; a value with no `format` sibling
+        // and one whose sibling is a *different* format (`uri`) are skipped; a default in
+        // one property never pairs with a *following* property's `format: uri-reference`
+        // across the dedent; a block-scalar default is skipped; an inner `default` inside
+        // an outer `example:` payload is skipped; and a property literally named `default`
+        // (opening a block) is skipped.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    GoodRef:
+      type: string
+      format: uri-reference
+      default: \"//host/path\"
+    BadScheme:
+      type: string
+      format: uri-reference
+      default: \"1http://x\"
+    FormatBelow:
+      type: string
+      default: \"has space\"
+      format: uri-reference
+    NoFormat:
+      type: string
+      default: \"//no-format\"
+    UriSibling:
+      type: string
+      format: uri
+      default: \"bad no scheme\"
+    Split:
+      type: object
+      properties:
+        a:
+          type: string
+          enum: [DAY, NIGHT]
+          default: DAY
+        b:
+          type: string
+          format: uri-reference
+          default: \"/ok/x\"
+    Folded:
+      type: string
+      format: uri-reference
+      default: >-
+        //folded.example.com/very/long/path
+    InExample:
+      type: object
+      example:
+        format: uri-reference
+        default: \"bad thing\"
+    NamedDefault:
+      type: object
+      properties:
+        default:
+          type: string
+          format: uri-reference
+";
+        // Flagged, in document order: BadScheme.default (line 21, scheme `1http` starts
+        // with a digit) and FormatBelow.default (line 24, value `has space` carries
+        // whitespace, its `format: uri-reference` a line below — down-scan pairs it). Not
+        // flagged: GoodRef (valid scheme-relative); NoFormat (no `format` sibling);
+        // UriSibling `bad no scheme` (sibling is `uri`, not `uri-reference` — the exact
+        // mutual-exclusion match, so its whitespace never reaches the validator);
+        // Split.a.default `DAY` (its only `format: uri-reference` is the *following*
+        // property Split.b, past a dedent); Split.b.default (valid); Folded (block-scalar
+        // opener `>-`, no inline value); InExample's inner `default: \"bad thing\"` (inside
+        // the outer `example:` payload); NamedDefault's `default:` property (opens a block,
+        // no inline value).
+        assert_eq!(uri_reference_format_defaults_malformed(body), vec![21, 24]);
+
+        // Non-vacuous floor (future-drift posture, mirroring the uri-default twin): across
+        // every registered spec every `default` beside a same-indent
+        // `format: uri-reference` is a well-formed URI-reference (the invariant the
+        // contract test asserts). The corpus declares `format: uri-reference` fields (the
+        // CloudEvent `source` contexts) but pairs **none** with a `default` in the *same*
+        // Schema Object today (they carry examples), so this asserts a clean `== 0`
+        // genuine-pair count and guards future drift; the synthetic body above is what
+        // keeps the detection path live. The pair count reuses the extractor's own
+        // **dedent-bounded** same-indent sibling scan — the genuine-Schema-Object pairing —
+        // rather than a crude ±window, and stays independent of the extractor's *validity*
+        // (`is_well_formed_uri_reference`) comparison.
+        let mut uri_reference_defaults = 0usize;
+        for api in APIS {
+            assert!(
+                uri_reference_format_defaults_malformed(api.body).is_empty(),
+                "{}: every default beside a same-indent `format: uri-reference` must be a \
+                 well-formed URI-reference",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            let raw_inline = |l: &str, name: &str| -> Option<String> {
+                let (k, v) = l.trim_start().split_once(':')?;
+                if k.trim() != name {
+                    return None;
+                }
+                let v = v.split('#').next().unwrap_or(v).trim();
+                if v.is_empty() { None } else { Some(v.to_string()) }
+            };
+            // A genuine same-Schema-Object `format: uri-reference` sibling of the `default`
+            // on line `i` (indent `c`): scan down through the object's block then up,
+            // dedent-bounded exactly like the extractor's `sibling_is_uri_reference_format`,
+            // so a *following* property's `format: uri-reference` past a dedent never counts.
+            let sibling_is_uri_reference = |i: usize, c: usize| -> bool {
+                let is_uri_reference = |l: &str| -> bool {
+                    raw_inline(l, "format")
+                        .map(|v| v.trim_matches('"').trim_matches('\'') == "uri-reference")
+                        .unwrap_or(false)
+                };
+                let mut j = i + 1;
+                while j < lines.len() {
+                    let l = lines[j];
+                    if l.trim().is_empty() {
+                        j += 1;
+                        continue;
+                    }
+                    if indent(l) < c {
+                        break;
+                    }
+                    if indent(l) == c && is_uri_reference(l) {
+                        return true;
+                    }
+                    j += 1;
+                }
+                let mut k = i;
+                while k > 0 {
+                    k -= 1;
+                    let l = lines[k];
+                    if l.trim().is_empty() {
+                        continue;
+                    }
+                    if indent(l) < c {
+                        break;
+                    }
+                    if indent(l) == c && is_uri_reference(l) {
+                        return true;
+                    }
+                }
+                false
+            };
+            for (i, l) in lines.iter().enumerate() {
+                let Some(v) = raw_inline(l, "default") else {
+                    continue;
+                };
+                // Inline scalar only (skip block-scalar openers), mirroring the extractor
+                // so the floor counts exactly the pairs it inspects.
+                if v.starts_with('>') || v.starts_with('|') {
+                    continue;
+                }
+                let c = indent(l);
+                if sibling_is_uri_reference(i, c) {
+                    uri_reference_defaults += 1;
+                }
+            }
+        }
+        assert_eq!(
+            uri_reference_defaults, 0,
+            "expected no genuine default + same-Schema-Object `format: uri-reference` \
+             pairs across specs (the future-drift posture; a new pair means switch this \
+             guard to a `>= 1` floor like the example side), got {uri_reference_defaults}"
+        );
+    }
+
     /// Whether `s` is a well-formed email address instance — the value an OpenAPI
     /// `format: email` field advertises. A pragmatic addr-spec shape (not the full
     /// RFC 5322 grammar, which no format validator implements literally): no ASCII
