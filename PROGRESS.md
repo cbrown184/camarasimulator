@@ -3335,6 +3335,21 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - an **`email`-`default` format-conformance** contract test (`src/registry.rs`
+    `every_email_format_default_is_a_well_formed_email`) — the `default`-side twin of
+    `every_email_format_example_is_a_well_formed_email` and the `email` member of the
+    format-default family (date-time / date / int32 / int64 / double / float / uri /
+    uri-reference / uuid / ipv4 / ipv6 already paired); it carries the format-default guard
+    onto the corpus's KYC `email` attributes. A `default` beside a same-indent
+    `format: email` must be a syntactically valid email address, else the schema's own
+    validator rejects the fall-back it pre-supplies. New pure `email_format_defaults_malformed`
+    (structurally identical to `ipv6_format_defaults_malformed` with the format anchor swapped
+    `ipv6`→`email`, matched exactly so `date`/`uri`/… never pair, and the judge
+    `is_well_formed_ipv6`→`is_well_formed_email`). Corpus declares 2 `format: email` fields but
+    pairs none with a default (they carry examples) → asserts clean `== 0` genuine-pair count +
+    guards future drift; floor reuses the dedent-bounded sibling scan (mirrors the ipv6-default
+    twin). Unit-covered (`email_format_default_extraction_rules`). Test-only, no spec change.
+    Leaves `byte` as the last format-example member without a default twin.
   - an **`ipv6`-`default` format-conformance** contract test (`src/registry.rs`
     `every_ipv6_format_default_is_a_well_formed_ipv6`) — the `default`-side twin of
     `every_ipv6_format_example_is_a_well_formed_ipv6` and the IPv6 address-family
@@ -6397,6 +6412,38 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-23 — Contract-test harness: guard that every **`format: email` `default` is a
+  well-formed email address** (`src/registry.rs` `every_email_format_default_is_a_well_formed_email`).
+  In OpenAPI 3.0.x (JSON Schema) a `default` is the schema's fall-back *instance*, so where a
+  Schema Object declares an inline `default` beside a same-indent `format: email`, the default
+  MUST be a syntactically valid email address — else the schema's own validator rejects the
+  fall-back it pre-supplies (a Redoc/Swagger form pre-fills an email control with an unusable
+  value; a codegen client carries a value no `email`-typed field can legally hold). The
+  **`default`-side twin of `every_email_format_example_is_a_well_formed_email`** and the
+  **`email` member of the format-default family** (date-time / date / int32 / int64 / double /
+  float / uri / uri-reference / uuid / ipv4 / ipv6 already paired): it carries the format-default
+  guard from the numeric/string-format and address members onto the corpus's KYC `email`
+  attributes. New pure `email_format_defaults_malformed`: the `ipv6_format_defaults_malformed`
+  extractor with its format anchor swapped `ipv6`→`email` (matched exactly, so `date`/`uri`/…
+  never pair) and validity judge `is_well_formed_ipv6`→`is_well_formed_email` (already present,
+  covered by `email_format_example_extraction_rules`), reusing unchanged its inline-scalar
+  reader, its dedent-bounded same-indent `format: email` sibling probe, its `example:`/`examples:`
+  payload ancestor-walk exclusion, and its block-scalar-opener skip. Surveyed the corpus first —
+  2 `format: email` fields (kyc-age-verification, kyc-fill-in) but **none** paired with a
+  `default` in the same Schema Object (they carry examples; the nearby kyc-age-verification
+  `default: false` is a *following* `includeContentLock` property past a dedent, so the
+  dedent-bounded scan does not pair it) — so the contract test asserts clean `== 0` across all
+  specs and guards future drift; the future-drift floor reuses the extractor's own
+  **dedent-bounded** genuine-Schema-Object sibling scan (genuine pairs `== 0`) rather than a
+  crude ±window. This leaves `byte` as the only format-example member without a default twin.
+  Tests: +2 (the contract test + `email_format_default_extraction_rules`: a valid
+  `alice@example.com` beside `format: email` cleared; a no-`@` `not-an-email`, a single-label-
+  domain `alice@localhost`, and a `nope` with its `format: email` a line below (down-scan)
+  flagged in document order `[21, 25, 28]`; no-format / different-format (`date`) / following-
+  property-across-dedent / block-scalar / in-`example:` / property-named-`default` cases skipped;
+  `email_defaults == 0` genuine-pair floor). `cargo test` 2964 green (was 2962); `cargo build
+  --release` succeeds. No new dependency; test-only change (no spec/runtime edit). — binary
+  (release): 5.1M (5,323,160 B; unchanged).
 - 2026-08-23 — Contract-test harness: guard that every **`format: ipv6` `default` is a
   well-formed IPv6 address** (`src/registry.rs` `every_ipv6_format_default_is_a_well_formed_ipv6`).
   In OpenAPI 3.0.x (JSON Schema) a `default` is the schema's fall-back *instance*, so where a

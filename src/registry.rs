@@ -58795,6 +58795,359 @@ components:
         );
     }
 
+    /// The 1-based line numbers, in document order, of every `default:` keyword whose
+    /// inline scalar value sits in a Schema Object declaring a *same-indent*
+    /// `format: email` sibling yet is not a well-formed email address, without a YAML dep.
+    /// The **email** member of the format-default family (date-time / date / int32 /
+    /// int64 / double / float / uri / uri-reference / uuid / ipv4 / ipv6), over the
+    /// corpus's KYC `format: email` attributes.
+    ///
+    /// In OpenAPI 3.0.x (JSON Schema) a `default` is the schema's fall-back *instance*,
+    /// so a `format: email` field's default MUST be a syntactically valid email address.
+    /// A malformed one — a placeholder pasted beside the format, a value with stray
+    /// whitespace, or a value with no `@` — is a fall-back the format's own validator
+    /// rejects, so a Redoc/Swagger form pre-fills an email control with an unusable value
+    /// and a codegen client carries a value no `email`-typed field can legally hold.
+    ///
+    /// Only a `default` carrying an **inline scalar** (quoted or unquoted) with a
+    /// same-indent `format: email` sibling in the same Schema Object is inspected. A
+    /// block-scalar default (`default: >-` / `default: |`, whose value continues on the
+    /// following lines) opens no inline value, so it is skipped rather than mis-read. The
+    /// `format: email` sibling is matched **exactly** (`date`, `uri`, etc. are different
+    /// formats and never pair), scanned at the default's own indent down through the
+    /// object's block then up, dedent-bounded exactly like `ipv6_format_defaults_malformed`,
+    /// so a *following* property's `format: email` past a dedent never pairs with this
+    /// property's default. A `default:` nested inside an outer `example:`/`examples:`
+    /// payload (sample data, not a schema keyword) is skipped. Email shape is judged by
+    /// `is_well_formed_email`.
+    fn email_format_defaults_malformed(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let raw_inline = |l: &str, name: &str| -> Option<String> {
+            let (k, v) = l.trim_start().split_once(':')?;
+            if k.trim() != name {
+                return None;
+            }
+            let v = v.split('#').next().unwrap_or(v).trim();
+            if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            }
+        };
+        // Whether a same-indent `format:` sibling of line `i` (indent `c`) in the same
+        // Schema Object names `email` (exactly): scan down through the object's block
+        // then up, dedent-bounded so a nested or following object's `format` never pairs.
+        let sibling_is_email_format = |i: usize, c: usize| -> bool {
+            let is_email_format = |l: &str| -> bool {
+                raw_inline(l, "format")
+                    .map(|v| v.trim_matches('"').trim_matches('\'') == "email")
+                    .unwrap_or(false)
+            };
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_email_format(l) {
+                    return true;
+                }
+                j += 1;
+            }
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_email_format(l) {
+                    return true;
+                }
+            }
+            false
+        };
+        // True when line `i` (indent `c`) sits inside an outer `example:`/`examples:`
+        // payload — some enclosing container key up the indent ladder is
+        // `example`/`examples`, so an inner `default` key there is sample data.
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some(raw) = raw_inline(line, "default") else {
+                continue;
+            };
+            // A block-scalar opener (`>`/`|`, optionally with a chomping indicator)
+            // carries its value on the following lines, not inline — skip it.
+            if raw.starts_with('>') || raw.starts_with('|') {
+                continue;
+            }
+            let c = indent(line);
+            if inside_example(i, c) {
+                continue;
+            }
+            if !sibling_is_email_format(i, c) {
+                continue;
+            }
+            let value = raw.trim_matches('"').trim_matches('\'');
+            if !is_well_formed_email(value) {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_email_format_default_is_a_well_formed_email() {
+        // Contract-harness invariant (OpenAPI 3.0.x / JSON-Schema structural rule): where
+        // a Schema Object declares an inline `default` beside a same-indent
+        // `format: email`, the default MUST be a syntactically valid email address. A
+        // `default` is the schema's fall-back *instance*, so a value that is not a
+        // well-formed email — a placeholder beside the format, a value with stray
+        // whitespace, a value with no `@` — is a self-contradictory schema whose own
+        // validator rejects the fall-back it pre-supplies, so a Redoc/Swagger form
+        // pre-fills an email control with an unusable value and a codegen client carries a
+        // value no `email`-typed field can hold.
+        //
+        // The **`default` twin** of `every_email_format_example_is_a_well_formed_email`
+        // and the email member of the format-default family (date-time / date / int32 /
+        // int64 / double / float / uri / uri-reference / uuid / ipv4 / ipv6), carrying the
+        // format-default guard onto the KYC `email` attributes. Future-drift posture (like
+        // the ipv6- / ipv4- / uuid-default twins): the corpus declares two `format: email`
+        // fields but pairs **none** with a `default` today (they carry examples, not
+        // defaults), so the guard asserts clean across all specs and holds the line
+        // against a future email default drifting to a placeholder or a malformed address;
+        // the synthetic unit body in `email_format_default_extraction_rules` keeps the
+        // detection path live. Verified true across all mounted specs before asserting.
+        for api in APIS {
+            let offenders = email_format_defaults_malformed(api.body);
+            assert!(
+                offenders.is_empty(),
+                "{} spec declares a `default` beside a same-indent `format: email` that \
+                 is not a well-formed email address (a fall-back the format's own validator \
+                 would reject) at `default:` line(s): {:?}",
+                api.name,
+                offenders
+            );
+        }
+    }
+
+    #[test]
+    fn email_format_default_extraction_rules() {
+        // Unit-cover `email_format_defaults_malformed` so the contract test above can't
+        // pass vacuously and its detection is pinned (`is_well_formed_email` itself is
+        // already covered by `email_format_example_extraction_rules`).
+        //
+        // Extractor: a valid email beside a same-indent `format: email` passes; a no-`@`
+        // value, a single-label-domain value, and a value with the format *below* it
+        // (down-scan) are flagged; a value with no `format` sibling and one whose sibling
+        // is a *different* format (`date`) are skipped; a default in one property never
+        // pairs with a *following* property's `format: email` across the dedent; a
+        // block-scalar default is skipped; an inner `default` inside an outer `example:`
+        // payload is skipped; and a property literally named `default` (opening a block)
+        // is skipped.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    GoodEmail:
+      type: string
+      format: email
+      default: \"alice@example.com\"
+    BadNoAt:
+      type: string
+      format: email
+      default: \"not-an-email\"
+    BadShape:
+      type: string
+      format: email
+      default: \"alice@localhost\"
+    FormatBelow:
+      type: string
+      default: nope
+      format: email
+    NoFormat:
+      type: string
+      default: \"plain@example.com\"
+    DateFmt:
+      type: string
+      format: date
+      default: not-an-email
+    BlockDefault:
+      type: string
+      format: email
+      default: |
+        a@b.com
+    Split:
+      type: object
+      properties:
+        a:
+          type: string
+          enum: [DAY, NIGHT]
+          default: DAY
+        b:
+          type: string
+          format: email
+          default: \"b@ok.com\"
+    InExample:
+      type: object
+      example:
+        format: email
+        default: not-an-email
+    NamedDefault:
+      type: object
+      properties:
+        default:
+          type: string
+          format: email
+";
+        // Flagged, in document order: BadNoAt.default (line 21, `not-an-email` has no
+        // `@`), BadShape.default (line 25, `alice@localhost` has a single-label domain),
+        // and FormatBelow.default (line 28, value `nope` with its `format: email` a line
+        // below — down-scan pairs it). Not flagged: GoodEmail (valid `alice@example.com`);
+        // NoFormat (no `format` sibling); DateFmt (sibling is `date`, not `email` — so its
+        // `not-an-email` is out of scope, the analogue of the int32/int64 and double/float
+        // mutual exclusions); BlockDefault (block-scalar opener `|`, no inline value);
+        // Split.a.default `DAY` (its only `format: email` is the *following* property
+        // Split.b, past a dedent); Split.b.default (valid `b@ok.com`); InExample's inner
+        // `default: not-an-email` (inside the outer `example:` payload); NamedDefault's
+        // `default:` property (opens a block, no inline value).
+        assert_eq!(email_format_defaults_malformed(body), vec![21, 25, 28]);
+
+        // Non-vacuous floor (future-drift posture, mirroring the ipv6- / ipv4- / uuid-
+        // default twins): across every registered spec every `default` beside a same-indent
+        // `format: email` is a well-formed email address (the invariant the contract test
+        // asserts). The corpus declares two `format: email` fields (the KYC email
+        // attributes) but pairs **none** with a `default` in the *same* Schema Object today
+        // (they carry examples, not defaults) — so this asserts a clean `== 0`
+        // genuine-pair count and guards future drift; the synthetic body above is what
+        // keeps the detection path live. The pair count reuses the extractor's own
+        // **dedent-bounded** same-indent sibling scan — the genuine-Schema-Object pairing —
+        // rather than a crude window, and stays independent of the extractor's *validity*
+        // (`is_well_formed_email`) comparison.
+        let mut email_defaults = 0usize;
+        for api in APIS {
+            assert!(
+                email_format_defaults_malformed(api.body).is_empty(),
+                "{}: every default beside a same-indent `format: email` must be a \
+                 well-formed email address",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            let raw_inline = |l: &str, name: &str| -> Option<String> {
+                let (k, v) = l.trim_start().split_once(':')?;
+                if k.trim() != name {
+                    return None;
+                }
+                let v = v.split('#').next().unwrap_or(v).trim();
+                if v.is_empty() { None } else { Some(v.to_string()) }
+            };
+            // A genuine same-Schema-Object `format: email` sibling of the `default` on line
+            // `i` (indent `c`): scan down through the object's block then up,
+            // dedent-bounded exactly like the extractor's `sibling_is_email_format`, so a
+            // *following* property's `format: email` past a dedent never counts.
+            let sibling_is_email = |i: usize, c: usize| -> bool {
+                let is_email = |l: &str| -> bool {
+                    raw_inline(l, "format")
+                        .map(|v| v.trim_matches('"').trim_matches('\'') == "email")
+                        .unwrap_or(false)
+                };
+                let mut j = i + 1;
+                while j < lines.len() {
+                    let l = lines[j];
+                    if l.trim().is_empty() {
+                        j += 1;
+                        continue;
+                    }
+                    if indent(l) < c {
+                        break;
+                    }
+                    if indent(l) == c && is_email(l) {
+                        return true;
+                    }
+                    j += 1;
+                }
+                let mut k = i;
+                while k > 0 {
+                    k -= 1;
+                    let l = lines[k];
+                    if l.trim().is_empty() {
+                        continue;
+                    }
+                    if indent(l) < c {
+                        break;
+                    }
+                    if indent(l) == c && is_email(l) {
+                        return true;
+                    }
+                }
+                false
+            };
+            for (i, l) in lines.iter().enumerate() {
+                let Some(v) = raw_inline(l, "default") else {
+                    continue;
+                };
+                // Inline scalar only (skip block-scalar openers), mirroring the extractor
+                // so the floor counts exactly the pairs it inspects.
+                if v.starts_with('>') || v.starts_with('|') {
+                    continue;
+                }
+                let c = indent(l);
+                if sibling_is_email(i, c) {
+                    email_defaults += 1;
+                }
+            }
+        }
+        assert_eq!(
+            email_defaults, 0,
+            "expected no genuine default + same-Schema-Object `format: email` pairs across \
+             specs (the future-drift posture; a new pair means switch this guard to a \
+             `>= 1` floor like the example side), got {email_defaults}"
+        );
+    }
+
     /// Whether `s` is a well-formed IPv6 address instance — the sample an OpenAPI
     /// `format: ipv6` field advertises. True iff `s` parses as an RFC 4291 IPv6
     /// address: eight `:`-separated groups of 1–4 hex digits, with at most one `::`
