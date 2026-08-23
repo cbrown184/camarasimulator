@@ -3335,6 +3335,19 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - an **object-`example` property-count-bounds** contract test (`src/registry.rs`
+    `every_object_example_respects_its_property_count_bounds`) — the object-cardinality
+    member of the example/bounds family (array-item-count, string-length, numeric-value
+    already paired): an object `example` (inline flow map `{…}` or a block mapping) beside a
+    `minProperties`/`maxProperties` sibling must have a direct-property count within those
+    bounds, else the schema's own validator rejects the sample it advertises. New pure
+    `object_examples_outside_their_property_count_bounds` (mirrors the array-example
+    extractor; also skips an `example:` that is a property literally *named* `example` under
+    a `properties:` map, so a sibling `minProperties` property is never misread as a bound).
+    Corpus pairs no object example with an object-size bound today → asserts clean + guards
+    future drift (array-default posture); ≥10 object-size-bound floor keeps the guard live.
+    Unit-covered (`object_example_property_count_extraction_rules`;
+    `bounded_object_examples == 0` floor). Test-only, no spec change.
   - an **array-`default` item-bounds** contract test (`src/registry.rs`
     `every_array_default_respects_its_item_bounds`) — the `default`-side twin of
     `every_array_example_respects_its_item_bounds`: an array `default` (inline flow or `- `
@@ -6221,6 +6234,41 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-23 — Contract-test harness: guard that every **object `example` respects its
+  property-count bounds** (`src/registry.rs`
+  `every_object_example_respects_its_property_count_bounds`). In OpenAPI 3.0.x (JSON
+  Schema) an `example` is a sample *instance* of the schema, so where a Schema Object
+  bounds its member count with `minProperties`/`maxProperties`, an object example with
+  fewer than `minProperties` or more than `maxProperties` direct properties is a
+  self-contradictory schema whose own validator rejects the sample it advertises (a
+  Redoc/Swagger "try it" prefill / codegen sample the size bound can never hold). The
+  **object-cardinality member of the example/bounds family** — the value-count twin of
+  `every_array_example_respects_its_item_bounds` (array element count),
+  `every_example_respects_its_string_length_bounds` (string length) and
+  `every_example_is_within_its_numeric_bounds` (numeric value); none reads an object
+  example's *member count*, and `every_example_matches_its_schema_type` reads only the
+  example's type while the size-bound tests
+  (`every_size_bound_is_a_non_negative_integer` /
+  `every_numeric_bound_is_ordered_low_to_high`) check the bounds' own domain/ordering,
+  never against an example. New pure `object_examples_outside_their_property_count_bounds`
+  (mirrors the array-example extractor's dedent-bounded `minProperties`/`maxProperties`
+  sibling scan; counts an inline flow map `{a: 1}` — `{}` = 0 — or a block mapping's
+  direct `key:` children; skips a scalar/array example, a multi-line flow, an example with
+  no size-bound sibling, one nested in an `example:`/`examples:` payload, and — critical
+  for objects, whose block form is itself a mapping — an `example:` that is a property
+  literally *named* `example` under a `properties:` map, so a sibling property named
+  `minProperties` is never misread as a bound). Corpus survey: its
+  `minProperties`/`maxProperties` objects carry per-property examples, not object-level
+  ones → no object-example+bound pair today, so the test asserts clean and guards future
+  drift (the array-default posture); the ≥10 object-size-bound floor keeps the guard live.
+  Tests: +2 (the contract test + `object_example_property_count_extraction_rules`: a
+  within-bounds flow and a within-bounds block cleared, a count equal to both bounds
+  cleared; below-`minProperties` flow + block forms, above-`maxProperties`, and empty `{}`
+  below `minProperties` flagged in document order; scalar / array / no-bound / in-`example:`
+  / cross-dedent / property-named-`example`-with-sibling-`minProperties` cases skipped;
+  `bounded_object_examples == 0` + `object_size_bounds >= 10` corpus floors).
+  `cargo test` 2938 green (was 2936); `cargo build --release` succeeds. No new dependency;
+  test-only change (no spec/runtime edit). — binary (release): 5.1M (5,323,160 B; unchanged).
 - 2026-08-23 — Contract-test harness: guard that every **`schema:` keyword carries a
   Schema Object value** (`src/registry.rs` `every_schema_field_value_is_a_schema_object`).
   A `schema:` field — a Parameter, Header, or Media Type Object's schema — MUST be a
