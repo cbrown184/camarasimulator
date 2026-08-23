@@ -6445,6 +6445,23 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-23 — Contract-test harness: guard that every **IMEI `pattern` `default` matches the
+  pattern** (`src/registry.rs` `every_imei_pattern_default_conforms_to_the_imei_pattern`). The
+  **second member of the `pattern`-default family** after E.164 (landed last pass), and the
+  `default`-side twin of `every_imei_pattern_example_conforms_to_the_imei_pattern`. In OpenAPI
+  3.0.x a `default` is the schema's fall-back *instance*, so a field constrained by
+  `pattern: '^[0-9]{15}$'` (the IMEI pattern; carries no `format`, so otherwise unchecked) MUST
+  carry a default the pattern accepts; an IMEI default the pattern rejects (a digit dropped/added,
+  a placeholder) advertises a fall-back the schema's own validator rejects. New pure
+  `imei_pattern_defaults_malformed` (the `imei_pattern_examples_malformed` extractor with its
+  trigger key swapped `example:`→`default:` and a block-scalar opener skipped; reuses
+  `matches_imei_pattern` / `IMEI_PATTERN`). Corpus declares several IMEI `pattern` fields but pairs
+  none with a default (they carry examples) → asserts a clean `== 0` genuine-pair count
+  (future-drift posture, mirroring the E.164-default twin) + guards future drift; floor reuses the
+  dedent-bounded sibling scan. Unit-covered (`imei_pattern_default_extraction_rules`). Test-only,
+  no spec change. cargo test 2970 pass (+2); cargo build --release clean, no new dep. — binary
+  (release): 5,323,160 bytes (~5.08 MiB; unchanged by a test-only change).
+
 - 2026-08-23 — Contract-test harness: guard that every **E.164 `pattern` `default` matches
   the pattern** (`src/registry.rs` `every_e164_pattern_default_conforms_to_the_e164_pattern`).
   Opens a **`pattern`-*default* family** — the `pattern`-side echo of the exhausted

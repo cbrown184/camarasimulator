@@ -39196,6 +39196,362 @@ components:
         );
     }
 
+    /// The 1-based line numbers, in document order, of every `default:` keyword whose
+    /// inline scalar value sits in a Schema Object declaring a *same-indent*
+    /// `pattern: '^[0-9]{15}$'` sibling yet does not match that IMEI pattern, without a
+    /// YAML dep. The **`default`-side twin** of `imei_pattern_examples_malformed` and the
+    /// second member of the `pattern`-*default* family after `e164_pattern_defaults_malformed`
+    /// — the `pattern`-side echo of the `format`-default family, keyed on `IMEI_PATTERN`.
+    ///
+    /// In OpenAPI 3.0.x (JSON Schema) a `default` is the schema's fall-back *instance*, so a
+    /// field constrained by `pattern` MUST carry a default the pattern accepts (the same
+    /// Spectral `oas3-valid-schema-example` posture that validates an example against its
+    /// schema applies to a `default` — it is a schema-level instance too). An IMEI default
+    /// that is not exactly 15 digits — a digit dropped or added, a placeholder pasted beside
+    /// the pattern — advertises a fall-back the schema's own validator rejects, so a
+    /// Redoc/Swagger form pre-fills an `imei` control with an unusable value and a codegen
+    /// client carries a value no field constrained by this pattern can legally hold. Like the
+    /// IMEI-example twin (and unlike the UUID patterns, which sit beside a `format: uuid`
+    /// already guarded), the IMEI pattern carries no `format`, so such a default is otherwise
+    /// unchecked.
+    ///
+    /// Structurally identical to `imei_pattern_examples_malformed`, with the trigger key
+    /// swapped `example:`→`default:` and a block-scalar opener (`default: >-` / `default: |`)
+    /// skipped (it opens no inline value) — mirroring how `e164_pattern_defaults_malformed`
+    /// was derived from its example twin. Scoping is otherwise unchanged: only a `default`
+    /// carrying an inline scalar with a same-indent `pattern` sibling *equal to* `IMEI_PATTERN`
+    /// in the same Schema Object is inspected — the sibling is scanned at the default's own
+    /// indent, down through the object's block then up, dedent-bounded, so a nested or
+    /// following object's `pattern` never pairs. A `default:` nested inside an outer
+    /// `example:`/`examples:` payload (sample data, not a schema keyword) is skipped. Only the
+    /// IMEI pattern is matched; other patterns are out of scope.
+    fn imei_pattern_defaults_malformed(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let raw_inline = |l: &str, name: &str| -> Option<String> {
+            let (k, v) = l.trim_start().split_once(':')?;
+            if k.trim() != name {
+                return None;
+            }
+            let v = v.split('#').next().unwrap_or(v).trim();
+            if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            }
+        };
+        // Whether a same-indent `pattern:` sibling of line `i` (indent `c`) in the same
+        // Schema Object equals the IMEI pattern: scan down through the object's block then
+        // up, dedent-bounded so a nested or following object's `pattern` never pairs.
+        let sibling_is_imei_pattern = |i: usize, c: usize| -> bool {
+            let is_imei_pattern = |l: &str| -> bool {
+                raw_inline(l, "pattern")
+                    .map(|v| v.trim_matches('"').trim_matches('\'') == IMEI_PATTERN)
+                    .unwrap_or(false)
+            };
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_imei_pattern(l) {
+                    return true;
+                }
+                j += 1;
+            }
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_imei_pattern(l) {
+                    return true;
+                }
+            }
+            false
+        };
+        // True when line `i` (indent `c`) sits inside an outer `example:`/`examples:`
+        // payload — some enclosing container key up the indent ladder is
+        // `example`/`examples`, so an inner `default` key there is sample data.
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some(raw) = raw_inline(line, "default") else {
+                continue;
+            };
+            // A block-scalar opener (`>`/`|`, optionally with a chomping indicator)
+            // carries its value on the following lines, not inline — skip it.
+            if raw.starts_with('>') || raw.starts_with('|') {
+                continue;
+            }
+            let c = indent(line);
+            if inside_example(i, c) {
+                continue;
+            }
+            if !sibling_is_imei_pattern(i, c) {
+                continue;
+            }
+            let value = raw.trim_matches('"').trim_matches('\'');
+            if !matches_imei_pattern(value) {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_imei_pattern_default_conforms_to_the_imei_pattern() {
+        // Contract-harness invariant (OpenAPI 3.0.x / JSON-Schema structural rule): where
+        // a Schema Object declares an inline `default` beside a same-indent
+        // `pattern: '^[0-9]{15}$'` (the IMEI pattern the CAMARA device specs use verbatim),
+        // the default MUST match that pattern. A `default` is the schema's fall-back
+        // *instance*, so a value the `pattern` rejects — an IMEI with a digit dropped or
+        // added, or a placeholder pasted beside the pattern — is a self-contradictory schema
+        // whose own validator rejects the fall-back it pre-supplies, so a Redoc/Swagger form
+        // pre-fills an `imei` control with an unusable value and a codegen client's generated
+        // instance carries a value no field constrained by this pattern can legally hold.
+        //
+        // The **`default` twin** of `every_imei_pattern_example_conforms_to_the_imei_pattern`
+        // and the second member of the `pattern`-*default* family after
+        // `every_e164_pattern_default_conforms_to_the_e164_pattern`. Future-drift posture
+        // (like the E.164-default twin): the corpus declares several IMEI `pattern` fields but
+        // pairs **none** with a `default` today (they carry examples, not defaults), so the
+        // guard asserts clean across all specs and holds the line against a future IMEI default
+        // drifting to a placeholder or a mis-lengthed value; the synthetic unit body in
+        // `imei_pattern_default_extraction_rules` keeps the detection path live. Verified true
+        // across all mounted specs before asserting.
+        for api in APIS {
+            let offenders = imei_pattern_defaults_malformed(api.body);
+            assert!(
+                offenders.is_empty(),
+                "{} spec declares a `default` beside a same-indent IMEI \
+                 `pattern: '^[0-9]{{15}}$'` that does not match that pattern (a fall-back the \
+                 pattern's own validator would reject) at `default:` line(s): {:?}",
+                api.name,
+                offenders
+            );
+        }
+    }
+
+    #[test]
+    fn imei_pattern_default_extraction_rules() {
+        // Unit-cover `imei_pattern_defaults_malformed` so the contract test above can't pass
+        // vacuously and its detection is pinned (`matches_imei_pattern` itself is already
+        // covered by `imei_pattern_example_extraction_rules`).
+        //
+        // Extractor: a valid quoted and a valid unquoted IMEI beside a same-indent IMEI
+        // `pattern` pass; a too-short, a too-long, and a non-digit value are flagged; a bad
+        // value with the pattern *below* it (down-scan) is flagged; a value with no `pattern`
+        // sibling and one whose sibling is a *different* pattern (E.164) are skipped; a default
+        // in one property never pairs with a *following* property's IMEI `pattern` across the
+        // dedent; a block-scalar default is skipped; an inner `default` inside an outer
+        // `example:` payload is skipped; and a property literally named `default` (opening a
+        // block) is skipped.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    GoodQuoted:
+      type: string
+      pattern: '^[0-9]{15}$'
+      default: \"490154203237518\"
+    GoodUnquoted:
+      type: string
+      pattern: '^[0-9]{15}$'
+      default: 490154203237518
+    TooShort:
+      type: string
+      pattern: '^[0-9]{15}$'
+      default: \"12345\"
+    TooLong:
+      type: string
+      pattern: '^[0-9]{15}$'
+      default: \"1234567890123456\"
+    NonDigit:
+      type: string
+      pattern: '^[0-9]{15}$'
+      default: \"49015420323751X\"
+    PatternBelow:
+      type: string
+      default: \"nope\"
+      pattern: '^[0-9]{15}$'
+    NoPattern:
+      type: string
+      default: \"490154203237518-but-no-pattern\"
+    OtherPattern:
+      type: string
+      pattern: '^\\+[1-9][0-9]{4,14}$'
+      default: \"+123456789012\"
+    BlockDefault:
+      type: string
+      pattern: '^[0-9]{15}$'
+      default: |
+        nope
+    InExample:
+      type: object
+      example:
+        pattern: '^[0-9]{15}$'
+        default: \"bad\"
+    Split:
+      type: object
+      properties:
+        a:
+          default: \"bad\"
+        b:
+          type: string
+          pattern: '^[0-9]{15}$'
+    NamedDefault:
+      type: object
+      properties:
+        default:
+          type: string
+          pattern: '^[0-9]{15}$'
+";
+        // Flagged, in document order: TooShort.default (line 25, 5 digits), TooLong.default
+        // (line 29, 16 digits), NonDigit.default (line 33, an embedded `X`), and
+        // PatternBelow.default (line 36, value `nope` with its IMEI `pattern` a line below —
+        // down-scan pairs it). Not flagged: GoodQuoted/GoodUnquoted (valid 15-digit);
+        // NoPattern (no `pattern` sibling); OtherPattern (sibling is the E.164 pattern, not
+        // IMEI); BlockDefault (block-scalar opener `|`, no inline value); InExample's inner
+        // `default: \"bad\"` (sits inside the outer `example:` payload); Split.a.default,
+        // whose only IMEI `pattern` is in the following property Split.b past a dedent; and
+        // NamedDefault's `default:` property opening a block (no inline value).
+        assert_eq!(imei_pattern_defaults_malformed(body), vec![25, 29, 33, 36]);
+
+        // Non-vacuous floor (future-drift posture, mirroring the E.164-default twin): across
+        // every registered spec every `default` beside a same-indent IMEI `pattern` matches it
+        // (the invariant the contract test asserts). The corpus declares several IMEI `pattern`
+        // fields but pairs **none** with a `default` in the *same* Schema Object today (they
+        // carry examples, not defaults) — so this asserts a clean `== 0` genuine-pair count and
+        // guards future drift; the synthetic body above keeps the detection path live. The pair
+        // count reuses the extractor's own **dedent-bounded** same-indent sibling scan — the
+        // genuine-Schema-Object pairing — rather than a crude window, and stays independent of
+        // the extractor's *validity* (`matches_imei_pattern`) comparison.
+        let mut imei_defaults = 0usize;
+        for api in APIS {
+            assert!(
+                imei_pattern_defaults_malformed(api.body).is_empty(),
+                "{}: every default beside a same-indent IMEI `pattern` must match it",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            let raw_inline = |l: &str, name: &str| -> Option<String> {
+                let (k, v) = l.trim_start().split_once(':')?;
+                if k.trim() != name {
+                    return None;
+                }
+                let v = v.split('#').next().unwrap_or(v).trim();
+                if v.is_empty() { None } else { Some(v.to_string()) }
+            };
+            // A genuine same-Schema-Object IMEI `pattern` sibling of the `default` on line
+            // `i` (indent `c`): scan down through the object's block then up, dedent-bounded
+            // exactly like the extractor's `sibling_is_imei_pattern`, so a *following*
+            // property's IMEI `pattern` past a dedent never counts.
+            let sibling_is_imei = |i: usize, c: usize| -> bool {
+                let is_imei = |l: &str| -> bool {
+                    raw_inline(l, "pattern")
+                        .map(|v| v.trim_matches('"').trim_matches('\'') == IMEI_PATTERN)
+                        .unwrap_or(false)
+                };
+                let mut j = i + 1;
+                while j < lines.len() {
+                    let l = lines[j];
+                    if l.trim().is_empty() {
+                        j += 1;
+                        continue;
+                    }
+                    if indent(l) < c {
+                        break;
+                    }
+                    if indent(l) == c && is_imei(l) {
+                        return true;
+                    }
+                    j += 1;
+                }
+                let mut k = i;
+                while k > 0 {
+                    k -= 1;
+                    let l = lines[k];
+                    if l.trim().is_empty() {
+                        continue;
+                    }
+                    if indent(l) < c {
+                        break;
+                    }
+                    if indent(l) == c && is_imei(l) {
+                        return true;
+                    }
+                }
+                false
+            };
+            for (i, l) in lines.iter().enumerate() {
+                let Some(v) = raw_inline(l, "default") else {
+                    continue;
+                };
+                // Inline scalar only (skip block-scalar openers), mirroring the extractor
+                // so the floor counts exactly the pairs it inspects.
+                if v.starts_with('>') || v.starts_with('|') {
+                    continue;
+                }
+                let c = indent(l);
+                if sibling_is_imei(i, c) {
+                    imei_defaults += 1;
+                }
+            }
+        }
+        assert_eq!(
+            imei_defaults, 0,
+            "expected no genuine default + same-Schema-Object IMEI `pattern` pairs across \
+             specs (the future-drift posture; a new pair means switch this guard to a \
+             `>= 1` floor like the example side), got {imei_defaults}"
+        );
+    }
+
     /// The ICCID `pattern` the CAMARA eSIM specs use verbatim (written in YAML as
     /// `'^[0-9]{19,20}$'`): 19 **or** 20 decimal digits. After E.164 and IMEI it is the
     /// corpus's next-most-declared *fixed-shape* `pattern` (a profile `iccid` field recurs
