@@ -3335,6 +3335,20 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - a **token `pattern`-`default` conformance** contract test (`src/registry.rs`
+    `every_token_pattern_default_conforms_to_the_token_pattern`) — the `default`-side twin of
+    `every_token_pattern_example_conforms_to_the_token_pattern` and the **fifth member of the
+    `pattern`-default family** after E.164 / IMEI / ICCID / name, the first over a *ranged-length*
+    (`{1,64}`) alphabet (`^[a-zA-Z0-9_\-]{1,64}$`, the eSIM request-tracking token
+    `sequenceNum`/`taskId`): a dotted or over-length token is the fault the unbounded-`+`
+    name-default (dot-admitting) and digit-only ICCID-default checks can't express. A `default`
+    beside a same-indent token `pattern` must match it, else the schema's own validator rejects
+    the fall-back it pre-supplies. New pure `token_pattern_defaults_malformed` (the
+    `name_pattern_defaults_malformed` extractor keyed on `TOKEN_PATTERN` + `matches_token_pattern`).
+    Corpus declares token `pattern` fields but pairs none with a default (they carry examples) →
+    asserts clean `== 0` genuine-pair count (future-drift posture) + guards future drift; floor
+    reuses the dedent-bounded sibling scan. Unit-covered
+    (`token_pattern_default_extraction_rules`). Test-only, no spec change.
   - an **E.164 `pattern`-`default` conformance** contract test (`src/registry.rs`
     `every_e164_pattern_default_conforms_to_the_e164_pattern`) — the `default`-side twin of
     `every_e164_pattern_example_conforms_to_the_e164_pattern` and the **first member of a
@@ -6444,6 +6458,32 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 ---
 
 ## Scan journal
+
+- 2026-08-23 — Contract-test harness: guard that every **token `pattern` `default` matches the
+  pattern** (`src/registry.rs` `every_token_pattern_default_conforms_to_the_token_pattern`). The
+  **fifth member of the `pattern`-default family** after E.164, IMEI, ICCID, and name (all landed
+  earlier today), the `default`-side twin of `every_token_pattern_example_conforms_to_the_token_pattern`,
+  and the **first pattern-default member over a ranged-length (`{1,64}`) alphabet** (`^[a-zA-Z0-9_\-]{1,64}$`
+  — the eSIM Remote Management request-tracking token pattern used by `sequenceNum`/`taskId`), so a
+  dotted or over-length token in an otherwise well-shaped value is the fault the unbounded-`+`
+  name-default check (whose class also *admits* the dot the token class forbids) and the digit-only
+  ICCID-default check cannot express. In OpenAPI 3.0.x a `default` is the schema's fall-back
+  *instance*, so a token field constrained by this `pattern` (carries no `format`, so otherwise
+  unchecked) MUST carry a default the pattern accepts; a token default the pattern rejects advertises
+  a fall-back the schema's own validator rejects. New pure `token_pattern_defaults_malformed` (the
+  `name_pattern_defaults_malformed` extractor keyed on `TOKEN_PATTERN` + judged by
+  `matches_token_pattern`, both already present from the example side; trigger key `default:`,
+  block-scalar opener skipped, dedent-bounded same-indent sibling scan, in-`example:` payload
+  excluded). Surveyed the corpus first — the eSIM spec declares token `pattern` fields but pairs
+  **none** with a `default` (all carry examples; the dot-admitting name pattern and the 128-char
+  `clientId` pattern are different patterns and never pair) → asserts a clean `== 0` genuine-pair
+  count (future-drift posture, mirroring the E.164/IMEI/ICCID/name-default twins) + guards future
+  drift; floor reuses the dedent-bounded sibling scan. Unit-covered
+  (`token_pattern_default_extraction_rules`: valid quoted/unquoted tokens cleared; space/dot/slash/
+  pattern-below flagged in document order [25, 29, 33, 36]; no-pattern / different-pattern (name) /
+  block-scalar / in-`example:` / following-property-across-dedent / property-named-`default`
+  skipped). Test-only, no spec change. `cargo test` 2976 pass (+2); `cargo build --release` clean,
+  no new dep. — binary (release): 5,323,160 bytes (~5.08 MiB; unchanged by a test-only change).
 
 - 2026-08-23 — Contract-test harness: guard that every **name `pattern` `default` matches the
   pattern** (`src/registry.rs` `every_name_pattern_default_conforms_to_the_name_pattern`). The
