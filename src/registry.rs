@@ -32404,6 +32404,551 @@ components:
         );
     }
 
+    /// The 1-based line numbers, in document order, of every object `default` (an inline
+    /// flow map `{...}` or a block mapping) whose direct-property count falls outside a
+    /// sibling `minProperties`/`maxProperties` object-size bound declared in the same
+    /// Schema Object, without a YAML dep. The `default`-side twin of
+    /// `object_examples_outside_their_property_count_bounds`.
+    ///
+    /// In OpenAPI 3.0.x (JSON Schema) a `default` is a fall-back *instance* of the schema,
+    /// so it MUST satisfy the schema's own constraints. Where the object bounds its member
+    /// count with `minProperties`/`maxProperties`, a default with fewer than
+    /// `minProperties` or more than `maxProperties` direct properties is a
+    /// self-contradictory schema whose own validator rejects the value it pre-supplies, so
+    /// a Redoc/Swagger form pre-fills a control with an out-of-range default and a codegen
+    /// client's default fails the size bound at the point a caller reads or builds the
+    /// payload.
+    ///
+    /// Only a `default` whose value is a YAML **mapping** — an inline flow map
+    /// (`default: {a: 1}`) or a block mapping (`default:` opening a block whose first child
+    /// is a `key:` entry) — and that declares at least one same-object object-size bound
+    /// sibling is inspected; each bound is scanned at the default's own indent, down
+    /// through the object's block then up, dedent-bounded exactly like
+    /// `object_examples_outside_their_property_count_bounds`, so a nested or following
+    /// sibling object's bound never pairs, and read only when it is a non-negative-integer
+    /// scalar. Skipped: a scalar default (a number/string/boolean — the numeric-bound /
+    /// length / type tests' concern); an array default (`[...]` flow or a `- ` block — the
+    /// array item-bound test's concern); a block-opening `default:` whose first child is a
+    /// sequence item or scalar (an array/block-scalar default); a flow map that never
+    /// closes on its line (a multi-line flow, left un-counted rather than miscounted); a
+    /// default with no object-size-bound sibling; a `default:` nested inside an outer
+    /// `example:`/`examples:` payload (sample data, not a schema keyword); and — critically
+    /// for objects, whose block form is a mapping just like a schema — a `default:` that is
+    /// itself a **property named `default`** (its immediate block-opening parent key is
+    /// `properties`), so a sibling property that happens to be named
+    /// `minProperties`/`maxProperties` is never misread as a bound. The comparison is
+    /// inclusive — only a count strictly below `minProperties` or strictly above
+    /// `maxProperties` is flagged.
+    fn object_defaults_outside_their_property_count_bounds(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        // The inline scalar of a `name:` key (inline comment stripped; surrounding quotes
+        // preserved); `None` when the line is a different key or opens a block.
+        let raw_inline = |l: &str, name: &str| -> Option<String> {
+            let (k, v) = l.trim_start().split_once(':')?;
+            if k.trim() != name {
+                return None;
+            }
+            let v = v.split('#').next().unwrap_or(v).trim();
+            if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            }
+        };
+        // A same-indent non-negative-integer object-size bound sibling `key` in the same
+        // object as line `i` (indent `c`): scan down through the object's block then up,
+        // dedent-bounded so a nested or following object's bound never pairs. A quoted or
+        // non-integer bound has no count to compare against and is treated as absent (its
+        // own domain is `every_size_bound_is_a_non_negative_integer`'s concern).
+        let sibling_int = |i: usize, c: usize, key: &str| -> Option<usize> {
+            let parse_int = |l: &str| -> Option<usize> {
+                let raw = raw_inline(l, key)?;
+                if raw.starts_with('"') || raw.starts_with('\'') {
+                    return None; // quoted → not a plain integer
+                }
+                raw.parse::<usize>().ok()
+            };
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c {
+                    if let Some(n) = parse_int(l) {
+                        return Some(n);
+                    }
+                }
+                j += 1;
+            }
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c {
+                    if let Some(n) = parse_int(l) {
+                        return Some(n);
+                    }
+                }
+            }
+            None
+        };
+        // True when line `i` (indent `c`) sits inside an outer `example:`/`examples:`
+        // payload — some enclosing container key up the indent ladder is
+        // `example`/`examples` — so a `default` key there is sample data, not a schema
+        // keyword.
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        // True when the immediate block-opening parent of line `i` (indent `c`) is a
+        // `properties:` mapping — i.e. this `default:` is a property literally *named*
+        // `default`, not a schema's default keyword. The nearest preceding line at a
+        // smaller indent opens the block that contains `i`.
+        let parent_is_properties = |i: usize, c: usize| -> bool {
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) < c {
+                    return l
+                        .trim_start()
+                        .split_once(':')
+                        .is_some_and(|(key, _)| key.trim() == "properties");
+                }
+            }
+            false
+        };
+        // The direct-property count of an inline flow map whose text starts with `{` —
+        // top-level commas (bracket/brace depth 1 inside the outer map, quotes respected)
+        // plus one when the map holds any content; `None` when the flow never closes on its
+        // line (a multi-line flow, left un-counted). Anything after the outer `}` (e.g. a
+        // trailing comment) is ignored. `{}` counts 0.
+        let flow_map_count = |v: &str| -> Option<usize> {
+            let mut depth: i32 = 0;
+            let mut in_s = false;
+            let mut in_d = false;
+            let mut commas = 0usize;
+            let mut nonempty = false;
+            for ch in v.chars() {
+                if in_s {
+                    if ch == '\'' {
+                        in_s = false;
+                    }
+                    continue;
+                }
+                if in_d {
+                    if ch == '"' {
+                        in_d = false;
+                    }
+                    continue;
+                }
+                match ch {
+                    '[' | '{' => depth += 1,
+                    ']' | '}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            return Some(if nonempty { commas + 1 } else { 0 });
+                        }
+                    }
+                    '\'' => {
+                        in_s = true;
+                        if depth >= 1 {
+                            nonempty = true;
+                        }
+                    }
+                    '"' => {
+                        in_d = true;
+                        if depth >= 1 {
+                            nonempty = true;
+                        }
+                    }
+                    ',' if depth == 1 => commas += 1,
+                    c if depth >= 1 && !c.is_whitespace() => nonempty = true,
+                    _ => {}
+                }
+            }
+            None
+        };
+        // The direct-property count of a block mapping opened by a `default:` at line `i`
+        // (indent `c`): the number of `key:` mapping entries at the first child's indent,
+        // bounded by the dedent that closes the block. `None` when the first non-empty child
+        // is not a mapping key (a `- ` sequence item → an array; a plain/block scalar → not
+        // an object), so only genuine object defaults are counted.
+        let block_map_count = |i: usize, c: usize| -> Option<usize> {
+            let mut child_indent: Option<usize> = None;
+            let mut count = 0usize;
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                let li = indent(l);
+                if li <= c {
+                    break;
+                }
+                let t = l.trim_start();
+                let is_item = t == "-" || t.starts_with("- ");
+                let is_key = !is_item
+                    && t.split_once(':').is_some_and(|(k, _)| !k.trim().is_empty());
+                match child_indent {
+                    None => {
+                        if !is_key {
+                            return None; // first child is a sequence item or a scalar
+                        }
+                        child_indent = Some(li);
+                        count += 1;
+                    }
+                    Some(ci) => {
+                        if li == ci && is_key {
+                            count += 1;
+                        }
+                    }
+                }
+                j += 1;
+            }
+            child_indent.map(|_| count)
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some((k, v)) = line.trim_start().split_once(':') else {
+                continue;
+            };
+            if k.trim() != "default" {
+                continue;
+            }
+            let c = indent(line);
+            if inside_example(i, c) || parent_is_properties(i, c) {
+                continue;
+            }
+            let min = sibling_int(i, c, "minProperties");
+            let max = sibling_int(i, c, "maxProperties");
+            if min.is_none() && max.is_none() {
+                continue;
+            }
+            let inline = v.split('#').next().unwrap_or(v).trim();
+            let count = if inline.is_empty() {
+                // opens a block — an object only when its first child is a `key:` mapping
+                match block_map_count(i, c) {
+                    Some(n) => n,
+                    None => continue,
+                }
+            } else if inline.starts_with('{') {
+                match flow_map_count(inline) {
+                    Some(n) => n,
+                    None => continue, // multi-line flow — not counted
+                }
+            } else {
+                continue; // scalar or array default — not an object (other tests' concern)
+            };
+            let below = min.is_some_and(|m| count < m);
+            let above = max.is_some_and(|m| count > m);
+            if below || above {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_object_default_respects_its_property_count_bounds() {
+        // Contract-harness invariant (OpenAPI 3.0.x / JSON-Schema structural rule):
+        // where a Schema Object declares an object `default` beside a `minProperties`
+        // and/or `maxProperties`, the default's direct-property count MUST lie within those
+        // bounds. A `default` is a fall-back *instance* of the schema, so an object with
+        // fewer than `minProperties` or more than `maxProperties` members — a placeholder
+        // emptied below a raised floor, a map pasted past a tightened cap — is a
+        // self-contradictory schema whose own validator rejects the value it pre-supplies,
+        // so a Redoc/Swagger form pre-fills a control with an out-of-range default and a
+        // codegen client's default fails the size bound at the point a caller reads or
+        // builds the payload.
+        //
+        // The `default`-side twin of `every_object_example_respects_its_property_count_
+        // bounds`, completing the object-cardinality corner of the example/default symmetry
+        // the harness already keeps for the array-item-count
+        // (`every_array_default_respects_its_item_bounds`), numeric-bound
+        // (`every_default_is_within_its_numeric_bounds`), string-length
+        // (`every_default_respects_its_string_length_bounds`), enum-membership and
+        // schema-type families. No existing test compares an object default's *member
+        // count* against its size bounds: `every_default_matches_its_schema_type` checks the
+        // default's type, `every_default_is_a_member_of_its_enum` checks it against a
+        // sibling enum, and the size-bound tests (`every_size_bound_is_a_non_negative_
+        // integer`, `every_numeric_bound_is_ordered_low_to_high`) check the bounds' own
+        // domain and ordering, never against a default.
+        //
+        // The mounted corpus declares no object default paired with an object-size bound
+        // today (it declares no object defaults at all), so this asserts clean across every
+        // spec and guards future drift — the same posture as
+        // `every_array_default_respects_its_item_bounds`; the unit test below pins the
+        // extractor's detection so the pass is never vacuous.
+        for api in APIS {
+            let offenders = object_defaults_outside_their_property_count_bounds(api.body);
+            assert!(
+                offenders.is_empty(),
+                "{} spec declares an object `default` whose direct-property count falls \
+                 outside its sibling `minProperties`/`maxProperties` bound (a value the \
+                 bound's own validator would reject) at `default:` line(s): {:?}",
+                api.name,
+                offenders
+            );
+        }
+    }
+
+    #[test]
+    fn object_default_property_count_extraction_rules() {
+        // Unit-cover `object_defaults_outside_their_property_count_bounds` so the contract
+        // test above can't pass vacuously and its detection is pinned: an object default
+        // whose property count is within its bounds passes; one below a `minProperties`
+        // (inline flow and block-mapping forms) and one above a `maxProperties` are flagged
+        // in document order; an empty flow map `{}` below `minProperties` is flagged; a
+        // count equal to a bound passes (inclusive); a scalar default and an array default
+        // are skipped (not objects); a default with no object-size-bound sibling is skipped;
+        // a `default:` nested inside an outer `example:` payload is skipped; a default in
+        // one property never pairs with a following property's bound across the dedent; and
+        // a property literally named `default` (a member of a `properties:` map) is skipped
+        // — even when a sibling property named `minProperties` would otherwise be misread as
+        // a bound.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    GoodFlow:
+      type: object
+      minProperties: 1
+      maxProperties: 3
+      default: {a: 1, b: 2}
+    TooFew:
+      type: object
+      minProperties: 2
+      default: {only: 1}
+    TooMany:
+      type: object
+      maxProperties: 2
+      default: {a: 1, b: 2, c: 3}
+    EmptyBelow:
+      type: object
+      minProperties: 1
+      default: {}
+    EqualBound:
+      type: object
+      minProperties: 2
+      maxProperties: 2
+      default: {x: 7, y: 8}
+    BlockFew:
+      type: object
+      minProperties: 3
+      default:
+        a: 1
+        b: 2
+    BlockGood:
+      type: object
+      minProperties: 1
+      maxProperties: 3
+      default:
+        a: 1
+        b: 2
+    ScalarDefault:
+      type: object
+      minProperties: 5
+      default: \"notobject\"
+    ArrayDefault:
+      type: object
+      minProperties: 5
+      default: [1, 2]
+    NoBound:
+      type: object
+      default: {a: 1}
+    InExample:
+      type: object
+      example:
+        minProperties: 5
+        default: {a: 1}
+    Split:
+      type: object
+      properties:
+        a:
+          default: {a: 1}
+        b:
+          type: object
+          minProperties: 5
+    NamedProperty:
+      type: object
+      properties:
+        default: {only: 1}
+        minProperties: 5
+";
+        // Flagged, in document order: line 22 (`TooFew.default: {only: 1}`, 1 property <
+        // its `minProperties: 2` sibling above), line 26 (`TooMany.default: {a: 1, b: 2,
+        // c: 3}`, 3 > its `maxProperties: 2`), line 30 (`EmptyBelow.default: {}`, 0 <
+        // `minProperties: 1`), and line 39 (`BlockFew.default:` block mapping of 2 keys <
+        // `minProperties: 3`). Not flagged: `GoodFlow` (2 in [1,3]); `EqualBound` (2 == both
+        // bounds, inclusive); `BlockGood` (2 in [1,3], block form); `ScalarDefault`
+        // (`\"notobject\"` is a scalar, not an object); `ArrayDefault` (`[1, 2]` is an
+        // array, not an object — the item-bound test's concern); `NoBound` (no
+        // `minProperties`/`maxProperties` sibling); `InExample` (its inner `default: {a: 1}`
+        // sits inside the outer `example:` payload, whose own `minProperties: 5` is a child,
+        // not a sibling); `Split.a.default: {a: 1}`, whose only candidate `minProperties: 5`
+        // sits in the following property `Split.b` past a dedent, so the two never pair; and
+        // `NamedProperty` (a `default:` that is a member of a `properties:` map — a property
+        // literally named `default`, skipped despite the sibling property named
+        // `minProperties: 5` that would otherwise be misread as a bound).
+        assert_eq!(
+            object_defaults_outside_their_property_count_bounds(body),
+            vec![22, 26, 30, 39]
+        );
+
+        // The mounted corpus declares no object default paired with an object-size bound
+        // (it declares no object defaults at all), so — like the array-default twin — there
+        // is no positive corpus floor to assert; the synthetic body above is what proves the
+        // count-comparison path runs and a broken (always-empty) extractor cannot hide.
+        // Confirm the contract invariant holds across the corpus here too, and that the
+        // corpus indeed pairs no object default with an object-size bound (documenting the
+        // future-drift posture) while it does declare such bounds (so the guard is live).
+        let mut bounded_object_defaults = 0usize;
+        let mut object_size_bounds = 0usize;
+        for api in APIS {
+            assert!(
+                object_defaults_outside_their_property_count_bounds(api.body).is_empty(),
+                "{}: every object default must lie within its sibling \
+                 minProperties/maxProperties bound",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            let is_key = |l: &str, name: &str| {
+                l.trim_start()
+                    .split_once(':')
+                    .is_some_and(|(k, _)| k.trim() == name)
+            };
+            for (i, l) in lines.iter().enumerate() {
+                if is_key(l, "minProperties") || is_key(l, "maxProperties") {
+                    object_size_bounds += 1;
+                }
+                let Some((k, v)) = l.trim_start().split_once(':') else {
+                    continue;
+                };
+                if k.trim() != "default" {
+                    continue;
+                }
+                // Only count an object-shaped default (inline `{` flow or a block whose
+                // first deeper child is a `key:`), presence-only, paired with a same-indent
+                // minProperties/maxProperties sibling.
+                let c = indent(l);
+                let vt = v.split('#').next().unwrap_or(v).trim();
+                let is_object = if vt.starts_with('{') {
+                    true
+                } else if vt.is_empty() {
+                    let mut obj = false;
+                    let mut j = i + 1;
+                    while j < lines.len() {
+                        let x = lines[j];
+                        if x.trim().is_empty() {
+                            j += 1;
+                            continue;
+                        }
+                        if indent(x) <= c {
+                            break;
+                        }
+                        let t = x.trim_start();
+                        obj = !(t == "-" || t.starts_with("- "))
+                            && t.split_once(':').is_some_and(|(kk, _)| !kk.trim().is_empty());
+                        break;
+                    }
+                    obj
+                } else {
+                    false
+                };
+                if !is_object {
+                    continue;
+                }
+                let mut has_bound = false;
+                for dir in [1i64, -1] {
+                    let mut j = i as i64 + dir;
+                    while j >= 0 && (j as usize) < lines.len() {
+                        let x = lines[j as usize];
+                        if !x.trim().is_empty() {
+                            if indent(x) < c {
+                                break;
+                            }
+                            if indent(x) == c
+                                && (is_key(x, "minProperties") || is_key(x, "maxProperties"))
+                            {
+                                has_bound = true;
+                                break;
+                            }
+                        }
+                        j += dir;
+                    }
+                    if has_bound {
+                        break;
+                    }
+                }
+                if has_bound {
+                    bounded_object_defaults += 1;
+                }
+            }
+        }
+        assert_eq!(
+            bounded_object_defaults, 0,
+            "expected no object default paired with an object-size bound in the corpus \
+             (future-drift posture), got {bounded_object_defaults} — if a bounded object \
+             default is added, drop this floor and the \
+             every_object_default_respects_its_property_count_bounds test now guards it"
+        );
+        assert!(
+            object_size_bounds >= 10,
+            "expected the corpus to declare object-size bounds so the guard is live, got \
+             {object_size_bounds}"
+        );
+    }
+
     /// The 1-based line numbers, in document order, of every array `default` (an inline
     /// flow `[...]` or a `- ` block sequence) whose element count falls outside a sibling
     /// `minItems`/`maxItems` array-size bound declared in the same Schema Object, without

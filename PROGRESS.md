@@ -3335,6 +3335,21 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - an **object-`default` property-count-bounds** contract test (`src/registry.rs`
+    `every_object_default_respects_its_property_count_bounds`) — the `default`-side twin of
+    `every_object_example_respects_its_property_count_bounds`, completing the
+    object-cardinality corner of the example/default symmetry (array-item-count,
+    numeric-value, string-length, enum-membership, schema-type already paired): an object
+    `default` (inline flow map `{…}` or a block mapping) beside a `minProperties`/
+    `maxProperties` sibling must have a direct-property count within those bounds, else the
+    schema's own validator rejects the fall-back it pre-supplies. New pure
+    `object_defaults_outside_their_property_count_bounds` (the object-example extractor with
+    its trigger key swapped `example:`→`default:`; keeps the `parent_is_properties` skip —
+    unlike the array-default twin — since an object default's block form is a mapping like a
+    schema's, so a property literally *named* `default` must be excluded). Corpus: 68
+    object-size bounds, none paired with an object default → asserts clean + guards future
+    drift (`== 0` floor, `>= 10` liveness floor). Unit-covered
+    (`object_default_property_count_extraction_rules`). Test-only, no spec change.
   - a **`date`-`default` format-conformance** contract test (`src/registry.rs`
     `every_date_format_default_is_a_well_formed_date`) — the `default`-side twin of
     `every_date_format_example_is_a_well_formed_date`, completing the temporal corner
@@ -6274,6 +6289,41 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-23 — Contract-test harness: guard that every **object `default` respects its
+  property-count bounds** (`src/registry.rs`
+  `every_object_default_respects_its_property_count_bounds`). In OpenAPI 3.0.x (JSON
+  Schema) a `default` is a fall-back *instance* of the schema, so where a Schema Object
+  declares an object `default` beside a `minProperties`/`maxProperties`, the default's
+  direct-property count MUST lie within those bounds — else the schema's own validator
+  rejects the fall-back it pre-supplies (a Redoc/Swagger form pre-fills a control with an
+  out-of-range default; a codegen client carries a default the size bound can never hold).
+  The **`default`-side twin of `every_object_example_respects_its_property_count_bounds`**
+  (added last pass), completing the object-cardinality corner of the example/default
+  symmetry the harness already keeps for array-item-count
+  (`every_array_default_respects_its_item_bounds` ↔ `…example…`), numeric-value, string-
+  length, enum-membership and schema-type — the object-count row was the one example guard
+  without a default counterpart. New pure `object_defaults_outside_their_property_count_
+  bounds`: the object-example extractor with its trigger key swapped `example:`→`default:`,
+  reusing unchanged its dedent-bounded same-indent `minProperties`/`maxProperties` sibling
+  scan, inline-flow-map / block-mapping direct-property counters, the `example:`/`examples:`
+  payload ancestor-walk exclusion, and — critically for objects, whose block form is itself
+  a mapping — the `parent_is_properties` skip (a `default:` that is a property literally
+  *named* `default` under `properties:`, so a sibling property named `minProperties` is
+  never misread as a bound; the array-default twin can omit this since an array default's
+  shape checks already exclude it, but an object default cannot). Surveyed the corpus first
+  — 68 `minProperties`/`maxProperties` bounds across the specs, **none** paired with an
+  object `default` (the corpus declares no object defaults at all) — so the contract test
+  asserts clean across all specs and guards future drift (the `== 0` future-drift floor of
+  the array-default twin, plus a `>= 10` object-size-bound floor proving the guard is live);
+  the synthetic unit body keeps the count-comparison path live. Tests: +2 (the contract test
+  + `object_default_property_count_extraction_rules`: a within-bounds object default cleared
+  (inline flow + block-mapping forms, equal-bound inclusive); one below `minProperties`
+  (inline + block) and one above `maxProperties` and an empty flow `{}` below the floor
+  flagged in document order (`[22, 26, 30, 39]`); scalar / array / no-bound / in-`example:`
+  payload / following-property-across-dedent / property-named-`default` cases skipped;
+  `bounded_object_defaults == 0` corpus floor + `object_size_bounds >= 10` liveness floor).
+  `cargo test` 2946 green (was 2944); `cargo build --release` succeeds. No new dependency;
+  test-only change (no spec/runtime edit). — binary (release): 5.1M (5,323,160 B; unchanged).
 - 2026-08-23 — Contract-test harness: guard that every **`format: date` `default` is a
   well-formed RFC 3339 full-date** (`src/registry.rs`
   `every_date_format_default_is_a_well_formed_date`). In OpenAPI 3.0.x (JSON Schema) a
