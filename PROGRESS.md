@@ -3335,6 +3335,23 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - a **`uri`-`default` format-conformance** contract test (`src/registry.rs`
+    `every_uri_format_default_is_a_well_formed_uri`) — the `default`-side twin of
+    `every_uri_format_example_is_a_well_formed_uri` and the string-format companion of
+    the numeric format-default family (int32 / int64 / double / float, completed the
+    prior passes); it extends the format-default guards from the numeric formats to the
+    corpus's most heavily-used string format — the callback/notification
+    `sink`/`webhookUrl` URLs. A `default` beside a same-indent `format: uri` must be a
+    syntactically valid absolute URI, else the schema's own validator rejects the
+    fall-back it pre-supplies. New pure `uri_format_defaults_malformed` (the
+    `double_format_defaults_malformed` extractor with its format anchor swapped
+    `double`→`uri` and validator `is_well_formed_double`→`is_well_formed_absolute_uri`;
+    exact `uri` sibling probe so `uri-reference` never pairs). Corpus declares 40
+    `format: uri` fields but pairs none with a default (the only nearby `default` is a
+    cross-property boolean the dedent-bounded scan does not pair) → asserts clean `== 0`
+    genuine-pair count + guards future drift; floor reuses the dedent-bounded sibling
+    scan (mirrors the float-default twin, not a crude ±window). Unit-covered
+    (`uri_format_default_extraction_rules`). Test-only, no spec change.
   - a **`double`-`default` format-conformance** contract test (`src/registry.rs`
     `every_double_format_default_is_a_well_formed_double`) — the `default`-side twin of
     `every_double_format_example_is_a_well_formed_double` and the floating-point companion
@@ -6319,6 +6336,39 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-23 — Contract-test harness: guard that every **`format: uri` `default` is a
+  well-formed absolute URI** (`src/registry.rs` `every_uri_format_default_is_a_well_formed_uri`).
+  In OpenAPI 3.0.x (JSON Schema) a `default` is a fall-back *instance* of the schema, so where
+  a Schema Object declares an inline `default` beside a same-indent `format: uri`, the default
+  MUST be a syntactically valid absolute URI — else the schema's own validator rejects the
+  fall-back it pre-supplies (a Redoc/Swagger form pre-fills a `sink`/`webhookUrl` control with
+  an unusable value; a codegen client carries a URL no `uri`-typed callback target can legally
+  hold). The **`default`-side twin of `every_uri_format_example_is_a_well_formed_uri`** and the
+  string-format companion of the now-complete numeric format-default family (int32 / int64 /
+  double / float): it carries the format-default guards from the numeric formats onto the
+  corpus's most heavily-used string format — the callback/notification URLs. New pure
+  `uri_format_defaults_malformed`: the `double_format_defaults_malformed` extractor with its
+  format anchor swapped `double`→`uri` and validator `is_well_formed_double`→
+  `is_well_formed_absolute_uri` (reused from the example twin), reusing unchanged its
+  inline-scalar reader, its dedent-bounded same-indent `format: uri` sibling probe (matched
+  exactly, so `uri-reference` — which admits a relative URI — never pairs), its
+  `example:`/`examples:` payload ancestor-walk exclusion, and its block-scalar-opener skip; a
+  property literally named `default` under `properties:` opens a block (empty inline value) and
+  is skipped naturally. Surveyed the corpus first — 40 `format: uri` fields, **none** paired
+  with a `default` in the same Schema Object (the only `default` sitting near a `format: uri` is
+  click-to-dial's cross-property `recordingEnabled` boolean `default: false`, which the
+  dedent-bounded scan correctly does not pair) — so the contract test asserts clean across all
+  specs and guards future drift. Because that cross-property boolean would fool a crude
+  same-indent ±window (as it did the float-default twin), the future-drift floor reuses the
+  extractor's own **dedent-bounded** genuine-Schema-Object sibling scan (genuine pairs `== 0`)
+  rather than a ±window. Tests: +2 (the contract test + `uri_format_default_extraction_rules`:
+  a valid `https://…` beside `format: uri` cleared; a scheme-less value and a `nope` with its
+  `format: uri` a line below (down-scan) flagged in document order `[21, 24]`; no-format /
+  different-format (`uri-reference`) / following-property-across-dedent / block-scalar /
+  in-`example:` / property-named-`default` cases skipped; `uri_defaults == 0` genuine-pair
+  floor). `cargo test` 2954 green (was 2952); `cargo build --release` succeeds. No new
+  dependency; test-only change (no spec/runtime edit). — binary (release): 5.1M (5,323,160 B;
+  unchanged).
 - 2026-08-23 — Contract-test harness: guard that every **`format: float` `default` is a
   well-formed single-precision value** (`src/registry.rs`
   `every_float_format_default_is_a_well_formed_float`). In OpenAPI 3.0.x (JSON Schema) a
