@@ -53567,6 +53567,324 @@ components:
         );
     }
 
+    /// The 1-based line numbers, in document order, of every `default:` keyword whose
+    /// inline scalar value sits in a Schema Object declaring a *same-indent*
+    /// `format: int64` sibling yet is not a well-formed 64-bit integer, without a YAML
+    /// dep. The `default` twin of `int64_format_examples_malformed` and the exact int64
+    /// sibling of `int32_format_defaults_malformed`: an `example` is a sample instance of
+    /// the schema and a `default` is its fall-back instance, so both must honour the
+    /// `int64` range the format fixes; the example side was already guarded, the default
+    /// side was not.
+    ///
+    /// Scoping mirrors `int32_format_defaults_malformed` exactly — only a `default`
+    /// carrying an inline scalar (a block-scalar `default: >-`/`|` opens no inline value
+    /// and is skipped; an integer default never takes that form, but the guard mirrors
+    /// the sibling) with a same-indent `format: int64` sibling (matched **exactly**, so
+    /// `int32` — whose range is narrower — never pairs, the reverse of the exclusion
+    /// `int32_format_defaults_malformed` applies to `int64`) in the same Schema Object is
+    /// inspected. The sibling is scanned at the default's own indent, down through the
+    /// object's block then up, dedent-bounded exactly like the sibling extractor, so a
+    /// *following* property's `format: int64` past a dedent never pairs with this
+    /// property's default. A `default:` nested inside an outer `example:`/`examples:`
+    /// payload (sample data, not a schema keyword) is skipped. Integer shape + range is
+    /// judged by the shared `is_well_formed_int64`.
+    fn int64_format_defaults_malformed(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let raw_inline = |l: &str, name: &str| -> Option<String> {
+            let (k, v) = l.trim_start().split_once(':')?;
+            if k.trim() != name {
+                return None;
+            }
+            let v = v.split('#').next().unwrap_or(v).trim();
+            if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            }
+        };
+        // Whether a same-indent `format:` sibling of line `i` (indent `c`) in the same
+        // Schema Object names `int64` (exactly — not `int32`): scan down through the
+        // object's block then up, dedent-bounded so a nested or following object's
+        // `format` never pairs.
+        let sibling_is_int64_format = |i: usize, c: usize| -> bool {
+            let is_int64_format = |l: &str| -> bool {
+                raw_inline(l, "format")
+                    .map(|v| v.trim_matches('"').trim_matches('\'') == "int64")
+                    .unwrap_or(false)
+            };
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_int64_format(l) {
+                    return true;
+                }
+                j += 1;
+            }
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_int64_format(l) {
+                    return true;
+                }
+            }
+            false
+        };
+        // True when line `i` (indent `c`) sits inside an outer `example:`/`examples:`
+        // payload — some enclosing container key up the indent ladder is
+        // `example`/`examples`, so an inner `default` key there is sample data.
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some(raw) = raw_inline(line, "default") else {
+                continue;
+            };
+            // A block-scalar opener (`>`/`|`, optionally with a chomping indicator)
+            // carries its value on the following lines, not inline — skip it.
+            if raw.starts_with('>') || raw.starts_with('|') {
+                continue;
+            }
+            let c = indent(line);
+            if inside_example(i, c) {
+                continue;
+            }
+            if !sibling_is_int64_format(i, c) {
+                continue;
+            }
+            let value = raw.trim_matches('"').trim_matches('\'');
+            if !is_well_formed_int64(value) {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_int64_format_default_is_a_well_formed_int64() {
+        // Contract-harness invariant (OpenAPI 3.0.x / JSON-Schema structural rule):
+        // where a Schema Object declares an inline `default` beside a same-indent
+        // `format: int64`, the default MUST be an integer within the signed 64-bit
+        // range. A `default` is the schema's fall-back *instance*, so a value that is
+        // not a valid int64 — a fraction, a placeholder, or a magnitude that overflows
+        // i64 — is a self-contradictory schema whose own validator rejects the fall-back
+        // it pre-supplies, so a Redoc/Swagger form pre-fills a control (a byte-count /
+        // total / capacity field with a `default`) with an out-of-range value and a
+        // codegen client that maps `int64` onto a 64-bit integer carries a default no
+        // `int64`-typed field can legally hold.
+        //
+        // The **`default` twin** of `every_int64_format_example_is_a_well_formed_int64`
+        // and the int64 sibling of `every_int32_format_default_is_a_well_formed_int32`:
+        // together the two integer-format-default guards close the format-default family
+        // over the two integer formats a CAMARA schema uses, mirroring the integer corner
+        // of the format-example family. Future-drift posture (like the date-time-default
+        // twin): the corpus declares `format: int64` fields but pairs **none** with a
+        // `default` today, so the guard asserts clean across all specs and holds the line
+        // against a future int64 default drifting out of range; the synthetic unit body
+        // in `int64_format_default_extraction_rules` keeps the detection path live.
+        // Verified true across all mounted specs before asserting.
+        for api in APIS {
+            let offenders = int64_format_defaults_malformed(api.body);
+            assert!(
+                offenders.is_empty(),
+                "{} spec declares a `default` beside a same-indent `format: int64` that \
+                 is not a well-formed 64-bit integer (a fall-back the format's own \
+                 validator would reject) at `default:` line(s): {:?}",
+                api.name,
+                offenders
+            );
+        }
+    }
+
+    #[test]
+    fn int64_format_default_extraction_rules() {
+        // Unit-cover `int64_format_defaults_malformed` so the contract test above can't
+        // pass vacuously and its detection is pinned (`is_well_formed_int64` itself is
+        // already covered by `int64_format_example_extraction_rules`).
+        //
+        // Extractor: a valid integer beside a same-indent `format: int64` passes; a
+        // fraction and an overflowing magnitude beside `format: int64` are flagged; a
+        // bad value with the format *below* it (down-scan) is flagged; a value with no
+        // `format` sibling and one whose sibling is a *different* format (`int32`) are
+        // skipped; a default in one property never pairs with a *following* property's
+        // `format: int64` across the dedent; a block-scalar default is skipped; an inner
+        // `default` inside an outer `example:` payload is skipped; and a property
+        // literally named `default` (opening a block) is skipped.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    GoodInt:
+      type: integer
+      format: int64
+      default: 9007199254740991
+    BadFraction:
+      type: integer
+      format: int64
+      default: 3.5
+    BadOverflow:
+      type: integer
+      format: int64
+      default: 99999999999999999999
+    FormatBelow:
+      type: integer
+      default: nope
+      format: int64
+    NoFormat:
+      type: integer
+      default: 42
+    Int32Fmt:
+      type: integer
+      format: int32
+      default: 99999999999999999999
+    Split:
+      type: object
+      properties:
+        a:
+          type: string
+          enum: [DAY, NIGHT]
+          default: DAY
+        b:
+          type: integer
+          format: int64
+          default: 60
+    Folded:
+      type: integer
+      format: int64
+      default: >-
+        12345
+    InExample:
+      type: object
+      example:
+        format: int64
+        default: 999999999999
+    NamedDefault:
+      type: object
+      properties:
+        default:
+          type: integer
+          format: int64
+";
+        // Flagged, in document order: BadFraction.default (line 21, `3.5` is not an
+        // integer), BadOverflow.default (line 25, `99999999999999999999` overflows i64),
+        // and FormatBelow.default (line 28, value `nope` with its `format: int64` a line
+        // below — down-scan pairs it). Not flagged: GoodInt (valid `9007199254740991`);
+        // NoFormat (no `format` sibling); Int32Fmt (sibling is `int32`, not `int64` — so
+        // its overflowing `99999999999999999999` is out of scope, the reverse of the
+        // `int64` case the int32 extractor skips); Split.a.default `DAY` (its only
+        // `format: int64` is the *following* property Split.b, past a dedent);
+        // Split.b.default (valid `60`); Folded (block-scalar opener `>-`, no inline
+        // value); InExample's inner `default: 999999999999` (inside the outer `example:`
+        // payload); NamedDefault's `default:` property (opens a block, no inline value).
+        assert_eq!(int64_format_defaults_malformed(body), vec![21, 25, 28]);
+
+        // Non-vacuous floor (future-drift posture, mirroring the date-time-default twin):
+        // across every registered spec every `default` beside a same-indent
+        // `format: int64` is a well-formed 64-bit integer (the invariant the contract
+        // test asserts). The corpus declares `format: int64` fields but pairs **none**
+        // with a `default` today, so — unlike the int32 side — this asserts a clean `== 0`
+        // pair count and guards future drift; the synthetic body above is what keeps the
+        // detection path live. Count pairs with a same-indent detector independent of the
+        // extractor's shape comparison.
+        let mut int64_defaults = 0usize;
+        for api in APIS {
+            assert!(
+                int64_format_defaults_malformed(api.body).is_empty(),
+                "{}: every default beside a same-indent `format: int64` must be a \
+                 well-formed 64-bit integer",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            let is_key = |l: &str, name: &str, val: Option<&str>| {
+                l.trim_start().split_once(':').is_some_and(|(k, v)| {
+                    k.trim() == name
+                        && val.is_none_or(|want| {
+                            v.split('#').next().unwrap_or(v).trim().trim_matches('"').trim_matches('\'')
+                                == want
+                        })
+                })
+            };
+            for (i, l) in lines.iter().enumerate() {
+                if !is_key(l, "default", None) {
+                    continue;
+                }
+                let v = l
+                    .trim_start()
+                    .split_once(':')
+                    .map(|(_, v)| v.split('#').next().unwrap_or(v).trim())
+                    .unwrap_or("");
+                // Inline scalar only (skip empty + block-scalar openers), mirroring the
+                // extractor so the floor counts exactly the pairs it inspects.
+                if v.is_empty() || v.starts_with('>') || v.starts_with('|') {
+                    continue;
+                }
+                let c = indent(l);
+                let lo = i.saturating_sub(6);
+                let hi = (i + 6).min(lines.len());
+                let has_int64_format = (lo..hi).any(|j| {
+                    j != i && indent(lines[j]) == c && is_key(lines[j], "format", Some("int64"))
+                });
+                if has_int64_format {
+                    int64_defaults += 1;
+                }
+            }
+        }
+        assert_eq!(
+            int64_defaults, 0,
+            "expected no default + same-indent `format: int64` pairs across specs (the \
+             future-drift posture; a new pair means switch this guard to a `>= 1` floor \
+             like the int32 side), got {int64_defaults}"
+        );
+    }
+
     /// Whether `s` is a well-formed IEEE-754 double-precision value — the sample an
     /// OpenAPI `format: double` field advertises. True iff `s` parses as an `f64` and
     /// is finite: an integer (`3000`), a decimal (`51.5074`), or a signed magnitude
