@@ -3335,6 +3335,22 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - a **`byte`-`default` format-conformance** contract test (`src/registry.rs`
+    `every_byte_format_default_is_a_well_formed_byte`) — the `default`-side twin of
+    `every_byte_format_example_is_a_well_formed_byte` and the **`byte` member of the
+    format-default family** (date-time / date / int32 / int64 / double / float / uri /
+    uri-reference / uuid / ipv4 / ipv6 / email already paired), the **last** standard
+    OpenAPI string format to gain its default-side guard. A `default` beside a same-indent
+    `format: byte` must be a well-formed base64 string (OAS 3.0.x `byte` = base64, RFC 4648
+    §4), else the schema's own validator rejects the fall-back it pre-supplies. New pure
+    `byte_format_defaults_malformed` (structurally identical to `email_format_defaults_malformed`
+    with the format anchor swapped `email`→`byte`, matched exactly so `date`/`uri`/… never
+    pair, and the judge `is_well_formed_email`→`is_well_formed_byte`, already present). Corpus
+    declares 1 `format: byte` field (Click to Dial recording `content`) but pairs none with a
+    default (it carries an example) → asserts clean `== 0` genuine-pair count + guards future
+    drift; floor reuses the dedent-bounded sibling scan (mirrors the email-default twin).
+    Unit-covered (`byte_format_default_extraction_rules`). Test-only, no spec change.
+    **Completes the format-default family — every format-example member now has a default twin.**
   - an **`email`-`default` format-conformance** contract test (`src/registry.rs`
     `every_email_format_default_is_a_well_formed_email`) — the `default`-side twin of
     `every_email_format_example_is_a_well_formed_email` and the `email` member of the
@@ -3349,7 +3365,7 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
     pairs none with a default (they carry examples) → asserts clean `== 0` genuine-pair count +
     guards future drift; floor reuses the dedent-bounded sibling scan (mirrors the ipv6-default
     twin). Unit-covered (`email_format_default_extraction_rules`). Test-only, no spec change.
-    Leaves `byte` as the last format-example member without a default twin.
+    (Left `byte` as the last format-example member without a default twin — now paired.)
   - an **`ipv6`-`default` format-conformance** contract test (`src/registry.rs`
     `every_ipv6_format_default_is_a_well_formed_ipv6`) — the `default`-side twin of
     `every_ipv6_format_example_is_a_well_formed_ipv6` and the IPv6 address-family
@@ -6412,6 +6428,38 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-23 — Contract-test harness: guard that every **`format: byte` `default` is a
+  well-formed base64 string** (`src/registry.rs` `every_byte_format_default_is_a_well_formed_byte`).
+  In OpenAPI 3.0.x (JSON Schema) a `default` is the schema's fall-back *instance*, so where a
+  Schema Object declares an inline `default` beside a same-indent `format: byte`, the default
+  MUST be a syntactically valid base64 string (OAS 3.0.x defines `byte` as base64-encoded octets,
+  RFC 4648 §4) — else the schema's own validator rejects the fall-back it pre-supplies (a
+  Redoc/Swagger form pre-fills a `byte` control with an undecodable value; a codegen client that
+  maps `byte` onto a base64-decoded blob carries a value no `byte`-typed field can legally hold).
+  The **`default`-side twin of `every_byte_format_example_is_a_well_formed_byte`** and the
+  **`byte` member of the format-default family** (date-time / date / int32 / int64 / double /
+  float / uri / uri-reference / uuid / ipv4 / ipv6 / email already paired) — the **last** standard
+  OpenAPI string format present in the corpus to gain its default-side guard, so the
+  format-default family now covers every format-example member. New pure
+  `byte_format_defaults_malformed`: the `email_format_defaults_malformed` extractor with its format
+  anchor swapped `email`→`byte` (matched exactly, so `date`/`uri`/… never pair, the analogue of the
+  int32/int64 and double/float mutual exclusions) and validity judge
+  `is_well_formed_email`→`is_well_formed_byte` (already present, covered by
+  `byte_format_example_extraction_rules`), reusing unchanged its inline-scalar reader, its
+  dedent-bounded same-indent `format: byte` sibling probe, its `example:`/`examples:` payload
+  ancestor-walk exclusion, and its block-scalar-opener skip. Surveyed the corpus first — 1
+  `format: byte` field (click-to-dial recording `content`) but **none** paired with a `default` in
+  the same Schema Object (it carries an example) — so the contract test asserts clean `== 0` across
+  all specs and guards future drift; the future-drift floor reuses the extractor's own
+  **dedent-bounded** genuine-Schema-Object sibling scan (genuine pairs `== 0`) rather than a crude
+  ±window. Tests: +2 (the contract test + `byte_format_default_extraction_rules`: a valid
+  `UklGRgAAAABXQVZF` beside `format: byte` cleared; a whitespace/non-alphabet `not base64!`, a
+  length-3 `abc`, and a `zzz` with its `format: byte` a line below (down-scan) flagged in document
+  order `[21, 25, 28]`; no-format / different-format (`date`) / following-property-across-dedent /
+  block-scalar / in-`example:` / property-named-`default` cases skipped; `byte_defaults == 0`
+  genuine-pair floor). `cargo test` 2966 green (was 2964); `cargo build --release` succeeds. No new
+  dependency; test-only change (no spec/runtime edit). — binary (release): 5.1M (5,323,160 B;
+  unchanged).
 - 2026-08-23 — Contract-test harness: guard that every **`format: email` `default` is a
   well-formed email address** (`src/registry.rs` `every_email_format_default_is_a_well_formed_email`).
   In OpenAPI 3.0.x (JSON Schema) a `default` is the schema's fall-back *instance*, so where a

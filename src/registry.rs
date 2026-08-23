@@ -59148,6 +59148,363 @@ components:
         );
     }
 
+    /// The 1-based line numbers, in document order, of every `default` keyword whose
+    /// inline scalar value sits in a Schema Object declaring a *same-indent*
+    /// `format: byte` sibling yet is not a well-formed base64 string, without a YAML dep.
+    /// The **byte** member of the format-default family (date-time / date / int32 /
+    /// int64 / double / float / uri / uri-reference / uuid / ipv4 / ipv6 / email) — the
+    /// last standard OpenAPI string format present in the corpus, over its `format: byte`
+    /// fields (the Click to Dial recording `content`, inline base64 audio).
+    ///
+    /// In OpenAPI 3.0.x (JSON Schema) a `default` is the schema's fall-back *instance*,
+    /// so a `format: byte` field's default MUST be a syntactically valid base64 string
+    /// (OAS 3.0.x defines `byte` as base64-encoded octets, RFC 4648 §4). A malformed
+    /// one — a placeholder pasted beside the format, a value with stray whitespace, or a
+    /// length/alphabet the encoding does not admit — is a fall-back the format's own
+    /// validator rejects, so a Redoc/Swagger form pre-fills a `byte` control with an
+    /// undecodable value and a codegen client that maps `byte` onto a base64-decoded blob
+    /// carries a value no `byte`-typed field can legally hold.
+    ///
+    /// Only a `default` carrying an **inline scalar** (quoted or unquoted) with a
+    /// same-indent `format: byte` sibling in the same Schema Object is inspected. A
+    /// block-scalar default (`default: >-` / `default: |`, whose value continues on the
+    /// following lines) opens no inline value, so it is skipped rather than mis-read. The
+    /// `format: byte` sibling is matched **exactly** (`date`, `uri`, etc. are different
+    /// formats and never pair), scanned at the default's own indent down through the
+    /// object's block then up, dedent-bounded exactly like `email_format_defaults_malformed`,
+    /// so a *following* property's `format: byte` past a dedent never pairs with this
+    /// property's default. A `default:` nested inside an outer `example:`/`examples:`
+    /// payload (sample data, not a schema keyword) is skipped. Base64 shape is judged by
+    /// `is_well_formed_byte`.
+    fn byte_format_defaults_malformed(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let raw_inline = |l: &str, name: &str| -> Option<String> {
+            let (k, v) = l.trim_start().split_once(':')?;
+            if k.trim() != name {
+                return None;
+            }
+            let v = v.split('#').next().unwrap_or(v).trim();
+            if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            }
+        };
+        // Whether a same-indent `format:` sibling of line `i` (indent `c`) in the same
+        // Schema Object names `byte` (exactly): scan down through the object's block then
+        // up, dedent-bounded so a nested or following object's `format` never pairs.
+        let sibling_is_byte_format = |i: usize, c: usize| -> bool {
+            let is_byte_format = |l: &str| -> bool {
+                raw_inline(l, "format")
+                    .map(|v| v.trim_matches('"').trim_matches('\'') == "byte")
+                    .unwrap_or(false)
+            };
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_byte_format(l) {
+                    return true;
+                }
+                j += 1;
+            }
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_byte_format(l) {
+                    return true;
+                }
+            }
+            false
+        };
+        // True when line `i` (indent `c`) sits inside an outer `example:`/`examples:`
+        // payload — some enclosing container key up the indent ladder is
+        // `example`/`examples`, so an inner `default` key there is sample data.
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some(raw) = raw_inline(line, "default") else {
+                continue;
+            };
+            // A block-scalar opener (`>`/`|`, optionally with a chomping indicator)
+            // carries its value on the following lines, not inline — skip it.
+            if raw.starts_with('>') || raw.starts_with('|') {
+                continue;
+            }
+            let c = indent(line);
+            if inside_example(i, c) {
+                continue;
+            }
+            if !sibling_is_byte_format(i, c) {
+                continue;
+            }
+            let value = raw.trim_matches('"').trim_matches('\'');
+            if !is_well_formed_byte(value) {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_byte_format_default_is_a_well_formed_byte() {
+        // Contract-harness invariant (OpenAPI 3.0.x / JSON-Schema structural rule): where
+        // a Schema Object declares an inline `default` beside a same-indent
+        // `format: byte`, the default MUST be a syntactically valid base64 string. A
+        // `default` is the schema's fall-back *instance*, so a value that is not
+        // well-formed base64 — a placeholder beside the format, a value with stray
+        // whitespace, a length/alphabet the encoding rejects — is a self-contradictory
+        // schema whose own validator rejects the fall-back it pre-supplies, so a
+        // Redoc/Swagger form pre-fills a `byte` control with an undecodable value and a
+        // codegen client carries a value no `byte`-typed field can hold.
+        //
+        // The **`default` twin** of `every_byte_format_example_is_a_well_formed_byte` and
+        // the byte member of the format-default family (date-time / date / int32 / int64 /
+        // double / float / uri / uri-reference / uuid / ipv4 / ipv6 / email) — the final
+        // standard OpenAPI string format to gain its default-side guard. Future-drift
+        // posture (like the email- / ipv6- / ipv4- / uuid-default twins): the corpus's one
+        // `format: byte` field (the Click to Dial recording `content`) carries an
+        // **example**, not a `default`, so no `format: byte` pairs with a `default` today;
+        // the guard asserts clean across all specs and holds the line against a future byte
+        // default drifting to a placeholder or an undecodable value; the synthetic unit
+        // body in `byte_format_default_extraction_rules` keeps the detection path live.
+        // Verified true across all mounted specs before asserting.
+        for api in APIS {
+            let offenders = byte_format_defaults_malformed(api.body);
+            assert!(
+                offenders.is_empty(),
+                "{} spec declares a `default` beside a same-indent `format: byte` that \
+                 is not a well-formed base64 string (a fall-back the format's own validator \
+                 would reject) at `default:` line(s): {:?}",
+                api.name,
+                offenders
+            );
+        }
+    }
+
+    #[test]
+    fn byte_format_default_extraction_rules() {
+        // Unit-cover `byte_format_defaults_malformed` so the contract test above can't
+        // pass vacuously and its detection is pinned (`is_well_formed_byte` itself is
+        // already covered by `byte_format_example_extraction_rules`).
+        //
+        // Extractor: a valid base64 beside a same-indent `format: byte` passes; a
+        // whitespace/non-alphabet value, a too-short (length-3) value, and a value with the
+        // format *below* it (down-scan) are flagged; a value with no `format` sibling and
+        // one whose sibling is a *different* format (`date`) are skipped; a default in one
+        // property never pairs with a *following* property's `format: byte` across the
+        // dedent; a block-scalar default is skipped; an inner `default` inside an outer
+        // `example:` payload is skipped; and a property literally named `default` (opening
+        // a block) is skipped.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    GoodByte:
+      type: string
+      format: byte
+      default: \"UklGRgAAAABXQVZF\"
+    BadNotBase64:
+      type: string
+      format: byte
+      default: \"not base64!\"
+    BadLen:
+      type: string
+      format: byte
+      default: \"abc\"
+    FormatBelow:
+      type: string
+      default: zzz
+      format: byte
+    NoFormat:
+      type: string
+      default: \"UklGRgAAAABXQVZF\"
+    DateFmt:
+      type: string
+      format: date
+      default: not base64!
+    BlockDefault:
+      type: string
+      format: byte
+      default: |
+        UklGRgAAAABXQVZF
+    Split:
+      type: object
+      properties:
+        a:
+          type: string
+          enum: [DAY, NIGHT]
+          default: DAY
+        b:
+          type: string
+          format: byte
+          default: \"TQ==\"
+    InExample:
+      type: object
+      example:
+        format: byte
+        default: not base64!
+    NamedDefault:
+      type: object
+      properties:
+        default:
+          type: string
+          format: byte
+";
+        // Flagged, in document order: BadNotBase64.default (line 21, `not base64!` carries
+        // whitespace and a non-alphabet `!`), BadLen.default (line 25, `abc` is length 3,
+        // not a multiple of 4), and FormatBelow.default (line 28, value `zzz` length 3 with
+        // its `format: byte` a line below — down-scan pairs it). Not flagged: GoodByte
+        // (valid `UklGRgAAAABXQVZF`); NoFormat (no `format` sibling); DateFmt (sibling is
+        // `date`, not `byte` — so its `not base64!` is out of scope, the analogue of the
+        // int32/int64 and double/float mutual exclusions); BlockDefault (block-scalar
+        // opener `|`, no inline value); Split.a.default `DAY` (its only `format: byte` is
+        // the *following* property Split.b, past a dedent); Split.b.default (valid `TQ==`);
+        // InExample's inner `default: not base64!` (inside the outer `example:` payload);
+        // NamedDefault's `default:` property (opens a block, no inline value).
+        assert_eq!(byte_format_defaults_malformed(body), vec![21, 25, 28]);
+
+        // Non-vacuous floor (future-drift posture, mirroring the email- / ipv6- / ipv4- /
+        // uuid-default twins): across every registered spec every `default` beside a
+        // same-indent `format: byte` is a well-formed base64 string (the invariant the
+        // contract test asserts). The corpus declares one `format: byte` field (the Click
+        // to Dial recording `content`) but pairs **no** `format: byte` with a `default` in
+        // the *same* Schema Object today (it carries an example, not a default) — so this
+        // asserts a clean `== 0` genuine-pair count and guards future drift; the synthetic
+        // body above is what keeps the detection path live. The pair count reuses the
+        // extractor's own **dedent-bounded** same-indent sibling scan — the
+        // genuine-Schema-Object pairing — rather than a crude window, and stays independent
+        // of the extractor's *validity* (`is_well_formed_byte`) comparison.
+        let mut byte_defaults = 0usize;
+        for api in APIS {
+            assert!(
+                byte_format_defaults_malformed(api.body).is_empty(),
+                "{}: every default beside a same-indent `format: byte` must be a \
+                 well-formed base64 string",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            let raw_inline = |l: &str, name: &str| -> Option<String> {
+                let (k, v) = l.trim_start().split_once(':')?;
+                if k.trim() != name {
+                    return None;
+                }
+                let v = v.split('#').next().unwrap_or(v).trim();
+                if v.is_empty() { None } else { Some(v.to_string()) }
+            };
+            // A genuine same-Schema-Object `format: byte` sibling of the `default` on line
+            // `i` (indent `c`): scan down through the object's block then up,
+            // dedent-bounded exactly like the extractor's `sibling_is_byte_format`, so a
+            // *following* property's `format: byte` past a dedent never counts.
+            let sibling_is_byte = |i: usize, c: usize| -> bool {
+                let is_byte = |l: &str| -> bool {
+                    raw_inline(l, "format")
+                        .map(|v| v.trim_matches('"').trim_matches('\'') == "byte")
+                        .unwrap_or(false)
+                };
+                let mut j = i + 1;
+                while j < lines.len() {
+                    let l = lines[j];
+                    if l.trim().is_empty() {
+                        j += 1;
+                        continue;
+                    }
+                    if indent(l) < c {
+                        break;
+                    }
+                    if indent(l) == c && is_byte(l) {
+                        return true;
+                    }
+                    j += 1;
+                }
+                let mut k = i;
+                while k > 0 {
+                    k -= 1;
+                    let l = lines[k];
+                    if l.trim().is_empty() {
+                        continue;
+                    }
+                    if indent(l) < c {
+                        break;
+                    }
+                    if indent(l) == c && is_byte(l) {
+                        return true;
+                    }
+                }
+                false
+            };
+            for (i, l) in lines.iter().enumerate() {
+                let Some(v) = raw_inline(l, "default") else {
+                    continue;
+                };
+                // Inline scalar only (skip block-scalar openers), mirroring the extractor
+                // so the floor counts exactly the pairs it inspects.
+                if v.starts_with('>') || v.starts_with('|') {
+                    continue;
+                }
+                let c = indent(l);
+                if sibling_is_byte(i, c) {
+                    byte_defaults += 1;
+                }
+            }
+        }
+        assert_eq!(
+            byte_defaults, 0,
+            "expected no genuine default + same-Schema-Object `format: byte` pairs across \
+             specs (the future-drift posture; a new pair means switch this guard to a \
+             `>= 1` floor like the example side), got {byte_defaults}"
+        );
+    }
+
     /// Whether `s` is a well-formed IPv6 address instance — the sample an OpenAPI
     /// `format: ipv6` field advertises. True iff `s` parses as an RFC 4291 IPv6
     /// address: eight `:`-separated groups of 1–4 hex digits, with at most one `::`
