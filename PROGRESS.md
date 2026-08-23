@@ -3335,6 +3335,18 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - a **`date-time`-`default` format-conformance** contract test (`src/registry.rs`
+    `every_date_time_format_default_is_a_well_formed_datetime`) — the `default`-side twin of
+    `every_date_time_format_example_is_a_well_formed_datetime`, completing the `date-time`
+    corner of the example/default format symmetry the harness already keeps on the integer
+    side (`every_int32_format_default…`). A `default` beside a same-indent `format: date-time`
+    must be a valid RFC 3339 date-time, else the schema's own validator rejects the fall-back
+    it pre-supplies. New pure `datetime_format_defaults_malformed` (the datetime example
+    extractor with its anchor swapped `example:`→`default:`, block-scalar opener skipped;
+    reuses `is_well_formed_rfc3339_datetime`). Corpus pairs no default with a date-time format
+    today → asserts clean + guards future drift (array-default posture). Unit-covered
+    (`datetime_format_default_extraction_rules`; `dt_defaults == 0` floor). Test-only, no spec
+    change.
   - an **object-`example` property-count-bounds** contract test (`src/registry.rs`
     `every_object_example_respects_its_property_count_bounds`) — the object-cardinality
     member of the example/bounds family (array-item-count, string-length, numeric-value
@@ -6234,6 +6246,37 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-23 — Contract-test harness: guard that every **`format: date-time` `default` is a
+  well-formed RFC 3339 date-time** (`src/registry.rs`
+  `every_date_time_format_default_is_a_well_formed_datetime`). In OpenAPI 3.0.x (JSON Schema)
+  a `default` is a fall-back *instance* of the schema, so where a Schema Object declares an
+  inline `default` beside a same-indent `format: date-time`, the default MUST be a
+  syntactically valid RFC 3339 date-time — else the schema's own validator rejects the
+  fall-back it pre-supplies (a Redoc/Swagger form pre-fills an invalid control; a codegen
+  client's default fails the format). The **`default`-side twin of
+  `every_date_time_format_example_is_a_well_formed_datetime`**, completing the `date-time`
+  corner of the example/default format-conformance symmetry the harness already keeps on the
+  integer side (`every_int32_format_example…` paired with `every_int32_format_default…`); no
+  existing test read a `default` against its `format` for date-time (the value-domain
+  example/default pairings the harness keeps — numeric bounds, `multipleOf`, string-length —
+  had, for `format: date-time`, only the example version). New pure
+  `datetime_format_defaults_malformed`: the `datetime_format_examples_malformed` extractor
+  with its anchor swapped `example:`→`default:` and a block-scalar opener (`>`/`|`) skipped
+  (as `int32_format_defaults_malformed` does), the exact `format: date-time` same-indent
+  sibling probe (down-then-up, dedent-bounded, so a following property's format never pairs
+  and `date` — the narrower format — is excluded), the `example:`/`examples:` payload
+  ancestor-walk exclusion, and the `is_well_formed_rfc3339_datetime` shape check all reused
+  unchanged. Surveyed the corpus first — it pairs **no** default with a `format: date-time`
+  (its date-time fields carry examples, not defaults) — so the contract test asserts clean
+  across all specs and guards future drift (the array-default posture); the synthetic unit
+  body is what keeps the detection path live. Tests: +2 (the contract test +
+  `datetime_format_default_extraction_rules`: a valid timestamp beside `format: date-time`
+  cleared; a dropped-digit value and a format-below value flagged in document order; no-format
+  / different-format (`date`) / following-property-across-dedent / block-scalar / in-`example:`
+  / property-named-`default` cases skipped; `dt_defaults == 0` corpus floor documenting the
+  future-drift posture). `cargo test` 2940 green (was 2938); `cargo build --release` succeeds.
+  No new dependency; test-only change (no spec/runtime edit). — binary (release): 5.1M
+  (5,323,160 B; unchanged).
 - 2026-08-23 — Contract-test harness: guard that every **object `example` respects its
   property-count bounds** (`src/registry.rs`
   `every_object_example_respects_its_property_count_bounds`). In OpenAPI 3.0.x (JSON

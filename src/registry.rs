@@ -50436,6 +50436,325 @@ components:
         );
     }
 
+    /// The 1-based line numbers, in document order, of every `default:` keyword whose
+    /// inline scalar value sits in a Schema Object declaring a *same-indent*
+    /// `format: date-time` sibling yet is not a well-formed RFC 3339 date-time, without a
+    /// YAML dep. The **`default` twin** of `datetime_format_examples_malformed`: that
+    /// extractor with its anchor swapped from `example:` to `default:` (and a block-scalar
+    /// opener skipped, as `int32_format_defaults_malformed` does), the `format: date-time`
+    /// sibling probe and the `is_well_formed_rfc3339_datetime` shape check unchanged.
+    ///
+    /// In OpenAPI 3.0.x (JSON Schema) a `default` is a fall-back *instance* of the schema,
+    /// so a `format: date-time` field's default MUST be a value the `date-time` format
+    /// admits: a syntactically valid RFC 3339 date-time. A malformed one — a bare date with
+    /// its time-and-offset tail dropped, a digit lost from a hand-typed timestamp, or a
+    /// placeholder pasted beside the format — is a self-contradictory schema whose own
+    /// validator rejects the fall-back it pre-supplies, so a Redoc/Swagger form pre-fills a
+    /// control with an out-of-range value and a codegen client that maps `date-time` onto a
+    /// timestamp type carries a default no `date-time`-typed field can legally hold.
+    ///
+    /// Completes the `date-time` corner of the example/default format-conformance symmetry
+    /// the harness already keeps on the integer side (`every_int32_format_example…` paired
+    /// with `every_int32_format_default…`): the value-domain checks the corpus applies to
+    /// both an `example` and a `default` (numeric bounds, `multipleOf`, string-length) had,
+    /// for `format: date-time`, only the example version. No existing test reads a `default`
+    /// against its `format`.
+    ///
+    /// Only a `default` carrying an **inline scalar** (quoted or unquoted; a stray
+    /// surrounding quote is tolerated so a quoted `"…Z"` still reads through) with a
+    /// same-indent `format: date-time` sibling in the same Schema Object is inspected. A
+    /// block-scalar default (`default: >-` / `default: |`) opens no inline value and is
+    /// skipped; the `format: date-time` sibling is matched **exactly** (`date`, the
+    /// narrower format, never pairs), scanned at the default's own indent down through the
+    /// object's block then up, dedent-bounded exactly like the example twin, so a
+    /// *following* property's `format: date-time` past a dedent never pairs. A `default:`
+    /// nested inside an outer `example:`/`examples:` payload (sample data, not a schema
+    /// keyword) is skipped. The date-time shape is judged by `is_well_formed_rfc3339_datetime`.
+    fn datetime_format_defaults_malformed(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let raw_inline = |l: &str, name: &str| -> Option<String> {
+            let (k, v) = l.trim_start().split_once(':')?;
+            if k.trim() != name {
+                return None;
+            }
+            let v = v.split('#').next().unwrap_or(v).trim();
+            if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            }
+        };
+        // Whether a same-indent `format:` sibling of line `i` (indent `c`) in the same
+        // Schema Object names `date-time` (exactly — not `date`): scan down through the
+        // object's block then up, dedent-bounded so a nested or following object's
+        // `format` never pairs.
+        let sibling_is_datetime_format = |i: usize, c: usize| -> bool {
+            let is_dt_format = |l: &str| -> bool {
+                raw_inline(l, "format")
+                    .map(|v| v.trim_matches('"').trim_matches('\'') == "date-time")
+                    .unwrap_or(false)
+            };
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_dt_format(l) {
+                    return true;
+                }
+                j += 1;
+            }
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_dt_format(l) {
+                    return true;
+                }
+            }
+            false
+        };
+        // True when line `i` (indent `c`) sits inside an outer `example:`/`examples:`
+        // payload — some enclosing container key up the indent ladder is
+        // `example`/`examples`, so an inner `default` key there is sample data.
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some(raw) = raw_inline(line, "default") else {
+                continue;
+            };
+            // A block-scalar opener (`>`/`|`, optionally with a chomping indicator)
+            // carries its value on the following lines, not inline — skip it.
+            if raw.starts_with('>') || raw.starts_with('|') {
+                continue;
+            }
+            let c = indent(line);
+            if inside_example(i, c) {
+                continue;
+            }
+            if !sibling_is_datetime_format(i, c) {
+                continue;
+            }
+            let value = raw.trim_matches('"').trim_matches('\'');
+            if !is_well_formed_rfc3339_datetime(value) {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_date_time_format_default_is_a_well_formed_datetime() {
+        // Contract-harness invariant (OpenAPI 3.0.x / JSON-Schema structural rule): where a
+        // Schema Object declares an inline `default` beside a same-indent
+        // `format: date-time`, the default MUST be a syntactically valid RFC 3339 date-time.
+        // A `default` is the schema's fall-back *instance*, so a value that is not a
+        // well-formed date-time — a bare date, a dropped digit, a placeholder — is a
+        // self-contradictory schema whose own validator rejects the fall-back it pre-supplies,
+        // so a Redoc/Swagger form pre-fills a control with an invalid value and a codegen
+        // client that maps `date-time` onto a timestamp type carries a default no
+        // `date-time`-typed field can legally hold.
+        //
+        // The **`default` twin** of `every_date_time_format_example_is_a_well_formed_datetime`,
+        // completing the `date-time` corner of the example/default format-conformance symmetry
+        // the harness already keeps on the integer side (`every_int32_format_default…`). No
+        // existing test reads a `default` against its `format` for date-time. The mounted
+        // corpus declares no `format: date-time` default today (its date-time fields carry
+        // examples, not defaults), so this asserts clean across every spec and guards future
+        // drift — the same posture as `every_array_default_respects_its_item_bounds`; the unit
+        // test below pins the extractor's detection so the pass is never vacuous.
+        for api in APIS {
+            let offenders = datetime_format_defaults_malformed(api.body);
+            assert!(
+                offenders.is_empty(),
+                "{} spec declares a `default` beside a same-indent `format: date-time` that \
+                 is not a well-formed RFC 3339 date-time (a fall-back the format's own \
+                 validator would reject) at `default:` line(s): {:?}",
+                api.name,
+                offenders
+            );
+        }
+    }
+
+    #[test]
+    fn datetime_format_default_extraction_rules() {
+        // Unit-cover `datetime_format_defaults_malformed` so the contract test above can't
+        // pass vacuously and its detection is pinned (`is_well_formed_rfc3339_datetime` itself
+        // is already covered by `datetime_format_example_extraction_rules`).
+        //
+        // Extractor: a valid timestamp beside a same-indent `format: date-time` passes; a
+        // dropped-digit value beside `format: date-time`, and a bad value with the format
+        // *below* it (down-scan), are flagged in document order; a value with no `format`
+        // sibling and one whose sibling is a *different* format (`date`) are skipped; a
+        // default in one property never pairs with a *following* property's
+        // `format: date-time` across the dedent; a block-scalar default is skipped; an inner
+        // `default` inside an outer `example:` payload is skipped; and a property literally
+        // named `default` (opening a block) is skipped.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    GoodTime:
+      type: string
+      format: date-time
+      default: \"2024-01-01T14:27:08Z\"
+    BadShort:
+      type: string
+      format: date-time
+      default: \"2024-01-01T14:27:8Z\"
+    FormatBelow:
+      type: string
+      default: \"nope\"
+      format: date-time
+    NoFormat:
+      type: string
+      default: \"not-a-time-but-no-format\"
+    OtherFormat:
+      type: string
+      format: date
+      default: \"2024-01-01\"
+    Split:
+      type: object
+      properties:
+        a:
+          type: string
+          enum: [DAY, NIGHT]
+          default: DAY
+        b:
+          type: string
+          format: date-time
+          default: \"2024-01-01T00:00:00Z\"
+    Folded:
+      type: string
+      format: date-time
+      default: >-
+        2024-01-01T14:27:08Z
+    InExample:
+      type: object
+      example:
+        format: date-time
+        default: \"bad\"
+    NamedDefault:
+      type: object
+      properties:
+        default:
+          type: string
+          format: date-time
+";
+        // Flagged, in document order: BadShort.default (line 21, dropped seconds digit) and
+        // FormatBelow.default (line 24, value `nope` with its `format: date-time` a line
+        // below — down-scan pairs it). Not flagged: GoodTime (valid); NoFormat (no `format`
+        // sibling); OtherFormat (sibling is `date`, not `date-time` — so its date-only
+        // `2024-01-01` is out of scope); Split.a.default `DAY` (its only `format: date-time`
+        // is the *following* property Split.b, past a dedent); Split.b.default (valid);
+        // Folded (block-scalar opener `>-`, no inline value); InExample's inner
+        // `default: \"bad\"` (inside the outer `example:` payload); NamedDefault's `default:`
+        // property (opens a block, no inline value).
+        assert_eq!(datetime_format_defaults_malformed(body), vec![21, 24]);
+
+        // The mounted corpus declares no `format: date-time` default (its date-time fields
+        // carry examples, not defaults), so — like the array-default twin — there is no
+        // positive corpus floor to assert; the synthetic body above is what proves the
+        // date-time comparison path runs and a broken (always-empty) extractor cannot hide.
+        // Confirm the invariant holds across the corpus here too, and that the corpus indeed
+        // pairs no default with a date-time format (documenting the future-drift posture).
+        let mut dt_defaults = 0usize;
+        for api in APIS {
+            assert!(
+                datetime_format_defaults_malformed(api.body).is_empty(),
+                "{}: every default beside a same-indent `format: date-time` must be a \
+                 well-formed RFC 3339 date-time",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            let is_key = |l: &str, name: &str, val: Option<&str>| {
+                l.trim_start().split_once(':').is_some_and(|(k, v)| {
+                    k.trim() == name
+                        && val.is_none_or(|want| {
+                            v.split('#').next().unwrap_or(v).trim().trim_matches('"').trim_matches('\'')
+                                == want
+                        })
+                })
+            };
+            for (i, l) in lines.iter().enumerate() {
+                if !is_key(l, "default", None) {
+                    continue;
+                }
+                let v = l
+                    .trim_start()
+                    .split_once(':')
+                    .map(|(_, v)| v.split('#').next().unwrap_or(v).trim())
+                    .unwrap_or("");
+                if v.is_empty() || v.starts_with('>') || v.starts_with('|') {
+                    continue;
+                }
+                let c = indent(l);
+                let lo = i.saturating_sub(6);
+                let hi = (i + 6).min(lines.len());
+                let has_dt_format = (lo..hi).any(|j| {
+                    j != i && indent(lines[j]) == c && is_key(lines[j], "format", Some("date-time"))
+                });
+                if has_dt_format {
+                    dt_defaults += 1;
+                }
+            }
+        }
+        assert_eq!(
+            dt_defaults, 0,
+            "expected the mounted corpus to pair no default with a `format: date-time` (its \
+             date-time fields carry examples); found {dt_defaults} — if a date-time default \
+             is added, drop this floor and the \
+             every_date_time_format_default_is_a_well_formed_datetime test now guards it"
+        );
+    }
+
     /// True when `s` is a well-formed RFC 3339 `full-date` string — the concrete
     /// syntax OpenAPI's `format: date` names (JSON Schema's `date` is RFC 3339 §5.6
     /// `full-date`). Shape-only and lenient on the calendar (it range-checks month
