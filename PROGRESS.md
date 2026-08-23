@@ -3335,6 +3335,18 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - a **`double`-`default` format-conformance** contract test (`src/registry.rs`
+    `every_double_format_default_is_a_well_formed_double`) — the `default`-side twin of
+    `every_double_format_example_is_a_well_formed_double` and the floating-point companion
+    of `every_int64_format_default_is_a_well_formed_int64`; together with the two integer-
+    format-default guards it extends the format-default family (date-time / date / int32 /
+    int64) to the `double` format. A `default` beside a same-indent `format: double` must be
+    a finite IEEE-754 double, else the schema's own validator rejects the fall-back it
+    pre-supplies. New pure `double_format_defaults_malformed` (the int64-default extractor
+    with its format anchor swapped `int64`→`double`; reuses `is_well_formed_double`; exact
+    `double` sibling probe so `float` never pairs). Corpus declares 28 `format: double`
+    fields but pairs none with a default → asserts clean `== 0` + guards future drift.
+    Unit-covered (`double_format_default_extraction_rules`). Test-only, no spec change.
   - an **object-`default` required-properties** contract test (`src/registry.rs`
     `every_object_default_lists_its_required_properties`) — the `default`-side twin of
     `every_object_example_lists_its_required_properties`, **completing the object
@@ -6307,6 +6319,40 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-23 — Contract-test harness: guard that every **`format: double` `default` is a
+  well-formed double-precision value** (`src/registry.rs`
+  `every_double_format_default_is_a_well_formed_double`). In OpenAPI 3.0.x (JSON Schema) a
+  `default` is a fall-back *instance* of the schema, so where a Schema Object declares an
+  inline `default` beside a same-indent `format: double`, the default MUST be a finite
+  IEEE-754 double — else the schema's own validator rejects the fall-back it pre-supplies
+  (a Redoc/Swagger form pre-fills a coordinate/radius/rate/amount control with an unusable
+  value; a codegen client that maps `double` onto a 64-bit float carries a default no
+  `double`-typed field can hold). The **`default`-side twin of
+  `every_double_format_example_is_a_well_formed_double`** and the floating-point companion
+  of `every_int64_format_default_is_a_well_formed_int64`: together with the two
+  integer-format-default guards it extends the format-default family (date-time / date /
+  int32 / int64) to the `double` format a CAMARA schema uses for real-valued measurements —
+  the `double` row was the topmost format-example guard still without a default counterpart.
+  New pure `double_format_defaults_malformed`: the `int64_format_defaults_malformed`
+  extractor with its format anchor swapped `int64`→`double` and `is_well_formed_int64`→
+  `is_well_formed_double`, reusing unchanged its inline-scalar reader, its dedent-bounded
+  same-indent `format: double` sibling probe (matched exactly, so `float` — the
+  single-precision format — never pairs, the analogue of the int32/int64 mutual exclusion),
+  its `example:`/`examples:` payload ancestor-walk exclusion, and its block-scalar-opener
+  skip. Surveyed the corpus first — 28 `format: double` fields, **none** paired with a
+  `default` (they carry examples) — so the contract test asserts clean across all specs and
+  guards future drift (`== 0` future-drift floor, mirroring the int64-default twin); the
+  synthetic unit body keeps the detection path live. Only a **block-form** inline scalar is
+  inspected (a block-scalar `default: >-`/`|` is skipped; a numeric default never takes that
+  form, but the guard mirrors the sibling). Tests: +2 (the contract test +
+  `double_format_default_extraction_rules`: a valid `51.5074` beside `format: double`
+  cleared; a `TODO` placeholder, an overflow-to-infinity `1e400`, and a `nope` with its
+  `format: double` a line below (down-scan) flagged in document order `[21, 25, 28]`;
+  no-format / different-format (`float`) / following-property-across-dedent / block-scalar /
+  in-`example:` / property-named-`default` cases skipped; `double_defaults == 0` corpus
+  floor documenting the future-drift posture). `cargo test` 2950 green (was 2948); `cargo
+  build --release` succeeds. No new dependency; test-only change (no spec/runtime edit). —
+  binary (release): 5.1M (5,323,160 B; unchanged).
 - 2026-08-23 — Contract-test harness: guard that every **object `default` lists its
   required properties** (`src/registry.rs`
   `every_object_default_lists_its_required_properties`). In OpenAPI 3.0.x (JSON Schema) a

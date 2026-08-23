@@ -55613,6 +55613,326 @@ components:
         );
     }
 
+    /// The 1-based line numbers, in document order, of every `default:` keyword whose
+    /// inline scalar value sits in a Schema Object declaring a *same-indent*
+    /// `format: double` sibling yet is not a well-formed double-precision value, without
+    /// a YAML dep. The `default` twin of `double_format_examples_malformed` and the
+    /// floating-point companion of `int64_format_defaults_malformed`: an `example` is a
+    /// sample instance of the schema and a `default` is its fall-back instance, so both
+    /// must honour the finite-`double` shape the format fixes; the example side was
+    /// already guarded, the default side was not.
+    ///
+    /// Scoping mirrors `int64_format_defaults_malformed` / `double_format_examples_malformed`
+    /// exactly — only a `default` carrying an inline scalar (a block-scalar
+    /// `default: >-`/`|` opens no inline value and is skipped; a numeric default never
+    /// takes that form, but the guard mirrors the sibling) with a same-indent
+    /// `format: double` sibling (matched **exactly**, so `float` — the single-precision
+    /// format — never pairs, the analogue of the `int32`/`int64` mutual exclusion) in the
+    /// same Schema Object is inspected. The sibling is scanned at the default's own indent,
+    /// down through the object's block then up, dedent-bounded exactly like the sibling
+    /// extractor, so a *following* property's `format: double` past a dedent never pairs
+    /// with this property's default. A `default:` nested inside an outer
+    /// `example:`/`examples:` payload (sample data, not a schema keyword) is skipped.
+    /// Double shape + finiteness is judged by the shared `is_well_formed_double`.
+    fn double_format_defaults_malformed(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let raw_inline = |l: &str, name: &str| -> Option<String> {
+            let (k, v) = l.trim_start().split_once(':')?;
+            if k.trim() != name {
+                return None;
+            }
+            let v = v.split('#').next().unwrap_or(v).trim();
+            if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            }
+        };
+        // Whether a same-indent `format:` sibling of line `i` (indent `c`) in the same
+        // Schema Object names `double` (exactly — not `float`): scan down through the
+        // object's block then up, dedent-bounded so a nested or following object's
+        // `format` never pairs.
+        let sibling_is_double_format = |i: usize, c: usize| -> bool {
+            let is_double_format = |l: &str| -> bool {
+                raw_inline(l, "format")
+                    .map(|v| v.trim_matches('"').trim_matches('\'') == "double")
+                    .unwrap_or(false)
+            };
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_double_format(l) {
+                    return true;
+                }
+                j += 1;
+            }
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_double_format(l) {
+                    return true;
+                }
+            }
+            false
+        };
+        // True when line `i` (indent `c`) sits inside an outer `example:`/`examples:`
+        // payload — some enclosing container key up the indent ladder is
+        // `example`/`examples`, so an inner `default` key there is sample data.
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some(raw) = raw_inline(line, "default") else {
+                continue;
+            };
+            // A block-scalar opener (`>`/`|`, optionally with a chomping indicator)
+            // carries its value on the following lines, not inline — skip it.
+            if raw.starts_with('>') || raw.starts_with('|') {
+                continue;
+            }
+            let c = indent(line);
+            if inside_example(i, c) {
+                continue;
+            }
+            if !sibling_is_double_format(i, c) {
+                continue;
+            }
+            let value = raw.trim_matches('"').trim_matches('\'');
+            if !is_well_formed_double(value) {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_double_format_default_is_a_well_formed_double() {
+        // Contract-harness invariant (OpenAPI 3.0.x / JSON-Schema structural rule):
+        // where a Schema Object declares an inline `default` beside a same-indent
+        // `format: double`, the default MUST be a finite double-precision value. A
+        // `default` is the schema's fall-back *instance*, so a value that is not a valid
+        // double — a placeholder, trailing junk from a fat-fingered decimal, or a
+        // magnitude that overflows the double range to a non-finite value — is a
+        // self-contradictory schema whose own validator rejects the fall-back it
+        // pre-supplies, so a Redoc/Swagger form pre-fills a control (a coordinate /
+        // radius / rate / amount field with a `default`) with an unusable value and a
+        // codegen client that maps `double` onto a 64-bit float carries a default no
+        // `double`-typed field can legally hold.
+        //
+        // The **`default` twin** of `every_double_format_example_is_a_well_formed_double`
+        // and the floating-point companion of
+        // `every_int64_format_default_is_a_well_formed_int64`: together with the two
+        // integer-format-default guards they extend the format-default family (date-time /
+        // date / int32 / int64) to the `double` format a CAMARA schema uses for
+        // real-valued measurements. Future-drift posture (like the int64-default twin):
+        // the corpus declares `format: double` fields but pairs **none** with a `default`
+        // today, so the guard asserts clean across all specs and holds the line against a
+        // future double default drifting to a non-finite or non-numeric value; the
+        // synthetic unit body in `double_format_default_extraction_rules` keeps the
+        // detection path live. Verified true across all mounted specs before asserting.
+        for api in APIS {
+            let offenders = double_format_defaults_malformed(api.body);
+            assert!(
+                offenders.is_empty(),
+                "{} spec declares a `default` beside a same-indent `format: double` that \
+                 is not a well-formed double-precision value (a fall-back the format's own \
+                 validator would reject) at `default:` line(s): {:?}",
+                api.name,
+                offenders
+            );
+        }
+    }
+
+    #[test]
+    fn double_format_default_extraction_rules() {
+        // Unit-cover `double_format_defaults_malformed` so the contract test above can't
+        // pass vacuously and its detection is pinned (`is_well_formed_double` itself is
+        // already covered by `double_format_example_extraction_rules`).
+        //
+        // Extractor: a valid double beside a same-indent `format: double` passes; a
+        // placeholder, an overflow-to-infinity, and a value with the format *below* it
+        // (down-scan) are flagged; a value with no `format` sibling and one whose sibling
+        // is a *different* format (`float`) are skipped; a default in one property never
+        // pairs with a *following* property's `format: double` across the dedent; a
+        // block-scalar default is skipped; an inner `default` inside an outer `example:`
+        // payload is skipped; and a property literally named `default` (opening a block)
+        // is skipped.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    GoodDouble:
+      type: number
+      format: double
+      default: 51.5074
+    BadPlaceholder:
+      type: number
+      format: double
+      default: TODO
+    BadOverflow:
+      type: number
+      format: double
+      default: 1e400
+    FormatBelow:
+      type: number
+      default: nope
+      format: double
+    NoFormat:
+      type: number
+      default: 42
+    FloatFmt:
+      type: number
+      format: float
+      default: nope
+    Split:
+      type: object
+      properties:
+        a:
+          type: string
+          enum: [DAY, NIGHT]
+          default: DAY
+        b:
+          type: number
+          format: double
+          default: 51.5
+    Folded:
+      type: number
+      format: double
+      default: >-
+        3.14
+    InExample:
+      type: object
+      example:
+        format: double
+        default: notanumber
+    NamedDefault:
+      type: object
+      properties:
+        default:
+          type: number
+          format: double
+";
+        // Flagged, in document order: BadPlaceholder.default (line 21, `TODO` is not
+        // numeric), BadOverflow.default (line 25, `1e400` overflows to a non-finite
+        // infinity), and FormatBelow.default (line 28, value `nope` with its
+        // `format: double` a line below — down-scan pairs it). Not flagged: GoodDouble
+        // (valid `51.5074`); NoFormat (no `format` sibling); FloatFmt (sibling is `float`,
+        // not `double` — so its `nope` is out of scope, the analogue of the int32/int64
+        // mutual exclusion); Split.a.default `DAY` (its only `format: double` is the
+        // *following* property Split.b, past a dedent); Split.b.default (valid `51.5`);
+        // Folded (block-scalar opener `>-`, no inline value); InExample's inner
+        // `default: notanumber` (inside the outer `example:` payload); NamedDefault's
+        // `default:` property (opens a block, no inline value).
+        assert_eq!(double_format_defaults_malformed(body), vec![21, 25, 28]);
+
+        // Non-vacuous floor (future-drift posture, mirroring the int64-default twin):
+        // across every registered spec every `default` beside a same-indent
+        // `format: double` is a well-formed double (the invariant the contract test
+        // asserts). The corpus declares `format: double` fields but pairs **none** with a
+        // `default` today, so — unlike the example side — this asserts a clean `== 0` pair
+        // count and guards future drift; the synthetic body above is what keeps the
+        // detection path live. Count pairs with a same-indent detector independent of the
+        // extractor's shape comparison.
+        let mut double_defaults = 0usize;
+        for api in APIS {
+            assert!(
+                double_format_defaults_malformed(api.body).is_empty(),
+                "{}: every default beside a same-indent `format: double` must be a \
+                 well-formed double-precision value",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            let is_key = |l: &str, name: &str, val: Option<&str>| {
+                l.trim_start().split_once(':').is_some_and(|(k, v)| {
+                    k.trim() == name
+                        && val.is_none_or(|want| {
+                            v.split('#').next().unwrap_or(v).trim().trim_matches('"').trim_matches('\'')
+                                == want
+                        })
+                })
+            };
+            for (i, l) in lines.iter().enumerate() {
+                if !is_key(l, "default", None) {
+                    continue;
+                }
+                let v = l
+                    .trim_start()
+                    .split_once(':')
+                    .map(|(_, v)| v.split('#').next().unwrap_or(v).trim())
+                    .unwrap_or("");
+                // Inline scalar only (skip empty + block-scalar openers), mirroring the
+                // extractor so the floor counts exactly the pairs it inspects.
+                if v.is_empty() || v.starts_with('>') || v.starts_with('|') {
+                    continue;
+                }
+                let c = indent(l);
+                let lo = i.saturating_sub(6);
+                let hi = (i + 6).min(lines.len());
+                let has_double_format = (lo..hi).any(|j| {
+                    j != i && indent(lines[j]) == c && is_key(lines[j], "format", Some("double"))
+                });
+                if has_double_format {
+                    double_defaults += 1;
+                }
+            }
+        }
+        assert_eq!(
+            double_defaults, 0,
+            "expected no default + same-indent `format: double` pairs across specs (the \
+             future-drift posture; a new pair means switch this guard to a `>= 1` floor \
+             like the example side), got {double_defaults}"
+        );
+    }
+
     /// Whether `s` is a well-formed IEEE-754 **single-precision** value — the sample an
     /// OpenAPI `format: float` field advertises. True iff `s` parses as an `f32` and is
     /// finite: an integer (`3000`), a decimal (`9.99`), or a signed magnitude (`-0.108`)
