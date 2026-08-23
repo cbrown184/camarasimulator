@@ -6445,6 +6445,32 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-23 — Contract-test harness: guard that every **name `pattern` `default` matches the
+  pattern** (`src/registry.rs` `every_name_pattern_default_conforms_to_the_name_pattern`). The
+  **fourth member of the `pattern`-default family** after E.164, IMEI, and ICCID (all landed
+  earlier today), the `default`-side twin of `every_name_pattern_example_conforms_to_the_name_pattern`,
+  and the **first pattern-default member over a mixed alphanumeric-plus-punctuation alphabet with
+  an unbounded `+` floor** (`^[a-zA-Z0-9_.-]+$` — the CAMARA QoS-family profile-name pattern), so a
+  forbidden character (space/slash/`@`) in an otherwise well-shaped name is the fault the
+  fixed-length IMEI-default and ranged-length ICCID-default checks cannot express. In OpenAPI 3.0.x
+  a `default` is the schema's fall-back *instance*, so a profile-name field constrained by this
+  `pattern` (carries no `format`, so otherwise unchecked) MUST carry a default the pattern accepts;
+  a name default the pattern rejects advertises a fall-back the schema's own validator rejects. New
+  pure `name_pattern_defaults_malformed` (the `name_pattern_examples_malformed` extractor with its
+  trigger key swapped `example:`→`default:` and a block-scalar opener skipped; reuses
+  `matches_name_pattern` / `NAME_PATTERN`; same dedent-bounded same-indent sibling scan +
+  `example:` payload exclusion). Surveyed the corpus first — 8 name `pattern` fields across the
+  QoS-family specs (qos-profiles / quality-on-demand / qos-provisioning / qos-booking /
+  dedicated-network-{areas,profiles}) but **none** pairs with a `default` (all carry examples;
+  `defaultQosProfile` is a *property name*, not a `default:` key) → asserts a clean `== 0`
+  genuine-pair count (future-drift posture, mirroring the E.164/IMEI/ICCID-default twins) + guards
+  future drift; floor reuses the dedent-bounded sibling scan. Unit-covered
+  (`name_pattern_default_extraction_rules`: valid quoted/unquoted names cleared; space/slash/`@`/
+  pattern-below flagged in document order [25, 29, 33, 36]; no-pattern / different-pattern (IMEI) /
+  block-scalar / in-`example:` / following-property-across-dedent / property-named-`default`
+  skipped). Test-only, no spec change. `cargo test` 2974 pass (+2); `cargo build --release` clean,
+  no new dep. — binary (release): 5,323,160 bytes (~5.08 MiB; unchanged by a test-only change).
+
 - 2026-08-23 — Contract-test harness: guard that every **ICCID `pattern` `default` matches the
   pattern** (`src/registry.rs` `every_iccid_pattern_default_conforms_to_the_iccid_pattern`). The
   **third member of the `pattern`-default family** after E.164 and IMEI (both landed earlier
