@@ -25824,6 +25824,295 @@ components:
         );
     }
 
+    /// The 1-based line numbers of every **`schema:` keyword** a mounted spec
+    /// declares whose value is **not** a Schema Object (a mapping).
+    ///
+    /// A `schema:` field — a Parameter, Header, or Media Type Object's schema —
+    /// MUST carry a Schema Object: an inline schema (a block whose first deeper
+    /// line is a mapping key, or a `{ … }` flow map, `{}` included) or a `$ref`
+    /// (itself a mapping). A `schema:` whose value is a bare scalar
+    /// (`schema: string`, a common paste conflating it with `type:`), a flow
+    /// sequence (`schema: [a, b]`), a `- ` block sequence, or an empty/`null`
+    /// field (`schema:` with nothing deeper) is an invalid document: a validator
+    /// and a Redoc/Swagger/codegen client read the parameter/header/payload's type
+    /// from a shape that is not a schema, so the input or response body silently
+    /// doesn't parse right where a caller builds or reads it.
+    ///
+    /// The **`schema:`-keyword complement of `every_property_value_is_a_schema_object`**
+    /// (which reads only the values under a `properties:` mapping, never the
+    /// `schema:` keyword of a Parameter/Header/Media Type Object) and the value-side
+    /// twin of `every_media_type_declares_a_schema` (which checks a Media Type Object
+    /// *has* a `schema:` at all, never that its value is a mapping). The schema-shape
+    /// tests (`every_type_names_a_valid_schema_type`, `every_items_declares_a_single_schema`,
+    /// …) only descend once a value is already a mapping, so a `schema:` pasted as a
+    /// scalar or a list is unseen.
+    ///
+    /// The plural Components Object section `schemas:` is a different key and never
+    /// matches (`schema:` requires the `:` immediately after `schema`). A `schema:`
+    /// inside an `example:`/`examples:` payload is sample data, not the keyword, and
+    /// is excluded by an ancestor walk (mirroring the sibling schema-shape extractors).
+    fn schema_fields_with_non_mapping_value(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        // True when line `i` (indent `c`) sits inside an `example:`/`examples:`
+        // payload — some enclosing key up the indent ladder is `example`/`examples`.
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        // The shape of a block `schema:`'s value at line `i` (indent `c`):
+        // `Some(true)` when its first deeper non-blank, non-comment line is a mapping
+        // key (a Schema Object), `Some(false)` when that line is a `- ` sequence item,
+        // `None` when the field is empty (dedents with nothing deeper).
+        let block_value_is_map = |i: usize, c: usize| -> Option<bool> {
+            for l in &lines[i + 1..] {
+                let tl = l.trim();
+                if tl.is_empty() || tl.starts_with('#') {
+                    continue;
+                }
+                if indent(l) <= c {
+                    return None; // dedented out with nothing under `schema:`
+                }
+                return Some(!tl.starts_with('-'));
+            }
+            None
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some(rest) = line.trim_start().strip_prefix("schema:") else {
+                continue; // a different key (`schemas:`, `schema_foo:`, …) never matches
+            };
+            let val = rest.split('#').next().unwrap_or(rest).trim();
+            let c = indent(line);
+            if inside_example(i, c) {
+                continue; // sample data, not the keyword
+            }
+            let ok = if val.is_empty() {
+                // Block opener: a Schema Object iff its first deeper line is a mapping
+                // key (never a `- ` item), and it is non-empty.
+                matches!(block_value_is_map(i, c), Some(true))
+            } else {
+                // Inline value: only a `{ … }` flow map (`{}` included) is a Schema
+                // Object; `[ … ]` is a sequence and any other scalar is not a schema.
+                val.starts_with('{')
+            };
+            if !ok {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_schema_field_value_is_a_schema_object() {
+        // Contract-harness invariant (OpenAPI 3.0.x / JSON-Schema structural rule):
+        // every `schema:` keyword a mounted spec declares — a Parameter, Header, or
+        // Media Type Object's schema — MUST carry a Schema Object value, an inline
+        // schema or a `$ref`, both mappings. A `schema:` whose value is a bare scalar
+        // (`schema: string`, the routine paste conflating it with `type:`), a sequence
+        // (`schema: [a, b]` or a `- ` block), or an empty/`null` field is an invalid
+        // document: a validator and a Redoc/Swagger/codegen client read the input's or
+        // payload's type from a shape that is not a schema, so the field silently
+        // doesn't parse right where a caller builds the request or reads the response.
+        //
+        // The `schema:`-keyword complement of `every_property_value_is_a_schema_object`
+        // (which reads only the values under a `properties:` mapping, never a
+        // Parameter/Header/Media Type Object's `schema:` keyword) and the value-side
+        // twin of `every_media_type_declares_a_schema` (presence only). The plural
+        // Components `schemas:` section is a different key (never matched), and a
+        // `schema:` inside an `example:`/`examples:` payload is sample data (excluded).
+        // Verified true across all mounted specs before asserting.
+        for api in APIS {
+            let bad = schema_fields_with_non_mapping_value(api.body);
+            assert!(
+                bad.is_empty(),
+                "{} spec declares a `schema:` field whose value is not a Schema Object \
+                 (a schema a client and a validator can't parse) at line(s): {:?}",
+                api.name,
+                bad
+            );
+        }
+    }
+
+    #[test]
+    fn schema_field_value_schema_object_extraction_rules() {
+        // Unit-cover `schema_fields_with_non_mapping_value` so the contract test above
+        // can't pass vacuously and its accept/flag boundary is pinned: a block schema
+        // (`schema:` + `type: string`), a `$ref` block, an inline flow map
+        // (`schema: {type: string}`) and an empty flow map (`schema: {}`) pass; a bare
+        // scalar (`schema: string`), a flow sequence (`schema: [a, b]`), a `- ` block
+        // sequence, and an empty/`null` block are flagged in document order; a `schema:`
+        // inside an `example:` payload and the Components `schemas:` section are skipped.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      parameters:
+        - name: good
+          in: query
+          schema:
+            type: string
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Foo'
+  /b:
+    get:
+      operationId: getB
+      parameters:
+        - name: flow
+          in: query
+          schema: {type: string}
+        - name: emptyflow
+          in: query
+          schema: {}
+        - name: scalar
+          in: query
+          schema: string
+        - name: seqflow
+          in: query
+          schema: [a, b]
+        - name: blockseq
+          in: query
+          schema:
+            - nope
+        - name: empty
+          in: query
+          schema:
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              example:
+                schema: notAField
+components:
+  schemas:
+    Foo:
+      type: object
+";
+        // Flagged, in document order: line 33 (`schema: string` — a bare scalar), line 36
+        // (`schema: [a, b]` — a flow sequence), line 39 (a block `schema:` whose first
+        // deeper line `- nope` is a `- ` sequence item), and line 43 (a block `schema:`
+        // with only the dedented `responses:` below it, i.e. an empty/`null` field). Not
+        // flagged: the two block schemas (lines 12/19 — `type:` and `$ref:` mapping keys),
+        // the flow maps `{type: string}`/`{}` (lines 27/30), the `example:`-nested
+        // `schema: notAField` (sample data, line 50), and the Components `schemas:`
+        // section (a different key).
+        assert_eq!(
+            schema_fields_with_non_mapping_value(body),
+            vec![33, 36, 39, 43]
+        );
+
+        // Non-vacuous floor: across every registered spec every `schema:` field carries
+        // a Schema Object value (the invariant the contract test asserts), and the corpus
+        // actually declares many `schema:` keywords (parameter/header/media-type schemas),
+        // so the mapping-recognition path runs on real data and a broken (always-empty)
+        // extractor can't hide behind a corpus that never declares one. Count the
+        // mapping-valued `schema:` fields with a detector independent of the extractor.
+        let mut mapping_schemas = 0usize;
+        for api in APIS {
+            assert!(
+                schema_fields_with_non_mapping_value(api.body).is_empty(),
+                "{}: every `schema:` field must carry a Schema Object value",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            for (i, line) in lines.iter().enumerate() {
+                let Some(rest) = line.trim_start().strip_prefix("schema:") else {
+                    continue;
+                };
+                let val = rest.split('#').next().unwrap_or(rest).trim();
+                let c = indent(line);
+                // Skip an `example:`/`examples:`-nested `schema:`.
+                let mut level = c;
+                let mut k = i;
+                let mut in_example = false;
+                while k > 0 {
+                    k -= 1;
+                    let l = lines[k];
+                    if l.trim().is_empty() {
+                        continue;
+                    }
+                    let li = indent(l);
+                    if li < level {
+                        if let Some((key, _)) = l.trim_start().split_once(':') {
+                            let key = key.trim();
+                            if key == "example" || key == "examples" {
+                                in_example = true;
+                                break;
+                            }
+                        }
+                        level = li;
+                        if li == 0 {
+                            break;
+                        }
+                    }
+                }
+                if in_example {
+                    continue;
+                }
+                let is_map = if val.is_empty() {
+                    // Block opener with a deeper mapping-key first line.
+                    let mut m = i + 1;
+                    loop {
+                        if m >= lines.len() {
+                            break false;
+                        }
+                        let ll = lines[m].trim();
+                        if ll.is_empty() || ll.starts_with('#') {
+                            m += 1;
+                            continue;
+                        }
+                        if indent(lines[m]) <= c {
+                            break false;
+                        }
+                        break !ll.starts_with('-');
+                    }
+                } else {
+                    val.starts_with('{')
+                };
+                if is_map {
+                    mapping_schemas += 1;
+                }
+            }
+        }
+        assert!(
+            mapping_schemas >= 400,
+            "expected many Schema Object `schema:` fields across specs, got {mapping_schemas}"
+        );
+    }
+
     /// The `` `<name>` (examples map at line N) `` label of every **inline**
     /// `examples:` map a mounted spec declares — a Media Type / Parameter /
     /// Header Object's named examples — that lists the **same example name

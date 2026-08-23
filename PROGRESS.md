@@ -6221,6 +6221,34 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-23 — Contract-test harness: guard that every **`schema:` keyword carries a
+  Schema Object value** (`src/registry.rs` `every_schema_field_value_is_a_schema_object`).
+  A `schema:` field — a Parameter, Header, or Media Type Object's schema — MUST be a
+  Schema Object: an inline schema (a block whose first deeper line is a mapping key, or a
+  `{ … }` flow map, `{}` included) or a `$ref`, both mappings. A `schema:` pasted as a bare
+  scalar (`schema: string`, the routine paste conflating it with `type:`), a flow sequence
+  (`schema: [a, b]`), a `- ` block sequence, or an empty/`null` field is an invalid document:
+  a validator and a Redoc/Swagger/codegen client read the input's or payload's type from a
+  shape that isn't a schema, so the field silently doesn't parse right where a caller builds
+  the request or reads the response. The **`schema:`-keyword complement of
+  `every_property_value_is_a_schema_object`** (which reads only the values under a
+  `properties:` mapping, never a Parameter/Header/Media Type Object's own `schema:` keyword)
+  and the value-side twin of `every_media_type_declares_a_schema` (presence only); the
+  schema-shape tests (`every_type_names_a_valid_schema_type` / `every_items_declares_a_single_schema`
+  / …) only descend once a value is already a mapping, so a `schema:` pasted as a scalar or a
+  list is unseen. New pure `schema_fields_with_non_mapping_value` (every `schema:` key —
+  `strip_prefix("schema:")`, so the plural Components `schemas:` section never matches — not
+  inside an `example:`/`examples:` payload (ancestor walk): an inline `{ … }` flow map passes,
+  any other inline scalar / `[ … ]` flow flagged; a block opener passes iff its first deeper
+  non-blank line is a mapping key, and is flagged for a `- ` first line or an empty/`null`
+  field). Surveyed the corpus first (655 `schema:` keys across the mounted specs, all block
+  openers, every one a Schema Object) → 0 drift. Tests: +2 (the contract test +
+  `schema_field_value_schema_object_extraction_rules`: two block schemas [`type:` + `$ref:`],
+  a `{type: string}` and a `{}` flow map cleared; a bare scalar, a flow sequence, a `- ` block
+  and an empty block flagged in document order; an `example:`-nested `schema:` and the
+  Components `schemas:` section skipped; ≥400 mapping-valued `schema:` non-vacuity floor).
+  `cargo test` 2936 green (was 2934); `cargo build --release` succeeds. No new dependency;
+  test-only change (no spec/runtime edit). — binary (release): 5.1M (5,323,160 B; unchanged).
 - 2026-08-22 — Contract-test harness: guard that every **array `default` respects its
   item bounds** (`src/registry.rs` `every_array_default_respects_its_item_bounds`). In
   OpenAPI 3.0.x (JSON Schema) a `default` is a fall-back *instance* of the schema, so
