@@ -3335,6 +3335,20 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - a **`uuid`-`default` format-conformance** contract test (`src/registry.rs`
+    `every_uuid_format_default_is_a_well_formed_uuid`) — the `default`-side twin of
+    `every_uuid_format_example_is_a_well_formed_uuid` and the `uuid` member of the
+    format-default family (date-time / date / int32 / int64 / double / float / uri /
+    uri-reference already paired); it carries the format-default guard onto the corpus's
+    most heavily-used string format — the resource ids (`sessionId`/`paymentId`/`appId`/…).
+    A `default` beside a same-indent `format: uuid` must be a syntactically valid UUID, else
+    the schema's own validator rejects the fall-back it pre-supplies. New pure
+    `uuid_format_defaults_malformed` (the `uuid_format_examples_malformed` extractor with its
+    trigger key swapped `example:`→`default:` and a block-scalar opener skipped; reuses
+    `is_well_formed_uuid`). Corpus declares many `format: uuid` fields but pairs none with a
+    default (the ids carry examples) → asserts clean `== 0` genuine-pair count + guards
+    future drift; floor reuses the dedent-bounded sibling scan (mirrors the uri-default
+    twin). Unit-covered (`uuid_format_default_extraction_rules`). Test-only, no spec change.
   - a **`uri-reference`-`default` format-conformance** contract test (`src/registry.rs`
     `every_uri_reference_format_default_is_a_well_formed_uri_reference`) — the
     `default`-side twin of
@@ -6353,6 +6367,34 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-23 — Contract-test harness: guard that every **`format: uuid` `default` is a
+  well-formed UUID** (`src/registry.rs` `every_uuid_format_default_is_a_well_formed_uuid`).
+  In OpenAPI 3.0.x (JSON Schema) a `default` is the schema's fall-back *instance*, so where a
+  Schema Object declares an inline `default` beside a same-indent `format: uuid`, the default
+  MUST be a syntactically valid UUID — else the schema's own validator rejects the fall-back
+  it pre-supplies (a Redoc/Swagger form pre-fills an id control with an unusable value; a
+  codegen client carries a value no `uuid`-typed field can legally hold). The **`default`-side
+  twin of `every_uuid_format_example_is_a_well_formed_uuid`** and the `uuid` member of the
+  format-default family (date-time / date / int32 / int64 / double / float / uri /
+  uri-reference already landed): it carries the format-default guard onto the corpus's most
+  heavily-used string format — the resource ids (`sessionId`/`paymentId`/`appId`/…). New pure
+  `uuid_format_defaults_malformed`: the `uuid_format_examples_malformed` extractor with its
+  trigger key swapped `example:`→`default:` and a block-scalar opener (`>`/`|`, value on the
+  following lines) skipped, reusing unchanged its inline-scalar reader, its dedent-bounded
+  same-indent `format: uuid` sibling probe (so a following property's format never pairs
+  across a dedent), its `example:`/`examples:` payload ancestor-walk exclusion, and
+  `is_well_formed_uuid`. Surveyed the corpus first — many `format: uuid` fields but **none**
+  paired with a `default` in the same Schema Object (the ids carry examples) — so the contract
+  test asserts clean `== 0` across all specs and guards future drift; the future-drift floor
+  reuses the extractor's own **dedent-bounded** genuine-Schema-Object sibling scan (genuine
+  pairs `== 0`) rather than a crude ±window. Tests: +2 (the contract test +
+  `uuid_format_default_extraction_rules`: a valid uuid beside `format: uuid` cleared; a
+  too-short value and a `nope` with its `format: uuid` a line below (down-scan) flagged in
+  document order `[21, 24]`; no-format / different-format (`date-time`) / following-property-
+  across-dedent / block-scalar / in-`example:` / property-named-`default` cases skipped;
+  `uuid_defaults == 0` genuine-pair floor). `cargo test` 2958 green (was 2956);
+  `cargo build --release` succeeds. No new dependency; test-only change (no spec/runtime
+  edit). — binary (release): 5.1M (5,323,160 B; unchanged).
 - 2026-08-23 — Contract-test harness: guard that every **`format: uri-reference` `default`
   is a well-formed RFC 3986 URI-reference** (`src/registry.rs`
   `every_uri_reference_format_default_is_a_well_formed_uri_reference`). In OpenAPI 3.0.x

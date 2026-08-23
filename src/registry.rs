@@ -36230,6 +36230,350 @@ components:
         );
     }
 
+    /// The 1-based line numbers, in document order, of every `default:` keyword whose
+    /// inline scalar value sits in a Schema Object declaring a *same-indent*
+    /// `format: uuid` sibling yet is not a well-formed UUID, without a YAML dep. The
+    /// **`default`-side twin** of `uuid_format_examples_malformed`.
+    ///
+    /// In OpenAPI 3.0.x (JSON Schema) a `default` is the schema's fall-back *instance*,
+    /// so a `format: uuid` field's default MUST be a syntactically valid UUID. A malformed
+    /// one — a placeholder pasted beside a `format: uuid`, a hex digit dropped from a
+    /// hand-typed uuid — is a self-contradictory schema whose own validator rejects the
+    /// fall-back it pre-supplies, so a Redoc/Swagger form pre-fills an id control with an
+    /// unusable value and a codegen client carries a value no `uuid`-typed field can
+    /// legally hold. A live hazard in these scenario-table specs, where a
+    /// `sessionId`/`paymentId` uuid is hand-authored per API and copied between siblings.
+    ///
+    /// The extractor is `uuid_format_examples_malformed` with its trigger key swapped
+    /// `example:`→`default:` and a block-scalar opener (`>`/`|`, value on the following
+    /// lines) skipped — mirroring the numeric / `uri` / `uri-reference` default twins.
+    /// Only a `default` carrying an inline scalar (quoted or unquoted; a block/object
+    /// default opens no inline value and is skipped) with a same-indent `format: uuid`
+    /// sibling in the same Schema Object is inspected — the sibling is scanned at the
+    /// default's own indent, down through the object's block then up, dedent-bounded so a
+    /// nested or following object's `format` never pairs. A `default:` nested inside an
+    /// outer `example:`/`examples:` payload (sample data, not a schema keyword) is skipped.
+    /// UUID shape is judged by `is_well_formed_uuid`.
+    fn uuid_format_defaults_malformed(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let raw_inline = |l: &str, name: &str| -> Option<String> {
+            let (k, v) = l.trim_start().split_once(':')?;
+            if k.trim() != name {
+                return None;
+            }
+            let v = v.split('#').next().unwrap_or(v).trim();
+            if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            }
+        };
+        // Whether a same-indent `format:` sibling of line `i` (indent `c`) in the same
+        // Schema Object names `uuid`: scan down through the object's block then up,
+        // dedent-bounded so a nested or following object's `format` never pairs.
+        let sibling_is_uuid_format = |i: usize, c: usize| -> bool {
+            let is_uuid_format = |l: &str| -> bool {
+                raw_inline(l, "format")
+                    .map(|v| v.trim_matches('"').trim_matches('\'') == "uuid")
+                    .unwrap_or(false)
+            };
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_uuid_format(l) {
+                    return true;
+                }
+                j += 1;
+            }
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_uuid_format(l) {
+                    return true;
+                }
+            }
+            false
+        };
+        // True when line `i` (indent `c`) sits inside an outer `example:`/`examples:`
+        // payload — some enclosing container key up the indent ladder is
+        // `example`/`examples`, so an inner `default` key there is sample data.
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some(raw) = raw_inline(line, "default") else {
+                continue;
+            };
+            // A block-scalar opener (`>`/`|`, optionally with a chomping indicator)
+            // carries its value on the following lines, not inline — skip it.
+            if raw.starts_with('>') || raw.starts_with('|') {
+                continue;
+            }
+            let c = indent(line);
+            if inside_example(i, c) {
+                continue;
+            }
+            if !sibling_is_uuid_format(i, c) {
+                continue;
+            }
+            let value = raw.trim_matches('"').trim_matches('\'');
+            if !is_well_formed_uuid(value) {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_uuid_format_default_is_a_well_formed_uuid() {
+        // Contract-harness invariant (OpenAPI 3.0.x / JSON-Schema structural rule): where
+        // a Schema Object declares an inline `default` beside a same-indent
+        // `format: uuid`, the default MUST be a syntactically valid UUID. A `default` is
+        // the schema's fall-back *instance*, so a value that is not a well-formed UUID — a
+        // placeholder pasted beside a `format: uuid`, a digit dropped from a hand-typed
+        // uuid — is a self-contradictory schema whose own validator rejects the fall-back
+        // it pre-supplies, so a Redoc/Swagger form pre-fills an id control with an unusable
+        // value and a codegen client carries a value no `uuid`-typed field can legally
+        // hold.
+        //
+        // The **`default` twin** of `every_uuid_format_example_is_a_well_formed_uuid` and
+        // the uuid member of the format-default family (date-time / date / int32 / int64 /
+        // double / float / uri / uri-reference already paired), carrying the format-default
+        // guard onto the corpus's most heavily-used string format — the resource ids
+        // (`sessionId`/`paymentId`/`appId`/…). Future-drift posture (like the uri-default
+        // twin): the corpus declares many `format: uuid` fields but pairs **none** with a
+        // `default` today (the ids carry examples, not defaults), so the guard asserts
+        // clean across all specs and holds the line against a future uuid default drifting
+        // to a placeholder or truncated value; the synthetic unit body in
+        // `uuid_format_default_extraction_rules` keeps the detection path live. Verified
+        // true across all mounted specs before asserting.
+        for api in APIS {
+            let offenders = uuid_format_defaults_malformed(api.body);
+            assert!(
+                offenders.is_empty(),
+                "{} spec declares a `default` beside a same-indent `format: uuid` that \
+                 is not a well-formed UUID (a fall-back the format's own validator would \
+                 reject) at `default:` line(s): {:?}",
+                api.name,
+                offenders
+            );
+        }
+    }
+
+    #[test]
+    fn uuid_format_default_extraction_rules() {
+        // Unit-cover `uuid_format_defaults_malformed` so the contract test above can't
+        // pass vacuously and its detection is pinned (`is_well_formed_uuid` itself is
+        // already covered by `uuid_format_example_extraction_rules`).
+        //
+        // Extractor: a valid uuid beside a same-indent `format: uuid` passes; a too-short
+        // value and a value with the format *below* it (down-scan) are flagged; a value
+        // with no `format` sibling and one whose sibling is a *different* format
+        // (`date-time`) are skipped; a default in one property never pairs with a
+        // *following* property's `format: uuid` across the dedent; a block-scalar default
+        // is skipped; an inner `default` inside an outer `example:` payload is skipped; and
+        // a property literally named `default` (opening a block) is skipped.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    GoodUuid:
+      type: string
+      format: uuid
+      default: \"3fa85f64-5717-4562-b3fc-2c963f66afa6\"
+    ShortUuid:
+      type: string
+      format: uuid
+      default: \"3fa85f64-5717-4562-b3fc\"
+    FormatBelow:
+      type: string
+      default: \"nope\"
+      format: uuid
+    NoFormat:
+      type: string
+      default: \"not-a-uuid-but-no-format\"
+    OtherFormat:
+      type: string
+      format: date-time
+      default: \"2024-01-01T00:00:00Z\"
+    BlockDefault:
+      type: string
+      format: uuid
+      default: |
+        3fa85f64-5717-4562-b3fc-2c963f66afa6
+    InExample:
+      type: object
+      example:
+        format: uuid
+        default: \"bad\"
+    Split:
+      type: object
+      properties:
+        a:
+          type: string
+          enum: [DAY, NIGHT]
+          default: DAY
+        b:
+          type: string
+          format: uuid
+          default: \"3fa85f64-5717-4562-b3fc-2c963f66afa6\"
+    NamedDefault:
+      type: object
+      properties:
+        default:
+          type: string
+          format: uuid
+";
+        // Flagged, in document order: ShortUuid.default (line 21, too short) and
+        // FormatBelow.default (line 24, value `nope` with its `format: uuid` a line below —
+        // down-scan pairs it). Not flagged: GoodUuid (valid); NoFormat (no `format`
+        // sibling); OtherFormat (sibling is `date-time`, not `uuid`); Split.a.default `DAY`
+        // (its only `format: uuid` is the *following* property Split.b, past a dedent);
+        // Split.b.default (valid); BlockDefault (block-scalar opener `|`, no inline value);
+        // InExample's inner `default: \"bad\"` (inside the outer `example:` payload);
+        // NamedDefault's `default:` property (opens a block, no inline value).
+        assert_eq!(uuid_format_defaults_malformed(body), vec![21, 24]);
+
+        // Non-vacuous floor (future-drift posture, mirroring the uri-default twin): across
+        // every registered spec every `default` beside a same-indent `format: uuid` is a
+        // well-formed UUID (the invariant the contract test asserts). The corpus declares
+        // many `format: uuid` fields (the resource ids) but pairs **none** with a `default`
+        // in the *same* Schema Object today (they carry examples, not defaults) — so this
+        // asserts a clean `== 0` genuine-pair count and guards future drift; the synthetic
+        // body above is what keeps the detection path live. The pair count reuses the
+        // extractor's own **dedent-bounded** same-indent sibling scan — the genuine-Schema-
+        // Object pairing — rather than a crude window, and stays independent of the
+        // extractor's *validity* (`is_well_formed_uuid`) comparison.
+        let mut uuid_defaults = 0usize;
+        for api in APIS {
+            assert!(
+                uuid_format_defaults_malformed(api.body).is_empty(),
+                "{}: every default beside a same-indent `format: uuid` must be a \
+                 well-formed UUID",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            let raw_inline = |l: &str, name: &str| -> Option<String> {
+                let (k, v) = l.trim_start().split_once(':')?;
+                if k.trim() != name {
+                    return None;
+                }
+                let v = v.split('#').next().unwrap_or(v).trim();
+                if v.is_empty() { None } else { Some(v.to_string()) }
+            };
+            // A genuine same-Schema-Object `format: uuid` sibling of the `default` on line
+            // `i` (indent `c`): scan down through the object's block then up,
+            // dedent-bounded exactly like the extractor's `sibling_is_uuid_format`, so a
+            // *following* property's `format: uuid` past a dedent never counts.
+            let sibling_is_uuid = |i: usize, c: usize| -> bool {
+                let is_uuid = |l: &str| -> bool {
+                    raw_inline(l, "format")
+                        .map(|v| v.trim_matches('"').trim_matches('\'') == "uuid")
+                        .unwrap_or(false)
+                };
+                let mut j = i + 1;
+                while j < lines.len() {
+                    let l = lines[j];
+                    if l.trim().is_empty() {
+                        j += 1;
+                        continue;
+                    }
+                    if indent(l) < c {
+                        break;
+                    }
+                    if indent(l) == c && is_uuid(l) {
+                        return true;
+                    }
+                    j += 1;
+                }
+                let mut k = i;
+                while k > 0 {
+                    k -= 1;
+                    let l = lines[k];
+                    if l.trim().is_empty() {
+                        continue;
+                    }
+                    if indent(l) < c {
+                        break;
+                    }
+                    if indent(l) == c && is_uuid(l) {
+                        return true;
+                    }
+                }
+                false
+            };
+            for (i, l) in lines.iter().enumerate() {
+                let Some(v) = raw_inline(l, "default") else {
+                    continue;
+                };
+                // Inline scalar only (skip block-scalar openers), mirroring the extractor
+                // so the floor counts exactly the pairs it inspects.
+                if v.starts_with('>') || v.starts_with('|') {
+                    continue;
+                }
+                let c = indent(l);
+                if sibling_is_uuid(i, c) {
+                    uuid_defaults += 1;
+                }
+            }
+        }
+        assert_eq!(
+            uuid_defaults, 0,
+            "expected no genuine default + same-Schema-Object `format: uuid` pairs across \
+             specs (the future-drift posture; a new pair means switch this guard to a \
+             `>= 1` floor like the example side), got {uuid_defaults}"
+        );
+    }
+
     /// The 1-based line numbers, in document order, of every **parameter/header-level**
     /// `example:` keyword — one that sits beside a same-indent `schema:` *block* (a
     /// Parameter Object, a `components.headers` entry, or a Media-Type Object, whose
