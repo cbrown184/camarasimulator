@@ -31401,6 +31401,504 @@ components:
         );
     }
 
+    /// The 1-based line numbers, in document order, of every object-valued `default:`
+    /// keyword whose payload omits a top-level property its schema's sibling `required:`
+    /// array lists as mandatory — the `default`-side twin of
+    /// `object_examples_missing_required_properties`, without a YAML dep.
+    ///
+    /// In OpenAPI 3.0.x (JSON Schema) a `default` is a fall-back *instance* of the schema,
+    /// so it MUST satisfy the schema's constraints — and `required: [a, b]` makes `a` and
+    /// `b` mandatory members of every instance. An object default missing a required
+    /// property is a self-contradictory schema whose own validator rejects the value it
+    /// pre-supplies, so a Redoc/Swagger form pre-fills a control with a default the
+    /// `required` list can never legally hold and a codegen client carries a fall-back that
+    /// fails validation the moment a caller reads or builds the payload. The object-shape
+    /// member of the `default`-conformance family alongside
+    /// `object_defaults_outside_their_property_count_bounds` (a default's *member count*):
+    /// this guards its *property set* against `required`. No existing test compares a
+    /// default object's members to `required` — the count/format/type default guards check a
+    /// default's size and shape, and `every_required_entry_names_a_declared_property` checks
+    /// `required` against `properties`, never against the `default`.
+    ///
+    /// Only a **block-form** `default:` (empty inline value) whose payload is a **mapping**
+    /// (its first non-blank child is a `key:` line, not a `- ` sequence item or a scalar)
+    /// and that declares a same-object `required:` **block-sequence** sibling is inspected.
+    /// The required list and the default's *top-level* keys are read at their own indents,
+    /// dedent-bounded exactly like the example twin, so a nested or following object's
+    /// `required`/keys never pair; a required entry absent from the top-level default keys
+    /// flags the `default:` line once (however many are missing). Nested keys deeper than the
+    /// default's top level are ignored — a nested object's required members are that
+    /// sub-schema's own concern, unreachable here across a `$ref`. Skipped: a scalar or flow
+    /// (`default: "x"` / `default: {…}` / `default: [ … ]`) default (only a block mapping
+    /// carries line-addressable top-level keys — a documented cut mirroring the example
+    /// twin); a block-opening `default:` whose first child is a `- ` item or a scalar; a
+    /// default whose object declares no `required:` block-sequence sibling (a scalar
+    /// `required: true` request-body/parameter flag never pairs — it opens no `- ` items); a
+    /// `default:` nested inside an outer `example:`/`examples:` payload (sample data, not a
+    /// schema keyword); and — critically for objects, whose block form is a mapping just like
+    /// a schema — a `default:` that is itself a **property named `default`** (its immediate
+    /// block-opening parent key is `properties`), so a sibling property that happens to be
+    /// named `required` is never misread as a constraint list.
+    fn object_defaults_missing_required_properties(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        // True when line `i` (indent `c`) sits inside an outer `example:`/`examples:`
+        // payload — some enclosing container key up the indent ladder is
+        // `example`/`examples` — so a `default` key there is sample data, not a schema
+        // keyword. Mirrors `object_examples_missing_required_properties::inside_example`.
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        // True when the immediate block-opening parent of line `i` (indent `c`) is a
+        // `properties:` mapping — i.e. this `default:` is a property literally *named*
+        // `default`, not a schema's default keyword. The nearest preceding line at a smaller
+        // indent opens the block that contains `i`. Mirrors the object-default property-count
+        // twin's `parent_is_properties`.
+        let parent_is_properties = |i: usize, c: usize| -> bool {
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) < c {
+                    return l
+                        .trim_start()
+                        .split_once(':')
+                        .is_some_and(|(key, _)| key.trim() == "properties");
+                }
+            }
+            false
+        };
+        // The `- ` item members of a `required:` block sequence opening at line `start`
+        // (indent `c`, empty inline value); `None` when line `start` is not such a sequence —
+        // a `required: <scalar>` (e.g. `true`) whose inline value is non-empty, or a block
+        // whose first non-blank child is not a `- ` item (a property literally named
+        // `required` opening a mapping). Items are gathered at indent > `c` until the block
+        // dedents to <= `c`; each item's inline comment and one surrounding quote pair are
+        // stripped.
+        let read_required_seq = |start: usize, c: usize| -> Option<Vec<String>> {
+            let (k, v) = lines[start].trim_start().split_once(':')?;
+            if k.trim() != "required" {
+                return None;
+            }
+            if !v.split('#').next().unwrap_or(v).trim().is_empty() {
+                return None; // `required: true`-style scalar flag, not a constraint list
+            }
+            let mut items = Vec::new();
+            let mut seen_item = false;
+            let mut j = start + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) <= c {
+                    break;
+                }
+                if let Some(item) = l.trim_start().strip_prefix("- ") {
+                    let it = item.split('#').next().unwrap_or(item).trim();
+                    let it = it
+                        .strip_prefix('"')
+                        .and_then(|s| s.strip_suffix('"'))
+                        .or_else(|| it.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')))
+                        .unwrap_or(it);
+                    items.push(it.to_string());
+                    seen_item = true;
+                } else if !seen_item {
+                    return None; // first child is not a sequence item
+                }
+                j += 1;
+            }
+            if items.is_empty() {
+                None
+            } else {
+                Some(items)
+            }
+        };
+        // The members of a same-indent `required:` block-sequence sibling in the same object
+        // as line `i` (indent `c`): scan down through the object's block then up,
+        // dedent-bounded so a nested or following object's `required` never pairs.
+        let required_siblings = |i: usize, c: usize| -> Option<Vec<String>> {
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && l.trim_start().starts_with("required:") {
+                    if let Some(r) = read_required_seq(j, c) {
+                        return Some(r);
+                    }
+                }
+                j += 1;
+            }
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && l.trim_start().starts_with("required:") {
+                    if let Some(r) = read_required_seq(k, c) {
+                        return Some(r);
+                    }
+                }
+            }
+            None
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some((k, v)) = line.trim_start().split_once(':') else {
+                continue;
+            };
+            if k.trim() != "default" {
+                continue;
+            }
+            let c = indent(line);
+            if !v.split('#').next().unwrap_or(v).trim().is_empty() {
+                continue; // scalar or inline-flow default — no block mapping payload
+            }
+            if inside_example(i, c) || parent_is_properties(i, c) {
+                continue;
+            }
+            // The payload must be a block mapping: its first non-blank child is a `key:`
+            // line indented past the `default:` key (not a `- ` sequence item, not empty).
+            let Some(child) = lines[i + 1..].iter().find(|l| !l.trim().is_empty()) else {
+                continue;
+            };
+            let pc = indent(child);
+            if pc <= c || child.trim_start().starts_with("- ") {
+                continue;
+            }
+            if child.trim_start().split_once(':').is_none() {
+                continue; // a block scalar / non-mapping payload
+            }
+            let Some(required) = required_siblings(i, c) else {
+                continue;
+            };
+            // The default's top-level keys: `key:` lines at exactly the payload indent `pc`,
+            // scanned until the default block dedents to <= `c`. Deeper keys (a nested
+            // object's members) are ignored; one surrounding quote pair is stripped.
+            let mut keys: Vec<String> = Vec::new();
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) <= c {
+                    break;
+                }
+                if indent(l) == pc && !l.trim_start().starts_with("- ") {
+                    if let Some((kk, _)) = l.trim_start().split_once(':') {
+                        let kk = kk.trim();
+                        let kk = kk
+                            .strip_prefix('"')
+                            .and_then(|s| s.strip_suffix('"'))
+                            .or_else(|| kk.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')))
+                            .unwrap_or(kk);
+                        keys.push(kk.to_string());
+                    }
+                }
+                j += 1;
+            }
+            if required.iter().any(|r| !keys.contains(r)) {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_object_default_lists_its_required_properties() {
+        // Contract-harness invariant (OpenAPI 3.0.x / JSON-Schema structural rule): where a
+        // Schema Object declares an object-valued `default` beside a `required:` array, the
+        // default object MUST contain every property that array lists. A `default` is a
+        // fall-back *instance* of the schema, so an object omitting a required property is a
+        // self-contradictory schema whose own validator rejects the value it pre-supplies —
+        // a Redoc/Swagger form pre-fills a control with a default the `required` list can
+        // never legally hold, and a codegen client carries a fall-back that fails validation
+        // the moment a caller reads or builds the payload.
+        //
+        // The `default`-side twin of `every_object_example_lists_its_required_properties`,
+        // completing the object example/default symmetry the harness already keeps for the
+        // property-count corner (`every_object_example_respects_its_property_count_bounds` ↔
+        // `every_object_default_respects_its_property_count_bounds`): the required-properties
+        // corner was the one object-example guard without a default counterpart. No existing
+        // test compares a default object's members to `required` —
+        // `every_default_matches_its_schema_type` checks the default's type and
+        // `every_required_entry_names_a_declared_property` checks `required` against
+        // `properties`, never against the `default`. Verified true across all mounted specs
+        // before asserting (the corpus declares no object defaults today, so this asserts
+        // clean and guards future drift).
+        for api in APIS {
+            let offenders = object_defaults_missing_required_properties(api.body);
+            assert!(
+                offenders.is_empty(),
+                "{} spec declares an object `default` that omits a property its sibling \
+                 `required:` array lists as mandatory (a fall-back the schema's own validator \
+                 would reject) at `default:` line(s): {:?}",
+                api.name,
+                offenders
+            );
+        }
+    }
+
+    #[test]
+    fn object_default_required_extraction_rules() {
+        // Unit-cover `object_defaults_missing_required_properties` so the contract test above
+        // can't pass vacuously and its detection is pinned: an object default carrying every
+        // required property passes; one missing a required member (required declared above)
+        // and one missing a member (required declared *below*, down-scan) are flagged in
+        // document order; a scalar `default:` and a sequence-valued `default:` are skipped (no
+        // block mapping payload); an object with no `required:` block-sequence sibling is
+        // skipped; a `default:` nested inside an outer `example:` payload is skipped (so its
+        // inner `required:` never pairs); a property literally named `default` under
+        // `properties:` is skipped (so a sibling property named `required` never pairs); and a
+        // required property present as a nested-object top-level key is matched while deeper
+        // keys are ignored.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    GoodObject:
+      type: object
+      required:
+        - id
+        - name
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+      default:
+        id: \"x1\"
+        name: \"n\"
+    MissingReq:
+      type: object
+      required:
+        - id
+        - name
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+      default:
+        id: \"x1\"
+    ReqBelow:
+      type: object
+      default:
+        id: \"x1\"
+      required:
+        - id
+        - email
+    ScalarDefault:
+      type: string
+      required:
+        - id
+      default: \"just-a-string\"
+    SeqDefault:
+      type: object
+      required:
+        - id
+      default:
+        - id
+        - two
+    NoRequired:
+      type: object
+      default:
+        id: \"x1\"
+    InExample:
+      type: object
+      example:
+        required:
+          - id
+        default:
+          name: \"n\"
+    NamedDefaultProp:
+      type: object
+      required:
+        - id
+      properties:
+        default:
+          type: object
+    NestedOk:
+      type: object
+      required:
+        - id
+        - data
+      properties:
+        id:
+          type: string
+        data:
+          type: object
+      default:
+        id: \"x1\"
+        data:
+          inner: \"v\"
+";
+        // Flagged, in document order: line 37 (`MissingReq.default` omits required `name`,
+        // required declared above) and line 41 (`ReqBelow.default` omits required `email`,
+        // required declared *below* the default — down-scan). Not flagged: `GoodObject` (both
+        // `id`/`name` present); `ScalarDefault` (an inline scalar default, no mapping
+        // payload); `SeqDefault` (a `- ` sequence default, not a mapping); `NoRequired` (no
+        // `required:` sibling); `InExample`, whose inner `default:` sits inside the outer
+        // `example:` payload so the `inside_example` guard skips it; `NamedDefaultProp`, whose
+        // `default:` is a property under `properties:` (the `parent_is_properties` guard skips
+        // it, so the sibling `required` under the schema never pairs); and `NestedOk`
+        // (required `id`/`data` both present as top-level keys, the deeper `inner:` under
+        // `data` ignored).
+        assert_eq!(
+            object_defaults_missing_required_properties(body),
+            vec![37, 41]
+        );
+
+        // Future-drift posture (like the object-default property-count twin): across every
+        // registered spec every object default lists all its required properties, AND the
+        // corpus declares no object default paired with a `required:` array at all today — so
+        // the guard asserts clean and stands ready for the first such pair. Count both with a
+        // detector independent of the extractor's containment check: object defaults paired
+        // with a `required:` block-sequence sibling (must be 0, the future-drift floor) and
+        // `required:` block-sequences overall (must be plentiful, proving the sibling-scan
+        // path is exercisable the moment an object default appears).
+        let mut object_defaults_with_required = 0usize;
+        let mut required_blocks = 0usize;
+        for api in APIS {
+            assert!(
+                object_defaults_missing_required_properties(api.body).is_empty(),
+                "{}: every object default must list all its sibling `required` properties",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            let opens_seq = |i: usize| -> bool {
+                lines[i + 1..]
+                    .iter()
+                    .find(|x| !x.trim().is_empty())
+                    .map(|x| x.trim_start().starts_with("- "))
+                    .unwrap_or(false)
+            };
+            for (i, l) in lines.iter().enumerate() {
+                let Some((k, v)) = l.trim_start().split_once(':') else {
+                    continue;
+                };
+                let key = k.trim();
+                let inline_empty = v.split('#').next().unwrap_or(v).trim().is_empty();
+                let c = indent(l);
+                if key == "required" && inline_empty && opens_seq(i) {
+                    required_blocks += 1;
+                }
+                if key != "default" || !inline_empty {
+                    continue;
+                }
+                // an object (mapping) default payload
+                let Some(child) = lines[i + 1..].iter().find(|x| !x.trim().is_empty()) else {
+                    continue;
+                };
+                if indent(child) <= c
+                    || child.trim_start().starts_with("- ")
+                    || child.trim_start().split_once(':').is_none()
+                {
+                    continue;
+                }
+                // a same-indent `required:` block-sequence sibling, up or down, dedent-bounded
+                let mut has_req = false;
+                for down in [true, false] {
+                    let mut j = i;
+                    loop {
+                        if down {
+                            j += 1;
+                            if j >= lines.len() {
+                                break;
+                            }
+                        } else if j == 0 {
+                            break;
+                        } else {
+                            j -= 1;
+                        }
+                        let ll = lines[j];
+                        if ll.trim().is_empty() {
+                            continue;
+                        }
+                        let li = indent(ll);
+                        if li < c {
+                            break;
+                        }
+                        if li == c
+                            && ll.trim_start().starts_with("required:")
+                            && ll
+                                .trim_start()
+                                .split_once(':')
+                                .map(|(_, vv)| vv.split('#').next().unwrap_or(vv).trim().is_empty())
+                                .unwrap_or(false)
+                            && opens_seq(j)
+                        {
+                            has_req = true;
+                        }
+                    }
+                }
+                if has_req {
+                    object_defaults_with_required += 1;
+                }
+            }
+        }
+        assert_eq!(
+            object_defaults_with_required, 0,
+            "expected no object default paired with a required-array sibling in the corpus \
+             (future-drift posture), got {object_defaults_with_required}"
+        );
+        assert!(
+            required_blocks >= 10,
+            "expected the corpus to declare `required:` block-sequences so the guard is live, \
+             got {required_blocks}"
+        );
+    }
+
     /// The 1-based line numbers, in document order, of every array `example:` keyword
     /// whose item count falls outside a sibling array-size bound — `minItems` or
     /// `maxItems` — declared in the same Schema Object, without a YAML dep. The array-

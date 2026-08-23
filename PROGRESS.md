@@ -3335,6 +3335,24 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - an **object-`default` required-properties** contract test (`src/registry.rs`
+    `every_object_default_lists_its_required_properties`) — the `default`-side twin of
+    `every_object_example_lists_its_required_properties`, **completing the object
+    example/default symmetry**: the property-count corner paired last pass
+    (`…object_example…property_count_bounds` ↔ `…object_default…`), and the
+    required-properties corner was the one remaining object-example guard without a default
+    counterpart. An object-valued `default` beside a sibling `required:` array must contain
+    every property that array lists, else the schema's own validator rejects the fall-back it
+    pre-supplies (a Redoc/Swagger form pre-fills a control with an out-of-range default; a
+    codegen client carries a fall-back that fails validation). New pure
+    `object_defaults_missing_required_properties` (the object-example-required extractor with
+    its trigger key swapped `example:`→`default:`; keeps the `inside_example` skip and — like
+    the object-default property-count twin, since an object default's block form is a mapping
+    like a schema's — adds the `parent_is_properties` skip so a property literally named
+    `default` with a sibling property named `required` never pairs). Corpus declares no object
+    defaults today (0 paired with `required`, 264 `required:` blocks) → asserts clean +
+    guards future drift (`== 0` future-drift floor, `>= 10` required-block liveness floor).
+    Unit-covered (`object_default_required_extraction_rules`). Test-only, no spec change.
   - an **object-`default` property-count-bounds** contract test (`src/registry.rs`
     `every_object_default_respects_its_property_count_bounds`) — the `default`-side twin of
     `every_object_example_respects_its_property_count_bounds`, completing the
@@ -6289,6 +6307,49 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-23 — Contract-test harness: guard that every **object `default` lists its
+  required properties** (`src/registry.rs`
+  `every_object_default_lists_its_required_properties`). In OpenAPI 3.0.x (JSON Schema) a
+  `default` is a fall-back *instance* of the schema, so where a Schema Object declares an
+  object-valued `default` beside a sibling `required:` array, the default MUST contain every
+  property that array lists — else the schema's own validator rejects the fall-back it
+  pre-supplies (a Redoc/Swagger form pre-fills a control with a default the `required` list
+  can never legally hold; a codegen client carries a fall-back that fails validation the
+  moment a caller reads or builds the payload). The **`default`-side twin of
+  `every_object_example_lists_its_required_properties`**, **completing the object
+  example/default symmetry**: the property-count corner paired last pass
+  (`every_object_example_respects_its_property_count_bounds` ↔
+  `every_object_default_respects_its_property_count_bounds`), and the required-properties
+  corner was the one remaining object-example guard without a default counterpart. No
+  existing test compares a default object's members to `required` —
+  `every_default_matches_its_schema_type` checks the default's type and
+  `every_required_entry_names_a_declared_property` checks `required` against `properties`,
+  never against the `default`. New pure `object_defaults_missing_required_properties`: the
+  `object_examples_missing_required_properties` extractor with its trigger key swapped
+  `example:`→`default:`, reusing unchanged its `inside_example` payload-ancestor skip, its
+  `read_required_seq` block-sequence reader, its dedent-bounded `required_siblings`
+  down-then-up sibling scan, and its top-level-key collector (deeper nested keys ignored,
+  one surrounding quote pair stripped); adds — like the object-default property-count twin,
+  since an object default's block form is a mapping just like a schema's — the
+  `parent_is_properties` skip so a `default:` that is a property literally *named* `default`
+  under `properties:` (with a sibling property named `required`) never pairs. Surveyed the
+  corpus first — 264 `required:` block-sequences but **no** object `default` at all (the
+  corpus declares no object defaults), so none paired with `required` — so the contract test
+  asserts clean across all specs and guards future drift (`== 0` future-drift floor mirroring
+  the object-default property-count twin, plus a `>= 10` `required:`-block liveness floor
+  proving the sibling-scan path is exercisable the moment an object default appears). Only a
+  **block-form** object `default` is inspected (a scalar / inline-flow / array default is
+  skipped — only a block mapping carries line-addressable top-level keys; a documented cut
+  mirroring the example twin). Tests: +2 (the contract test +
+  `object_default_required_extraction_rules`: an object default carrying every required
+  property cleared; one missing a required member (required declared above) and one missing a
+  member (required declared *below*, down-scan) flagged in document order `[37, 41]`; scalar
+  / sequence-valued / no-`required`-sibling / in-`example:`-payload / property-named-`default`
+  cases skipped; a required property present as a nested-object top-level key matched while
+  deeper keys ignored; `object_defaults_with_required == 0` corpus floor +
+  `required_blocks >= 10` liveness floor). `cargo test` 2948 green (was 2946); `cargo build
+  --release` succeeds. No new dependency; test-only change (no spec/runtime edit). — binary
+  (release): 5.1M (5,323,160 B; unchanged).
 - 2026-08-23 — Contract-test harness: guard that every **object `default` respects its
   property-count bounds** (`src/registry.rs`
   `every_object_default_respects_its_property_count_bounds`). In OpenAPI 3.0.x (JSON
