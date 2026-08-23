@@ -42083,6 +42083,379 @@ components:
         );
     }
 
+    /// The 1-based line numbers, in document order, of every `default:` keyword whose
+    /// inline scalar value sits in a Schema Object declaring a *same-indent* 32-hex
+    /// `pattern` sibling (`^[<hex>]{32}$`, either corpus spelling) yet is not 32 ASCII hex
+    /// digits, without a YAML dep. The **`default`-side twin** of
+    /// `hex32_pattern_examples_malformed` and the sixth member of the `pattern`-*default*
+    /// family after `e164_pattern_defaults_malformed`, `imei_pattern_defaults_malformed`,
+    /// `iccid_pattern_defaults_malformed`, `name_pattern_defaults_malformed`, and
+    /// `token_pattern_defaults_malformed` — the `pattern`-side echo of the `format`-default
+    /// family, keyed on the `is_hex32_pattern` recognizer (not an exact literal, since the
+    /// corpus spells the class two ways) and judged by `matches_hex32_pattern`.
+    ///
+    /// In OpenAPI 3.0.x (JSON Schema) a `default` is the schema's fall-back *instance*, so a
+    /// field constrained by `pattern` MUST carry a default the pattern accepts (the same
+    /// Spectral `oas3-valid-schema-example` posture that validates an example against its
+    /// schema applies to a `default` — it is a schema-level instance too). A 32-hex default
+    /// with a digit dropped or added, a non-hex character, or a placeholder pasted beside the
+    /// pattern advertises a fall-back the schema's own validator rejects, so a Redoc/Swagger
+    /// form pre-fills an `eId`/`networkKey` control with an unusable value and a codegen
+    /// client carries a value no field constrained by this pattern can legally hold. Like the
+    /// hex32-example twin (and the IMEI/ICCID/token patterns, unlike the UUID patterns which
+    /// sit beside a `format: uuid` already guarded), the 32-hex pattern carries no `format`,
+    /// so such a default is otherwise unchecked; and — the first pattern-default member over a
+    /// *hexadecimal* alphabet — a hex-alphabet fault is one the decimal-only IMEI/ICCID-default
+    /// checks and the (space/dot/slash-forbidding) token-default check cannot express.
+    ///
+    /// Structurally identical to `token_pattern_defaults_malformed`, keyed on the
+    /// `is_hex32_pattern` recognizer and judged by `matches_hex32_pattern`: the trigger key is
+    /// `default:` and a block-scalar opener (`default: >-` / `default: |`) is skipped (it
+    /// opens no inline value). Scoping is otherwise unchanged: only a `default` carrying an
+    /// inline scalar with a same-indent `pattern` sibling the `is_hex32_pattern` recognizer
+    /// accepts, in the same Schema Object, is inspected — the sibling is scanned at the
+    /// default's own indent, down through the object's block then up, dedent-bounded, so a
+    /// nested or following object's `pattern` never pairs (a hex-lowercase-only or wrong-length
+    /// hex pattern is a *different* pattern and never pairs). A `default:` nested inside an
+    /// outer `example:`/`examples:` payload (sample data, not a schema keyword) is skipped.
+    /// Only the 32-hex pattern is matched; other patterns are out of scope.
+    fn hex32_pattern_defaults_malformed(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let raw_inline = |l: &str, name: &str| -> Option<String> {
+            let (k, v) = l.trim_start().split_once(':')?;
+            if k.trim() != name {
+                return None;
+            }
+            let v = v.split('#').next().unwrap_or(v).trim();
+            if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            }
+        };
+        // Whether a same-indent `pattern:` sibling of line `i` (indent `c`) in the same
+        // Schema Object is a 32-hex pattern: scan down through the object's block then up,
+        // dedent-bounded so a nested or following object's `pattern` never pairs.
+        let sibling_is_hex32_pattern = |i: usize, c: usize| -> bool {
+            let is_hex32 = |l: &str| -> bool {
+                raw_inline(l, "pattern")
+                    .map(|v| is_hex32_pattern(v.trim_matches('"').trim_matches('\'')))
+                    .unwrap_or(false)
+            };
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_hex32(l) {
+                    return true;
+                }
+                j += 1;
+            }
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_hex32(l) {
+                    return true;
+                }
+            }
+            false
+        };
+        // True when line `i` (indent `c`) sits inside an outer `example:`/`examples:`
+        // payload — some enclosing container key up the indent ladder is
+        // `example`/`examples`, so an inner `default` key there is sample data.
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some(raw) = raw_inline(line, "default") else {
+                continue;
+            };
+            // A block-scalar opener (`>`/`|`, optionally with a chomping indicator)
+            // carries its value on the following lines, not inline — skip it.
+            if raw.starts_with('>') || raw.starts_with('|') {
+                continue;
+            }
+            let c = indent(line);
+            if inside_example(i, c) {
+                continue;
+            }
+            if !sibling_is_hex32_pattern(i, c) {
+                continue;
+            }
+            let value = raw.trim_matches('"').trim_matches('\'');
+            if !matches_hex32_pattern(value) {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_hex32_pattern_default_conforms_to_the_hex32_pattern() {
+        // Contract-harness invariant (OpenAPI 3.0.x / JSON-Schema structural rule): where a
+        // Schema Object declares an inline `default` beside a same-indent 32-hex `pattern`
+        // (`^[<hex>]{32}$` — the eSIM `eId` writes `^[A-Fa-f0-9]{32}$`, the Trust-Domain
+        // Thread `networkKey` writes `^[0-9a-fA-F]{32}$`; both denote 32 case-insensitive hex
+        // digits), the default MUST match that pattern. A `default` is the schema's fall-back
+        // *instance*, so a value the `pattern` rejects — a 32-hex identifier with a digit
+        // dropped or added, a non-hex character, or a placeholder pasted beside the pattern —
+        // is a self-contradictory schema whose own validator rejects the fall-back it
+        // pre-supplies, so a Redoc/Swagger form pre-fills an `eId`/`networkKey` control with an
+        // unusable value and a codegen client's generated instance carries a value no field
+        // constrained by this pattern can legally hold.
+        //
+        // The **`default` twin** of `every_hex32_pattern_example_conforms_to_the_hex32_pattern`
+        // and the sixth member of the `pattern`-*default* family after the E.164 / IMEI / ICCID
+        // / name / token default twins, and the first pattern-default member over a
+        // *hexadecimal* alphabet: neither the decimal-only IMEI/ICCID-default checks nor the
+        // (space/dot/slash-forbidding) token-default check can express a hex-alphabet fault.
+        // Future-drift posture (like the E.164/IMEI/ICCID/name/token-default twins): the corpus
+        // declares several 32-hex `pattern` fields but pairs **none** with a `default` today
+        // (they carry examples, not defaults), so the guard asserts clean across all specs and
+        // holds the line against a future `eId`/`networkKey` default drifting to a placeholder
+        // or a non-hex value; the synthetic unit body in `hex32_pattern_default_extraction_rules`
+        // keeps the detection path live. Verified true across all mounted specs before asserting.
+        for api in APIS {
+            let offenders = hex32_pattern_defaults_malformed(api.body);
+            assert!(
+                offenders.is_empty(),
+                "{} spec declares a `default` beside a same-indent 32-hex \
+                 `pattern: '^[<hex>]{{32}}$'` that does not match that pattern (a fall-back the \
+                 pattern's own validator would reject) at `default:` line(s): {:?}",
+                api.name,
+                offenders
+            );
+        }
+    }
+
+    #[test]
+    fn hex32_pattern_default_extraction_rules() {
+        // Unit-cover `hex32_pattern_defaults_malformed` so the contract test above can't pass
+        // vacuously and its detection is pinned (`is_hex32_pattern`/`matches_hex32_pattern` are
+        // already covered by `hex32_pattern_example_extraction_rules`).
+        //
+        // Extractor: a valid quoted default beside each corpus spelling passes; a too-short, a
+        // too-long, and a non-hex value are flagged; a bad value with the `pattern` *below* it
+        // (down-scan) is flagged; a value with no `pattern` sibling, one whose sibling is a
+        // *different* pattern (IMEI), and one whose sibling is a *different-length* hex pattern
+        // (16-hex) are skipped; a block-scalar default is skipped; a default in one property
+        // never pairs with a *following* property's 32-hex `pattern` across the dedent; an inner
+        // `default` inside an outer `example:` payload is skipped; and a property literally named
+        // `default` (opening a block) is skipped.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    GoodSpellingA:
+      type: string
+      pattern: '^[A-Fa-f0-9]{32}$'
+      default: \"A1B2C3D4E5F600000000000000000001\"
+    GoodSpellingB:
+      type: string
+      pattern: \"^[0-9a-fA-F]{32}$\"
+      default: dfd34f0f05cad978ec4e32b0413038ff
+    TooShort:
+      type: string
+      pattern: '^[A-Fa-f0-9]{32}$'
+      default: \"abcdef0123456789abcdef012345678\"
+    TooLong:
+      type: string
+      pattern: '^[A-Fa-f0-9]{32}$'
+      default: \"abcdef0123456789abcdef0123456789a\"
+    NonHex:
+      type: string
+      pattern: '^[A-Fa-f0-9]{32}$'
+      default: \"gbcdef0123456789abcdef0123456789\"
+    PatternBelow:
+      type: string
+      default: \"nope\"
+      pattern: '^[A-Fa-f0-9]{32}$'
+    NoPattern:
+      type: string
+      default: \"abcdef0123456789abcdef0123456789\"
+    OtherPattern:
+      type: string
+      pattern: '^[0-9]{15}$'
+      default: \"490154203237518\"
+    Hex16:
+      type: string
+      pattern: '^[0-9a-fA-F]{16}$'
+      default: \"d63e8e3e495ebbc3\"
+    BlockDefault:
+      type: string
+      pattern: '^[A-Fa-f0-9]{32}$'
+      default: |
+        nope
+    InExample:
+      type: object
+      example:
+        pattern: '^[A-Fa-f0-9]{32}$'
+        default: \"bad\"
+    Split:
+      type: object
+      properties:
+        a:
+          default: \"bad\"
+        b:
+          type: string
+          pattern: '^[A-Fa-f0-9]{32}$'
+    NamedDefault:
+      type: object
+      properties:
+        default:
+          type: string
+          pattern: '^[A-Fa-f0-9]{32}$'
+";
+        // Flagged, in document order: TooShort.default (line 25, 31 hex), TooLong.default
+        // (line 29, 33 hex), NonHex.default (line 33, an embedded `g`), and
+        // PatternBelow.default (line 36, value `nope` with its 32-hex `pattern` a line below —
+        // down-scan pairs it). Not flagged: GoodSpellingA/GoodSpellingB (valid 32-hex, each
+        // corpus spelling, quoted and unquoted); NoPattern (no `pattern` sibling); OtherPattern
+        // (sibling is the IMEI pattern); Hex16 (sibling is a 16-hex pattern, wrong length);
+        // BlockDefault (block-scalar opener `|`, no inline value); InExample's inner
+        // `default: \"bad\"` (sits inside the outer `example:` payload); Split.a.default, whose
+        // only 32-hex `pattern` is in the following property Split.b past a dedent; and
+        // NamedDefault's `default:` property opening a block (no inline value).
+        assert_eq!(hex32_pattern_defaults_malformed(body), vec![25, 29, 33, 36]);
+
+        // Non-vacuous floor (future-drift posture, mirroring the E.164/IMEI/ICCID/name/token
+        // -default twins): across every registered spec every `default` beside a same-indent
+        // 32-hex `pattern` matches it (the invariant the contract test asserts). The corpus
+        // declares several 32-hex `pattern` fields but pairs **none** with a `default` in the
+        // *same* Schema Object today (they carry examples, not defaults) — so this asserts a
+        // clean `== 0` genuine-pair count and guards future drift; the synthetic body above
+        // keeps the detection path live. The pair count reuses the extractor's own
+        // **dedent-bounded** same-indent sibling scan — the genuine-Schema-Object pairing —
+        // rather than a crude window, and stays independent of the extractor's *validity*
+        // (`matches_hex32_pattern`) comparison.
+        let mut hex32_defaults = 0usize;
+        for api in APIS {
+            assert!(
+                hex32_pattern_defaults_malformed(api.body).is_empty(),
+                "{}: every default beside a same-indent 32-hex `pattern` must match it",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            let raw_inline = |l: &str, name: &str| -> Option<String> {
+                let (k, v) = l.trim_start().split_once(':')?;
+                if k.trim() != name {
+                    return None;
+                }
+                let v = v.split('#').next().unwrap_or(v).trim();
+                if v.is_empty() { None } else { Some(v.to_string()) }
+            };
+            // A genuine same-Schema-Object 32-hex `pattern` sibling of the `default` on line
+            // `i` (indent `c`): scan down through the object's block then up, dedent-bounded
+            // exactly like the extractor's `sibling_is_hex32_pattern`, so a *following*
+            // property's 32-hex `pattern` past a dedent never counts.
+            let sibling_is_hex32 = |i: usize, c: usize| -> bool {
+                let is_hex32 = |l: &str| -> bool {
+                    raw_inline(l, "pattern")
+                        .map(|v| is_hex32_pattern(v.trim_matches('"').trim_matches('\'')))
+                        .unwrap_or(false)
+                };
+                let mut j = i + 1;
+                while j < lines.len() {
+                    let l = lines[j];
+                    if l.trim().is_empty() {
+                        j += 1;
+                        continue;
+                    }
+                    if indent(l) < c {
+                        break;
+                    }
+                    if indent(l) == c && is_hex32(l) {
+                        return true;
+                    }
+                    j += 1;
+                }
+                let mut k = i;
+                while k > 0 {
+                    k -= 1;
+                    let l = lines[k];
+                    if l.trim().is_empty() {
+                        continue;
+                    }
+                    if indent(l) < c {
+                        break;
+                    }
+                    if indent(l) == c && is_hex32(l) {
+                        return true;
+                    }
+                }
+                false
+            };
+            for (i, l) in lines.iter().enumerate() {
+                let Some(v) = raw_inline(l, "default") else {
+                    continue;
+                };
+                // Inline scalar only (skip block-scalar openers), mirroring the extractor
+                // so the floor counts exactly the pairs it inspects.
+                if v.starts_with('>') || v.starts_with('|') {
+                    continue;
+                }
+                let c = indent(l);
+                if sibling_is_hex32(i, c) {
+                    hex32_defaults += 1;
+                }
+            }
+        }
+        assert_eq!(
+            hex32_defaults, 0,
+            "expected no genuine default + same-Schema-Object 32-hex `pattern` pairs across \
+             specs (the future-drift posture; a new pair means switch this guard to a \
+             `>= 1` floor like the example side), got {hex32_defaults}"
+        );
+    }
+
     /// The MAC-address (EUI-48) `pattern` the CAMARA network-access specs use verbatim
     /// (written in YAML as `"^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$"`): six 2-hex-digit
     /// groups joined by five separators, each `:` or `-`. It is the corpus's next

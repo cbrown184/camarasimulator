@@ -3335,6 +3335,23 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - a **32-hex `pattern`-`default` conformance** contract test (`src/registry.rs`
+    `every_hex32_pattern_default_conforms_to_the_hex32_pattern`) — the `default`-side twin of
+    `every_hex32_pattern_example_conforms_to_the_hex32_pattern` and the **sixth member of the
+    `pattern`-default family** after E.164 / IMEI / ICCID / name / token, the **first over a
+    hexadecimal alphabet** (`^[<hex>]{32}$`; the eSIM `eId` spells it `^[A-Fa-f0-9]{32}$`, the
+    Trust-Domain Thread `networkKey` `^[0-9a-fA-F]{32}$` — one pattern, two spellings). A
+    hex-alphabet fault (a digit dropped/added, a non-hex character, a placeholder) is one the
+    decimal-only IMEI/ICCID-default checks and the space/dot/slash-forbidding token-default check
+    can't express. A `default` beside a same-indent 32-hex `pattern` must be 32 ASCII hex digits,
+    else the schema's own validator rejects the fall-back it pre-supplies. New pure
+    `hex32_pattern_defaults_malformed` (the `token_pattern_defaults_malformed` shape keyed on the
+    `is_hex32_pattern` recognizer + `matches_hex32_pattern`, both already present from the example
+    side; trigger key `default:`, block-scalar opener skipped). Corpus declares several 32-hex
+    `pattern` fields but pairs none with a default (they carry examples) → asserts clean `== 0`
+    genuine-pair count (future-drift posture) + guards future drift; floor reuses the
+    dedent-bounded sibling scan. Unit-covered (`hex32_pattern_default_extraction_rules`).
+    Test-only, no spec change.
   - a **token `pattern`-`default` conformance** contract test (`src/registry.rs`
     `every_token_pattern_default_conforms_to_the_token_pattern`) — the `default`-side twin of
     `every_token_pattern_example_conforms_to_the_token_pattern` and the **fifth member of the
@@ -6459,6 +6476,32 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-23 — Contract-test harness: guard that every **32-hex `pattern` `default` matches the
+  pattern** (`src/registry.rs` `every_hex32_pattern_default_conforms_to_the_hex32_pattern`). The
+  **sixth member of the `pattern`-default family** after E.164, IMEI, ICCID, name, and token, the
+  `default`-side twin of `every_hex32_pattern_example_conforms_to_the_hex32_pattern`, and the
+  **first pattern-default member over a hexadecimal alphabet** (`^[<hex>]{32}$` — the eSIM `eId`
+  writes `^[A-Fa-f0-9]{32}$`, the Trust-Domain Thread `networkKey` writes `^[0-9a-fA-F]{32}$`;
+  both denote 32 case-insensitive hex digits), so a hex-alphabet fault (a digit dropped/added, a
+  non-hex character, a placeholder) is one the decimal-only IMEI/ICCID-default checks and the
+  space/dot/slash-forbidding token-default check cannot express. In OpenAPI 3.0.x a `default` is
+  the schema's fall-back *instance*, so a field constrained by this `pattern` (carries no `format`,
+  so otherwise unchecked) MUST carry a default the pattern accepts. New pure
+  `hex32_pattern_defaults_malformed` (the `token_pattern_defaults_malformed` shape keyed on the
+  `is_hex32_pattern` recognizer — not an exact literal, since the class is spelled two ways — and
+  judged by `matches_hex32_pattern`, both already present from the example side; trigger key
+  `default:`, block-scalar opener skipped, dedent-bounded same-indent sibling scan, in-`example:`
+  payload excluded). Surveyed the corpus first — the eSIM/Network-Access-Domains specs declare
+  several 32-hex `pattern` fields but pair **none** with a `default` (all carry examples; a
+  hex-lowercase-only or wrong-length hex pattern is a different pattern and never pairs) → asserts a
+  clean `== 0` genuine-pair count (future-drift posture, mirroring the E.164/IMEI/ICCID/name/token
+  -default twins) + guards future drift; floor reuses the dedent-bounded sibling scan. Unit-covered
+  (`hex32_pattern_default_extraction_rules`: valid quoted/unquoted 32-hex cleared for both corpus
+  spellings; too-short/too-long/non-hex/pattern-below flagged in document order [25, 29, 33, 36];
+  no-pattern / IMEI-pattern / 16-hex-pattern / block-scalar / in-`example:` /
+  following-property-across-dedent / property-named-`default` skipped). Test-only, no spec change.
+  `cargo test` 2978 pass (+2); `cargo build --release` clean, no new dep. — binary (release):
+  5,323,160 bytes (~5.08 MiB; unchanged by a test-only change).
 - 2026-08-23 — Contract-test harness: guard that every **token `pattern` `default` matches the
   pattern** (`src/registry.rs` `every_token_pattern_default_conforms_to_the_token_pattern`). The
   **fifth member of the `pattern`-default family** after E.164, IMEI, ICCID, and name (all landed
