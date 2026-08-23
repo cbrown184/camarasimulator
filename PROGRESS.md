@@ -3335,6 +3335,21 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - an **`ipv4`-`default` format-conformance** contract test (`src/registry.rs`
+    `every_ipv4_format_default_is_a_well_formed_ipv4`) — the `default`-side twin of
+    `every_ipv4_format_example_is_a_well_formed_ipv4` and the network-address member of
+    the format-default family (date-time / date / int32 / int64 / double / float / uri /
+    uri-reference / uuid already paired); it carries the format-default guard onto the
+    device/endpoint address fields (`ipAddress`/`publicAddress`/`ipv4Address`). A `default`
+    beside a same-indent `format: ipv4` must be a dotted-quad IPv4 address, else the
+    schema's own validator rejects the fall-back it pre-supplies. New pure
+    `ipv4_format_defaults_malformed` (structurally identical to `uuid_format_defaults_malformed`
+    with the format anchor swapped `uuid`→`ipv4`, matched exactly so `ipv6` never pairs, and
+    the judge `is_well_formed_uuid`→`is_well_formed_ipv4`). Corpus declares 7 `format: ipv4`
+    fields but pairs none with a default (they carry examples) → asserts clean `== 0`
+    genuine-pair count + guards future drift; floor reuses the dedent-bounded sibling scan
+    (mirrors the uuid-default twin). Unit-covered (`ipv4_format_default_extraction_rules`).
+    Test-only, no spec change.
   - a **`uuid`-`default` format-conformance** contract test (`src/registry.rs`
     `every_uuid_format_default_is_a_well_formed_uuid`) — the `default`-side twin of
     `every_uuid_format_example_is_a_well_formed_uuid` and the `uuid` member of the
@@ -6367,6 +6382,36 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-23 — Contract-test harness: guard that every **`format: ipv4` `default` is a
+  well-formed IPv4 address** (`src/registry.rs` `every_ipv4_format_default_is_a_well_formed_ipv4`).
+  In OpenAPI 3.0.x (JSON Schema) a `default` is the schema's fall-back *instance*, so where a
+  Schema Object declares an inline `default` beside a same-indent `format: ipv4`, the default
+  MUST be a dotted-quad IPv4 address — else the schema's own validator rejects the fall-back it
+  pre-supplies (a Redoc/Swagger form pre-fills an `ipAddress`/`publicAddress` control with an
+  unusable value; a codegen client mapping `ipv4` onto a 4-byte address carries a value no
+  such field can legally hold). The **`default`-side twin of
+  `every_ipv4_format_example_is_a_well_formed_ipv4`** and the network-address member of the
+  format-default family (date-time / date / int32 / int64 / double / float / uri / uri-reference
+  / uuid already paired): it carries the format-default guard from the numeric/string-format
+  members onto the device/endpoint address fields. New pure `ipv4_format_defaults_malformed`:
+  the `uuid_format_defaults_malformed` extractor with its format anchor swapped `uuid`→`ipv4`
+  (matched exactly, so `ipv6` — a different address family — never pairs, mirroring the
+  int32/int64 and double/float mutual exclusions) and validity judge
+  `is_well_formed_uuid`→`is_well_formed_ipv4`, reusing unchanged its inline-scalar reader, its
+  dedent-bounded same-indent `format: ipv4` sibling probe, its `example:`/`examples:` payload
+  ancestor-walk exclusion, and its block-scalar-opener skip. Surveyed the corpus first — 7
+  `format: ipv4` fields but **none** paired with a `default` in the same Schema Object (they
+  carry examples) — so the contract test asserts clean `== 0` across all specs and guards
+  future drift; the future-drift floor reuses the extractor's own **dedent-bounded**
+  genuine-Schema-Object sibling scan (genuine pairs `== 0`) rather than a crude ±window.
+  Tests: +2 (the contract test + `ipv4_format_default_extraction_rules`: a valid
+  `198.51.100.1` beside `format: ipv4` cleared; a `256.1.1.1` out-of-range octet, a `1.2.3`
+  three-octet shape, and a `nope` with its `format: ipv4` a line below (down-scan) flagged in
+  document order `[21, 25, 28]`; no-format / different-format (`ipv6`) / following-property-
+  across-dedent / block-scalar / in-`example:` / property-named-`default` cases skipped;
+  `ipv4_defaults == 0` genuine-pair floor). `cargo test` 2960 green (was 2958);
+  `cargo build --release` succeeds. No new dependency; test-only change (no spec/runtime
+  edit). — binary (release): 5.1M (5,323,160 B; unchanged).
 - 2026-08-23 — Contract-test harness: guard that every **`format: uuid` `default` is a
   well-formed UUID** (`src/registry.rs` `every_uuid_format_default_is_a_well_formed_uuid`).
   In OpenAPI 3.0.x (JSON Schema) a `default` is the schema's fall-back *instance*, so where a

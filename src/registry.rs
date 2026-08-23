@@ -58081,6 +58081,363 @@ components:
         );
     }
 
+    /// The 1-based line numbers, in document order, of every `default:` keyword whose
+    /// inline scalar value sits in a Schema Object declaring a *same-indent*
+    /// `format: ipv4` sibling yet is not a well-formed IPv4 address, without a YAML dep.
+    /// The **`default`-side twin** of `ipv4_format_examples_malformed`, over the corpus's
+    /// device/endpoint `format: ipv4` fields (`ipAddress` / `publicAddress` /
+    /// `ipv4Address` / an app-instance's exposed address).
+    ///
+    /// In OpenAPI 3.0.x (JSON Schema) a `default` is the schema's fall-back *instance*,
+    /// so a `format: ipv4` field's default MUST be a value the `ipv4` format admits: a
+    /// dotted-quad IPv4 address. A malformed one — a placeholder beside the format, an
+    /// octet typo that overshoots 255, a dropped octet, or an IPv6 literal pasted into an
+    /// IPv4 slot — advertises a fall-back the format's own validator rejects, so a
+    /// Redoc/Swagger form pre-fills an address control with an unusable value and a
+    /// codegen client carries a value no `ipv4`-typed field can legally hold.
+    ///
+    /// Structurally identical to `uuid_format_defaults_malformed`, with the format anchor
+    /// swapped `uuid`→`ipv4` (matched **exactly**, so `ipv6` — a different address family
+    /// — never pairs, the analogue of the int32/int64 and double/float mutual exclusions)
+    /// and the validity judge `is_well_formed_uuid`→`is_well_formed_ipv4`. Only a `default`
+    /// carrying an **inline scalar** with a same-indent `format: ipv4` sibling in the same
+    /// Schema Object is inspected; a block-scalar default (`default: >-` / `default: |`)
+    /// opens no inline value and is skipped; a `default` nested inside an outer
+    /// `example:`/`examples:` payload (sample data, not a schema keyword) is skipped; the
+    /// sibling `format: ipv4` is scanned at the default's own indent down through the
+    /// object's block then up, dedent-bounded, so a *following* property's `format: ipv4`
+    /// past a dedent never pairs.
+    fn ipv4_format_defaults_malformed(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let raw_inline = |l: &str, name: &str| -> Option<String> {
+            let (k, v) = l.trim_start().split_once(':')?;
+            if k.trim() != name {
+                return None;
+            }
+            let v = v.split('#').next().unwrap_or(v).trim();
+            if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            }
+        };
+        // Whether a same-indent `format:` sibling of line `i` (indent `c`) in the same
+        // Schema Object names `ipv4` (exactly — not `ipv6`): scan down through the
+        // object's block then up, dedent-bounded so a nested or following object's
+        // `format` never pairs.
+        let sibling_is_ipv4_format = |i: usize, c: usize| -> bool {
+            let is_ipv4_format = |l: &str| -> bool {
+                raw_inline(l, "format")
+                    .map(|v| v.trim_matches('"').trim_matches('\'') == "ipv4")
+                    .unwrap_or(false)
+            };
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_ipv4_format(l) {
+                    return true;
+                }
+                j += 1;
+            }
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_ipv4_format(l) {
+                    return true;
+                }
+            }
+            false
+        };
+        // True when line `i` (indent `c`) sits inside an outer `example:`/`examples:`
+        // payload — some enclosing container key up the indent ladder is
+        // `example`/`examples`, so an inner `default` key there is sample data.
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some(raw) = raw_inline(line, "default") else {
+                continue;
+            };
+            // A block-scalar opener (`>`/`|`, optionally with a chomping indicator)
+            // carries its value on the following lines, not inline — skip it.
+            if raw.starts_with('>') || raw.starts_with('|') {
+                continue;
+            }
+            let c = indent(line);
+            if inside_example(i, c) {
+                continue;
+            }
+            if !sibling_is_ipv4_format(i, c) {
+                continue;
+            }
+            let value = raw.trim_matches('"').trim_matches('\'');
+            if !is_well_formed_ipv4(value) {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_ipv4_format_default_is_a_well_formed_ipv4() {
+        // Contract-harness invariant (OpenAPI 3.0.x / JSON-Schema structural rule): where
+        // a Schema Object declares an inline `default` beside a same-indent
+        // `format: ipv4`, the default MUST be a dotted-quad IPv4 address. A `default` is
+        // the schema's fall-back *instance*, so a value that is not a valid IPv4 address —
+        // a placeholder beside the format, an octet typo that overshoots 255, a dropped
+        // octet, or an IPv6 literal pasted into an IPv4 slot — is a self-contradictory
+        // schema whose own validator rejects the fall-back it pre-supplies, so a
+        // Redoc/Swagger form pre-fills an address control with an unusable value and a
+        // codegen client carries a value no `ipv4`-typed field (an `ipAddress`/
+        // `publicAddress`) can hold.
+        //
+        // The **`default` twin** of `every_ipv4_format_example_is_a_well_formed_ipv4` and
+        // the network-address member of the format-default family (date-time / date /
+        // int32 / int64 / double / float / uri / uri-reference / uuid already paired),
+        // carrying the format-default guard onto the device/endpoint address fields.
+        // Future-drift posture (like the uuid- and uri-default twins): the corpus declares
+        // several `format: ipv4` fields but pairs **none** with a `default` today (they
+        // carry examples, not defaults), so the guard asserts clean across all specs and
+        // holds the line against a future ipv4 default drifting to a placeholder or an
+        // out-of-range address; the synthetic unit body in
+        // `ipv4_format_default_extraction_rules` keeps the detection path live. Verified
+        // true across all mounted specs before asserting.
+        for api in APIS {
+            let offenders = ipv4_format_defaults_malformed(api.body);
+            assert!(
+                offenders.is_empty(),
+                "{} spec declares a `default` beside a same-indent `format: ipv4` that \
+                 is not a well-formed IPv4 address (a fall-back the format's own validator \
+                 would reject) at `default:` line(s): {:?}",
+                api.name,
+                offenders
+            );
+        }
+    }
+
+    #[test]
+    fn ipv4_format_default_extraction_rules() {
+        // Unit-cover `ipv4_format_defaults_malformed` so the contract test above can't
+        // pass vacuously and its detection is pinned (`is_well_formed_ipv4` itself is
+        // already covered by `ipv4_format_example_extraction_rules`).
+        //
+        // Extractor: a valid address beside a same-indent `format: ipv4` passes; an
+        // out-of-range octet, a wrong-shape address, and a value with the format *below*
+        // it (down-scan) are flagged; a value with no `format` sibling and one whose
+        // sibling is a *different* format (`ipv6`) are skipped; a default in one property
+        // never pairs with a *following* property's `format: ipv4` across the dedent; a
+        // block-scalar default is skipped; an inner `default` inside an outer `example:`
+        // payload is skipped; and a property literally named `default` (opening a block)
+        // is skipped.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    GoodIpv4:
+      type: string
+      format: ipv4
+      default: \"198.51.100.1\"
+    BadOctet:
+      type: string
+      format: ipv4
+      default: \"256.1.1.1\"
+    BadShape:
+      type: string
+      format: ipv4
+      default: \"1.2.3\"
+    FormatBelow:
+      type: string
+      default: nope
+      format: ipv4
+    NoFormat:
+      type: string
+      default: \"1.2.3.4\"
+    Ipv6Fmt:
+      type: string
+      format: ipv6
+      default: notanip
+    BlockDefault:
+      type: string
+      format: ipv4
+      default: |
+        1.2.3.4
+    Split:
+      type: object
+      properties:
+        a:
+          type: string
+          enum: [DAY, NIGHT]
+          default: DAY
+        b:
+          type: string
+          format: ipv4
+          default: \"10.0.0.1\"
+    InExample:
+      type: object
+      example:
+        format: ipv4
+        default: notanip
+    NamedDefault:
+      type: object
+      properties:
+        default:
+          type: string
+          format: ipv4
+";
+        // Flagged, in document order: BadOctet.default (line 21, `256.1.1.1` has an octet
+        // above 255), BadShape.default (line 25, `1.2.3` is only three octets), and
+        // FormatBelow.default (line 28, value `nope` with its `format: ipv4` a line below
+        // — down-scan pairs it). Not flagged: GoodIpv4 (valid `198.51.100.1`); NoFormat
+        // (no `format` sibling); Ipv6Fmt (sibling is `ipv6`, not `ipv4` — so its `notanip`
+        // is out of scope, the analogue of the int32/int64 and double/float mutual
+        // exclusions); BlockDefault (block-scalar opener `|`, no inline value);
+        // Split.a.default `DAY` (its only `format: ipv4` is the *following* property
+        // Split.b, past a dedent); Split.b.default (valid `10.0.0.1`); InExample's inner
+        // `default: notanip` (inside the outer `example:` payload); NamedDefault's
+        // `default:` property (opens a block, no inline value).
+        assert_eq!(ipv4_format_defaults_malformed(body), vec![21, 25, 28]);
+
+        // Non-vacuous floor (future-drift posture, mirroring the uuid- and uri-default
+        // twins): across every registered spec every `default` beside a same-indent
+        // `format: ipv4` is a well-formed IPv4 address (the invariant the contract test
+        // asserts). The corpus declares several `format: ipv4` fields (the device/endpoint
+        // address fields) but pairs **none** with a `default` in the *same* Schema Object
+        // today (they carry examples, not defaults) — so this asserts a clean `== 0`
+        // genuine-pair count and guards future drift; the synthetic body above is what
+        // keeps the detection path live. The pair count reuses the extractor's own
+        // **dedent-bounded** same-indent sibling scan — the genuine-Schema-Object pairing —
+        // rather than a crude window, and stays independent of the extractor's *validity*
+        // (`is_well_formed_ipv4`) comparison.
+        let mut ipv4_defaults = 0usize;
+        for api in APIS {
+            assert!(
+                ipv4_format_defaults_malformed(api.body).is_empty(),
+                "{}: every default beside a same-indent `format: ipv4` must be a \
+                 well-formed IPv4 address",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            let raw_inline = |l: &str, name: &str| -> Option<String> {
+                let (k, v) = l.trim_start().split_once(':')?;
+                if k.trim() != name {
+                    return None;
+                }
+                let v = v.split('#').next().unwrap_or(v).trim();
+                if v.is_empty() { None } else { Some(v.to_string()) }
+            };
+            // A genuine same-Schema-Object `format: ipv4` sibling of the `default` on line
+            // `i` (indent `c`): scan down through the object's block then up,
+            // dedent-bounded exactly like the extractor's `sibling_is_ipv4_format`, so a
+            // *following* property's `format: ipv4` past a dedent never counts.
+            let sibling_is_ipv4 = |i: usize, c: usize| -> bool {
+                let is_ipv4 = |l: &str| -> bool {
+                    raw_inline(l, "format")
+                        .map(|v| v.trim_matches('"').trim_matches('\'') == "ipv4")
+                        .unwrap_or(false)
+                };
+                let mut j = i + 1;
+                while j < lines.len() {
+                    let l = lines[j];
+                    if l.trim().is_empty() {
+                        j += 1;
+                        continue;
+                    }
+                    if indent(l) < c {
+                        break;
+                    }
+                    if indent(l) == c && is_ipv4(l) {
+                        return true;
+                    }
+                    j += 1;
+                }
+                let mut k = i;
+                while k > 0 {
+                    k -= 1;
+                    let l = lines[k];
+                    if l.trim().is_empty() {
+                        continue;
+                    }
+                    if indent(l) < c {
+                        break;
+                    }
+                    if indent(l) == c && is_ipv4(l) {
+                        return true;
+                    }
+                }
+                false
+            };
+            for (i, l) in lines.iter().enumerate() {
+                let Some(v) = raw_inline(l, "default") else {
+                    continue;
+                };
+                // Inline scalar only (skip block-scalar openers), mirroring the extractor
+                // so the floor counts exactly the pairs it inspects.
+                if v.starts_with('>') || v.starts_with('|') {
+                    continue;
+                }
+                let c = indent(l);
+                if sibling_is_ipv4(i, c) {
+                    ipv4_defaults += 1;
+                }
+            }
+        }
+        assert_eq!(
+            ipv4_defaults, 0,
+            "expected no genuine default + same-Schema-Object `format: ipv4` pairs across \
+             specs (the future-drift posture; a new pair means switch this guard to a \
+             `>= 1` floor like the example side), got {ipv4_defaults}"
+        );
+    }
+
     /// Whether `s` is a well-formed IPv6 address instance — the sample an OpenAPI
     /// `format: ipv6` field advertises. True iff `s` parses as an RFC 4291 IPv6
     /// address: eight `:`-separated groups of 1–4 hex digits, with at most one `::`
