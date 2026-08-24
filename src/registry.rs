@@ -53304,6 +53304,396 @@ components:
         );
     }
 
+    /// The 1-based line numbers, in document order, of every `default:` keyword whose inline scalar
+    /// value sits in a Schema Object declaring a *same-indent* 4-hex `pattern` `^[0-9a-fA-F]{4}$`
+    /// sibling yet is not 4 ASCII hex digits, without a YAML dep. The `default`-side twin of
+    /// `hex4_pattern_examples_malformed`: same scoping, keyed on `HEX4_PATTERN`, judged by
+    /// `matches_hex4_pattern`, but triggered by `default:` and skipping a block-scalar opener.
+    ///
+    /// In OpenAPI 3.0.x (JSON Schema) a `default` is the schema's fall-back *instance*, so a field
+    /// constrained by `pattern` MUST carry a default the pattern accepts. A 4-hex default that is
+    /// not exactly 4 hex digits — a digit dropped or added, or a non-hex character (`g`–`z`) pasted
+    /// beside the pattern — advertises a fall-back the schema's own validator rejects, so a
+    /// Redoc/Swagger form pre-fills a `panId` control with an unusable value and a codegen client's
+    /// generated instance carries a value the field can never legally hold. Like the 32-hex /
+    /// 16-hex / IMEI / ICCID patterns the 4-hex pattern carries no `format` sibling, so these
+    /// defaults are beyond the `format`-default family's reach.
+    ///
+    /// Scoping mirrors `hex16_pattern_defaults_malformed` exactly: only a `default` carrying an
+    /// inline scalar (a block/object default opens no inline value and is skipped) with a same-indent
+    /// `pattern` sibling *equal to* `HEX4_PATTERN` in the same Schema Object is inspected — the
+    /// sibling is scanned at the default's own indent, down through the object's block then up,
+    /// dedent-bounded, so a nested or *following* property's `pattern` never pairs. A `default:`
+    /// nested inside an outer `example:`/`examples:` payload (sample data, not a schema keyword) is
+    /// skipped. Only the 4-hex pattern is matched; the 16-hex (`^[0-9a-fA-F]{16}$`) and 32-hex
+    /// (`^[A-Fa-f0-9]{32}$`) patterns — hex but four and eight times the length — are a *different*
+    /// string and never pair.
+    fn hex4_pattern_defaults_malformed(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let raw_inline = |l: &str, name: &str| -> Option<String> {
+            let (k, v) = l.trim_start().split_once(':')?;
+            if k.trim() != name {
+                return None;
+            }
+            let v = v.split('#').next().unwrap_or(v).trim();
+            if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            }
+        };
+        // Whether a same-indent `pattern:` sibling of line `i` (indent `c`) in the same Schema
+        // Object equals the 4-hex pattern: scan down through the object's block then up,
+        // dedent-bounded so a nested or following object's `pattern` never pairs.
+        let sibling_is_hex4_pattern = |i: usize, c: usize| -> bool {
+            let is_hex4_pattern = |l: &str| -> bool {
+                raw_inline(l, "pattern")
+                    .map(|v| v.trim_matches('"').trim_matches('\'') == HEX4_PATTERN)
+                    .unwrap_or(false)
+            };
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_hex4_pattern(l) {
+                    return true;
+                }
+                j += 1;
+            }
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_hex4_pattern(l) {
+                    return true;
+                }
+            }
+            false
+        };
+        // True when line `i` (indent `c`) sits inside an outer `example:`/`examples:` payload —
+        // some enclosing container key up the indent ladder is `example`/`examples`, so an inner
+        // `default` key there is sample data, not a schema keyword.
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some(raw) = raw_inline(line, "default") else {
+                continue;
+            };
+            // A block-scalar opener (`>`/`|`, optionally with a chomping indicator) carries its
+            // value on the following lines, not inline — skip it.
+            if raw.starts_with('>') || raw.starts_with('|') {
+                continue;
+            }
+            let c = indent(line);
+            if inside_example(i, c) {
+                continue;
+            }
+            if !sibling_is_hex4_pattern(i, c) {
+                continue;
+            }
+            let value = raw.trim_matches('"').trim_matches('\'');
+            if !matches_hex4_pattern(value) {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_hex4_pattern_default_conforms_to_the_hex4_pattern() {
+        // Contract-harness invariant (OpenAPI 3.0.x / JSON-Schema structural rule): where a Schema
+        // Object declares an inline `default` beside a same-indent 4-hex `pattern`
+        // (`^[0-9a-fA-F]{4}$`, the network-access `panId` field — a 4-hex-digit Thread PAN ID /
+        // 16-bit identifier), the default MUST match that pattern. A `default` is the schema's
+        // fall-back *instance*, so a value with a hex digit dropped or added, or a non-hex
+        // character, pasted beside the pattern is a self-contradictory schema whose own validator
+        // rejects the fall-back it pre-supplies, so a Redoc/Swagger form pre-fills a `panId`
+        // control with an unusable value and a codegen client's generated instance carries a value
+        // no field constrained by this pattern can hold.
+        //
+        // The **`default` twin** of `every_hex4_pattern_example_conforms_to_the_hex4_pattern` and
+        // the twenty-first member of the `pattern`-*default* family after the E.164 / IMEI / ICCID /
+        // name / token / 32-hex / MAC / result-code / UUID / email / full-date / semver / geohash /
+        // app-name / DNS-label / TAC / IMEISV / DPV-purpose / 16-hex / bounded-any-char (text256)
+        // default twins — and the **third fixed-length hex-digit run** after 32-hex and 16-hex, the
+        // first pinning exactly 4 hex digits. Each family member is keyed on the exact pattern
+        // string, so neither the 32-hex default member (keyed on `^[A-Fa-f0-9]{32}$`, length 32)
+        // nor the 16-hex default member (`^[0-9a-fA-F]{16}$`, length 16) ever pairs with
+        // `^[0-9a-fA-F]{4}$` — the three share an alphabet but not a length, so a 3-/5-char or
+        // non-hex value beside this pattern is the fault neither of the longer hex members can
+        // catch, and a value like `d63e` fits none of the longer runs. It also reaches past the
+        // generic length-bounds family: the `panId` field carries a `maxLength: 4` but no
+        // `minLength`, so a length-bounds default check never floors a 3-char default and checks
+        // character count rather than hex-ness — both of which this pattern pins. Like the 32-hex /
+        // 16-hex / IMEI / ICCID patterns the 4-hex pattern carries no `format` sibling, so these
+        // defaults are beyond the `format`-default family's reach. Future-drift posture (like the
+        // twenty prior default twins): the corpus declares the 4-hex `pattern` (Network Access
+        // Domains, on the `panId` schema) but pairs it with an `example`, **not** a `default`, so
+        // the guard asserts clean across all specs today and holds the line against a future 4-hex
+        // default drifting to a wrong-length or non-hex value; the synthetic unit body in
+        // `hex4_pattern_default_extraction_rules` keeps the detection path live. Verified true
+        // across all mounted specs before asserting.
+        for api in APIS {
+            let offenders = hex4_pattern_defaults_malformed(api.body);
+            assert!(
+                offenders.is_empty(),
+                "{} spec declares a `default` beside a same-indent 4-hex \
+                 `pattern: '^[0-9a-fA-F]{{4}}$'` that does not match that pattern (a fall-back the \
+                 pattern's own validator would reject) at `default:` line(s): {:?}",
+                api.name,
+                offenders
+            );
+        }
+    }
+
+    #[test]
+    fn hex4_pattern_default_extraction_rules() {
+        // Unit-cover `hex4_pattern_defaults_malformed` so the contract test above can't pass
+        // vacuously and its detection is pinned (`matches_hex4_pattern` itself is already covered by
+        // `hex4_pattern_example_extraction_rules`).
+        //
+        // Extractor: a valid quoted (`d63e`) and a valid unquoted (`D63E`) 4-hex default beside a
+        // same-indent 4-hex `pattern` pass; a too-few-chars (2 hex), a too-many-chars (5 hex), and a
+        // non-hex-tail value are flagged; a bad value with the pattern *below* it (down-scan) is
+        // flagged; a value with no `pattern` sibling and one whose sibling is a *different* pattern
+        // (the 16-hex `^[0-9a-fA-F]{16}$`, same alphabet but four times the length) are skipped; a
+        // block-scalar default is skipped; a default in one property never pairs with a *following*
+        // property's 4-hex `pattern` across the dedent; an inner `default` inside an outer
+        // `example:` payload is skipped; and a property literally named `default` (opening a block)
+        // is skipped.
+        let body = format!(
+            "openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    GoodQuoted:
+      type: string
+      pattern: '{p}'
+      default: \"d63e\"
+    GoodUnquoted:
+      type: string
+      pattern: '{p}'
+      default: D63E
+    TooShort:
+      type: string
+      pattern: '{p}'
+      default: \"d6\"
+    TooLong:
+      type: string
+      pattern: '{p}'
+      default: \"d63ea\"
+    NonHex:
+      type: string
+      pattern: '{p}'
+      default: \"d63g\"
+    PatternBelow:
+      type: string
+      default: \"nope\"
+      pattern: '{p}'
+    NoPattern:
+      type: string
+      default: \"d63e-but-no-pattern\"
+    OtherPattern:
+      type: string
+      pattern: '{hex16}'
+      default: \"d63e8e3e495ebbc3\"
+    BlockDefault:
+      type: string
+      pattern: '{p}'
+      default: |
+        d63e
+    InExample:
+      type: object
+      example:
+        pattern: '{p}'
+        default: \"bad\"
+    Split:
+      type: object
+      properties:
+        a:
+          default: \"nope\"
+        b:
+          type: string
+          pattern: '{p}'
+    NamedDefault:
+      type: object
+      properties:
+        default:
+          type: string
+          pattern: '{p}'
+",
+            p = HEX4_PATTERN,
+            hex16 = HEX16_PATTERN
+        );
+        // Flagged, in document order: TooShort.default (`d6`, 2 hex); TooLong.default (`d63ea`, 5
+        // hex); NonHex.default (an embedded `g`); PatternBelow.default (`nope` with the 4-hex
+        // `pattern` a line below — down-scan pairs it). Not flagged: GoodQuoted / GoodUnquoted (both
+        // valid 4-hex); NoPattern (no `pattern` sibling); OtherPattern (sibling is the 16-hex
+        // pattern, not 4-hex — a 16-hex value there is out of scope, and shares 4-hex's alphabet but
+        // not its length, proving exact-pattern keying); BlockDefault (block-scalar opener `|`, no
+        // inline value); InExample's inner `default: "bad"` (sits inside the outer `example:`
+        // payload); Split.a.default, whose only 4-hex `pattern` is in the following property Split.b
+        // past a dedent; and NamedDefault's `default:` property opening a block (no inline value).
+        let flagged = hex4_pattern_defaults_malformed(&body);
+        let flagged_props: Vec<&str> = flagged
+            .iter()
+            .map(|&n| {
+                let lines: Vec<&str> = body.lines().collect();
+                let mut k = n - 1;
+                loop {
+                    let l = lines[k];
+                    let ind = l.len() - l.trim_start().len();
+                    if ind == 4 && l.trim_end().ends_with(':') {
+                        break l.trim().trim_end_matches(':');
+                    }
+                    if k == 0 {
+                        break "";
+                    }
+                    k -= 1;
+                }
+            })
+            .collect();
+        assert_eq!(
+            flagged_props,
+            vec!["TooShort", "TooLong", "NonHex", "PatternBelow"]
+        );
+
+        // Non-vacuous floor (future-drift posture, mirroring the twenty prior `pattern`-default
+        // twins): across every registered spec every `default` beside a same-indent 4-hex `pattern`
+        // matches it (the invariant the contract test asserts). The corpus declares the 4-hex
+        // `pattern` on the Network Access Domains `panId` schema but pairs it with an `example`,
+        // **not** a `default`, in the *same* Schema Object today — so this asserts a clean `== 0`
+        // genuine-pair count and guards future drift; the synthetic body above keeps the detection
+        // path live. The pair count reuses the extractor's own **dedent-bounded** same-indent
+        // sibling scan — the genuine-Schema-Object pairing — rather than a crude window, and stays
+        // independent of the extractor's *validity* (`matches_hex4_pattern`) comparison.
+        let mut hex4_defaults = 0usize;
+        for api in APIS {
+            assert!(
+                hex4_pattern_defaults_malformed(api.body).is_empty(),
+                "{}: every default beside a same-indent 4-hex `pattern` must match it",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            let raw_inline = |l: &str, name: &str| -> Option<String> {
+                let (k, v) = l.trim_start().split_once(':')?;
+                if k.trim() != name {
+                    return None;
+                }
+                let v = v.split('#').next().unwrap_or(v).trim();
+                if v.is_empty() { None } else { Some(v.to_string()) }
+            };
+            // A genuine same-Schema-Object 4-hex `pattern` sibling of the `default` on line `i`
+            // (indent `c`): scan down through the object's block then up, dedent-bounded exactly like
+            // the extractor's `sibling_is_hex4_pattern`, so a *following* property's 4-hex `pattern`
+            // past a dedent never counts.
+            let sibling_is_hex4 = |i: usize, c: usize| -> bool {
+                let is_hex4 = |l: &str| -> bool {
+                    raw_inline(l, "pattern")
+                        .map(|v| v.trim_matches('"').trim_matches('\'') == HEX4_PATTERN)
+                        .unwrap_or(false)
+                };
+                let mut j = i + 1;
+                while j < lines.len() {
+                    let l = lines[j];
+                    if l.trim().is_empty() {
+                        j += 1;
+                        continue;
+                    }
+                    if indent(l) < c {
+                        break;
+                    }
+                    if indent(l) == c && is_hex4(l) {
+                        return true;
+                    }
+                    j += 1;
+                }
+                let mut k = i;
+                while k > 0 {
+                    k -= 1;
+                    let l = lines[k];
+                    if l.trim().is_empty() {
+                        continue;
+                    }
+                    if indent(l) < c {
+                        break;
+                    }
+                    if indent(l) == c && is_hex4(l) {
+                        return true;
+                    }
+                }
+                false
+            };
+            for (i, l) in lines.iter().enumerate() {
+                let Some(v) = raw_inline(l, "default") else {
+                    continue;
+                };
+                // Inline scalar only (skip block-scalar openers), mirroring the extractor so the
+                // floor counts exactly the pairs it inspects.
+                if v.starts_with('>') || v.starts_with('|') {
+                    continue;
+                }
+                let c = indent(l);
+                if sibling_is_hex4(i, c) {
+                    hex4_defaults += 1;
+                }
+            }
+        }
+        assert_eq!(
+            hex4_defaults, 0,
+            "expected no genuine default + same-Schema-Object 4-hex `pattern` pairs across specs \
+             (the future-drift posture; a new pair means switch this guard to a `>= 1` floor like \
+             the example side), got {hex4_defaults}"
+        );
+    }
+
     const TEXT512_PATTERN: &str = r"^[\s\S]{0,512}$";
 
     /// True when `s` matches the bounded-any-char `pattern` `^[\s\S]{0,512}$` exactly: the

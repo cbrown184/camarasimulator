@@ -3335,6 +3335,24 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - a **4-hex `pattern`-`default` conformance** contract test (`src/registry.rs`
+    `every_hex4_pattern_default_conforms_to_the_hex4_pattern`) — the `default`-side twin of
+    `every_hex4_pattern_example_conforms_to_the_hex4_pattern` and the **twenty-first member of the
+    `pattern`-default family** after E.164 / IMEI / ICCID / name / token / 32-hex / MAC /
+    result-code / UUID / email / full-date / semver / geohash / app-name / DNS-label / TAC / IMEISV /
+    DPV-purpose / 16-hex / text256, the **third fixed-length hex-digit run** after 32-hex and 16-hex
+    (`^[0-9a-fA-F]{4}$`, the Network Access Domains `panId` field — a 4-hex-digit Thread PAN ID). Each
+    member is keyed on the exact pattern string, so neither the 32-hex (`^[A-Fa-f0-9]{32}$`) nor the
+    16-hex (`^[0-9a-fA-F]{16}$`) default member pairs with a 4-hex default — they share an alphabet
+    but not a length, so a 3-/5-char or non-hex value beside this pattern is the fault neither longer
+    hex member catches. Reaches past the length-bounds family too (`maxLength: 4` but no `minLength`,
+    char-count not hex-ness) and carries no `format` sibling. New pure `hex4_pattern_defaults_malformed`
+    (the `hex16_pattern_defaults_malformed` shape keyed on `HEX4_PATTERN` equality + judged by
+    `matches_hex4_pattern`; trigger key `default:`, block-scalar opener skipped, dedent-bounded
+    same-indent sibling scan, in-`example:` payload excluded). Corpus declares the 4-hex `pattern`
+    (Network Access Domains `panId`) but pairs it with an `example`, **not** a `default` → asserts a
+    clean `== 0` genuine-pair count (future-drift posture, mirroring the twenty prior default twins) +
+    guards future drift. Unit-covered (`hex4_pattern_default_extraction_rules`). Test-only, no spec change.
   - a **bounded-any-char (text256) `pattern`-`default` conformance** contract test
     (`src/registry.rs` `every_text256_pattern_default_conforms_to_the_text256_pattern`) — the
     `default`-side twin of `every_text256_pattern_example_conforms_to_the_text256_pattern` and the
@@ -6687,6 +6705,35 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-24 — Contract-test harness: guard that every **4-hex `pattern` `default` matches the
+  pattern** (`src/registry.rs` `every_hex4_pattern_default_conforms_to_the_hex4_pattern`). The
+  **twenty-first member of the `pattern`-default family** after E.164, IMEI, ICCID, name, token,
+  32-hex, MAC, result-code, UUID, email, full-date, semver, geohash, app-name, DNS-label, TAC,
+  IMEISV, DPV-purpose, 16-hex, and bounded-any-char (text256) — the `default`-side twin of
+  `every_hex4_pattern_example_conforms_to_the_hex4_pattern` (4-hex pattern `^[0-9a-fA-F]{4}$` —
+  Network Access Domains' `panId` field, a 4-hex-digit Thread PAN ID / 16-bit identifier) and the
+  **third fixed-length hex-digit run** after 32-hex and 16-hex, the first pinning exactly 4 hex
+  digits. Each family member is keyed on the exact pattern string, so neither the 32-hex default
+  member (`^[A-Fa-f0-9]{32}$`, length 32) nor the 16-hex default member (`^[0-9a-fA-F]{16}$`,
+  length 16) ever pairs with a 4-hex default: the three share an alphabet but not a length, so a
+  3-/5-char or non-hex value beside this pattern is the fault neither longer hex member can catch.
+  It also reaches past the generic length-bounds family (`panId` carries `maxLength: 4` but no
+  `minLength`, and a length-bounds check counts chars, not hex-ness). Like the 32-hex/16-hex/IMEI/
+  ICCID patterns the 4-hex pattern carries **no** `format` sibling, so this default is beyond the
+  `format`-default family's reach. New pure `hex4_pattern_defaults_malformed` (the
+  `hex16_pattern_defaults_malformed` shape keyed on `HEX4_PATTERN` equality + judged by
+  `matches_hex4_pattern`, both already present from the example side; trigger key `default:`,
+  block-scalar opener skipped, dedent-bounded same-indent sibling scan, in-`example:` payload
+  excluded). Surveyed the corpus first — the single 4-hex `pattern` field (Network Access Domains
+  `panId`) pairs with an `example`, **not** a `default` → asserts a clean `== 0` genuine-pair count
+  (future-drift posture, mirroring the twenty prior default twins) + guards future drift; floor
+  reuses the dedent-bounded sibling scan. Unit-covered (`hex4_pattern_default_extraction_rules`:
+  valid quoted (`d63e`) / unquoted (`D63E`) cleared; too-few (2-hex) / too-many (5-hex) / non-hex
+  (`g`) / pattern-below flagged as `[TooShort, TooLong, NonHex, PatternBelow]`; no-pattern /
+  different-pattern (16-hex `^[0-9a-fA-F]{16}$`) / block-scalar / in-`example:` /
+  following-property-across-dedent / property-named-`default` skipped). Test-only, no spec change.
+  `cargo test` 3008 pass (+2); `cargo build --release` clean, no new dep. — binary (release):
+  5,323,160 bytes (~5.08 MiB; unchanged by a test-only change).
 - 2026-08-24 — Contract-test harness: guard that every **bounded-any-char (text256) `pattern`
   `default` matches the pattern** (`src/registry.rs`
   `every_text256_pattern_default_conforms_to_the_text256_pattern`). The **twentieth member of the
