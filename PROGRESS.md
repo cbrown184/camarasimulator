@@ -3335,6 +3335,26 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - a **correlator `pattern`-`default` conformance** contract test (`src/registry.rs`
+    `every_correlator_pattern_default_conforms_to_the_correlator_pattern`) — the `default`-side
+    twin of `every_correlator_pattern_example_conforms_to_the_correlator_pattern` and the
+    **twenty-seventh member of the `pattern`-default family** after E.164 / IMEI / ICCID / name /
+    token / 32-hex / MAC / result-code / UUID / email / full-date / semver / geohash / app-name /
+    DNS-label / TAC / IMEISV / DPV-purpose / 16-hex / text256 / 4-hex / text512 / version-4-UUID /
+    OTP-template / region / client-id, over the iot-sim-fraud-prevention `XCorrelator`
+    (`x-correlator` header) pattern `^[a-zA-Z0-9-_:;.\/<>{}]{0,256}$`. **First default member over
+    a bounded *positive restricted* ASCII alphabet** (alphanumeric + ten punctuation marks, 0–256
+    length): the two `[\s\S]{0,N}` bounded-any-char default members (256-/512-wide) admit the
+    space/`@`/`#`/`,` this class forbids, so a forbidden-character default is a fault only this
+    member catches (members key on the exact pattern string, so they never cross-pair); no `format`
+    sibling, so beyond the `format`-default family. New pure `correlator_pattern_defaults_malformed`
+    (the `client_id_pattern_defaults_malformed` shape keyed on `CORRELATOR_PATTERN` + judged by
+    `matches_correlator_pattern`, both already present from the example side; trigger key `default:`,
+    block-scalar opener skipped, dedent-bounded same-indent sibling scan, in-`example:` payload
+    excluded). Corpus declares the correlator `pattern` (the `XCorrelator` field) but pairs it with
+    an `example`, **not** a `default` → asserts a clean `== 0` genuine-pair count (future-drift
+    posture, mirroring the twenty-six prior default twins) + guards future drift. Unit-covered
+    (`correlator_pattern_default_extraction_rules`). Test-only, no spec change.
   - a **client-id `pattern`-`default` conformance** contract test (`src/registry.rs`
     `every_client_id_pattern_default_conforms_to_the_client_id_pattern`) — the `default`-side
     twin of `every_client_id_pattern_example_conforms_to_the_client_id_pattern` and the
@@ -6810,6 +6830,28 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-24 — Contract-test harness: guard that every **correlator `pattern` `default` matches the
+  pattern** (`src/registry.rs` `every_correlator_pattern_default_conforms_to_the_correlator_pattern`).
+  The **twenty-seventh member of the `pattern`-default family** — the `default`-side twin of
+  `every_correlator_pattern_example_conforms_to_the_correlator_pattern`, over the
+  iot-sim-fraud-prevention `XCorrelator` (`x-correlator` header) pattern
+  `^[a-zA-Z0-9-_:;.\/<>{}]{0,256}$`. **First default member over a bounded positive restricted ASCII
+  alphabet** (alphanumeric + ten punctuation marks, 0–256 length): the two `[\s\S]{0,N}`
+  bounded-any-char default members (256-/512-wide) admit the space/`@`/`#`/`,` this class forbids, so
+  a forbidden-character default is the fault only this member catches; members key on the exact
+  pattern string, so they never cross-pair, and the field carries no `format` sibling (beyond the
+  `format`-default family). New pure `correlator_pattern_defaults_malformed` (the
+  `client_id_pattern_defaults_malformed` shape keyed on `CORRELATOR_PATTERN` + judged by
+  `matches_correlator_pattern`, both already present from the example side; `default:` trigger,
+  block-scalar opener skipped, dedent-bounded same-indent sibling scan, in-`example:` payload
+  excluded). Surveyed the corpus — the correlator `pattern` (the one `XCorrelator` field) pairs with
+  an `example`, **not** a `default` → asserts a clean `== 0` genuine-pair count (future-drift posture,
+  mirroring the twenty-six prior default twins) + guards future drift. Unit-covered
+  (`correlator_pattern_default_extraction_rules`: valid quoted/unquoted cleared; space/`@`/`,`/
+  pattern-below flagged; no-pattern / any-char-bounded-sibling / block-scalar / in-`example:` /
+  following-property-across-dedent / property-named-`default` skipped). Test-only, no spec change.
+  `cargo test` 3020 pass (+2); `cargo build --release` clean, no new dep. — binary (release):
+  5,323,160 bytes (~5.08 MiB; unchanged by a test-only change).
 - 2026-08-24 — Contract-test harness: guard that every **client-id `pattern` `default` matches the
   pattern** (`src/registry.rs` `every_client_id_pattern_default_conforms_to_the_client_id_pattern`).
   The **twenty-sixth member of the `pattern`-default family** after E.164, IMEI, ICCID, name,

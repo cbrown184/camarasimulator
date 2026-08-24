@@ -59352,6 +59352,403 @@ components:
         );
     }
 
+    /// The 1-based line numbers, in document order, of every `default:` keyword whose inline
+    /// scalar value sits in a Schema Object declaring a *same-indent* correlator `pattern` sibling
+    /// (`^[a-zA-Z0-9-_:;.\/<>{}]{0,256}$`) yet is not a value that pattern accepts, without a YAML
+    /// dep. The **`default`-side twin** of `correlator_pattern_examples_malformed` and the
+    /// twenty-seventh member of the `pattern`-*default* family, keyed on `CORRELATOR_PATTERN` and
+    /// judged by `matches_correlator_pattern`.
+    ///
+    /// In OpenAPI 3.0.x (JSON Schema) a `default` is the schema's fall-back *instance*, so a field
+    /// constrained by `pattern` MUST carry a default the pattern accepts (the same Spectral
+    /// `oas3-valid-schema-example` posture that validates an example against its schema applies to
+    /// a `default` — it is a schema-level instance too). A correlator default with a character
+    /// outside the restricted alphabet (a space, `@`, `#`, `,`, …) or longer than 256 characters
+    /// advertises a fall-back the schema's own validator rejects, so a Redoc/Swagger form pre-fills
+    /// an `x-correlator` control with an unusable value and a codegen client carries a value no
+    /// field constrained by this pattern can legally hold. Like the correlator-example twin the
+    /// `XCorrelator` field carries no `format` sibling (`type: string` with only `description` +
+    /// `example` + `pattern`), so such a default is otherwise unchecked; and — the **first default
+    /// member over a bounded *positive restricted* ASCII alphabet** — a character outside the set
+    /// is a fault the two `[\s\S]{0,N}` bounded-any-char default members (256- and 512-wide) and
+    /// the no-semicolon complement class *admit*, so it is caught only here; the pattern strings
+    /// differ so they never cross-pair.
+    ///
+    /// Structurally identical to `client_id_pattern_defaults_malformed`, keyed on
+    /// `CORRELATOR_PATTERN`: the trigger key is `default:` and a block-scalar opener
+    /// (`default: >-` / `default: |`) is skipped (it opens no inline value). Scoping is otherwise
+    /// unchanged: only a `default` carrying an inline scalar with a same-indent `pattern` sibling
+    /// *equal to* `CORRELATOR_PATTERN` in the same Schema Object is inspected — the sibling is
+    /// scanned at the default's own indent, down through the object's block then up, dedent-bounded,
+    /// so a nested or following object's `pattern` never pairs (in particular the any-char bounded
+    /// pattern `^[\s\S]{0,256}$`, which admits a space this alphabet forbids, is a *different*
+    /// pattern and never pairs). A `default:` nested inside an outer `example:`/`examples:` payload
+    /// (sample data, not a schema keyword) is skipped.
+    fn correlator_pattern_defaults_malformed(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let raw_inline = |l: &str, name: &str| -> Option<String> {
+            let (k, v) = l.trim_start().split_once(':')?;
+            if k.trim() != name {
+                return None;
+            }
+            let v = v.split('#').next().unwrap_or(v).trim();
+            if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            }
+        };
+        // Whether a same-indent `pattern:` sibling of line `i` (indent `c`) in the same Schema
+        // Object equals the correlator pattern: scan down through the object's block then up,
+        // dedent-bounded so a nested or following object's `pattern` never pairs.
+        let sibling_is_correlator_pattern = |i: usize, c: usize| -> bool {
+            let is_correlator_pattern = |l: &str| -> bool {
+                raw_inline(l, "pattern")
+                    .map(|v| v.trim_matches('"').trim_matches('\'') == CORRELATOR_PATTERN)
+                    .unwrap_or(false)
+            };
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_correlator_pattern(l) {
+                    return true;
+                }
+                j += 1;
+            }
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_correlator_pattern(l) {
+                    return true;
+                }
+            }
+            false
+        };
+        // True when line `i` (indent `c`) sits inside an outer `example:`/`examples:` payload —
+        // some enclosing container key up the indent ladder is `example`/`examples`, so an inner
+        // `default` key there is sample data.
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some(raw) = raw_inline(line, "default") else {
+                continue;
+            };
+            // A block-scalar opener (`>`/`|`, optionally with a chomping indicator) carries its
+            // value on the following lines, not inline — skip it.
+            if raw.starts_with('>') || raw.starts_with('|') {
+                continue;
+            }
+            let c = indent(line);
+            if inside_example(i, c) {
+                continue;
+            }
+            if !sibling_is_correlator_pattern(i, c) {
+                continue;
+            }
+            let value = raw.trim_matches('"').trim_matches('\'');
+            if !matches_correlator_pattern(value) {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_correlator_pattern_default_conforms_to_the_correlator_pattern() {
+        // Contract-harness invariant (OpenAPI 3.0.x / JSON-Schema structural rule): where a Schema
+        // Object declares an inline `default` beside a same-indent correlator `pattern`
+        // (`^[a-zA-Z0-9-_:;.\/<>{}]{0,256}$`, the bounded correlation-id shape the
+        // iot-sim-fraud-prevention `XCorrelator` field — an `x-correlator` header value — uses),
+        // the default MUST match that pattern. A `default` is the schema's fall-back *instance*, so
+        // a value with a character outside the restricted alphabet (a space, `@`, `#`, `,`, …) or
+        // longer than 256 characters is a self-contradictory schema whose own validator rejects the
+        // fall-back it pre-supplies, so a Redoc/Swagger form pre-fills an `x-correlator` control
+        // with an unusable value and a codegen client's generated instance carries a value no field
+        // constrained by this pattern can legally hold.
+        //
+        // The **`default` twin** of
+        // `every_correlator_pattern_example_conforms_to_the_correlator_pattern` and the
+        // twenty-seventh member of the `pattern`-*default* family after E.164 / IMEI / ICCID /
+        // name / token / 32-hex / MAC / result-code / UUID / email / full-date / semver / geohash /
+        // app-name / DNS-label / TAC / IMEISV / DPV-purpose / 16-hex / text256 / 4-hex / text512 /
+        // version-4-UUID / OTP-template / region / client-id — the **first default member over a
+        // bounded positive restricted ASCII alphabet** (a fixed alphanumeric-plus-ten-punctuation
+        // class with a 0–256 length window). The nearest default neighbours are the two
+        // `[\s\S]{0,N}` bounded-any-char members (256- and 512-wide): each admits the space / `@` /
+        // `#` / `,` this alphabet forbids, so a character outside the restricted set — legal under
+        // those members — is the fault only this member can catch, and the pattern strings differ
+        // so they never cross-pair. Carries no `format` sibling, so beyond the `format`-default
+        // family. Future-drift posture (like the twenty-six prior default twins): the corpus
+        // declares the correlator `pattern` (the iot-sim-fraud-prevention `XCorrelator` field) but
+        // pairs it with an `example`, **not** a `default` today, so the guard asserts clean across
+        // all specs and holds the line against a future `x-correlator` default drifting to a
+        // forbidden-character or over-length value; the synthetic unit body in
+        // `correlator_pattern_default_extraction_rules` keeps the detection path live. Verified
+        // true across all mounted specs before asserting.
+        for api in APIS {
+            let offenders = correlator_pattern_defaults_malformed(api.body);
+            assert!(
+                offenders.is_empty(),
+                "{} spec declares a `default` beside a same-indent correlator \
+                 `pattern` (a bounded `[a-zA-Z0-9-_:;.\\/<>{{}}]{{0,256}}` alphabet) that does not \
+                 match that pattern (a fall-back the pattern's own validator would reject) at \
+                 `default:` line(s): {:?}",
+                api.name,
+                offenders
+            );
+        }
+    }
+
+    #[test]
+    fn correlator_pattern_default_extraction_rules() {
+        // Unit-cover `correlator_pattern_defaults_malformed` so the contract test above can't pass
+        // vacuously and its detection is pinned (`matches_correlator_pattern` itself is already
+        // covered by `correlator_pattern_example_extraction_rules`).
+        //
+        // Extractor: a valid quoted correlator value and a valid unquoted correlator value beside a
+        // same-indent correlator `pattern` pass; space-, `@`-, and `,`-bearing values are flagged
+        // (all forbidden by the restricted alphabet); a bad value with the pattern *below* it
+        // (down-scan) is flagged; a value with no `pattern` sibling and one whose sibling is the
+        // *closely-related* any-char bounded pattern `^[\s\S]{0,256}$` (which admits a space) are
+        // skipped; a block-scalar default is skipped; a default in one property never pairs with a
+        // *following* property's correlator `pattern` across the dedent; an inner `default` inside
+        // an outer `example:` payload is skipped; and a property literally named `default` (opening
+        // a block) is skipped.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    GoodQuoted:
+      type: string
+      pattern: ^[a-zA-Z0-9-_:;.\\/<>{}]{0,256}$
+      default: \"req:1;a-b.c/d_2<e>\"
+    GoodUnquoted:
+      type: string
+      pattern: ^[a-zA-Z0-9-_:;.\\/<>{}]{0,256}$
+      default: 123e4567-e89b-12d3-a456-426614174000
+    HasSpace:
+      type: string
+      pattern: ^[a-zA-Z0-9-_:;.\\/<>{}]{0,256}$
+      default: \"a b\"
+    HasAt:
+      type: string
+      pattern: ^[a-zA-Z0-9-_:;.\\/<>{}]{0,256}$
+      default: \"a@b\"
+    HasComma:
+      type: string
+      pattern: ^[a-zA-Z0-9-_:;.\\/<>{}]{0,256}$
+      default: \"a,b\"
+    PatternBelow:
+      type: string
+      default: \"bad value\"
+      pattern: ^[a-zA-Z0-9-_:;.\\/<>{}]{0,256}$
+    NoPattern:
+      type: string
+      default: \"a b\"
+    OtherPattern:
+      type: string
+      pattern: ^[\\s\\S]{0,256}$
+      default: \"a b\"
+    BlockDefault:
+      type: string
+      pattern: ^[a-zA-Z0-9-_:;.\\/<>{}]{0,256}$
+      default: |
+        a b
+    InExample:
+      type: object
+      example:
+        pattern: ^[a-zA-Z0-9-_:;.\\/<>{}]{0,256}$
+        default: \"bad thing\"
+    Split:
+      type: object
+      properties:
+        a:
+          default: \"bad value\"
+        b:
+          type: string
+          pattern: ^[a-zA-Z0-9-_:;.\\/<>{}]{0,256}$
+    NamedDefault:
+      type: object
+      properties:
+        default:
+          type: string
+          pattern: ^[a-zA-Z0-9-_:;.\\/<>{}]{0,256}$
+";
+        // Flagged, in document order: HasSpace.default (a space), HasAt.default (an `@`),
+        // HasComma.default (a comma), and PatternBelow.default (value `bad value` with a space, its
+        // correlator `pattern` a line below — down-scan pairs it). Not flagged:
+        // GoodQuoted/GoodUnquoted (valid correlator values); NoPattern (no `pattern` sibling);
+        // OtherPattern (sibling is the any-char bounded pattern `^[\s\S]{0,256}$`, not the
+        // correlator pattern — its space-bearing default is a valid text value and never inspected
+        // here, proving the two never cross-pair); BlockDefault (block-scalar opener `|`, no inline
+        // value); InExample's inner `default: \"bad thing\"` (sits inside the outer `example:`
+        // payload); Split.a.default, whose only correlator `pattern` is in the following property
+        // Split.b past a dedent; and NamedDefault's `default:` property opening a block (no inline
+        // value).
+        let flagged = correlator_pattern_defaults_malformed(body);
+        let flagged_props: Vec<&str> = flagged
+            .iter()
+            .map(|&n| {
+                let lines: Vec<&str> = body.lines().collect();
+                let mut k = n - 1;
+                loop {
+                    let l = lines[k];
+                    let ind = l.len() - l.trim_start().len();
+                    if ind == 4 && l.trim_end().ends_with(':') {
+                        break l.trim().trim_end_matches(':');
+                    }
+                    if k == 0 {
+                        break "";
+                    }
+                    k -= 1;
+                }
+            })
+            .collect();
+        assert_eq!(
+            flagged_props,
+            vec!["HasSpace", "HasAt", "HasComma", "PatternBelow"]
+        );
+
+        // Non-vacuous floor (future-drift posture, mirroring the twenty-six prior default twins):
+        // across every registered spec every `default` beside a same-indent correlator `pattern`
+        // matches it (the invariant the contract test asserts). The corpus declares the correlator
+        // `pattern` (the iot-sim-fraud-prevention `XCorrelator` field) but pairs it with an
+        // `example`, **not** a `default` in the *same* Schema Object today — so this asserts a clean
+        // `== 0` genuine-pair count and guards future drift; the synthetic body above keeps the
+        // detection path live. The pair count reuses the extractor's own **dedent-bounded**
+        // same-indent sibling scan — the genuine-Schema-Object pairing — rather than a crude
+        // window, and stays independent of the extractor's *validity* (`matches_correlator_pattern`)
+        // comparison.
+        let mut correlator_defaults = 0usize;
+        for api in APIS {
+            assert!(
+                correlator_pattern_defaults_malformed(api.body).is_empty(),
+                "{}: every default beside a same-indent correlator `pattern` must match it",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            let raw_inline = |l: &str, name: &str| -> Option<String> {
+                let (k, v) = l.trim_start().split_once(':')?;
+                if k.trim() != name {
+                    return None;
+                }
+                let v = v.split('#').next().unwrap_or(v).trim();
+                if v.is_empty() { None } else { Some(v.to_string()) }
+            };
+            // A genuine same-Schema-Object correlator `pattern` sibling of the `default` on line
+            // `i` (indent `c`): scan down through the object's block then up, dedent-bounded exactly
+            // like the extractor's `sibling_is_correlator_pattern`, so a *following* property's
+            // correlator `pattern` past a dedent never counts.
+            let sibling_is_correlator = |i: usize, c: usize| -> bool {
+                let is_correlator = |l: &str| -> bool {
+                    raw_inline(l, "pattern")
+                        .map(|v| v.trim_matches('"').trim_matches('\'') == CORRELATOR_PATTERN)
+                        .unwrap_or(false)
+                };
+                let mut j = i + 1;
+                while j < lines.len() {
+                    let l = lines[j];
+                    if l.trim().is_empty() {
+                        j += 1;
+                        continue;
+                    }
+                    if indent(l) < c {
+                        break;
+                    }
+                    if indent(l) == c && is_correlator(l) {
+                        return true;
+                    }
+                    j += 1;
+                }
+                let mut k = i;
+                while k > 0 {
+                    k -= 1;
+                    let l = lines[k];
+                    if l.trim().is_empty() {
+                        continue;
+                    }
+                    if indent(l) < c {
+                        break;
+                    }
+                    if indent(l) == c && is_correlator(l) {
+                        return true;
+                    }
+                }
+                false
+            };
+            for (i, l) in lines.iter().enumerate() {
+                let Some(v) = raw_inline(l, "default") else {
+                    continue;
+                };
+                // Inline scalar only (skip block-scalar openers), mirroring the extractor so the
+                // floor counts exactly the pairs it inspects.
+                if v.starts_with('>') || v.starts_with('|') {
+                    continue;
+                }
+                let c = indent(l);
+                if sibling_is_correlator(i, c) {
+                    correlator_defaults += 1;
+                }
+            }
+        }
+        assert_eq!(
+            correlator_defaults, 0,
+            "expected no genuine default + same-Schema-Object correlator `pattern` pairs across \
+             specs (the future-drift posture; a new pair means switch this guard to a `>= 1` floor \
+             like the example side), got {correlator_defaults}"
+        );
+    }
+
     const CLIENT_ID_PATTERN: &str = r"^[a-zA-Z0-9_\-]{1,128}$";
 
     /// True when `s` matches the client-id `pattern` `^[a-zA-Z0-9_\-]{1,128}$` exactly: between
