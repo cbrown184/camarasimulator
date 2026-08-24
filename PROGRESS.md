@@ -3335,6 +3335,27 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - a **no-semicolon `pattern`-`default` conformance** contract test (`src/registry.rs`
+    `every_no_semicolon_pattern_default_conforms_to_the_no_semicolon_pattern`) — the `default`-side
+    twin of `every_no_semicolon_pattern_example_conforms_to_the_no_semicolon_pattern` and the
+    **twenty-eighth member of the `pattern`-default family** after E.164 / IMEI / ICCID / name /
+    token / 32-hex / MAC / result-code / UUID / email / full-date / semver / geohash / app-name /
+    DNS-label / TAC / IMEISV / DPV-purpose / 16-hex / text256 / 4-hex / text512 / version-4-UUID /
+    OTP-template / region / client-id / correlator, over the capabilities-and-restrictions `name`
+    pattern `^[^;]*$`. **First default member over a negated character class** (an exclusion
+    constraint — every character except `;` — not an inclusion alphabet): the two `[\s\S]{0,N}`
+    bounded-any-char default members exclude nothing and the correlator member's alphabet
+    `[a-zA-Z0-9-_:;.\/<>{}]` lists `;` explicitly, so a semicolon-bearing default — legal under all
+    of them — is the fault only this member catches (members key on the exact pattern string, so
+    they never cross-pair); no `format` sibling, so beyond the `format`-default family. New pure
+    `no_semicolon_pattern_defaults_malformed` (the `correlator_pattern_defaults_malformed` shape
+    keyed on `NO_SEMICOLON_PATTERN` + judged by `matches_no_semicolon_pattern`, both already present
+    from the example side; trigger key `default:`, block-scalar opener skipped, dedent-bounded
+    same-indent sibling scan, in-`example:` payload excluded). Corpus declares the no-semicolon
+    `pattern` (the `name` field) but pairs it with an `example`, **not** a `default` → asserts a
+    clean `== 0` genuine-pair count (future-drift posture, mirroring the twenty-seven prior default
+    twins) + guards future drift. Unit-covered (`no_semicolon_pattern_default_extraction_rules`).
+    Test-only, no spec change.
   - a **correlator `pattern`-`default` conformance** contract test (`src/registry.rs`
     `every_correlator_pattern_default_conforms_to_the_correlator_pattern`) — the `default`-side
     twin of `every_correlator_pattern_example_conforms_to_the_correlator_pattern` and the
@@ -6830,6 +6851,29 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-24 — Contract-test harness: guard that every **no-semicolon `pattern` `default` matches the
+  pattern** (`src/registry.rs` `every_no_semicolon_pattern_default_conforms_to_the_no_semicolon_pattern`).
+  The **twenty-eighth member of the `pattern`-default family** — the `default`-side twin of
+  `every_no_semicolon_pattern_example_conforms_to_the_no_semicolon_pattern`, over the
+  capabilities-and-restrictions `name` pattern `^[^;]*$`. **First default member over a negated
+  character class** (an exclusion constraint — every character except `;`, the capability-token
+  separator — rather than an inclusion alphabet): the two `[\s\S]{0,N}` bounded-any-char default
+  members exclude nothing, and the correlator member's alphabet `[a-zA-Z0-9-_:;.\/<>{}]` lists `;`
+  explicitly, so a semicolon-bearing default — legal under all of them — is the fault only this
+  member catches; members key on the exact pattern string, so they never cross-pair, and the field
+  carries no `format` sibling (beyond the `format`-default family). New pure
+  `no_semicolon_pattern_defaults_malformed` (the `correlator_pattern_defaults_malformed` shape keyed
+  on `NO_SEMICOLON_PATTERN` + judged by `matches_no_semicolon_pattern`, both already present from the
+  example side; `default:` trigger, block-scalar opener skipped, dedent-bounded same-indent sibling
+  scan, in-`example:` payload excluded). Surveyed the corpus — the no-semicolon `pattern` (the one
+  `name` field) pairs with an `example`, **not** a `default` → asserts a clean `== 0` genuine-pair
+  count (future-drift posture, mirroring the twenty-seven prior default twins) + guards future drift.
+  Unit-covered (`no_semicolon_pattern_default_extraction_rules`: valid quoted/unquoted cleared;
+  embedded-`;` / trailing-`;` / pattern-below flagged; no-pattern / any-char-bounded-sibling
+  (`^[\s\S]{0,256}$`, which admits `;`) / block-scalar / in-`example:` / following-property-across-
+  dedent / property-named-`default` skipped). Test-only, no spec change. `cargo test` 3022 pass (+2);
+  `cargo build --release` clean, no new dep. — binary (release): 5,323,160 bytes (~5.08 MiB;
+  unchanged by a test-only change).
 - 2026-08-24 — Contract-test harness: guard that every **correlator `pattern` `default` matches the
   pattern** (`src/registry.rs` `every_correlator_pattern_default_conforms_to_the_correlator_pattern`).
   The **twenty-seventh member of the `pattern`-default family** — the `default`-side twin of
