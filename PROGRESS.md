@@ -3335,6 +3335,27 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - an **app-name `pattern`-`default` conformance** contract test (`src/registry.rs`
+    `every_app_name_pattern_default_conforms_to_the_app_name_pattern`) — the `default`-side twin of
+    `every_app_name_pattern_example_conforms_to_the_app_name_pattern` and the **fourteenth member of
+    the `pattern`-default family** after E.164 / IMEI / ICCID / name / token / 32-hex / MAC /
+    result-code / UUID / email / full-date / semver / geohash, the **first over a mandatory leading
+    ASCII letter anchoring a distinct body alphabet under a bounded length**
+    (`^[A-Za-z][A-Za-z0-9_]{1,63}$`, the resource-name pattern the Edge Application Management API
+    uses for an application `name` / `AppInstanceName` / `AppDeploymentName`). No earlier default
+    member expresses this shape: the name (`^[a-zA-Z0-9_.-]+$`) and token
+    (`^[a-zA-Z0-9_\-]{1,64}$`) twins both admit a leading digit and neither forces a first-character
+    letter (token also admits `-`, name `.`/`-`); the digit-run members accept only decimal digits —
+    a leading-digit or `.`/`-`-bearing app-name default is the fault none catches. Carries no
+    `format` sibling (there is no standard OpenAPI format for it), so beyond the `format`-default
+    family. New pure `app_name_pattern_defaults_malformed` (the `geohash_pattern_defaults_malformed`
+    shape keyed on `APP_NAME_PATTERN` equality + judged by `matches_app_name_pattern`, both already
+    present from the example side; trigger key `default:`, block-scalar opener skipped,
+    dedent-bounded same-indent sibling scan, in-`example:` payload excluded). Corpus declares the
+    app-name `pattern` (Edge Application Management, on three name fields) but pairs it with an
+    `example`, **not** a `default` → asserts clean `== 0` genuine-pair count (future-drift posture)
+    + guards future drift; floor reuses the dedent-bounded sibling scan. Unit-covered
+    (`app_name_pattern_default_extraction_rules`). Test-only, no spec change.
   - a **geohash `pattern`-`default` conformance** contract test (`src/registry.rs`
     `every_geohash_pattern_default_conforms_to_the_geohash_pattern`) — the `default`-side twin of
     `every_geohash_pattern_example_conforms_to_the_geohash_pattern` and the **thirteenth member of
@@ -6583,6 +6604,41 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-24 — Contract-test harness: guard that every **app-name `pattern` `default` matches the
+  pattern** (`src/registry.rs` `every_app_name_pattern_default_conforms_to_the_app_name_pattern`).
+  The **fourteenth member of the `pattern`-default family** after E.164, IMEI, ICCID, name, token,
+  32-hex, MAC, result-code, UUID, email, full-date, semver, and geohash, the `default`-side twin of
+  `every_app_name_pattern_example_conforms_to_the_app_name_pattern`, and the **first pattern-default
+  member with a mandatory leading ASCII letter anchoring a distinct body alphabet under a bounded
+  length** (`^[A-Za-z][A-Za-z0-9_]{1,63}$` — the resource-name shape the Edge Application Management
+  API uses on an application `name`, an `AppInstanceName`, and an `AppDeploymentName`: an anchored
+  first ASCII letter, then 1–63 further chars each an ASCII letter, digit, or `_`, giving a 2-to-64
+  character length with no leading digit and neither `.` nor `-` admitted). A leading-digit
+  (`3dApp`), a `.`/`-`-bearing (`my-app`), a single-character (below the 2-char floor), or a
+  past-the-64-char-ceiling default is a fault none of the thirteen prior members can express: the
+  name twin (`^[a-zA-Z0-9_.-]+$`) admits a leading digit AND `.`/`-`, the token twin
+  (`^[a-zA-Z0-9_\-]{1,64}$`) admits a leading digit AND `-`, and neither anchors a first-character
+  *letter*; the digit-run members (IMEI/ICCID) accept only decimal digits, so a
+  wrong-alphabet-in-the-tail app-name default is the fault none catches. Like the IMEI / ICCID /
+  32-hex / MAC / result-code / semver / geohash patterns the app-name pattern carries **no**
+  `format` sibling (there is no OpenAPI `app-name` format), so this default is beyond the
+  `format`-default family's reach. In OpenAPI 3.0.x a `default` is the schema's fall-back
+  *instance*, so a field constrained by this `pattern` MUST carry a default the pattern accepts; an
+  app-name default the pattern rejects advertises a fall-back the schema's own validator rejects.
+  New pure `app_name_pattern_defaults_malformed` (the `geohash_pattern_defaults_malformed` shape
+  keyed on `APP_NAME_PATTERN` equality + judged by `matches_app_name_pattern`, both already present
+  from the example side; trigger key `default:`, block-scalar opener skipped, dedent-bounded
+  same-indent sibling scan, in-`example:` payload excluded). Surveyed the corpus first — the three
+  app-name `pattern` fields (Edge Application Management on `name`, `AppInstanceName`,
+  `AppDeploymentName`) all pair with an `example`, **not** a `default` → asserts a clean `== 0`
+  genuine-pair count (future-drift posture, mirroring the thirteen prior default twins) + guards
+  future drift; floor reuses the dedent-bounded sibling scan. Unit-covered
+  (`app_name_pattern_default_extraction_rules`: valid quoted (`MyEdgeApp`) / unquoted (`prod`)
+  cleared; leading-digit / bad-char / too-short / pattern-below flagged as
+  `[LeadingDigit, BadChar, TooShort, PatternBelow]`; no-pattern / different-pattern (ICCID) /
+  block-scalar / in-`example:` / following-property-across-dedent / property-named-`default`
+  skipped). Test-only, no spec change. `cargo test` 2994 pass (+2); `cargo build --release` clean,
+  no new dep. — binary (release): 5,323,160 bytes (~5.08 MiB; unchanged by a test-only change).
 - 2026-08-24 — Contract-test harness: guard that every **geohash `pattern` `default` matches the
   pattern** (`src/registry.rs` `every_geohash_pattern_default_conforms_to_the_geohash_pattern`). The
   **thirteenth member of the `pattern`-default family** after E.164, IMEI, ICCID, name, token,

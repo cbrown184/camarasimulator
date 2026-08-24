@@ -45417,6 +45417,395 @@ components:
         );
     }
 
+    /// The 1-based line numbers, in document order, of every `default:` keyword whose inline
+    /// scalar value sits in a Schema Object declaring a *same-indent* app-name `pattern` sibling
+    /// (`^[A-Za-z][A-Za-z0-9_]{1,63}$`) yet does not match that pattern, without a YAML dep. The
+    /// **`default` twin** of `app_name_pattern_examples_malformed`: identical scoping, keyed on
+    /// `APP_NAME_PATTERN` and judged by `matches_app_name_pattern` (both already present from the
+    /// example side), but triggered by the `default:` keyword — the
+    /// `geohash_pattern_defaults_malformed` shape.
+    ///
+    /// In OpenAPI 3.0.x (JSON Schema) a `default` is the schema's fall-back *instance*, so a
+    /// field constrained by `pattern` MUST carry a default the pattern accepts. An app-name
+    /// default with a leading digit, a `.`/`-` or any other non-`[A-Za-z0-9_]` character, a single
+    /// character (below the 2-char floor), a value past the 64-char ceiling, or a placeholder
+    /// pasted beside the pattern advertises a fall-back the schema's own validator rejects, so a
+    /// Redoc/Swagger form pre-fills a name control with an unusable value and a codegen client's
+    /// generated instance carries a value no field bound by this pattern can legally hold. The
+    /// app-name pattern carries no `format` sibling (there is no standard OpenAPI format for it),
+    /// so these defaults are beyond the `format`-default family's reach.
+    ///
+    /// Scoping mirrors `geohash_pattern_defaults_malformed` exactly: only a `default` carrying an
+    /// inline scalar (a block/object default opens no inline value and is skipped) with a
+    /// same-indent `pattern` sibling *equal to* `APP_NAME_PATTERN` in the same Schema Object is
+    /// inspected — the sibling is scanned at the default's own indent, down through the object's
+    /// block then up, dedent-bounded, so a nested or *following* property's `pattern` never pairs.
+    /// A `default:` nested inside an outer `example:`/`examples:` payload (sample data, not a
+    /// schema keyword) is skipped. Only the app-name pattern is matched; other patterns are out of
+    /// scope.
+    fn app_name_pattern_defaults_malformed(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let raw_inline = |l: &str, name: &str| -> Option<String> {
+            let (k, v) = l.trim_start().split_once(':')?;
+            if k.trim() != name {
+                return None;
+            }
+            let v = v.split('#').next().unwrap_or(v).trim();
+            if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            }
+        };
+        // Whether a same-indent `pattern:` sibling of line `i` (indent `c`) in the same Schema
+        // Object equals the app-name pattern: scan down through the object's block then up,
+        // dedent-bounded so a nested or following object's `pattern` never pairs.
+        let sibling_is_app_name_pattern = |i: usize, c: usize| -> bool {
+            let is_app_name_pattern = |l: &str| -> bool {
+                raw_inline(l, "pattern")
+                    .map(|v| v.trim_matches('"').trim_matches('\'') == APP_NAME_PATTERN)
+                    .unwrap_or(false)
+            };
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_app_name_pattern(l) {
+                    return true;
+                }
+                j += 1;
+            }
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_app_name_pattern(l) {
+                    return true;
+                }
+            }
+            false
+        };
+        // True when line `i` (indent `c`) sits inside an outer `example:`/`examples:` payload —
+        // some enclosing container key up the indent ladder is `example`/`examples`, so an inner
+        // `default` key there is sample data, not a schema keyword.
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some(raw) = raw_inline(line, "default") else {
+                continue;
+            };
+            // A block-scalar opener (`>`/`|`, optionally with a chomping indicator) carries its
+            // value on the following lines, not inline — skip it.
+            if raw.starts_with('>') || raw.starts_with('|') {
+                continue;
+            }
+            let c = indent(line);
+            if inside_example(i, c) {
+                continue;
+            }
+            if !sibling_is_app_name_pattern(i, c) {
+                continue;
+            }
+            let value = raw.trim_matches('"').trim_matches('\'');
+            if !matches_app_name_pattern(value) {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_app_name_pattern_default_conforms_to_the_app_name_pattern() {
+        // Contract-harness invariant (OpenAPI 3.0.x / JSON-Schema structural rule): where a
+        // Schema Object declares an inline `default` beside a same-indent app-name `pattern`
+        // (`^[A-Za-z][A-Za-z0-9_]{1,63}$`, the resource-name pattern the Edge Application
+        // Management API uses for an application `name` / `AppInstanceName` / `AppDeploymentName`),
+        // the default MUST match that pattern. A `default` is the schema's fall-back *instance*, so
+        // a value with a leading digit, a `.`/`-` or any other non-`[A-Za-z0-9_]` character, a
+        // single character (below the 2-char floor), a value past the 64-char ceiling, or a
+        // placeholder pasted beside the pattern is a self-contradictory schema whose own validator
+        // rejects the fall-back it pre-supplies, so a Redoc/Swagger form pre-fills a name control
+        // with an unusable value and a codegen client's generated instance carries a value no field
+        // constrained by this pattern can hold.
+        //
+        // The **`default` twin** of `every_app_name_pattern_example_conforms_to_the_app_name_pattern`
+        // and the fourteenth member of the `pattern`-*default* family after the E.164 / IMEI /
+        // ICCID / name / token / 32-hex / MAC / result-code / UUID / email / full-date / semver /
+        // geohash default twins, and the first pattern-default member with a **mandatory leading
+        // ASCII letter anchoring a distinct body alphabet under a bounded length**: the name
+        // (`^[a-zA-Z0-9_.-]+$`) and token (`^[a-zA-Z0-9_\-]{1,64}$`) patterns both admit a leading
+        // digit and neither forces a first-character *letter* (token also admits `-`, name `.`/`-`),
+        // the digit-run members (IMEI / ICCID) accept only decimal digits, and none of them pin a
+        // 2-char floor via an anchored first char plus a `{1,63}` tail — so a leading-digit or
+        // `.`/`-`-bearing app-name default is the fault none of them catches. Like the IMEI / ICCID /
+        // 32-hex / MAC / result-code / semver / geohash patterns the app-name pattern carries no
+        // `format` sibling, so these defaults are beyond the `format`-default family's reach.
+        // Future-drift posture (like the thirteen prior default twins): the corpus declares the
+        // app-name `pattern` (Edge Application Management, on three name fields) but pairs it with an
+        // `example`, **not** a `default`, so the guard asserts clean across all specs today and holds
+        // the line against a future app-name default drifting to a leading-digit or wrong-alphabet
+        // value; the synthetic unit body in `app_name_pattern_default_extraction_rules` keeps the
+        // detection path live. Verified true across all mounted specs before asserting.
+        for api in APIS {
+            let offenders = app_name_pattern_defaults_malformed(api.body);
+            assert!(
+                offenders.is_empty(),
+                "{} spec declares a `default` beside a same-indent app-name \
+                 `pattern: '^[A-Za-z][A-Za-z0-9_]{{1,63}}$'` that does not match that pattern (a \
+                 fall-back the pattern's own validator would reject) at `default:` line(s): {:?}",
+                api.name,
+                offenders
+            );
+        }
+    }
+
+    #[test]
+    fn app_name_pattern_default_extraction_rules() {
+        // Unit-cover `app_name_pattern_defaults_malformed` so the contract test above can't pass
+        // vacuously and its detection is pinned (`matches_app_name_pattern` itself is already
+        // covered by `app_name_pattern_example_extraction_rules`).
+        //
+        // Extractor: a valid quoted (`MyEdgeApp`) and a valid unquoted (`prod`) app-name default
+        // beside a same-indent app-name `pattern` pass; a leading-digit value, a `.`/`-`-bearing
+        // value, and a single-character value (below the 2-char floor) are flagged; a bad value with
+        // the pattern *below* it (down-scan) is flagged; a value with no `pattern` sibling and one
+        // whose sibling is a *different* pattern (the ICCID `^[0-9]{19,20}$`) are skipped; a
+        // block-scalar default is skipped; a default in one property never pairs with a *following*
+        // property's app-name `pattern` across the dedent; an inner `default` inside an outer
+        // `example:` payload is skipped; and a property literally named `default` (opening a block)
+        // is skipped.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    GoodQuoted:
+      type: string
+      pattern: '^[A-Za-z][A-Za-z0-9_]{1,63}$'
+      default: 'MyEdgeApp'
+    GoodUnquoted:
+      type: string
+      pattern: '^[A-Za-z][A-Za-z0-9_]{1,63}$'
+      default: prod
+    LeadingDigit:
+      type: string
+      pattern: '^[A-Za-z][A-Za-z0-9_]{1,63}$'
+      default: '3dApp'
+    BadChar:
+      type: string
+      pattern: '^[A-Za-z][A-Za-z0-9_]{1,63}$'
+      default: 'my-app'
+    TooShort:
+      type: string
+      pattern: '^[A-Za-z][A-Za-z0-9_]{1,63}$'
+      default: 'a'
+    PatternBelow:
+      type: string
+      default: 'my-app'
+      pattern: '^[A-Za-z][A-Za-z0-9_]{1,63}$'
+    NoPattern:
+      type: string
+      default: 'my-app'
+    OtherPattern:
+      type: string
+      pattern: '^[0-9]{19,20}$'
+      default: 'my-app'
+    BlockDefault:
+      type: string
+      pattern: '^[A-Za-z][A-Za-z0-9_]{1,63}$'
+      default: |
+        my-app
+    InExample:
+      type: object
+      example:
+        pattern: '^[A-Za-z][A-Za-z0-9_]{1,63}$'
+        default: 'BAD!'
+    Split:
+      type: object
+      properties:
+        a:
+          default: 'BAD!'
+        b:
+          type: string
+          pattern: '^[A-Za-z][A-Za-z0-9_]{1,63}$'
+    NamedDefault:
+      type: object
+      properties:
+        default:
+          type: string
+          pattern: '^[A-Za-z][A-Za-z0-9_]{1,63}$'
+";
+        // Flagged, in document order: LeadingDigit.default (`3dApp`, leading digit);
+        // BadChar.default (`my-app`, hyphen); TooShort.default (`a`, one char below the 2-char
+        // floor); PatternBelow.default (`my-app` with the app-name `pattern` a line below —
+        // down-scan pairs it). Not flagged: GoodQuoted / GoodUnquoted (both valid); NoPattern (no
+        // `pattern` sibling); OtherPattern (sibling is the ICCID pattern, not app-name — an
+        // out-of-scope value proving exact-pattern keying); BlockDefault (block-scalar opener `|`,
+        // no inline value); InExample's inner `default: 'BAD!'` (sits inside the outer `example:`
+        // payload); Split.a.default, whose only app-name `pattern` is in the following property
+        // Split.b past a dedent; and NamedDefault's `default:` property opening a block (no inline
+        // value).
+        let flagged = app_name_pattern_defaults_malformed(body);
+        let flagged_props: Vec<&str> = flagged
+            .iter()
+            .map(|&n| {
+                let lines: Vec<&str> = body.lines().collect();
+                let mut k = n - 1;
+                loop {
+                    let l = lines[k];
+                    let ind = l.len() - l.trim_start().len();
+                    if ind == 4 && l.trim_end().ends_with(':') {
+                        break l.trim().trim_end_matches(':');
+                    }
+                    if k == 0 {
+                        break "";
+                    }
+                    k -= 1;
+                }
+            })
+            .collect();
+        assert_eq!(
+            flagged_props,
+            vec!["LeadingDigit", "BadChar", "TooShort", "PatternBelow"]
+        );
+
+        // Non-vacuous floor (future-drift posture, mirroring the thirteen prior `pattern`-default
+        // twins): across every registered spec every `default` beside a same-indent app-name
+        // `pattern` matches it (the invariant the contract test asserts). The corpus declares the
+        // app-name `pattern` on three name fields (Edge Application Management) but pairs it with an
+        // `example`, **not** a `default`, in the *same* Schema Object today — so this asserts a
+        // clean `== 0` genuine-pair count and guards future drift; the synthetic body above keeps
+        // the detection path live. The pair count reuses the extractor's own **dedent-bounded**
+        // same-indent sibling scan — the genuine-Schema-Object pairing — rather than a crude window,
+        // and stays independent of the extractor's *validity* (`matches_app_name_pattern`)
+        // comparison.
+        let mut app_name_defaults = 0usize;
+        for api in APIS {
+            assert!(
+                app_name_pattern_defaults_malformed(api.body).is_empty(),
+                "{}: every default beside a same-indent app-name `pattern` must match it",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            let raw_inline = |l: &str, name: &str| -> Option<String> {
+                let (k, v) = l.trim_start().split_once(':')?;
+                if k.trim() != name {
+                    return None;
+                }
+                let v = v.split('#').next().unwrap_or(v).trim();
+                if v.is_empty() { None } else { Some(v.to_string()) }
+            };
+            // A genuine same-Schema-Object app-name `pattern` sibling of the `default` on line `i`
+            // (indent `c`): scan down through the object's block then up, dedent-bounded exactly
+            // like the extractor's `sibling_is_app_name_pattern`, so a *following* property's
+            // app-name `pattern` past a dedent never counts.
+            let sibling_is_app_name = |i: usize, c: usize| -> bool {
+                let is_app_name = |l: &str| -> bool {
+                    raw_inline(l, "pattern")
+                        .map(|v| v.trim_matches('"').trim_matches('\'') == APP_NAME_PATTERN)
+                        .unwrap_or(false)
+                };
+                let mut j = i + 1;
+                while j < lines.len() {
+                    let l = lines[j];
+                    if l.trim().is_empty() {
+                        j += 1;
+                        continue;
+                    }
+                    if indent(l) < c {
+                        break;
+                    }
+                    if indent(l) == c && is_app_name(l) {
+                        return true;
+                    }
+                    j += 1;
+                }
+                let mut k = i;
+                while k > 0 {
+                    k -= 1;
+                    let l = lines[k];
+                    if l.trim().is_empty() {
+                        continue;
+                    }
+                    if indent(l) < c {
+                        break;
+                    }
+                    if indent(l) == c && is_app_name(l) {
+                        return true;
+                    }
+                }
+                false
+            };
+            for (i, l) in lines.iter().enumerate() {
+                let Some(v) = raw_inline(l, "default") else {
+                    continue;
+                };
+                // Inline scalar only (skip block-scalar openers), mirroring the extractor so the
+                // floor counts exactly the pairs it inspects.
+                if v.starts_with('>') || v.starts_with('|') {
+                    continue;
+                }
+                let c = indent(l);
+                if sibling_is_app_name(i, c) {
+                    app_name_defaults += 1;
+                }
+            }
+        }
+        assert_eq!(
+            app_name_defaults, 0,
+            "expected no genuine default + same-Schema-Object app-name `pattern` pairs across \
+             specs (the future-drift posture; a new pair means switch this guard to a `>= 1` \
+             floor like the example side), got {app_name_defaults}"
+        );
+    }
+
     /// The Type Allocation Code `pattern` — a bare run of **exactly eight** ASCII decimal digits
     /// (`^[0-9]{8}$`), the `tac` field of the Device Identifier `DeviceIdentifier`/`DeviceInfo`
     /// schemas ("the first 8 digits of the IMEI"). Like the IMEI/ICCID members and unlike a
