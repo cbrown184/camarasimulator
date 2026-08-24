@@ -44294,6 +44294,383 @@ components:
         );
     }
 
+    /// The 1-based line numbers, in document order, of every `default:` keyword whose inline
+    /// scalar value sits in a Schema Object declaring a *same-indent* bounded-any-char `pattern`
+    /// sibling (`^[\s\S]{0,256}$`) yet exceeds its 256-character ceiling, without a YAML dep. The
+    /// `default`-side twin of `text256_pattern_examples_malformed`: same scoping, keyed on
+    /// `TEXT256_PATTERN`, judged by `matches_text256_pattern`, but triggered by `default:` and
+    /// skipping a block-scalar opener.
+    ///
+    /// In OpenAPI 3.0.x (JSON Schema) a `default` is the schema's fall-back *instance*, so a field
+    /// constrained by `pattern` MUST carry a default the pattern accepts. `[\s\S]` admits every
+    /// character, so the pattern's only constraint is a 256-character ceiling; a free-text default
+    /// longer than 256 characters advertises a fall-back the schema's own validator rejects, so a
+    /// Redoc/Swagger form pre-fills a `resultDesc`/`message` control with an unusable value and a
+    /// codegen client's generated instance carries a value no field constrained by this pattern
+    /// can hold. This pattern carries no `format` sibling, so these defaults are otherwise beyond
+    /// the `format`-default family's reach.
+    ///
+    /// Scoping mirrors `hex16_pattern_defaults_malformed` exactly: only a `default` carrying an
+    /// inline scalar (a block/object default opens no inline value and is skipped) with a
+    /// same-indent `pattern` sibling *equal to* `TEXT256_PATTERN` in the same Schema Object is
+    /// inspected — the sibling is scanned at the default's own indent, down through the object's
+    /// block then up, dedent-bounded, so a nested or *following* property's `pattern` never pairs.
+    /// The same-indent scan steps over any intervening deeper-indented lines, so the corpus's
+    /// `pattern` → `maxLength` → `description` → `example` shape and its folded
+    /// `description: >-` multi-line block both pair correctly. A `default:` nested inside an outer
+    /// `example:`/`examples:` payload (sample data, not a schema keyword) is skipped. Only the
+    /// bounded-any-char pattern is matched; other patterns are out of scope.
+    fn text256_pattern_defaults_malformed(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let raw_inline = |l: &str, name: &str| -> Option<String> {
+            let (k, v) = l.trim_start().split_once(':')?;
+            if k.trim() != name {
+                return None;
+            }
+            let v = v.split('#').next().unwrap_or(v).trim();
+            if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            }
+        };
+        // Whether a same-indent `pattern:` sibling of line `i` (indent `c`) in the same Schema
+        // Object equals the bounded-any-char pattern: scan down through the object's block then up,
+        // dedent-bounded so a nested or following object's `pattern` never pairs.
+        let sibling_is_text256_pattern = |i: usize, c: usize| -> bool {
+            let is_text256_pattern = |l: &str| -> bool {
+                raw_inline(l, "pattern")
+                    .map(|v| v.trim_matches('"').trim_matches('\'') == TEXT256_PATTERN)
+                    .unwrap_or(false)
+            };
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_text256_pattern(l) {
+                    return true;
+                }
+                j += 1;
+            }
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_text256_pattern(l) {
+                    return true;
+                }
+            }
+            false
+        };
+        // True when line `i` (indent `c`) sits inside an outer `example:`/`examples:` payload —
+        // some enclosing container key up the indent ladder is `example`/`examples`, so an inner
+        // `default` key there is sample data, not a schema keyword.
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some(raw) = raw_inline(line, "default") else {
+                continue;
+            };
+            // A block-scalar opener (`>`/`|`, optionally with a chomping indicator) carries its
+            // value on the following lines, not inline — skip it.
+            if raw.starts_with('>') || raw.starts_with('|') {
+                continue;
+            }
+            let c = indent(line);
+            if inside_example(i, c) {
+                continue;
+            }
+            if !sibling_is_text256_pattern(i, c) {
+                continue;
+            }
+            let value = raw.trim_matches('"').trim_matches('\'');
+            if !matches_text256_pattern(value) {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_text256_pattern_default_conforms_to_the_text256_pattern() {
+        // Contract-harness invariant (OpenAPI 3.0.x / JSON-Schema structural rule): where a Schema
+        // Object declares an inline `default` beside a same-indent bounded-any-char `pattern`
+        // (`^[\s\S]{0,256}$`, the free-text `resultDesc`/`message` pattern the eSIM Remote
+        // Management CMP envelopes use verbatim), the default MUST match that pattern. `[\s\S]` is
+        // *every* character, so the pattern's only constraint is a 256-character ceiling; a
+        // `default` is the schema's fall-back *instance*, so a value longer than 256 characters is a
+        // self-contradictory schema whose own validator rejects the fall-back it pre-supplies, and a
+        // Redoc/Swagger form then pre-fills a control with a value no field constrained by this
+        // pattern can legally hold.
+        //
+        // The **`default` twin** of `every_text256_pattern_example_conforms_to_the_text256_pattern`
+        // and the twentieth member of the `pattern`-*default* family after the E.164 / IMEI / ICCID /
+        // name / token / 32-hex / MAC / result-code / UUID / email / full-date / semver / geohash /
+        // app-name / DNS-label / TAC / IMEISV / DPV-purpose / 16-hex default twins — and the **first
+        // over an unrestricted character class bounded only by a length ceiling**: every prior default
+        // member constrains the alphabet (a digit run, a hex layout, a scheme literal, an alphanumeric
+        // class), whereas this one admits any character and pins nothing but a maximum length, so none
+        // of them can express it (an over-256-character default is the fault they can't catch). It also
+        // reaches past the generic length-bounds family: the corpus's `resultDesc`/`message` schemas
+        // carry a `maxLength: 256` beside the `pattern`, but a `maxLength`-default check counts UTF-16
+        // code units against a *field-declared* bound whereas this guard pins the pattern's own 256
+        // scalar-value ceiling — the pattern is the constraint under test. Like the IMEI / ICCID /
+        // 32-hex / MAC / token / result-code patterns it carries no `format` sibling, so these defaults
+        // are beyond the `format`-default family's reach. Future-drift posture (like the nineteen prior
+        // default twins): the corpus declares this `pattern` (eSIM Remote Management, four `resultDesc`/
+        // `message` schemas) but pairs each with an `example`, **not** a `default`, so the guard asserts
+        // clean across all specs today and holds the line against a future free-text default drifting
+        // past the ceiling; the synthetic unit body in `text256_pattern_default_extraction_rules` keeps
+        // the detection path live. Verified true across all mounted specs before asserting.
+        for api in APIS {
+            let offenders = text256_pattern_defaults_malformed(api.body);
+            assert!(
+                offenders.is_empty(),
+                "{} spec declares a `default` beside a same-indent bounded-any-char \
+                 `pattern: '^[\\s\\S]{{0,256}}$'` that exceeds its 256-character ceiling (a fall-back \
+                 the pattern's own validator would reject) at `default:` line(s): {:?}",
+                api.name,
+                offenders
+            );
+        }
+    }
+
+    #[test]
+    fn text256_pattern_default_extraction_rules() {
+        // Unit-cover `text256_pattern_defaults_malformed` so the contract test above can't pass
+        // vacuously and its detection is pinned (`matches_text256_pattern` itself is already covered
+        // by `text256_pattern_example_extraction_rules`).
+        //
+        // Extractor: a valid quoted (`Success`) and a valid unquoted (`Enable operation accepted`)
+        // free-text default beside a same-indent bounded-any-char `pattern` pass; a 257-character
+        // value is flagged; a bad (over-length) value with the pattern *below* it (down-scan) is
+        // flagged; a value with no `pattern` sibling and one whose sibling is a *different* pattern
+        // (the result-code `^B[0-9]{6}$`) are skipped; a block-scalar default is skipped; a default
+        // in one property never pairs with a *following* property's bounded-any-char `pattern` across
+        // the dedent; an inner `default` inside an outer `example:` payload is skipped; and a property
+        // literally named `default` (opening a block) is skipped.
+        let over = "x".repeat(257);
+        let body = format!(
+            "openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    GoodQuoted:
+      type: string
+      pattern: '{p}'
+      default: \"Success\"
+    GoodUnquoted:
+      type: string
+      pattern: '{p}'
+      default: Enable operation accepted
+    TooLong:
+      type: string
+      pattern: '{p}'
+      default: '{over}'
+    PatternBelow:
+      type: string
+      default: '{over}'
+      pattern: '{p}'
+    NoPattern:
+      type: string
+      default: '{over}'
+    OtherPattern:
+      type: string
+      pattern: '^B[0-9]{{6}}$'
+      default: '{over}'
+    BlockDefault:
+      type: string
+      pattern: '{p}'
+      default: |
+        {over}
+    InExample:
+      type: object
+      example:
+        pattern: '{p}'
+        default: '{over}'
+    Split:
+      type: object
+      properties:
+        a:
+          default: '{over}'
+        b:
+          type: string
+          pattern: '{p}'
+    NamedDefault:
+      type: object
+      properties:
+        default:
+          type: string
+          pattern: '{p}'
+",
+            p = TEXT256_PATTERN,
+            over = over
+        );
+        // Flagged, in document order: TooLong.default (257 chars beside a same-indent bounded-any-char
+        // `pattern`) and PatternBelow.default (257 chars, the `pattern` a line below — down-scan pairs
+        // it). Not flagged: GoodQuoted / GoodUnquoted (both valid, well under the ceiling — the
+        // unquoted one also proving a spaced free-text scalar pairs); NoPattern (no `pattern` sibling);
+        // OtherPattern (sibling is the result-code pattern, not bounded-any-char — an over-length value
+        // there is out of scope); BlockDefault (block-scalar opener `|`, no inline value); InExample's
+        // inner `default` (sits inside the outer `example:` payload); Split.a.default, whose only
+        // bounded-any-char `pattern` is in the following property Split.b past a dedent; and
+        // NamedDefault's `default:` property opening a block (no inline value).
+        let flagged = text256_pattern_defaults_malformed(&body);
+        let flagged_props: Vec<&str> = flagged
+            .iter()
+            .map(|&n| {
+                let lines: Vec<&str> = body.lines().collect();
+                let mut k = n - 1;
+                loop {
+                    let l = lines[k];
+                    let ind = l.len() - l.trim_start().len();
+                    if ind == 4 && l.trim_end().ends_with(':') {
+                        break l.trim().trim_end_matches(':');
+                    }
+                    if k == 0 {
+                        break "";
+                    }
+                    k -= 1;
+                }
+            })
+            .collect();
+        assert_eq!(flagged_props, vec!["TooLong", "PatternBelow"]);
+
+        // Non-vacuous floor (future-drift posture, mirroring the nineteen prior `pattern`-default
+        // twins): across every registered spec every `default` beside a same-indent bounded-any-char
+        // `pattern` matches it (the invariant the contract test asserts). The corpus declares the
+        // bounded-any-char `pattern` on the eSIM Remote Management `resultDesc`/`message` schemas but
+        // pairs each with an `example`, **not** a `default`, in the *same* Schema Object today — so
+        // this asserts a clean `== 0` genuine-pair count and guards future drift; the synthetic body
+        // above keeps the detection path live. The pair count reuses the extractor's own
+        // **dedent-bounded** same-indent sibling scan — the genuine-Schema-Object pairing — rather than
+        // a crude window, and stays independent of the extractor's *validity* (`matches_text256_pattern`)
+        // comparison.
+        let mut text256_defaults = 0usize;
+        for api in APIS {
+            assert!(
+                text256_pattern_defaults_malformed(api.body).is_empty(),
+                "{}: every default beside a same-indent bounded-any-char `pattern` must match it",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            let raw_inline = |l: &str, name: &str| -> Option<String> {
+                let (k, v) = l.trim_start().split_once(':')?;
+                if k.trim() != name {
+                    return None;
+                }
+                let v = v.split('#').next().unwrap_or(v).trim();
+                if v.is_empty() { None } else { Some(v.to_string()) }
+            };
+            // A genuine same-Schema-Object bounded-any-char `pattern` sibling of the `default` on line
+            // `i` (indent `c`): scan down through the object's block then up, dedent-bounded exactly
+            // like the extractor's `sibling_is_text256_pattern`, so a *following* property's pattern
+            // past a dedent never counts.
+            let sibling_is_text256 = |i: usize, c: usize| -> bool {
+                let is_text256 = |l: &str| -> bool {
+                    raw_inline(l, "pattern")
+                        .map(|v| v.trim_matches('"').trim_matches('\'') == TEXT256_PATTERN)
+                        .unwrap_or(false)
+                };
+                let mut j = i + 1;
+                while j < lines.len() {
+                    let l = lines[j];
+                    if l.trim().is_empty() {
+                        j += 1;
+                        continue;
+                    }
+                    if indent(l) < c {
+                        break;
+                    }
+                    if indent(l) == c && is_text256(l) {
+                        return true;
+                    }
+                    j += 1;
+                }
+                let mut k = i;
+                while k > 0 {
+                    k -= 1;
+                    let l = lines[k];
+                    if l.trim().is_empty() {
+                        continue;
+                    }
+                    if indent(l) < c {
+                        break;
+                    }
+                    if indent(l) == c && is_text256(l) {
+                        return true;
+                    }
+                }
+                false
+            };
+            for (i, l) in lines.iter().enumerate() {
+                let Some(v) = raw_inline(l, "default") else {
+                    continue;
+                };
+                if v.starts_with('>') || v.starts_with('|') {
+                    continue;
+                }
+                let c = indent(l);
+                if sibling_is_text256(i, c) {
+                    text256_defaults += 1;
+                }
+            }
+        }
+        assert_eq!(
+            text256_defaults, 0,
+            "expected no genuine default + same-Schema-Object bounded-any-char `pattern` pairs across \
+             specs (the future-drift posture; a new pair means switch this guard to a `>= 1` floor like \
+             the example side), got {text256_defaults}"
+        );
+    }
+
     const GEOHASH_PATTERN: &str = r"^[0-9bcdefghjkmnpqrstuvwxyz]{1,12}$";
 
     /// True when `s` matches the geohash `pattern` `^[0-9bcdefghjkmnpqrstuvwxyz]{1,12}$`

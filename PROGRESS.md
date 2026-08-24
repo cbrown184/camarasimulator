@@ -3335,7 +3335,28 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - a **bounded-any-char (text256) `pattern`-`default` conformance** contract test
+    (`src/registry.rs` `every_text256_pattern_default_conforms_to_the_text256_pattern`) — the
+    `default`-side twin of `every_text256_pattern_example_conforms_to_the_text256_pattern` and the
+    **twentieth member of the `pattern`-default family** after E.164 / IMEI / ICCID / name / token /
+    32-hex / MAC / result-code / UUID / email / full-date / semver / geohash / app-name / DNS-label /
+    TAC / IMEISV / DPV-purpose / 16-hex, and the **first over an unrestricted character class bounded
+    only by a length ceiling** (`^[\s\S]{0,256}$`, the eSIM Remote Management CMP `resultDesc`/`message`
+    free-text field): every prior member constrains the alphabet (a digit run, a hex layout, a scheme
+    literal, an alphanumeric class), whereas this one admits any character and pins nothing but a
+    256-character ceiling — so an over-256-character default is the fault none of the nineteen prior
+    members catches. Reaches past the generic length-bounds family too (the pattern's own scalar-value
+    ceiling, not a field-declared `maxLength`), and carries no `format` sibling. New pure
+    `text256_pattern_defaults_malformed` (the `hex16_pattern_defaults_malformed` shape keyed on
+    `TEXT256_PATTERN` equality + judged by `matches_text256_pattern`, both already present from the
+    example side; trigger key `default:`, block-scalar opener skipped, dedent-bounded same-indent
+    sibling scan, in-`example:` payload excluded). Corpus declares the bounded-any-char `pattern` (eSIM
+    Remote Management, four `resultDesc`/`message` schemas) but pairs each with an `example`, **not** a
+    `default` → asserts a clean `== 0` genuine-pair count (future-drift posture, mirroring the nineteen
+    prior default twins) + guards future drift. Unit-covered (`text256_pattern_default_extraction_rules`).
+    Test-only, no spec change.
   - a **DPV-purpose `pattern`-`default` conformance** contract test (`src/registry.rs`
+    `every_dpv_purpose_pattern_default_conforms_to_the_dpv_purpose_pattern`) — the `default`-side twin
     `every_dpv_purpose_pattern_default_conforms_to_the_dpv_purpose_pattern`) — the `default`-side twin
     of `every_dpv_purpose_pattern_example_conforms_to_the_dpv_purpose_pattern` and the **eighteenth
     member of the `pattern`-default family** after E.164 / IMEI / ICCID / name / token / 32-hex / MAC /
@@ -6666,6 +6687,37 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-24 — Contract-test harness: guard that every **bounded-any-char (text256) `pattern`
+  `default` matches the pattern** (`src/registry.rs`
+  `every_text256_pattern_default_conforms_to_the_text256_pattern`). The **twentieth member of the
+  `pattern`-default family** after E.164, IMEI, ICCID, name, token, 32-hex, MAC, result-code, UUID,
+  email, full-date, semver, geohash, app-name, DNS-label, TAC, IMEISV, DPV-purpose, and 16-hex — the
+  `default`-side twin of `every_text256_pattern_example_conforms_to_the_text256_pattern`
+  (`^[\s\S]{0,256}$`, the eSIM Remote Management CMP `resultDesc`/`message` free-text field). The
+  **first default member over an unrestricted character class bounded only by a length ceiling**:
+  `[\s\S]` admits every character, so the pattern's only constraint is a 256-character ceiling. Every
+  prior default member constrains the alphabet (a digit run, a hex layout, a scheme literal, an
+  alphanumeric class), so none can express this — an over-256-character default is the fault none of
+  the nineteen prior members catches. It also reaches past the generic length-bounds family (this
+  guard pins the pattern's own 256 scalar-value ceiling, not a field-declared `maxLength`), and like
+  the IMEI/ICCID/32-hex/MAC/token/result-code patterns it carries **no** `format` sibling, so this
+  default is beyond the `format`-default family's reach. In OpenAPI 3.0.x a `default` is the schema's
+  fall-back *instance*, so a field constrained by this `pattern` MUST carry a default the pattern
+  accepts; a free-text default past the ceiling advertises a fall-back the schema's own validator
+  rejects. New pure `text256_pattern_defaults_malformed` (the `hex16_pattern_defaults_malformed`
+  shape keyed on `TEXT256_PATTERN` equality + judged by `matches_text256_pattern`, both already
+  present from the example side; trigger key `default:`, block-scalar opener skipped, dedent-bounded
+  same-indent sibling scan, in-`example:` payload excluded). Surveyed the corpus first — the four
+  bounded-any-char `pattern` fields (eSIM Remote Management `resultDesc`/`message`) each pair with an
+  `example`, **not** a `default` → asserts a clean `== 0` genuine-pair count (future-drift posture,
+  mirroring the nineteen prior default twins) + guards future drift; floor reuses the dedent-bounded
+  sibling scan. Unit-covered (`text256_pattern_default_extraction_rules`: valid quoted (`Success`) /
+  unquoted spaced (`Enable operation accepted`) cleared; a 257-char value flagged both same-indent
+  (`TooLong`) and pattern-below (`PatternBelow`, down-scan); no-pattern / different-pattern
+  (result-code `^B[0-9]{6}$`) / block-scalar / in-`example:` / following-property-across-dedent /
+  property-named-`default` skipped). Test-only, no spec change. `cargo test` 3006 pass (+2);
+  `cargo build --release` clean, no new dep. — binary (release): 5,323,160 bytes (~5.08 MiB;
+  unchanged by a test-only change).
 - 2026-08-24 — Contract-test harness: guard that every **16-hex `pattern` `default` matches the
   pattern** (`src/registry.rs` `every_hex16_pattern_default_conforms_to_the_hex16_pattern`). The
   **nineteenth member of the `pattern`-default family** after E.164, IMEI, ICCID, name, token,
