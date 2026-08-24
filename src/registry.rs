@@ -52564,6 +52564,405 @@ components:
         );
     }
 
+    /// The 1-based line numbers, in document order, of every `default:` keyword whose inline
+    /// scalar value sits in a Schema Object declaring a *same-indent* no-CR/LF `pattern` sibling
+    /// (`^[^\r\n]*$`) yet contains a carriage return or line feed, without a YAML dep. The
+    /// **`default`-side twin** of `no_crlf_pattern_examples_malformed` and the twenty-ninth member
+    /// of the `pattern`-*default* family, keyed on `NO_CRLF_PATTERN` and judged by
+    /// `matches_no_crlf_pattern`.
+    ///
+    /// In OpenAPI 3.0.x (JSON Schema) a `default` is the schema's fall-back *instance*, so a field
+    /// constrained by `pattern` MUST carry a default the pattern accepts (the same Spectral
+    /// `oas3-valid-schema-example` posture that validates an example against its schema applies to a
+    /// `default` — it is a schema-level instance too). A single-line field's default carrying an
+    /// embedded line terminator (the application-endpoint-registration `applicationProviderName`
+    /// field, whose name must stay on one line) advertises a fall-back the schema's own validator
+    /// rejects, so a Redoc/Swagger form pre-fills the control with an unusable value and a codegen
+    /// client carries a value no field bound by this pattern can legally hold. Like the no-CR/LF
+    /// example twin the field carries no `format` sibling, so such a default is otherwise unchecked;
+    /// and — the **second default member over a negated character class** (after no-semicolon
+    /// `^[^;]*$`), the first whose exclusion set is the two line terminators — a line terminator is a
+    /// fault the two `[\s\S]{0,N}` bounded-any-char default members (whose class matches every
+    /// character), the no-semicolon default member (`^[^;]*$` excludes only `;`, so it *admits*
+    /// `\r`/`\n`), and the correlator member (alphabet `[a-zA-Z0-9-_:;.\/<>{}]`, no line terminator
+    /// but a *different, non-cross-pairing* pattern string) all leave uncaught, so it is caught only
+    /// here; the pattern strings differ so they never cross-pair.
+    ///
+    /// Because an inline YAML scalar ends at its line, a line feed (`\n`) cannot appear inside one at
+    /// all; the terminator that *can* is a lone carriage return (`\r`), which `str::lines()` does not
+    /// treat as a line boundary — so the guard catches a CR embedded in a single-line default, the
+    /// only line terminator an inline scalar can smuggle in.
+    ///
+    /// Structurally identical to `no_semicolon_pattern_defaults_malformed`, keyed on
+    /// `NO_CRLF_PATTERN`: the trigger key is `default:` and a block-scalar opener
+    /// (`default: >-` / `default: |`) is skipped (it opens no inline value). Scoping is otherwise
+    /// unchanged: only a `default` carrying an inline scalar with a same-indent `pattern` sibling
+    /// *equal to* `NO_CRLF_PATTERN` in the same Schema Object is inspected — the sibling is scanned
+    /// at the default's own indent, down through the object's block then up, dedent-bounded, so a
+    /// nested or following object's `pattern` never pairs (in particular the sibling negated class
+    /// `^[^;]*$`, which admits `\r`/`\n`, is a *different* pattern and never pairs). A `default:`
+    /// nested inside an outer `example:`/`examples:` payload (sample data, not a schema keyword) is
+    /// skipped.
+    fn no_crlf_pattern_defaults_malformed(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let raw_inline = |l: &str, name: &str| -> Option<String> {
+            let (k, v) = l.trim_start().split_once(':')?;
+            if k.trim() != name {
+                return None;
+            }
+            let v = v.split('#').next().unwrap_or(v).trim();
+            if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            }
+        };
+        // Whether a same-indent `pattern:` sibling of line `i` (indent `c`) in the same Schema
+        // Object equals the no-CR/LF pattern: scan down through the object's block then up,
+        // dedent-bounded so a nested or following object's `pattern` never pairs.
+        let sibling_is_no_crlf_pattern = |i: usize, c: usize| -> bool {
+            let is_no_crlf_pattern = |l: &str| -> bool {
+                raw_inline(l, "pattern")
+                    .map(|v| v.trim_matches('"').trim_matches('\'') == NO_CRLF_PATTERN)
+                    .unwrap_or(false)
+            };
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_no_crlf_pattern(l) {
+                    return true;
+                }
+                j += 1;
+            }
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_no_crlf_pattern(l) {
+                    return true;
+                }
+            }
+            false
+        };
+        // True when line `i` (indent `c`) sits inside an outer `example:`/`examples:` payload —
+        // some enclosing container key up the indent ladder is `example`/`examples`, so an inner
+        // `default` key there is sample data.
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some(raw) = raw_inline(line, "default") else {
+                continue;
+            };
+            // A block-scalar opener (`>`/`|`, optionally with a chomping indicator) carries its
+            // value on the following lines, not inline — skip it.
+            if raw.starts_with('>') || raw.starts_with('|') {
+                continue;
+            }
+            let c = indent(line);
+            if inside_example(i, c) {
+                continue;
+            }
+            if !sibling_is_no_crlf_pattern(i, c) {
+                continue;
+            }
+            let value = raw.trim_matches('"').trim_matches('\'');
+            if !matches_no_crlf_pattern(value) {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_no_crlf_pattern_default_conforms_to_the_no_crlf_pattern() {
+        // Contract-harness invariant (OpenAPI 3.0.x / JSON-Schema structural rule): where a Schema
+        // Object declares an inline `default` beside a same-indent no-CR/LF `pattern` (`^[^\r\n]*$`,
+        // the application-endpoint-registration `applicationProviderName` field's pattern, which
+        // constrains the value to a single line), the default MUST match that pattern. A `default`
+        // is the schema's fall-back *instance*, so a value carrying a line terminator is a
+        // self-contradictory schema whose own validator rejects the fall-back it pre-supplies — a
+        // Redoc/Swagger form then pre-fills a single-line control with an unusable value and a
+        // codegen client's generated instance carries a value no field constrained by this pattern
+        // can legally hold.
+        //
+        // The **`default` twin** of `every_no_crlf_pattern_example_conforms_to_the_no_crlf_pattern`
+        // and the twenty-ninth member of the `pattern`-*default* family after E.164 / IMEI / ICCID /
+        // name / token / 32-hex / MAC / result-code / UUID / email / full-date / semver / geohash /
+        // app-name / DNS-label / TAC / IMEISV / DPV-purpose / 16-hex / text256 / 4-hex / text512 /
+        // version-4-UUID / OTP-template / region / client-id / correlator / no-semicolon — the
+        // **second default member over a negated character class** (after no-semicolon `^[^;]*$`),
+        // the first whose exclusion set is the two line terminators. The nearest default neighbours
+        // all *admit* a line terminator: the two `[\s\S]{0,N}` bounded-any-char members match every
+        // character, the no-semicolon member (`^[^;]*$`) excludes only `;`, and the correlator
+        // member is a different, non-cross-pairing pattern string — so a line-terminator-bearing
+        // default is the fault only this member can catch, and the pattern strings differ so they
+        // never cross-pair. Carries no `format` sibling, so beyond the `format`-default family.
+        // Future-drift posture (like the twenty-eight prior default twins): the corpus declares the
+        // no-CR/LF `pattern` (the `applicationProviderName` field) but pairs it with an `example`,
+        // **not** a `default` today, so the guard asserts clean across all specs and holds the line
+        // against a future default drifting to a multi-line value; the synthetic unit body in
+        // `no_crlf_pattern_default_extraction_rules` keeps the detection path live. Verified true
+        // across all mounted specs before asserting.
+        for api in APIS {
+            let offenders = no_crlf_pattern_defaults_malformed(api.body);
+            assert!(
+                offenders.is_empty(),
+                "{} spec declares a `default` beside a same-indent no-CR/LF \
+                 `pattern: '^[^\\r\\n]*$'` that contains a line terminator (a fall-back the \
+                 pattern's own validator would reject) at `default:` line(s): {:?}",
+                api.name,
+                offenders
+            );
+        }
+    }
+
+    #[test]
+    fn no_crlf_pattern_default_extraction_rules() {
+        // Unit-cover `no_crlf_pattern_defaults_malformed` so the contract test above can't pass
+        // vacuously and its detection is pinned (`matches_no_crlf_pattern` itself is already covered
+        // by `no_crlf_pattern_example_extraction_rules`).
+        //
+        // Extractor: a valid quoted single-line value and a valid unquoted single-line value beside
+        // a same-indent no-CR/LF `pattern` pass; an embedded-`\r` value and a value with two
+        // embedded `\r` are flagged; a bad value with the pattern *below* it (down-scan) is flagged;
+        // a value with no `pattern` sibling and one whose sibling is the *sibling negated class*
+        // `^[^;]*$` (which admits `\r`/`\n`) are skipped; a block-scalar default is skipped; a
+        // default in one property never pairs with a *following* property's no-CR/LF `pattern`
+        // across the dedent; an inner `default` inside an outer `example:` payload is skipped; and a
+        // property literally named `default` (opening a block) is skipped. A line feed cannot sit in
+        // an inline scalar (it would end the line), so the representable violator is the lone `\r`.
+        let body = format!(
+            "openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    GoodQuoted:
+      type: string
+      pattern: '{p}'
+      default: \"Acme Corporation\"
+    GoodUnquoted:
+      type: string
+      pattern: '{p}'
+      default: Acme Corp
+    BadEmbedded:
+      type: string
+      pattern: '{p}'
+      default: line1\rline2
+    BadEmbeddedTwo:
+      type: string
+      pattern: '{p}'
+      default: a\rb\rc
+    PatternBelow:
+      type: string
+      default: p\rq
+      pattern: '{p}'
+    NoPattern:
+      type: string
+      default: a\rb
+    OtherPattern:
+      type: string
+      pattern: '^[^;]*$'
+      default: a\rb
+    BlockDefault:
+      type: string
+      pattern: '{p}'
+      default: |
+        a\rb
+    InExample:
+      type: object
+      example:
+        pattern: '{p}'
+        default: a\rb
+    Split:
+      type: object
+      properties:
+        a:
+          default: a\rb
+        b:
+          type: string
+          pattern: '{p}'
+    NamedDefault:
+      type: object
+      properties:
+        default:
+          type: string
+          pattern: '{p}'
+",
+            p = NO_CRLF_PATTERN
+        );
+        // Flagged, in document order: BadEmbedded.default (an embedded `\r` beside a same-indent
+        // no-CR/LF `pattern`), BadEmbeddedTwo.default (two embedded `\r`), and PatternBelow.default
+        // (bad value, its no-CR/LF `pattern` a line below — down-scan pairs it). Not flagged:
+        // GoodQuoted/GoodUnquoted (single-line values); NoPattern (no `pattern` sibling);
+        // OtherPattern (sibling is the no-semicolon negated class `^[^;]*$`, not the no-CR/LF
+        // pattern — its `\r`-bearing default is admitted by that class and never inspected here,
+        // proving the two negated-class members never cross-pair); BlockDefault (block-scalar opener
+        // `|`, no inline value); InExample's inner `default: a\rb` (sits inside the outer `example:`
+        // payload); Split.a.default, whose only no-CR/LF `pattern` is in the following property
+        // Split.b past a dedent; and NamedDefault's `default:` property opening a block (no inline
+        // value).
+        let flagged = no_crlf_pattern_defaults_malformed(&body);
+        let flagged_props: Vec<&str> = flagged
+            .iter()
+            .map(|&n| {
+                let lines: Vec<&str> = body.lines().collect();
+                let mut k = n - 1;
+                loop {
+                    let l = lines[k];
+                    let ind = l.len() - l.trim_start().len();
+                    if ind == 4 && l.trim_end().ends_with(':') {
+                        break l.trim().trim_end_matches(':');
+                    }
+                    if k == 0 {
+                        break "";
+                    }
+                    k -= 1;
+                }
+            })
+            .collect();
+        assert_eq!(
+            flagged_props,
+            vec!["BadEmbedded", "BadEmbeddedTwo", "PatternBelow"]
+        );
+
+        // Non-vacuous floor (future-drift posture, mirroring the twenty-eight prior default twins):
+        // across every registered spec every `default` beside a same-indent no-CR/LF `pattern`
+        // matches it (the invariant the contract test asserts). The corpus declares the no-CR/LF
+        // `pattern` (the application-endpoint-registration `applicationProviderName` field) but pairs
+        // it with an `example`, **not** a `default` in the *same* Schema Object today — so this
+        // asserts a clean `== 0` genuine-pair count and guards future drift; the synthetic body
+        // above keeps the detection path live. The pair count reuses the extractor's own
+        // **dedent-bounded** same-indent sibling scan — the genuine-Schema-Object pairing — rather
+        // than a crude window, and stays independent of the extractor's *validity*
+        // (`matches_no_crlf_pattern`) comparison.
+        let mut no_crlf_defaults = 0usize;
+        for api in APIS {
+            assert!(
+                no_crlf_pattern_defaults_malformed(api.body).is_empty(),
+                "{}: every default beside a same-indent no-CR/LF `pattern` must match it",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            let raw_inline = |l: &str, name: &str| -> Option<String> {
+                let (k, v) = l.trim_start().split_once(':')?;
+                if k.trim() != name {
+                    return None;
+                }
+                let v = v.split('#').next().unwrap_or(v).trim();
+                if v.is_empty() { None } else { Some(v.to_string()) }
+            };
+            // A genuine same-Schema-Object no-CR/LF `pattern` sibling of the `default` on line `i`
+            // (indent `c`): scan down through the object's block then up, dedent-bounded exactly like
+            // the extractor's `sibling_is_no_crlf_pattern`, so a *following* property's no-CR/LF
+            // `pattern` past a dedent never counts.
+            let sibling_is_no_crlf = |i: usize, c: usize| -> bool {
+                let is_no_crlf = |l: &str| -> bool {
+                    raw_inline(l, "pattern")
+                        .map(|v| v.trim_matches('"').trim_matches('\'') == NO_CRLF_PATTERN)
+                        .unwrap_or(false)
+                };
+                let mut j = i + 1;
+                while j < lines.len() {
+                    let l = lines[j];
+                    if l.trim().is_empty() {
+                        j += 1;
+                        continue;
+                    }
+                    if indent(l) < c {
+                        break;
+                    }
+                    if indent(l) == c && is_no_crlf(l) {
+                        return true;
+                    }
+                    j += 1;
+                }
+                let mut k = i;
+                while k > 0 {
+                    k -= 1;
+                    let l = lines[k];
+                    if l.trim().is_empty() {
+                        continue;
+                    }
+                    if indent(l) < c {
+                        break;
+                    }
+                    if indent(l) == c && is_no_crlf(l) {
+                        return true;
+                    }
+                }
+                false
+            };
+            for (i, l) in lines.iter().enumerate() {
+                let Some(v) = raw_inline(l, "default") else {
+                    continue;
+                };
+                // Inline scalar only (skip block-scalar openers), mirroring the extractor so the
+                // floor counts exactly the pairs it inspects.
+                if v.starts_with('>') || v.starts_with('|') {
+                    continue;
+                }
+                let c = indent(l);
+                if sibling_is_no_crlf(i, c) {
+                    no_crlf_defaults += 1;
+                }
+            }
+        }
+        assert_eq!(
+            no_crlf_defaults, 0,
+            "expected no genuine default + same-Schema-Object no-CR/LF `pattern` pairs across \
+             specs (the future-drift posture; a new pair means switch this guard to a `>= 1` floor \
+             like the example side), got {no_crlf_defaults}"
+        );
+    }
+
     const OTP_TEMPLATE_PATTERN: &str = r".*\{\{code\}\}.*";
 
     /// True when `s` matches the OTP-template `pattern` `.*\{\{code\}\}.*` — i.e. it contains the

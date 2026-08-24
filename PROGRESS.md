@@ -3335,6 +3335,29 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - a **no-CR/LF `pattern`-`default` conformance** contract test (`src/registry.rs`
+    `every_no_crlf_pattern_default_conforms_to_the_no_crlf_pattern`) — the `default`-side twin of
+    `every_no_crlf_pattern_example_conforms_to_the_no_crlf_pattern` and the **twenty-ninth member of
+    the `pattern`-default family** after E.164 / IMEI / ICCID / name / token / 32-hex / MAC /
+    result-code / UUID / email / full-date / semver / geohash / app-name / DNS-label / TAC / IMEISV /
+    DPV-purpose / 16-hex / text256 / 4-hex / text512 / version-4-UUID / OTP-template / region /
+    client-id / correlator / no-semicolon, over the application-endpoint-registration
+    `applicationProviderName` pattern `^[^\r\n]*$`. The **second default member over a negated
+    character class** (after no-semicolon `^[^;]*$`), the first whose exclusion set is the two line
+    terminators (a single-line constraint): the two `[\s\S]{0,N}` bounded-any-char default members
+    match every character, the no-semicolon member excludes only `;` (so it *admits* `\r`/`\n`), and
+    the correlator member is a different, non-cross-pairing pattern string — so a
+    line-terminator-bearing default is the fault only this member catches (members key on the exact
+    pattern string, so they never cross-pair); no `format` sibling, so beyond the `format`-default
+    family. New pure `no_crlf_pattern_defaults_malformed` (the `no_semicolon_pattern_defaults_malformed`
+    shape keyed on `NO_CRLF_PATTERN` + judged by `matches_no_crlf_pattern`, both already present from
+    the example side; trigger key `default:`, block-scalar opener skipped, dedent-bounded same-indent
+    sibling scan, in-`example:` payload excluded). Corpus declares the no-CR/LF `pattern` (the
+    `applicationProviderName` field) but pairs it with an `example`, **not** a `default` → asserts a
+    clean `== 0` genuine-pair count (future-drift posture, mirroring the twenty-eight prior default
+    twins) + guards future drift. Because a `\n` cannot sit in an inline scalar (it ends the line),
+    the representable violator is a lone `\r`. Unit-covered (`no_crlf_pattern_default_extraction_rules`).
+    Test-only, no spec change.
   - a **no-semicolon `pattern`-`default` conformance** contract test (`src/registry.rs`
     `every_no_semicolon_pattern_default_conforms_to_the_no_semicolon_pattern`) — the `default`-side
     twin of `every_no_semicolon_pattern_example_conforms_to_the_no_semicolon_pattern` and the
@@ -6851,6 +6874,31 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-24 — Contract-test harness: guard that every **no-CR/LF `pattern` `default` matches the
+  pattern** (`src/registry.rs` `every_no_crlf_pattern_default_conforms_to_the_no_crlf_pattern`).
+  The **twenty-ninth member of the `pattern`-default family** — the `default`-side twin of
+  `every_no_crlf_pattern_example_conforms_to_the_no_crlf_pattern`, over the
+  application-endpoint-registration `applicationProviderName` `pattern` `^[^\r\n]*$`. **Second
+  default member over a negated character class** (after no-semicolon `^[^;]*$`), the first whose
+  exclusion set is the two line terminators (a single-line constraint): the two `[\s\S]{0,N}`
+  bounded-any-char defaults match every character, the no-semicolon default excludes only `;` (so it
+  admits `\r`/`\n`), and the correlator default is a different, non-cross-pairing pattern string — so
+  a line-terminator-bearing default is the fault only this member catches; members key on the exact
+  pattern string, so they never cross-pair, and the field carries no `format` sibling (beyond the
+  `format`-default family). New pure `no_crlf_pattern_defaults_malformed` (the
+  `no_semicolon_pattern_defaults_malformed` shape keyed on `NO_CRLF_PATTERN` + judged by
+  `matches_no_crlf_pattern`, both already present from the example side; `default:` trigger,
+  block-scalar opener skipped, dedent-bounded same-indent sibling scan, in-`example:` payload
+  excluded). Surveyed the corpus — the no-CR/LF `pattern` (the one `applicationProviderName` field)
+  pairs with an `example`, **not** a `default` → asserts a clean `== 0` genuine-pair count
+  (future-drift posture, mirroring the twenty-eight prior default twins) + guards future drift.
+  Because a `\n` cannot sit in an inline scalar (it ends the line), the representable violator is a
+  lone `\r`. Unit-covered (`no_crlf_pattern_default_extraction_rules`: valid quoted/unquoted cleared;
+  embedded-`\r` / two-embedded-`\r` / pattern-below flagged; no-pattern / sibling-negated-class
+  (`^[^;]*$`, which admits `\r`) / block-scalar / in-`example:` / following-property-across-dedent /
+  property-named-`default` skipped). Test-only, no spec change. `cargo test` 3024 pass (+2);
+  `cargo build --release` clean, no new dep. — binary (release): 5,323,160 bytes (~5.08 MiB;
+  unchanged by a test-only change).
 - 2026-08-24 — Contract-test harness: guard that every **no-semicolon `pattern` `default` matches the
   pattern** (`src/registry.rs` `every_no_semicolon_pattern_default_conforms_to_the_no_semicolon_pattern`).
   The **twenty-eighth member of the `pattern`-default family** — the `default`-side twin of
