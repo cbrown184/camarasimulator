@@ -3335,6 +3335,25 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - an **OTP-template `pattern`-`default` conformance** contract test (`src/registry.rs`
+    `every_otp_template_pattern_default_conforms_to_the_otp_template_pattern`) — the `default`-side
+    twin of `every_otp_template_pattern_example_conforms_to_the_otp_template_pattern` and the
+    **twenty-fourth member of the `pattern`-default family** after E.164 / IMEI / ICCID / name /
+    token / 32-hex / MAC / result-code / UUID / email / full-date / semver / geohash / app-name /
+    DNS-label / TAC / IMEISV / DPV-purpose / 16-hex / text256 / 4-hex / text512 / version-4-UUID, and
+    the **first over an unanchored pattern** (`.*\{\{code\}\}.*`, the one-time-password-sms
+    `SendCodeRequest.message` field): every prior default member is `^…$`-anchored and pins a
+    full-string shape, whereas this one carries no anchors, so under JSON Schema's ECMA-262
+    (unanchored) `pattern` semantics it asserts *substring containment* — the literal `{{code}}`
+    appears somewhere — so a placeholder-less default is the fault none of the twenty-three prior
+    members catches. Carries no `format` sibling; reuses the `matches_otp_template_pattern` matcher
+    (no new regex dep). New pure `otp_template_pattern_defaults_malformed` (the
+    `text512_pattern_defaults_malformed` shape keyed on `OTP_TEMPLATE_PATTERN` equality; trigger key
+    `default:`, block-scalar opener skipped, dedent-bounded same-indent sibling scan, in-`example:`
+    payload excluded). Corpus declares the OTP-template `pattern` (one-time-password-sms `message`)
+    but pairs it with an `example`, **not** a `default` → asserts a clean `== 0` genuine-pair count
+    (future-drift posture, mirroring the twenty-three prior default twins) + guards future drift.
+    Unit-covered (`otp_template_pattern_default_extraction_rules`). Test-only, no spec change.
   - a **version-4 UUID `pattern`-`default` conformance** contract test (`src/registry.rs`
     `every_uuid_v4_pattern_default_conforms_to_the_uuid_v4_pattern`) — the `default`-side twin of
     `every_uuid_v4_pattern_example_conforms_to_the_uuid_v4_pattern` and the **twenty-third member
@@ -6750,6 +6769,38 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-24 — Contract-test harness: guard that every **OTP-template `pattern` `default` matches
+  the pattern** (`src/registry.rs`
+  `every_otp_template_pattern_default_conforms_to_the_otp_template_pattern`). The **twenty-fourth
+  member of the `pattern`-default family** after E.164, IMEI, ICCID, name, token, 32-hex, MAC,
+  result-code, UUID, email, full-date, semver, geohash, app-name, DNS-label, TAC, IMEISV,
+  DPV-purpose, 16-hex, text256, 4-hex, text512, and version-4 UUID — the `default`-side twin of
+  `every_otp_template_pattern_example_conforms_to_the_otp_template_pattern` (`.*\{\{code\}\}.*`, the
+  one-time-password-sms `SendCodeRequest.message` field) and the **first over an unanchored
+  pattern**: every prior default member is `^…$`-anchored and pins a full-string shape (a digit run,
+  a hex layout, a scheme literal, an alphanumeric class, a length ceiling), whereas
+  `.*\{\{code\}\}.*` carries no anchors, so under JSON Schema's ECMA-262 (unanchored) `pattern`
+  semantics it asserts *substring containment* — the literal `{{code}}` appears somewhere. No
+  anchored member can express "contains this literal substring", so a placeholder-less default is
+  the fault none of the twenty-three prior members catches. Like the IMEI/ICCID/no-semicolon/
+  bounded-any-char patterns it carries **no** `format` sibling, so this default is beyond the
+  `format`-default family's reach; the concrete `matches_otp_template_pattern` matcher is reused
+  (already covered by the example side, no new regex dep). New pure
+  `otp_template_pattern_defaults_malformed` (the `text512_pattern_defaults_malformed` shape keyed on
+  `OTP_TEMPLATE_PATTERN` equality + judged by `matches_otp_template_pattern`; trigger key `default:`,
+  block-scalar opener skipped, dedent-bounded same-indent sibling scan, in-`example:` payload
+  excluded). Surveyed the corpus first — the single OTP-template `pattern` field
+  (one-time-password-sms `message`) pairs with an `example`, **not** a `default` → asserts a clean
+  `== 0` genuine-pair count (future-drift posture, mirroring the twenty-three prior default twins) +
+  guards future drift; floor reuses the dedent-bounded sibling scan. Unit-covered
+  (`otp_template_pattern_default_extraction_rules`: valid quoted (`{{code}} is your verification
+  code`) / unquoted (`Your code is {{code}}`) cleared; a placeholder-less value, a single-brace
+  `{code}` value, and a placeholder-less pattern-below value flagged as
+  `[BadMissing, BadSingleBrace, PatternBelow]`; no-pattern / different-pattern (result-code
+  `^B[0-9]{6}$`) / block-scalar / in-`example:` / following-property-across-dedent /
+  property-named-`default` skipped). Test-only, no spec change. `cargo test` 3014 pass (+2);
+  `cargo build --release` clean, no new dep. — binary (release): 5,323,160 bytes (~5.08 MiB;
+  unchanged by a test-only change).
 - 2026-08-24 — Contract-test harness: guard that every **version-4 UUID `pattern` `default`
   matches the pattern** (`src/registry.rs`
   `every_uuid_v4_pattern_default_conforms_to_the_uuid_v4_pattern`). The **twenty-third member of

@@ -52168,6 +52168,396 @@ components:
         );
     }
 
+    /// The 1-based line numbers, in document order, of every `default:` keyword whose inline scalar
+    /// value sits in a Schema Object declaring a *same-indent* OTP-template `pattern` sibling
+    /// (`.*\{\{code\}\}.*`) yet does **not** contain the literal `{{code}}` placeholder, without a
+    /// YAML dep. The `default`-side twin of `otp_template_pattern_examples_malformed`: same scoping,
+    /// keyed on `OTP_TEMPLATE_PATTERN`, judged by `matches_otp_template_pattern`, but triggered by
+    /// `default:` and skipping a block-scalar opener (mirroring `text512_pattern_defaults_malformed`).
+    ///
+    /// In OpenAPI 3.0.x (JSON Schema) a `default` is the schema's fall-back *instance*, so a field
+    /// constrained by `pattern` MUST carry a default the pattern accepts. An SMS-template default
+    /// dropping the `{{code}}` placeholder advertises a fall-back the schema's own validator rejects,
+    /// so a Redoc/Swagger form pre-fills a `message` control with a template the operator could never
+    /// inject the generated OTP into, and a codegen client's generated instance carries the same
+    /// unusable value. This pattern carries no `format` sibling, so these defaults are otherwise
+    /// beyond the `format`-default family's reach.
+    ///
+    /// The pattern is **unanchored** — the only member of the family without `^`/`$` — so it asserts
+    /// substring containment, not a full-string shape (see `matches_otp_template_pattern`).
+    ///
+    /// Scoping mirrors `text512_pattern_defaults_malformed` exactly: only a `default` carrying an
+    /// inline scalar (a block/object default opens no inline value and is skipped) with a same-indent
+    /// `pattern` sibling *equal to* `OTP_TEMPLATE_PATTERN` in the same Schema Object is inspected —
+    /// the sibling is scanned at the default's own indent, down through the object's block then up,
+    /// dedent-bounded, so a nested or *following* property's `pattern` never pairs. A `default:`
+    /// nested inside an outer `example:`/`examples:` payload (sample data, not a schema keyword) is
+    /// skipped. Only the OTP-template pattern is matched; other patterns are out of scope.
+    fn otp_template_pattern_defaults_malformed(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let raw_inline = |l: &str, name: &str| -> Option<String> {
+            let (k, v) = l.trim_start().split_once(':')?;
+            if k.trim() != name {
+                return None;
+            }
+            let v = v.split('#').next().unwrap_or(v).trim();
+            if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            }
+        };
+        // Whether a same-indent `pattern:` sibling of line `i` (indent `c`) in the same Schema
+        // Object equals the OTP-template pattern: scan down through the object's block then up,
+        // dedent-bounded so a nested or following object's `pattern` never pairs.
+        let sibling_is_otp_template_pattern = |i: usize, c: usize| -> bool {
+            let is_otp_template_pattern = |l: &str| -> bool {
+                raw_inline(l, "pattern")
+                    .map(|v| v.trim_matches('"').trim_matches('\'') == OTP_TEMPLATE_PATTERN)
+                    .unwrap_or(false)
+            };
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_otp_template_pattern(l) {
+                    return true;
+                }
+                j += 1;
+            }
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_otp_template_pattern(l) {
+                    return true;
+                }
+            }
+            false
+        };
+        // True when line `i` (indent `c`) sits inside an outer `example:`/`examples:` payload —
+        // some enclosing container key up the indent ladder is `example`/`examples`, so an inner
+        // `default` key there is sample data, not a schema keyword.
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some(raw) = raw_inline(line, "default") else {
+                continue;
+            };
+            // A block-scalar opener (`>`/`|`, optionally with a chomping indicator) carries its
+            // value on the following lines, not inline — skip it.
+            if raw.starts_with('>') || raw.starts_with('|') {
+                continue;
+            }
+            let c = indent(line);
+            if inside_example(i, c) {
+                continue;
+            }
+            if !sibling_is_otp_template_pattern(i, c) {
+                continue;
+            }
+            let value = raw.trim_matches('"').trim_matches('\'');
+            if !matches_otp_template_pattern(value) {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_otp_template_pattern_default_conforms_to_the_otp_template_pattern() {
+        // Contract-harness invariant (OpenAPI 3.0.x / JSON-Schema structural rule): where a Schema
+        // Object declares an inline `default` beside a same-indent OTP-template `pattern`
+        // (`.*\{\{code\}\}.*`, the one-time-password-sms `SendCodeRequest.message` field's pattern),
+        // the default MUST match that pattern. A `default` is the schema's fall-back *instance*, so an
+        // SMS-template default that drops the `{{code}}` placeholder is a self-contradictory schema
+        // whose own validator rejects the fall-back it pre-supplies, and a Redoc/Swagger form then
+        // pre-fills a control with a template into which the operator could never inject the generated
+        // OTP.
+        //
+        // The **`default` twin** of
+        // `every_otp_template_pattern_example_conforms_to_the_otp_template_pattern` and the
+        // twenty-fourth member of the `pattern`-*default* family after the E.164 / IMEI / ICCID /
+        // name / token / 32-hex / MAC / result-code / UUID / email / full-date / semver / geohash /
+        // app-name / DNS-label / TAC / IMEISV / DPV-purpose / 16-hex / bounded-any-char (256-wide) /
+        // 4-hex / bounded-any-char (512-wide) / version-4-UUID default twins — and the **first over an
+        // unanchored pattern**: every prior default member is `^…$`-anchored and pins a full-string
+        // shape (a digit run, a hex layout, a scheme literal, an alphanumeric class, a length
+        // ceiling), whereas `.*\{\{code\}\}.*` carries no anchors, so under JSON Schema's ECMA-262
+        // (unanchored) `pattern` semantics it asserts *substring containment* — the literal `{{code}}`
+        // appears somewhere. No anchored member can express "contains this literal substring", so a
+        // placeholder-less default is the fault none of the twenty-three prior members can catch. Like
+        // the IMEI / ICCID / no-semicolon / bounded-any-char patterns it carries no `format` sibling,
+        // so these defaults are beyond the `format`-default family's reach; a general regex-engine
+        // test would need a new dependency (declined on binary-size grounds), so the concrete
+        // hand-validated `matches_otp_template_pattern` matcher is reused (already covered by
+        // `otp_template_pattern_example_extraction_rules`).
+        //
+        // Future-drift posture (like the twenty-three prior default twins): the corpus declares this
+        // `pattern` (one-time-password-sms, the `message` field) but pairs it with an `example`,
+        // **not** a `default`, so the guard asserts clean across all specs today and holds the line
+        // against a future SMS-template default drifting past the placeholder; the synthetic unit body
+        // in `otp_template_pattern_default_extraction_rules` keeps the detection path live. Verified
+        // true across all mounted specs before asserting.
+        for api in APIS {
+            let offenders = otp_template_pattern_defaults_malformed(api.body);
+            assert!(
+                offenders.is_empty(),
+                "{} spec declares a `default` beside a same-indent OTP-template `pattern` \
+                 (`.*\\{{\\{{code\\}}\\}}.*`) that omits the code placeholder (a fall-back the \
+                 pattern's own validator would reject) at `default:` line(s): {:?}",
+                api.name,
+                offenders
+            );
+        }
+    }
+
+    #[test]
+    fn otp_template_pattern_default_extraction_rules() {
+        // Unit-cover `otp_template_pattern_defaults_malformed` so the contract test above can't pass
+        // vacuously and its detection is pinned (`matches_otp_template_pattern` itself is already
+        // covered by `otp_template_pattern_example_extraction_rules`).
+        //
+        // Extractor: a valid quoted (`{{code}} is your verification code`) and a valid unquoted
+        // (`Your code is {{code}}`) template default beside a same-indent OTP-template `pattern` pass;
+        // a placeholder-less value is flagged; a single-brace `{code}` value (not the literal
+        // `{{code}}`) is flagged; a bad (placeholder-less) value with the `pattern` *below* it
+        // (down-scan) is flagged; a value with no `pattern` sibling and one whose sibling is a
+        // *different* pattern (the result-code `^B[0-9]{6}$`) are skipped; a block-scalar default is
+        // skipped; a default in one property never pairs with a *following* property's OTP-template
+        // `pattern` across the dedent; an inner `default` inside an outer `example:` payload is
+        // skipped; and a property literally named `default` (opening a block) is skipped.
+        let ph = "{{code}}";
+        let body = format!(
+            "openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    GoodQuoted:
+      type: string
+      pattern: '{p}'
+      default: \"{c} is your verification code\"
+    GoodUnquoted:
+      type: string
+      pattern: '{p}'
+      default: Your code is {c}
+    BadMissing:
+      type: string
+      pattern: '{p}'
+      default: your verification code
+    BadSingleBrace:
+      type: string
+      pattern: '{p}'
+      default: code is {{code}}
+    PatternBelow:
+      type: string
+      default: no placeholder at all
+      pattern: '{p}'
+    NoPattern:
+      type: string
+      default: your verification code
+    OtherPattern:
+      type: string
+      pattern: '^B[0-9]{{6}}$'
+      default: your verification code
+    BlockDefault:
+      type: string
+      pattern: '{p}'
+      default: |
+        your verification code
+    InExample:
+      type: object
+      example:
+        pattern: '{p}'
+        default: your verification code
+    Split:
+      type: object
+      properties:
+        a:
+          default: your verification code
+        b:
+          type: string
+          pattern: '{p}'
+    NamedDefault:
+      type: object
+      properties:
+        default:
+          type: string
+          pattern: '{p}'
+",
+            p = OTP_TEMPLATE_PATTERN,
+            c = ph
+        );
+        // Flagged, in document order: BadMissing.default (no placeholder beside a same-indent
+        // OTP-template `pattern`), BadSingleBrace.default (`{code}` — single braces, not `{{code}}`),
+        // and PatternBelow.default (no placeholder, OTP-template `pattern` a line below — down-scan
+        // pairs it). Not flagged: GoodQuoted/GoodUnquoted (carry `{{code}}`, the latter proving an
+        // unquoted spaced free-text scalar pairs); NoPattern (no `pattern` sibling); OtherPattern
+        // (sibling is the result-code pattern, not OTP-template — a placeholder-less value there is
+        // out of scope); BlockDefault (block-scalar opener `|`, no inline value); InExample's inner
+        // `default` (inside the outer `example:` payload); Split.a.default (its only OTP-template
+        // `pattern` is in the following property past a dedent); and NamedDefault's `default:`
+        // property opening a block (no inline value).
+        let flagged = otp_template_pattern_defaults_malformed(&body);
+        let flagged_props: Vec<&str> = flagged
+            .iter()
+            .map(|&n| {
+                // Walk up to the nearest schema-name line (indent 4) for a stable label.
+                let lines: Vec<&str> = body.lines().collect();
+                let mut k = n - 1;
+                loop {
+                    let l = lines[k];
+                    let ind = l.len() - l.trim_start().len();
+                    if ind == 4 && l.trim_end().ends_with(':') {
+                        break l.trim().trim_end_matches(':');
+                    }
+                    if k == 0 {
+                        break "";
+                    }
+                    k -= 1;
+                }
+            })
+            .collect();
+        assert_eq!(
+            flagged_props,
+            vec!["BadMissing", "BadSingleBrace", "PatternBelow"]
+        );
+
+        // Non-vacuous floor (future-drift posture, mirroring the twenty-three prior `pattern`-default
+        // twins): across every registered spec every `default` beside a same-indent OTP-template
+        // `pattern` matches it (the invariant the contract test asserts). The corpus declares the
+        // OTP-template `pattern` on the one-time-password-sms `message` schema but pairs it with an
+        // `example`, **not** a `default`, in the *same* Schema Object today — so this asserts a clean
+        // `== 0` genuine-pair count and guards future drift; the synthetic body above keeps the
+        // detection path live. The pair count reuses the extractor's own **dedent-bounded**
+        // same-indent sibling scan — the genuine-Schema-Object pairing — rather than a crude window,
+        // and stays independent of the extractor's *validity* (`matches_otp_template_pattern`)
+        // comparison.
+        let mut otp_template_defaults = 0usize;
+        for api in APIS {
+            assert!(
+                otp_template_pattern_defaults_malformed(api.body).is_empty(),
+                "{}: every default beside a same-indent OTP-template `pattern` must match it",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            let raw_inline = |l: &str, name: &str| -> Option<String> {
+                let (k, v) = l.trim_start().split_once(':')?;
+                if k.trim() != name {
+                    return None;
+                }
+                let v = v.split('#').next().unwrap_or(v).trim();
+                if v.is_empty() { None } else { Some(v.to_string()) }
+            };
+            // A genuine same-Schema-Object OTP-template `pattern` sibling of the `default` on line
+            // `i` (indent `c`): scan down through the object's block then up, dedent-bounded exactly
+            // like the extractor's `sibling_is_otp_template_pattern`, so a *following* property's
+            // pattern past a dedent never counts.
+            let sibling_is_otp_template = |i: usize, c: usize| -> bool {
+                let is_otp_template = |l: &str| -> bool {
+                    raw_inline(l, "pattern")
+                        .map(|v| v.trim_matches('"').trim_matches('\'') == OTP_TEMPLATE_PATTERN)
+                        .unwrap_or(false)
+                };
+                let mut j = i + 1;
+                while j < lines.len() {
+                    let l = lines[j];
+                    if l.trim().is_empty() {
+                        j += 1;
+                        continue;
+                    }
+                    if indent(l) < c {
+                        break;
+                    }
+                    if indent(l) == c && is_otp_template(l) {
+                        return true;
+                    }
+                    j += 1;
+                }
+                let mut k = i;
+                while k > 0 {
+                    k -= 1;
+                    let l = lines[k];
+                    if l.trim().is_empty() {
+                        continue;
+                    }
+                    if indent(l) < c {
+                        break;
+                    }
+                    if indent(l) == c && is_otp_template(l) {
+                        return true;
+                    }
+                }
+                false
+            };
+            for (i, l) in lines.iter().enumerate() {
+                let Some(v) = raw_inline(l, "default") else {
+                    continue;
+                };
+                if v.starts_with('>') || v.starts_with('|') {
+                    continue;
+                }
+                let c = indent(l);
+                if sibling_is_otp_template(i, c) {
+                    otp_template_defaults += 1;
+                }
+            }
+        }
+        assert_eq!(
+            otp_template_defaults, 0,
+            "expected no genuine default + same-Schema-Object OTP-template `pattern` pairs across \
+             specs (the future-drift posture; a new pair means switch this guard to a `>= 1` floor \
+             like the example side), got {otp_template_defaults}"
+        );
+    }
+
     const HEX16_PATTERN: &str = r"^[0-9a-fA-F]{16}$";
 
     /// True when `s` matches the 16-hex `pattern` `^[0-9a-fA-F]{16}$` exactly: exactly 16 ASCII
