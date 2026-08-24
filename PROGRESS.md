@@ -3335,6 +3335,27 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - a **DNS-label `pattern`-`default` conformance** contract test (`src/registry.rs`
+    `every_dns_label_pattern_default_conforms_to_the_dns_label_pattern`) — the `default`-side twin of
+    `every_dns_label_pattern_example_conforms_to_the_dns_label_pattern` and the **fifteenth member of
+    the `pattern`-default family** after E.164 / IMEI / ICCID / name / token / 32-hex / MAC /
+    result-code / UUID / email / full-date / semver / geohash / app-name, the **first over an
+    anchored alphabet** (`^[A-Za-z0-9]([A-Za-z0-9-]{0,53}[A-Za-z0-9])?$`, the Application Endpoint
+    Registration `EdgeCloudZone` name/provider/region field): 1–55 chars, each ASCII letter/digit/
+    hyphen, first and last pinned to alphanumeric (no boundary hyphen), length capped at 55 by the
+    pattern itself. No earlier default member expresses anchored alphanumeric endpoints with a
+    hyphen-admitting bounded interior: the name pattern admits a boundary hyphen AND `_`/`.` and is
+    unbounded, the app-name pattern forces a leading *letter* and forbids `-`, and the token pattern
+    admits a boundary hyphen — so a boundary-hyphen or wrong-alphabet DNS-label default is the fault
+    none catches. Carries no `format` sibling, so beyond the `format`-default family. New pure
+    `dns_label_pattern_defaults_malformed` (the `app_name_pattern_defaults_malformed` shape keyed on
+    `DNS_LABEL_PATTERN` equality + judged by `matches_dns_label_pattern`, both already present from
+    the example side; trigger key `default:`, block-scalar opener skipped, dedent-bounded same-indent
+    sibling scan, in-`example:` payload excluded). Corpus declares the DNS-label `pattern`
+    (Application Endpoint Registration, three `EdgeCloudZone` fields) but pairs it with an `example`,
+    **not** a `default` → asserts clean `== 0` genuine-pair count (future-drift posture) + guards
+    future drift; floor reuses the dedent-bounded sibling scan. Unit-covered
+    (`dns_label_pattern_default_extraction_rules`). Test-only, no spec change.
   - an **app-name `pattern`-`default` conformance** contract test (`src/registry.rs`
     `every_app_name_pattern_default_conforms_to_the_app_name_pattern`) — the `default`-side twin of
     `every_app_name_pattern_example_conforms_to_the_app_name_pattern` and the **fourteenth member of
@@ -6604,6 +6625,40 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-24 — Contract-test harness: guard that every **DNS-label `pattern` `default` matches the
+  pattern** (`src/registry.rs` `every_dns_label_pattern_default_conforms_to_the_dns_label_pattern`).
+  The **fifteenth member of the `pattern`-default family** after E.164, IMEI, ICCID, name, token,
+  32-hex, MAC, result-code, UUID, email, full-date, semver, geohash, and app-name, the
+  `default`-side twin of `every_dns_label_pattern_example_conforms_to_the_dns_label_pattern`, and the
+  **first pattern-default member over an anchored alphabet** (`^[A-Za-z0-9]([A-Za-z0-9-]{0,53}[A-Za-z0-9])?$`
+  — the Application Endpoint Registration `EdgeCloudZone` name/provider/region shape: 1–55 chars,
+  each an ASCII letter/digit/hyphen, with the **first and last** characters pinned to alphanumeric
+  so no boundary hyphen is admitted, the length capped at 55 by the pattern itself — a head char,
+  `{0,53}` inner chars, a tail char). A leading-hyphen (`-bad`), a trailing-hyphen (`bad-`), an
+  underscore (`us_east`), a dot, a space, or a value past the 55-char ceiling is a fault none of the
+  fourteen prior members can express: the nearest neighbour, the name pattern `^[a-zA-Z0-9_.-]+$`,
+  admits a boundary hyphen AND `_`/`.` and is unbounded; the app-name pattern requires a leading
+  *letter*, admits `_`, and forbids `-`; the token pattern admits a boundary hyphen — none pins both
+  ends to an alphanumeric under an intrinsic length cap, so a boundary-hyphen or wrong-alphabet
+  DNS-label default is the fault none catches. Like the region/name patterns the DNS-label pattern
+  carries **no** `format` sibling, so this default is beyond the `format`-default family's reach. In
+  OpenAPI 3.0.x a `default` is the schema's fall-back *instance*, so a field constrained by this
+  `pattern` MUST carry a default the pattern accepts; a DNS-label default the pattern rejects
+  advertises a fall-back the schema's own validator rejects. New pure
+  `dns_label_pattern_defaults_malformed` (the `app_name_pattern_defaults_malformed` shape keyed on
+  `DNS_LABEL_PATTERN` equality + judged by `matches_dns_label_pattern`, both already present from the
+  example side; trigger key `default:`, block-scalar opener skipped, dedent-bounded same-indent
+  sibling scan, in-`example:` payload excluded). Surveyed the corpus first — the three DNS-label
+  `pattern` fields (Application Endpoint Registration on the `EdgeCloudZone` name/provider/region)
+  all pair with an `example`, **not** a `default` → asserts a clean `== 0` genuine-pair count
+  (future-drift posture, mirroring the fourteen prior default twins) + guards future drift; floor
+  reuses the dedent-bounded sibling scan. Unit-covered (`dns_label_pattern_default_extraction_rules`:
+  valid quoted (`zone-us-east-1`) / unquoted (`us-east-1`) cleared; leading-hyphen / trailing-hyphen /
+  underscore / pattern-below flagged as `[LeadingHyphen, TrailingHyphen, HasUnderscore, PatternBelow]`;
+  no-pattern / different-pattern (region `^[A-Za-z0-9-]+$`) / block-scalar / in-`example:` /
+  following-property-across-dedent / property-named-`default` skipped). Test-only, no spec change.
+  `cargo test` 2996 pass (+2); `cargo build --release` clean, no new dep. — binary (release):
+  5,323,160 bytes (~5.08 MiB; unchanged by a test-only change).
 - 2026-08-24 — Contract-test harness: guard that every **app-name `pattern` `default` matches the
   pattern** (`src/registry.rs` `every_app_name_pattern_default_conforms_to_the_app_name_pattern`).
   The **fourteenth member of the `pattern`-default family** after E.164, IMEI, ICCID, name, token,
