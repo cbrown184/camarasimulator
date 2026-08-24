@@ -3335,6 +3335,23 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - a **UUID `pattern`-`default` conformance** contract test (`src/registry.rs`
+    `every_uuid_pattern_default_conforms_to_the_uuid_pattern`) — the `default`-side twin of
+    `every_uuid_pattern_example_conforms_to_the_uuid_pattern` and the **ninth member of the
+    `pattern`-default family** after E.164 / IMEI / ICCID / name / token / 32-hex / MAC / result-code,
+    the **first over a structured, mixed-constraint form** (`^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`,
+    the RFC 4122 v1–5 identifier pattern the edge / network-access `vwip` specs use verbatim: a fixed
+    8-4-4-4-12 hyphen layout AND a strict-lowercase hex alphabet AND version `1..=5` / variant
+    `8/9/a/b` nibble ranges). An uppercase-hex / wrong-version / wrong-variant fault is one none of
+    the eight prior members express; and it is beyond the reach of the co-located `format: uuid`
+    default guard (`every_uuid_format_default_is_a_well_formed_uuid`, case-insensitive + nibble-lenient)
+    — the exact gap this member closes. New pure `uuid_pattern_defaults_malformed` (the
+    `name_pattern_defaults_malformed` shape keyed on `UUID_PATTERN` equality + judged by
+    `matches_uuid_v1to5_pattern`, both already present from the example side; trigger key `default:`,
+    block-scalar opener skipped). Corpus declares several strict-UUID `pattern` fields but pairs none
+    with a default (they carry examples) → asserts clean `== 0` genuine-pair count (future-drift
+    posture) + guards future drift; floor reuses the dedent-bounded sibling scan. Unit-covered
+    (`uuid_pattern_default_extraction_rules`). Test-only, no spec change.
   - a **result-code `pattern`-`default` conformance** contract test (`src/registry.rs`
     `every_result_code_pattern_default_conforms_to_the_result_code_pattern`) — the `default`-side
     twin of `every_result_code_pattern_example_conforms_to_the_result_code_pattern` and the
@@ -6509,6 +6526,37 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-24 — Contract-test harness: guard that every **UUID `pattern` `default` matches the
+  pattern** (`src/registry.rs` `every_uuid_pattern_default_conforms_to_the_uuid_pattern`). The
+  **ninth member of the `pattern`-default family** after E.164, IMEI, ICCID, name, token, 32-hex,
+  MAC, and result-code, the `default`-side twin of
+  `every_uuid_pattern_example_conforms_to_the_uuid_pattern`, and the **first pattern-default member
+  over a structured, mixed-constraint form** (`^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`
+  — the RFC 4122 v1–5 identifier pattern the edge-application-management / network-access-domains
+  `vwip` specs use verbatim: a fixed 8-4-4-4-12 hyphen layout AND a strict-lowercase hex alphabet
+  AND two position-specific nibble ranges, version `1..=5` at index 14 and variant `8/9/a/b` at
+  index 19). An uppercase-hex, wrong-version, or wrong-variant fault is one none of the eight prior
+  members can express (single-run classes, a hyphen-joined hex run, an alpha-prefix + digit run).
+  Crucially these schemas also carry a `format: uuid` sibling, but its default guard
+  `every_uuid_format_default_is_a_well_formed_uuid` is case-insensitive and lenient on the
+  version/variant nibbles, so an uppercase or wrong-version/variant UUID default passes there while
+  violating this pattern — the exact gap this member closes on the default side (mirroring what the
+  UUID example-side guard closes). In OpenAPI 3.0.x a `default` is the schema's fall-back *instance*,
+  so a field constrained by this `pattern` MUST carry a default the pattern accepts; a UUID default
+  the pattern rejects advertises a fall-back the schema's own validator rejects. New pure
+  `uuid_pattern_defaults_malformed` (the `name_pattern_defaults_malformed` shape keyed on
+  `UUID_PATTERN` equality + judged by `matches_uuid_v1to5_pattern`, both already present from the
+  example side; trigger key `default:`, block-scalar opener skipped, dedent-bounded same-indent
+  sibling scan, in-`example:` payload excluded). Surveyed the corpus first — the two specs' several
+  strict-UUID `pattern` fields all pair with an `example`, **none** with a `default` → asserts a
+  clean `== 0` genuine-pair count (future-drift posture, mirroring the seven prior default twins) +
+  guards future drift; floor reuses the dedent-bounded sibling scan. Unit-covered
+  (`uuid_pattern_default_extraction_rules`: valid quoted/unquoted UUIDs cleared;
+  uppercase/bad-version/bad-variant/pattern-below flagged in document order [25, 29, 33, 36];
+  no-pattern / different-pattern (case-insensitive UUID) / block-scalar / in-`example:` /
+  following-property-across-dedent / property-named-`default` skipped). Test-only, no spec change.
+  `cargo test` 2984 pass (+2); `cargo build --release` clean, no new dep. — binary (release):
+  5,323,160 bytes (~5.08 MiB; unchanged by a test-only change).
 - 2026-08-23 — Contract-test harness: guard that every **result-code `pattern` `default` matches
   the pattern** (`src/registry.rs`
   `every_result_code_pattern_default_conforms_to_the_result_code_pattern`). The **eighth member of
