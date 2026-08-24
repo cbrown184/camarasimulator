@@ -54056,6 +54056,389 @@ components:
         );
     }
 
+    /// The 1-based line numbers, in document order, of every `default:` keyword whose inline
+    /// scalar value sits in a Schema Object declaring a *same-indent* bounded-any-char `pattern`
+    /// sibling (`^[\s\S]{0,512}$`) yet exceeds its 512-character ceiling, without a YAML dep. The
+    /// `default`-side twin of `text512_pattern_examples_malformed`: same scoping, keyed on
+    /// `TEXT512_PATTERN`, judged by `matches_text512_pattern`, but triggered by `default:` and
+    /// skipping a block-scalar opener (mirroring `text256_pattern_defaults_malformed` at 512 wide).
+    ///
+    /// In OpenAPI 3.0.x (JSON Schema) a `default` is the schema's fall-back *instance*, so a field
+    /// constrained by `pattern` MUST carry a default the pattern accepts. `[\s\S]` admits every
+    /// character, so the pattern's only constraint is a 512-character ceiling; a free-text default
+    /// longer than 512 characters advertises a fall-back the schema's own validator rejects, so a
+    /// Redoc/Swagger form pre-fills a `resultMsg` control with an unusable value and a codegen
+    /// client's generated instance carries a value no field constrained by this pattern can hold.
+    /// This pattern carries no `format` sibling, so these defaults are otherwise beyond the
+    /// `format`-default family's reach.
+    ///
+    /// Scoping mirrors `text256_pattern_defaults_malformed` exactly: only a `default` carrying an
+    /// inline scalar (a block/object default opens no inline value and is skipped) with a
+    /// same-indent `pattern` sibling *equal to* `TEXT512_PATTERN` in the same Schema Object is
+    /// inspected — the sibling is scanned at the default's own indent, down through the object's
+    /// block then up, dedent-bounded, so a nested or *following* property's `pattern` never pairs.
+    /// The same-indent scan steps over any intervening deeper-indented lines, so the corpus's
+    /// `pattern` → `maxLength: 512` → `description` → `default` shape pairs correctly. A `default:`
+    /// nested inside an outer `example:`/`examples:` payload (sample data, not a schema keyword) is
+    /// skipped. Only the 512-wide bounded-any-char pattern is matched; the 256-wide sibling
+    /// (`TEXT256_PATTERN`) and every other pattern are out of scope.
+    fn text512_pattern_defaults_malformed(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let raw_inline = |l: &str, name: &str| -> Option<String> {
+            let (k, v) = l.trim_start().split_once(':')?;
+            if k.trim() != name {
+                return None;
+            }
+            let v = v.split('#').next().unwrap_or(v).trim();
+            if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            }
+        };
+        // Whether a same-indent `pattern:` sibling of line `i` (indent `c`) in the same Schema
+        // Object equals the 512-wide bounded-any-char pattern: scan down through the object's block
+        // then up, dedent-bounded so a nested or following object's `pattern` never pairs.
+        let sibling_is_text512_pattern = |i: usize, c: usize| -> bool {
+            let is_text512_pattern = |l: &str| -> bool {
+                raw_inline(l, "pattern")
+                    .map(|v| v.trim_matches('"').trim_matches('\'') == TEXT512_PATTERN)
+                    .unwrap_or(false)
+            };
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_text512_pattern(l) {
+                    return true;
+                }
+                j += 1;
+            }
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_text512_pattern(l) {
+                    return true;
+                }
+            }
+            false
+        };
+        // True when line `i` (indent `c`) sits inside an outer `example:`/`examples:` payload —
+        // some enclosing container key up the indent ladder is `example`/`examples`, so an inner
+        // `default` key there is sample data, not a schema keyword.
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some(raw) = raw_inline(line, "default") else {
+                continue;
+            };
+            // A block-scalar opener (`>`/`|`, optionally with a chomping indicator) carries its
+            // value on the following lines, not inline — skip it.
+            if raw.starts_with('>') || raw.starts_with('|') {
+                continue;
+            }
+            let c = indent(line);
+            if inside_example(i, c) {
+                continue;
+            }
+            if !sibling_is_text512_pattern(i, c) {
+                continue;
+            }
+            let value = raw.trim_matches('"').trim_matches('\'');
+            if !matches_text512_pattern(value) {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_text512_pattern_default_conforms_to_the_text512_pattern() {
+        // Contract-harness invariant (OpenAPI 3.0.x / JSON-Schema structural rule): where a Schema
+        // Object declares an inline `default` beside a same-indent bounded-any-char `pattern`
+        // (`^[\s\S]{0,512}$`, the free-text `resultMsg` pattern the eSIM Remote Management
+        // `TaskResult` envelope uses), the default MUST match that pattern. `[\s\S]` is *every*
+        // character, so the pattern's only constraint is a 512-character ceiling; a `default` is the
+        // schema's fall-back *instance*, so a value longer than 512 characters is a
+        // self-contradictory schema whose own validator rejects the fall-back it pre-supplies, and a
+        // Redoc/Swagger form then pre-fills a control with a value no field constrained by this
+        // pattern can legally hold.
+        //
+        // The **`default` twin** of `every_text512_pattern_example_conforms_to_the_text512_pattern`
+        // and the twenty-second member of the `pattern`-*default* family after the E.164 / IMEI /
+        // ICCID / name / token / 32-hex / MAC / result-code / UUID / email / full-date / semver /
+        // geohash / app-name / DNS-label / TAC / IMEISV / DPV-purpose / 16-hex / bounded-any-char
+        // (256-wide) / 4-hex default twins — and the **second bounded-any-char ceiling** after the
+        // 256-wide `TEXT256_PATTERN`, the first pinning exactly 512 characters. Each family member is
+        // keyed on the exact pattern string, so the 256-wide default member (keyed on
+        // `TEXT256_PATTERN`, ceiling 256) never pairs with `^[\s\S]{0,512}$`: the two share the
+        // any-character alphabet but not the length pin, so a 257-to-512-character default is legal
+        // here yet rejected by the 256-wide member, and a *513-character* default beside the 512-wide
+        // pattern is the fault only this member catches. It also reaches past the generic
+        // length-bounds family (the corpus's `resultMsg` schema carries a `maxLength: 512` beside the
+        // `pattern`, but a `maxLength`-default check counts code units against a *field-declared*
+        // bound whereas this guard pins the pattern's own 512 scalar-value ceiling — the pattern is
+        // the constraint under test). Like the 256-wide / IMEI / ICCID / MAC / token / result-code
+        // patterns it carries no `format` sibling, so these defaults are beyond the `format`-default
+        // family's reach. Future-drift posture (like the twenty-one prior default twins): the corpus
+        // declares this `pattern` (eSIM Remote Management, the `resultMsg` schema) but pairs it with
+        // an `example`, **not** a `default`, so the guard asserts clean across all specs today and
+        // holds the line against a future free-text default drifting past the ceiling; the synthetic
+        // unit body in `text512_pattern_default_extraction_rules` keeps the detection path live.
+        // Verified true across all mounted specs before asserting.
+        for api in APIS {
+            let offenders = text512_pattern_defaults_malformed(api.body);
+            assert!(
+                offenders.is_empty(),
+                "{} spec declares a `default` beside a same-indent bounded-any-char \
+                 `pattern: '^[\\s\\S]{{0,512}}$'` that exceeds its 512-character ceiling (a fall-back \
+                 the pattern's own validator would reject) at `default:` line(s): {:?}",
+                api.name,
+                offenders
+            );
+        }
+    }
+
+    #[test]
+    fn text512_pattern_default_extraction_rules() {
+        // Unit-cover `text512_pattern_defaults_malformed` so the contract test above can't pass
+        // vacuously and its detection is pinned (`matches_text512_pattern` itself is already covered
+        // by `text512_pattern_example_extraction_rules`).
+        //
+        // Extractor: a valid quoted (`Operation completed successfully`) and a valid unquoted
+        // (`Enable operation accepted`) free-text default beside a same-indent bounded-any-char
+        // `pattern` pass; a 513-character value is flagged; a bad (over-length) value with the
+        // pattern *below* it (down-scan) is flagged; a value with no `pattern` sibling and one whose
+        // sibling is the 256-wide bounded-any-char pattern (same class, different length ceiling —
+        // out of scope here, caught by `text256_pattern`'s guard) are skipped; a block-scalar
+        // default is skipped; a default in one property never pairs with a *following* property's
+        // bounded-any-char `pattern` across the dedent; an inner `default` inside an outer
+        // `example:` payload is skipped; and a property literally named `default` (opening a block)
+        // is skipped.
+        let over = "x".repeat(513);
+        let body = format!(
+            "openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    GoodQuoted:
+      type: string
+      pattern: '{p}'
+      default: \"Operation completed successfully\"
+    GoodUnquoted:
+      type: string
+      pattern: '{p}'
+      default: Enable operation accepted
+    TooLong:
+      type: string
+      pattern: '{p}'
+      default: '{over}'
+    PatternBelow:
+      type: string
+      default: '{over}'
+      pattern: '{p}'
+    NoPattern:
+      type: string
+      default: '{over}'
+    OtherPattern:
+      type: string
+      pattern: '{p256}'
+      default: '{over}'
+    BlockDefault:
+      type: string
+      pattern: '{p}'
+      default: |
+        {over}
+    InExample:
+      type: object
+      example:
+        pattern: '{p}'
+        default: '{over}'
+    Split:
+      type: object
+      properties:
+        a:
+          default: '{over}'
+        b:
+          type: string
+          pattern: '{p}'
+    NamedDefault:
+      type: object
+      properties:
+        default:
+          type: string
+          pattern: '{p}'
+",
+            p = TEXT512_PATTERN,
+            p256 = TEXT256_PATTERN,
+            over = over
+        );
+        // Flagged, in document order: TooLong.default (513 chars beside a same-indent bounded-any-char
+        // `pattern`) and PatternBelow.default (513 chars, the `pattern` a line below — down-scan pairs
+        // it). Not flagged: GoodQuoted / GoodUnquoted (both valid, well under the ceiling — the
+        // unquoted one also proving a spaced free-text scalar pairs); NoPattern (no `pattern` sibling);
+        // OtherPattern (sibling is the 256-wide bounded-any-char pattern, not 512-wide — an over-length
+        // value there is out of scope, caught by the 256-wide guard instead); BlockDefault (block-scalar
+        // opener `|`, no inline value); InExample's inner `default` (sits inside the outer `example:`
+        // payload); Split.a.default, whose only 512-wide `pattern` is in the following property Split.b
+        // past a dedent; and NamedDefault's `default:` property opening a block (no inline value).
+        let flagged = text512_pattern_defaults_malformed(&body);
+        let flagged_props: Vec<&str> = flagged
+            .iter()
+            .map(|&n| {
+                let lines: Vec<&str> = body.lines().collect();
+                let mut k = n - 1;
+                loop {
+                    let l = lines[k];
+                    let ind = l.len() - l.trim_start().len();
+                    if ind == 4 && l.trim_end().ends_with(':') {
+                        break l.trim().trim_end_matches(':');
+                    }
+                    if k == 0 {
+                        break "";
+                    }
+                    k -= 1;
+                }
+            })
+            .collect();
+        assert_eq!(flagged_props, vec!["TooLong", "PatternBelow"]);
+
+        // Non-vacuous floor (future-drift posture, mirroring the twenty-one prior `pattern`-default
+        // twins): across every registered spec every `default` beside a same-indent bounded-any-char
+        // (512-wide) `pattern` matches it (the invariant the contract test asserts). The corpus
+        // declares the 512-wide bounded-any-char `pattern` on the eSIM Remote Management `resultMsg`
+        // schema but pairs it with an `example`, **not** a `default`, in the *same* Schema Object
+        // today — so this asserts a clean `== 0` genuine-pair count and guards future drift; the
+        // synthetic body above keeps the detection path live. The pair count reuses the extractor's
+        // own **dedent-bounded** same-indent sibling scan — the genuine-Schema-Object pairing —
+        // rather than a crude window, and stays independent of the extractor's *validity*
+        // (`matches_text512_pattern`) comparison.
+        let mut text512_defaults = 0usize;
+        for api in APIS {
+            assert!(
+                text512_pattern_defaults_malformed(api.body).is_empty(),
+                "{}: every default beside a same-indent bounded-any-char (512) `pattern` must match it",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            let raw_inline = |l: &str, name: &str| -> Option<String> {
+                let (k, v) = l.trim_start().split_once(':')?;
+                if k.trim() != name {
+                    return None;
+                }
+                let v = v.split('#').next().unwrap_or(v).trim();
+                if v.is_empty() { None } else { Some(v.to_string()) }
+            };
+            // A genuine same-Schema-Object 512-wide bounded-any-char `pattern` sibling of the
+            // `default` on line `i` (indent `c`): scan down through the object's block then up,
+            // dedent-bounded exactly like the extractor's `sibling_is_text512_pattern`, so a
+            // *following* property's pattern past a dedent never counts.
+            let sibling_is_text512 = |i: usize, c: usize| -> bool {
+                let is_text512 = |l: &str| -> bool {
+                    raw_inline(l, "pattern")
+                        .map(|v| v.trim_matches('"').trim_matches('\'') == TEXT512_PATTERN)
+                        .unwrap_or(false)
+                };
+                let mut j = i + 1;
+                while j < lines.len() {
+                    let l = lines[j];
+                    if l.trim().is_empty() {
+                        j += 1;
+                        continue;
+                    }
+                    if indent(l) < c {
+                        break;
+                    }
+                    if indent(l) == c && is_text512(l) {
+                        return true;
+                    }
+                    j += 1;
+                }
+                let mut k = i;
+                while k > 0 {
+                    k -= 1;
+                    let l = lines[k];
+                    if l.trim().is_empty() {
+                        continue;
+                    }
+                    if indent(l) < c {
+                        break;
+                    }
+                    if indent(l) == c && is_text512(l) {
+                        return true;
+                    }
+                }
+                false
+            };
+            for (i, l) in lines.iter().enumerate() {
+                let Some(v) = raw_inline(l, "default") else {
+                    continue;
+                };
+                if v.starts_with('>') || v.starts_with('|') {
+                    continue;
+                }
+                let c = indent(l);
+                if sibling_is_text512(i, c) {
+                    text512_defaults += 1;
+                }
+            }
+        }
+        assert_eq!(
+            text512_defaults, 0,
+            "expected no genuine default + same-Schema-Object bounded-any-char (512) `pattern` pairs \
+             across specs (the future-drift posture; a new pair means switch this guard to a `>= 1` \
+             floor like the example side), got {text512_defaults}"
+        );
+    }
+
     // NB: written as it appears *raw in the YAML source* (double-quoted, so `\\` is a literal
     // backslash before `x`), because `raw_inline("pattern")` returns the source substring after
     // stripping only the outer quotes — no YAML-escape decoding — and this constant is compared

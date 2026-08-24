@@ -3335,6 +3335,29 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - a **bounded-any-char (512-wide) `pattern`-`default` conformance** contract test
+    (`src/registry.rs` `every_text512_pattern_default_conforms_to_the_text512_pattern`) — the
+    `default`-side twin of `every_text512_pattern_example_conforms_to_the_text512_pattern` and the
+    **twenty-second member of the `pattern`-default family** after E.164 / IMEI / ICCID / name /
+    token / 32-hex / MAC / result-code / UUID / email / full-date / semver / geohash / app-name /
+    DNS-label / TAC / IMEISV / DPV-purpose / 16-hex / text256 (bounded-any-char 256-wide) / 4-hex,
+    the **second bounded-any-char ceiling** after the 256-wide `TEXT256_PATTERN` (`^[\s\S]{0,512}$`,
+    the eSIM Remote Management `TaskResult.resultMsg` free-text field — the first pinning exactly
+    512 characters). Each member is keyed on the exact pattern string, so the 256-wide default
+    member (ceiling 256) never pairs with `^[\s\S]{0,512}$`: the two share the any-character alphabet
+    but not the length pin, so a 257-to-512-char default is legal here yet rejected by the 256-wide
+    member, and a 513-char default beside the 512-wide pattern is the fault only this member catches.
+    Reaches past the length-bounds family too (`maxLength: 512` counts code units against a
+    field-declared bound; this guard pins the pattern's own 512 scalar-value ceiling) and carries no
+    `format` sibling. New pure `text512_pattern_defaults_malformed` (the
+    `text256_pattern_defaults_malformed` shape keyed on `TEXT512_PATTERN` equality + judged by
+    `matches_text512_pattern`, both already present from the example side; trigger key `default:`,
+    block-scalar opener skipped, dedent-bounded same-indent sibling scan, in-`example:` payload
+    excluded). Corpus declares the 512-wide `pattern` (eSIM Remote Management `resultMsg`) but pairs
+    it with an `example`, **not** a `default` → asserts a clean `== 0` genuine-pair count
+    (future-drift posture, mirroring the twenty-one prior default twins) + guards future drift; floor
+    reuses the dedent-bounded sibling scan. Unit-covered (`text512_pattern_default_extraction_rules`).
+    Test-only, no spec change.
   - a **4-hex `pattern`-`default` conformance** contract test (`src/registry.rs`
     `every_hex4_pattern_default_conforms_to_the_hex4_pattern`) — the `default`-side twin of
     `every_hex4_pattern_example_conforms_to_the_hex4_pattern` and the **twenty-first member of the
@@ -6705,6 +6728,37 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-24 — Contract-test harness: guard that every **bounded-any-char (512-wide) `pattern`
+  `default` matches the pattern** (`src/registry.rs`
+  `every_text512_pattern_default_conforms_to_the_text512_pattern`). The **twenty-second member of the
+  `pattern`-default family** after E.164, IMEI, ICCID, name, token, 32-hex, MAC, result-code, UUID,
+  email, full-date, semver, geohash, app-name, DNS-label, TAC, IMEISV, DPV-purpose, 16-hex, text256
+  (256-wide), and 4-hex — the `default`-side twin of
+  `every_text512_pattern_example_conforms_to_the_text512_pattern` (`^[\s\S]{0,512}$`, the eSIM Remote
+  Management `TaskResult.resultMsg` free-text field) and the **second bounded-any-char ceiling** after
+  the 256-wide `TEXT256_PATTERN`, the first pinning exactly 512 characters. Each family member is
+  keyed on the exact pattern string, so the 256-wide default member (ceiling 256) never pairs with
+  `^[\s\S]{0,512}$`: the two share the any-character alphabet but not the length pin, so a
+  257-to-512-char default is legal here yet rejected by the 256-wide member, while a 513-char default
+  beside the 512-wide pattern is the fault only this member catches. It also reaches past the generic
+  length-bounds family (`resultMsg` carries `maxLength: 512`, but a length-bounds check counts code
+  units against a field-declared bound whereas this guard pins the pattern's own 512 scalar-value
+  ceiling) and, like the text256/IMEI/ICCID/32-hex patterns, carries **no** `format` sibling, so this
+  default is beyond the `format`-default family's reach. New pure `text512_pattern_defaults_malformed`
+  (the `text256_pattern_defaults_malformed` shape keyed on `TEXT512_PATTERN` equality + judged by
+  `matches_text512_pattern`, both already present from the example side; trigger key `default:`,
+  block-scalar opener skipped, dedent-bounded same-indent sibling scan, in-`example:` payload
+  excluded). Surveyed the corpus first — the single 512-wide `pattern` field (eSIM Remote Management
+  `resultMsg`) pairs with an `example`, **not** a `default` → asserts a clean `== 0` genuine-pair
+  count (future-drift posture, mirroring the twenty-one prior default twins) + guards future drift;
+  floor reuses the dedent-bounded sibling scan. Unit-covered
+  (`text512_pattern_default_extraction_rules`: valid quoted (`Operation completed successfully`) /
+  unquoted (`Enable operation accepted`) cleared; a 513-char value flagged both same-indent
+  (`TooLong`) and pattern-below (`PatternBelow`, down-scan); no-pattern / different-pattern (256-wide
+  `^[\s\S]{0,256}$`) / block-scalar / in-`example:` / following-property-across-dedent /
+  property-named-`default` skipped). Test-only, no spec change. `cargo test` 3010 pass (+2);
+  `cargo build --release` clean, no new dep. — binary (release): 5,323,160 bytes (~5.08 MiB;
+  unchanged by a test-only change).
 - 2026-08-24 — Contract-test harness: guard that every **4-hex `pattern` `default` matches the
   pattern** (`src/registry.rs` `every_hex4_pattern_default_conforms_to_the_hex4_pattern`). The
   **twenty-first member of the `pattern`-default family** after E.164, IMEI, ICCID, name, token,
