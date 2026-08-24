@@ -3335,6 +3335,27 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - a **region-name `pattern`-`default` conformance** contract test (`src/registry.rs`
+    `every_region_pattern_default_conforms_to_the_region_pattern`) — the `default`-side twin of
+    `every_region_pattern_example_conforms_to_the_region_pattern` and the **twenty-fifth member of
+    the `pattern`-default family** after E.164 / IMEI / ICCID / name / token / 32-hex / MAC /
+    result-code / UUID / email / full-date / semver / geohash / app-name / DNS-label / TAC / IMEISV /
+    DPV-purpose / 16-hex / text256 / 4-hex / text512 / version-4-UUID / OTP-template, over the
+    Optimal Edge Discovery `edgeCloudRegion`/`EdgeCloudRegion` pattern `^[A-Za-z0-9-]+$`. First
+    default member over a letter-digit-hyphen alphabet with **no** underscore or dot: the closest
+    sibling, the CAMARA QoS-family name pattern `^[a-zA-Z0-9_.-]+$` (keyed on `NAME_PATTERN`), admits
+    `_` and `.` this class forbids, so a region default carrying either is a fault the name member
+    can't catch (members key on the exact pattern string, so the two never pair). The `+` imposes
+    only a non-empty floor (the `maxLength: 64` ceiling is the length-bounds family's), and the
+    pattern carries no `format` sibling, so it's beyond both the length-bounds and `format`-default
+    families. New pure `region_pattern_defaults_malformed` (the `text512_pattern_defaults_malformed`
+    shape keyed on `REGION_PATTERN` + judged by `matches_region_pattern`, both already present from
+    the example side; trigger key `default:`, block-scalar opener skipped, dedent-bounded same-indent
+    sibling scan, in-`example:` payload excluded). Corpus declares the region `pattern` (three
+    Optimal Edge Discovery schemas) but pairs it with an `example`, **not** a `default` → asserts a
+    clean `== 0` genuine-pair count (future-drift posture, mirroring the twenty-four prior default
+    twins) + guards future drift. Unit-covered (`region_pattern_default_extraction_rules`). Test-only,
+    no spec change.
   - an **OTP-template `pattern`-`default` conformance** contract test (`src/registry.rs`
     `every_otp_template_pattern_default_conforms_to_the_otp_template_pattern`) — the `default`-side
     twin of `every_otp_template_pattern_example_conforms_to_the_otp_template_pattern` and the
@@ -6769,6 +6790,35 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-24 — Contract-test harness: guard that every **region-name `pattern` `default` matches
+  the pattern** (`src/registry.rs` `every_region_pattern_default_conforms_to_the_region_pattern`).
+  The **twenty-fifth member of the `pattern`-default family** after E.164, IMEI, ICCID, name, token,
+  32-hex, MAC, result-code, UUID, email, full-date, semver, geohash, app-name, DNS-label, TAC,
+  IMEISV, DPV-purpose, 16-hex, text256, 4-hex, text512, version-4-UUID, and OTP-template — the
+  `default`-side twin of `every_region_pattern_example_conforms_to_the_region_pattern`
+  (`^[A-Za-z0-9-]+$`, the Optimal Edge Discovery `edgeCloudRegion`/`EdgeCloudRegion` region-name
+  field). **First default member over a letter-digit-hyphen alphabet with no underscore or dot**:
+  the closest sibling, the CAMARA QoS-family name pattern `^[a-zA-Z0-9_.-]+$` (keyed on
+  `NAME_PATTERN`), admits `_` and `.` this class forbids, so a region default carrying either is a
+  fault the name member can't catch — members key on the exact pattern string, so the two never
+  cross-pair. The `+` quantifier imposes only a non-empty floor (the accompanying `maxLength: 64`
+  ceiling is the length-bounds family's business), and like the IMEI/ICCID/name patterns the region
+  pattern carries **no** `format` sibling, so this default is beyond both the length-bounds and
+  `format`-default families' reach. New pure `region_pattern_defaults_malformed` (the
+  `text512_pattern_defaults_malformed` shape keyed on `REGION_PATTERN` equality + judged by
+  `matches_region_pattern`, both already present from the example side; trigger key `default:`,
+  block-scalar opener skipped, dedent-bounded same-indent sibling scan, in-`example:` payload
+  excluded). Surveyed the corpus first — the region `pattern` (three Optimal Edge Discovery
+  `edgeCloudRegion`/`EdgeCloudRegion` schemas) pairs with an `example`/`maxLength`, **not** a
+  `default` → asserts a clean `== 0` genuine-pair count (future-drift posture, mirroring the
+  twenty-four prior default twins) + guards future drift; floor reuses the dedent-bounded sibling
+  scan. Unit-covered (`region_pattern_default_extraction_rules`: valid quoted (`us-east-1`, across an
+  intervening `maxLength`+`description` block) / unquoted (`eu-west-1`) cleared; underscore (`us_east`)
+  / dot (`v1.2`) / space (`us east`) / pattern-below values flagged; no-pattern / different-pattern
+  (name `^[a-zA-Z0-9_.-]+$`) / block-scalar / in-`example:` / following-property-across-dedent /
+  property-named-`default` skipped). Test-only, no spec change. `cargo test` 3016 pass (+2);
+  `cargo build --release` clean, no new dep. — binary (release): 5,323,160 bytes (~5.08 MiB;
+  unchanged by a test-only change).
 - 2026-08-24 — Contract-test harness: guard that every **OTP-template `pattern` `default` matches
   the pattern** (`src/registry.rs`
   `every_otp_template_pattern_default_conforms_to_the_otp_template_pattern`). The **twenty-fourth

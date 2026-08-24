@@ -47294,6 +47294,389 @@ components:
         );
     }
 
+    /// The 1-based line numbers, in document order, of every `default:` keyword whose inline scalar
+    /// value sits in a Schema Object declaring a *same-indent* region-name `pattern`
+    /// (`^[A-Za-z0-9-]+$`) sibling yet does not match that pattern, without a YAML dep. The
+    /// `default`-side twin of `region_pattern_examples_malformed`: same scoping, keyed on
+    /// `REGION_PATTERN`, judged by `matches_region_pattern`, but triggered by `default:` and
+    /// skipping a block-scalar opener (mirroring `text512_pattern_defaults_malformed`).
+    ///
+    /// In OpenAPI 3.0.x (JSON Schema) a `default` is the schema's fall-back *instance*, so a field
+    /// constrained by `pattern` MUST carry a default the pattern accepts. A region default carrying
+    /// a character the class forbids — a space, an underscore, a dot, a slash, or a placeholder
+    /// pasted beside the pattern — advertises a fall-back the schema's own validator rejects, so a
+    /// Redoc/Swagger form pre-fills an `edgeCloudRegion` control with an unusable value and a
+    /// codegen client's generated instance carries a value no field constrained by this pattern can
+    /// legally hold. `^[A-Za-z0-9-]+$` is the Optimal Edge Discovery `edgeCloudRegion` /
+    /// `EdgeCloudRegion` region-name pattern, and — like the IMEI/ICCID/name patterns, unlike the
+    /// UUID patterns which sit beside a `format: uuid` already guarded by the `format`-default
+    /// family — it carries no `format`, so these defaults are otherwise unchecked.
+    ///
+    /// Scoping mirrors `region_pattern_examples_malformed` exactly: only a `default` carrying an
+    /// inline scalar (a block/object default opens no inline value and is skipped) with a
+    /// same-indent `pattern` sibling *equal to* `REGION_PATTERN` in the same Schema Object is
+    /// inspected — the sibling is scanned at the default's own indent, down through the object's
+    /// block then up, dedent-bounded, so a nested or *following* property's `pattern` never pairs,
+    /// and an intervening `maxLength`/`description` sibling at the same indent is stepped over. In
+    /// particular the CAMARA QoS-family name pattern `^[a-zA-Z0-9_.-]+$` — which admits `_` and `.`
+    /// this class forbids — is a *different* pattern and never pairs. A `default:` nested inside an
+    /// outer `example:`/`examples:` payload (sample data, not a schema keyword) is skipped. Only the
+    /// region pattern is matched.
+    fn region_pattern_defaults_malformed(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let raw_inline = |l: &str, name: &str| -> Option<String> {
+            let (k, v) = l.trim_start().split_once(':')?;
+            if k.trim() != name {
+                return None;
+            }
+            let v = v.split('#').next().unwrap_or(v).trim();
+            if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            }
+        };
+        // Whether a same-indent `pattern:` sibling of line `i` (indent `c`) in the same Schema
+        // Object equals the region pattern: scan down through the object's block then up,
+        // dedent-bounded so a nested or following object's `pattern` never pairs.
+        let sibling_is_region_pattern = |i: usize, c: usize| -> bool {
+            let is_region_pattern = |l: &str| -> bool {
+                raw_inline(l, "pattern")
+                    .map(|v| v.trim_matches('"').trim_matches('\'') == REGION_PATTERN)
+                    .unwrap_or(false)
+            };
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_region_pattern(l) {
+                    return true;
+                }
+                j += 1;
+            }
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_region_pattern(l) {
+                    return true;
+                }
+            }
+            false
+        };
+        // True when line `i` (indent `c`) sits inside an outer `example:`/`examples:` payload —
+        // some enclosing container key up the indent ladder is `example`/`examples`, so an inner
+        // `default` key there is sample data, not a schema keyword.
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some(raw) = raw_inline(line, "default") else {
+                continue;
+            };
+            // A block-scalar opener (`>`/`|`, optionally with a chomping indicator) carries its
+            // value on the following lines, not inline — skip it.
+            if raw.starts_with('>') || raw.starts_with('|') {
+                continue;
+            }
+            let c = indent(line);
+            if inside_example(i, c) {
+                continue;
+            }
+            if !sibling_is_region_pattern(i, c) {
+                continue;
+            }
+            let value = raw.trim_matches('"').trim_matches('\'');
+            if !matches_region_pattern(value) {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_region_pattern_default_conforms_to_the_region_pattern() {
+        // Contract-harness invariant (OpenAPI 3.0.x / JSON-Schema structural rule): where a Schema
+        // Object declares an inline `default` beside a same-indent region-name `pattern`
+        // (`^[A-Za-z0-9-]+$`, the Optimal Edge Discovery `edgeCloudRegion` / `EdgeCloudRegion`
+        // pattern), the default MUST match that pattern. A `default` is the schema's fall-back
+        // *instance*, so a value the `pattern` rejects — a region carrying a space, `_`, `.`, `/`,
+        // or any character outside `[A-Za-z0-9-]` — is a self-contradictory schema whose own
+        // validator rejects the fall-back it pre-supplies, and a Redoc/Swagger form then pre-fills a
+        // control with a value no field constrained by this pattern can legally hold.
+        //
+        // The **`default` twin** of `every_region_pattern_example_conforms_to_the_region_pattern`
+        // and the twenty-fifth member of the `pattern`-*default* family after the E.164 / IMEI /
+        // ICCID / name / token / 32-hex / MAC / result-code / UUID / email / full-date / semver /
+        // geohash / app-name / DNS-label / TAC / IMEISV / DPV-purpose / 16-hex / text256 / 4-hex /
+        // text512 / version-4-UUID / OTP-template default twins — and the first over a
+        // letter-digit-hyphen alphabet with *no* underscore or dot: the closest sibling, the CAMARA
+        // QoS-family name pattern `^[a-zA-Z0-9_.-]+$` (keyed on `NAME_PATTERN`), admits `_` and `.`
+        // this class forbids, so a region default carrying either is a fault the name member cannot
+        // catch (each family member is keyed on the exact pattern string, so the two never pair).
+        // The `+` quantifier imposes only a non-empty floor — the accompanying `maxLength: 64`
+        // ceiling is guarded separately by the length-bounds family — so this member cannot be
+        // expressed by any fixed- or ranged-length check. Like the IMEI/ICCID/name patterns the
+        // region pattern carries no `format` sibling, so these defaults are beyond the
+        // `format`-default family's reach. Future-drift posture (like the twenty-four prior default
+        // twins): the corpus declares this `pattern` (Optimal Edge Discovery, three
+        // `edgeCloudRegion`/`EdgeCloudRegion` schemas) but pairs it with an `example`, **not** a
+        // `default`, so the guard asserts clean across all specs today and holds the line against a
+        // future region default drifting outside the class; the synthetic unit body in
+        // `region_pattern_default_extraction_rules` keeps the detection path live. Verified true
+        // across all mounted specs before asserting.
+        for api in APIS {
+            let offenders = region_pattern_defaults_malformed(api.body);
+            assert!(
+                offenders.is_empty(),
+                "{} spec declares a `default` beside a same-indent region-name \
+                 `pattern: '^[A-Za-z0-9-]+$'` that does not match that pattern (a fall-back the \
+                 pattern's own validator would reject) at `default:` line(s): {:?}",
+                api.name,
+                offenders
+            );
+        }
+    }
+
+    #[test]
+    fn region_pattern_default_extraction_rules() {
+        // Unit-cover `region_pattern_defaults_malformed` so the contract test above can't pass
+        // vacuously and its detection is pinned (`matches_region_pattern` itself is already covered
+        // by `region_pattern_example_extraction_rules`).
+        //
+        // Extractor: a valid quoted (`us-east-1`, across an intervening `maxLength` + `description`
+        // block — the corpus's request-property shape) and a valid unquoted (`eu-west-1`, adjacent)
+        // region default beside a same-indent region `pattern` pass; an underscore-, dot-, and
+        // space-bearing value are flagged; a bad value whose `pattern` is declared *below* it
+        // (down-scan) is flagged; a value with no `pattern` sibling and one whose sibling is the
+        // *different* name pattern `^[a-zA-Z0-9_.-]+$` (which admits `_` — out of scope here) are
+        // skipped; a block-scalar default is skipped; a default in one property never pairs with a
+        // *following* property's region `pattern` across the dedent; an inner `default` inside an
+        // outer `example:` payload is skipped; and a property literally named `default` (opening a
+        // block) is skipped.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    GoodBlockDesc:
+      type: string
+      pattern: '^[A-Za-z0-9-]+$'
+      maxLength: 64
+      description: >-
+        the edge cloud region
+      default: \"us-east-1\"
+    GoodAdjacent:
+      type: string
+      pattern: '^[A-Za-z0-9-]+$'
+      default: eu-west-1
+    HasUnderscore:
+      type: string
+      pattern: '^[A-Za-z0-9-]+$'
+      default: \"us_east\"
+    HasDot:
+      type: string
+      pattern: '^[A-Za-z0-9-]+$'
+      default: \"v1.2\"
+    HasSpace:
+      type: string
+      pattern: '^[A-Za-z0-9-]+$'
+      default: \"us east\"
+    PatternBelow:
+      type: string
+      default: \"bad region\"
+      pattern: '^[A-Za-z0-9-]+$'
+    NoPattern:
+      type: string
+      default: \"no pattern here\"
+    NamePattern:
+      type: string
+      pattern: '^[a-zA-Z0-9_.-]+$'
+      default: \"has_underscore\"
+    BlockDefault:
+      type: string
+      pattern: '^[A-Za-z0-9-]+$'
+      default: |
+        bad region
+    InExample:
+      type: object
+      example:
+        pattern: '^[A-Za-z0-9-]+$'
+        default: \"bad thing\"
+    Split:
+      type: object
+      properties:
+        a:
+          default: \"bad region\"
+        b:
+          type: string
+          pattern: '^[A-Za-z0-9-]+$'
+    NamedDefault:
+      type: object
+      properties:
+        default:
+          type: string
+          pattern: '^[A-Za-z0-9-]+$'
+";
+        // Flagged, in document order: HasUnderscore.default (`us_east`), HasDot.default (`v1.2`),
+        // HasSpace.default (`us east`), and PatternBelow.default (value `bad region`, region
+        // `pattern` a line below — down-scan pairs it). Not flagged: GoodBlockDesc/GoodAdjacent
+        // (valid, one across an intervening maxLength/description block); NoPattern (no `pattern`
+        // sibling); NamePattern (sibling is the name pattern `^[a-zA-Z0-9_.-]+$`, not the region
+        // pattern — a value with `_` the region matcher would reject, proving exact-pattern keying);
+        // BlockDefault (block-scalar opener `|`, no inline value); InExample's inner `default`
+        // (inside the outer `example:` payload); Split.a.default (its only region `pattern` is in
+        // the following property past a dedent); and NamedDefault's `default:` property opening a
+        // block (no inline value).
+        let flagged = region_pattern_defaults_malformed(body);
+        let flagged_vals: Vec<&str> = flagged
+            .iter()
+            .map(|&n| body.lines().nth(n - 1).unwrap().trim())
+            .collect();
+        assert_eq!(
+            flagged_vals,
+            vec![
+                "default: \"us_east\"",
+                "default: \"v1.2\"",
+                "default: \"us east\"",
+                "default: \"bad region\"",
+            ]
+        );
+
+        // Non-vacuous floor (future-drift posture, mirroring the twenty-four prior `pattern`-default
+        // twins): across every registered spec every `default` beside a same-indent region `pattern`
+        // matches it (the invariant the contract test asserts). The corpus declares the region
+        // `pattern` on three Optimal Edge Discovery `edgeCloudRegion`/`EdgeCloudRegion` schemas but
+        // pairs it with an `example`, **not** a `default`, in the *same* Schema Object today — so
+        // this asserts a clean `== 0` genuine-pair count and guards future drift; the synthetic body
+        // above keeps the detection path live. The pair count reuses the extractor's own
+        // **dedent-bounded** same-indent sibling scan — the genuine-Schema-Object pairing — rather
+        // than a crude window, and stays independent of the extractor's *validity*
+        // (`matches_region_pattern`) comparison.
+        let mut region_defaults = 0usize;
+        for api in APIS {
+            assert!(
+                region_pattern_defaults_malformed(api.body).is_empty(),
+                "{}: every default beside a same-indent region `pattern` must match it",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            let raw_inline = |l: &str, name: &str| -> Option<String> {
+                let (k, v) = l.trim_start().split_once(':')?;
+                if k.trim() != name {
+                    return None;
+                }
+                let v = v.split('#').next().unwrap_or(v).trim();
+                if v.is_empty() { None } else { Some(v.to_string()) }
+            };
+            // A genuine same-Schema-Object region `pattern` sibling of the `default` on line `i`
+            // (indent `c`): scan down through the object's block then up, dedent-bounded exactly
+            // like the extractor's `sibling_is_region_pattern`, so a *following* property's pattern
+            // past a dedent never counts.
+            let sibling_is_region = |i: usize, c: usize| -> bool {
+                let is_region = |l: &str| -> bool {
+                    raw_inline(l, "pattern")
+                        .map(|v| v.trim_matches('"').trim_matches('\'') == REGION_PATTERN)
+                        .unwrap_or(false)
+                };
+                let mut j = i + 1;
+                while j < lines.len() {
+                    let l = lines[j];
+                    if l.trim().is_empty() {
+                        j += 1;
+                        continue;
+                    }
+                    if indent(l) < c {
+                        break;
+                    }
+                    if indent(l) == c && is_region(l) {
+                        return true;
+                    }
+                    j += 1;
+                }
+                let mut k = i;
+                while k > 0 {
+                    k -= 1;
+                    let l = lines[k];
+                    if l.trim().is_empty() {
+                        continue;
+                    }
+                    if indent(l) < c {
+                        break;
+                    }
+                    if indent(l) == c && is_region(l) {
+                        return true;
+                    }
+                }
+                false
+            };
+            for (i, l) in lines.iter().enumerate() {
+                let Some(v) = raw_inline(l, "default") else {
+                    continue;
+                };
+                if v.starts_with('>') || v.starts_with('|') {
+                    continue;
+                }
+                let c = indent(l);
+                if sibling_is_region(i, c) {
+                    region_defaults += 1;
+                }
+            }
+        }
+        assert_eq!(
+            region_defaults, 0,
+            "expected no genuine default + same-Schema-Object region `pattern` pairs across specs \
+             (the future-drift posture; a new pair means switch this guard to a `>= 1` floor like \
+             the example side), got {region_defaults}"
+        );
+    }
+
     const DNS_LABEL_PATTERN: &str = r"^[A-Za-z0-9]([A-Za-z0-9-]{0,53}[A-Za-z0-9])?$";
 
     /// True when `s` matches the DNS-label `pattern`
