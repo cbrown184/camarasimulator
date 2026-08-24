@@ -49536,6 +49536,395 @@ components:
         );
     }
 
+    /// The 1-based line numbers, in document order, of every `default:` keyword whose inline scalar
+    /// value sits in a Schema Object declaring a *same-indent* DPV-purpose `pattern`
+    /// (`^dpv:[a-zA-Z0-9]+$`) sibling yet is not a well-formed `dpv:<Purpose>` token, without a YAML
+    /// dep. The `default`-side twin of `dpv_purpose_pattern_examples_malformed`: same scoping, keyed
+    /// on `DPV_PURPOSE_PATTERN`, judged by `matches_dpv_purpose_pattern`, but triggered by `default:`
+    /// and skipping a block-scalar opener.
+    ///
+    /// In OpenAPI 3.0.x (JSON Schema) a `default` is the schema's fall-back *instance*, so a field
+    /// constrained by `pattern` MUST carry a default the pattern accepts. A purpose default lacking
+    /// the literal `dpv:` sentinel, or carrying a non-alphanumeric character (a second colon, a
+    /// hyphen, a `#read` action fragment) in its suffix, or an empty suffix, advertises a fall-back
+    /// the schema's own validator rejects, so a Redoc/Swagger form pre-fills a `purpose` control with
+    /// an unusable value and a codegen client's generated instance carries a value the field can
+    /// never legally hold. This pattern carries no `format` sibling, so these defaults are beyond the
+    /// `format`-default family's reach.
+    ///
+    /// Scoping mirrors `imeisv_pattern_defaults_malformed` exactly: only a `default` carrying an
+    /// inline scalar (a block/object default opens no inline value and is skipped) with a same-indent
+    /// `pattern` sibling *equal to* `DPV_PURPOSE_PATTERN` in the same Schema Object is inspected — the
+    /// sibling is scanned at the default's own indent, down through the object's block then up,
+    /// dedent-bounded, so a nested or *following* property's `pattern` never pairs. A `default:`
+    /// nested inside an outer `example:`/`examples:` payload (sample data, not a schema keyword) is
+    /// skipped. Only the DPV-purpose pattern is matched; other patterns are a *different* string and
+    /// never pair.
+    fn dpv_purpose_pattern_defaults_malformed(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let raw_inline = |l: &str, name: &str| -> Option<String> {
+            let (k, v) = l.trim_start().split_once(':')?;
+            if k.trim() != name {
+                return None;
+            }
+            let v = v.split('#').next().unwrap_or(v).trim();
+            if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            }
+        };
+        // Whether a same-indent `pattern:` sibling of line `i` (indent `c`) in the same Schema
+        // Object equals the DPV-purpose pattern: scan down through the object's block then up,
+        // dedent-bounded so a nested or following object's `pattern` never pairs.
+        let sibling_is_dpv_purpose_pattern = |i: usize, c: usize| -> bool {
+            let is_dpv_purpose_pattern = |l: &str| -> bool {
+                raw_inline(l, "pattern")
+                    .map(|v| v.trim_matches('"').trim_matches('\'') == DPV_PURPOSE_PATTERN)
+                    .unwrap_or(false)
+            };
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_dpv_purpose_pattern(l) {
+                    return true;
+                }
+                j += 1;
+            }
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_dpv_purpose_pattern(l) {
+                    return true;
+                }
+            }
+            false
+        };
+        // True when line `i` (indent `c`) sits inside an outer `example:`/`examples:` payload —
+        // some enclosing container key up the indent ladder is `example`/`examples`, so an inner
+        // `default` key there is sample data, not a schema keyword.
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some(raw) = raw_inline(line, "default") else {
+                continue;
+            };
+            // A block-scalar opener (`>`/`|`, optionally with a chomping indicator) carries its
+            // value on the following lines, not inline — skip it.
+            if raw.starts_with('>') || raw.starts_with('|') {
+                continue;
+            }
+            let c = indent(line);
+            if inside_example(i, c) {
+                continue;
+            }
+            if !sibling_is_dpv_purpose_pattern(i, c) {
+                continue;
+            }
+            let value = raw.trim_matches('"').trim_matches('\'');
+            if !matches_dpv_purpose_pattern(value) {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_dpv_purpose_pattern_default_conforms_to_the_dpv_purpose_pattern() {
+        // Contract-harness invariant (OpenAPI 3.0.x / JSON-Schema structural rule): where a Schema
+        // Object declares an inline `default` beside a same-indent DPV-purpose `pattern`
+        // (`^dpv:[a-zA-Z0-9]+$`, the `dpv:<Purpose>` token the Consent Info API's `purpose` field
+        // uses), the default MUST match that pattern. A `default` is the schema's fall-back
+        // *instance*, so a purpose default missing its `dpv:` sentinel — or with a non-alphanumeric
+        // character in its suffix, or an empty suffix — is a self-contradictory schema whose own
+        // validator rejects the fall-back it pre-supplies, and a Redoc/Swagger form pre-fill and a
+        // codegen client's generated instance then carry a value no field bound by this pattern can
+        // legally hold.
+        //
+        // The **`default` twin** of `every_dpv_purpose_pattern_example_conforms_to_the_dpv_purpose_pattern`
+        // and the eighteenth member of the `pattern`-*default* family after the E.164 / IMEI / ICCID /
+        // name / token / 32-hex / MAC / result-code / UUID / email / full-date / semver / geohash /
+        // app-name / DNS-label / TAC / IMEISV default twins, and the **first over a fixed literal
+        // `dpv:` sentinel (letters plus a colon) followed by a variable-length alphanumeric run**. No
+        // earlier default member expresses this shape: the result-code twin (`^B[0-9]{6}$`) is the
+        // nearest — a fixed literal prefix then a bounded run — but its prefix is a single letter and
+        // its run is digit-only and fixed-length, so it cannot express a four-character prefix that
+        // itself contains a colon, nor an unbounded mixed alphanumeric suffix; a bare alphanumeric
+        // default with the `dpv:` prefix dropped (which the name/token matchers accept) is the fault
+        // none of the seventeen prior members catches. Like the IMEI / ICCID / name / result-code
+        // patterns the DPV-purpose pattern carries no `format` sibling, so these defaults are beyond
+        // the `format`-default family's reach; a general regex-engine test would need a new dependency
+        // (declined on binary-size grounds), so a concrete hand-validated matcher is checked.
+        // Future-drift posture (like the seventeen prior default twins): the corpus declares the
+        // DPV-purpose `pattern` (Consent Info, on the `purpose` field) but pairs it with an `example`,
+        // **not** a `default`, so the guard asserts clean across all specs today and holds the line
+        // against a future DPV-purpose default drifting to a prefix-less or non-alphanumeric value;
+        // the synthetic unit body in `dpv_purpose_pattern_default_extraction_rules` keeps the
+        // detection path live. Verified true across all mounted specs before asserting.
+        for api in APIS {
+            let offenders = dpv_purpose_pattern_defaults_malformed(api.body);
+            assert!(
+                offenders.is_empty(),
+                "{} spec declares a `default` beside a same-indent DPV-purpose \
+                 `pattern: '^dpv:[a-zA-Z0-9]+$'` that is not a well-formed `dpv:<Purpose>` token (a \
+                 fall-back the pattern's own validator would reject) at `default:` line(s): {:?}",
+                api.name,
+                offenders
+            );
+        }
+    }
+
+    #[test]
+    fn dpv_purpose_pattern_default_extraction_rules() {
+        // Unit-cover `dpv_purpose_pattern_defaults_malformed` so the contract test above can't pass
+        // vacuously and its detection is pinned (`matches_dpv_purpose_pattern` itself is already
+        // covered by `dpv_purpose_pattern_example_extraction_rules`).
+        //
+        // Extractor: two valid purpose tokens (a quoted one, a plain unquoted one whose value itself
+        // carries the sentinel colon — proving the `split_once(':')` key/value split keys off the
+        // *first* colon only) pass; a value missing the `dpv:` sentinel, a value with a colon in its
+        // suffix, and an empty suffix are flagged; a bad value with the DPV-purpose `pattern` declared
+        // *below* it (down-scan) is flagged; a value with no `pattern` sibling and one whose sibling
+        // is a *different* pattern (the result-code `^B[0-9]{6}$`) are skipped; a block-scalar default
+        // is skipped; a default in one property never pairs with a *following* property's DPV-purpose
+        // `pattern` across the dedent; an inner `default` inside an outer `example:` payload is
+        // skipped; and a property literally named `default` (opening a block) is skipped.
+        let body = format!(
+            "openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    GoodQuoted:
+      type: string
+      pattern: '{p}'
+      default: \"dpv:FraudPreventionAndDetection\"
+    GoodPlain:
+      type: string
+      pattern: '{p}'
+      default: dpv:Marketing
+    BadNoPrefix:
+      type: string
+      pattern: '{p}'
+      default: FraudPrevention
+    BadColonSuffix:
+      type: string
+      pattern: '{p}'
+      default: \"dpv:Fraud:Detection\"
+    BadEmptySuffix:
+      type: string
+      pattern: '{p}'
+      default: \"dpv:\"
+    PatternBelow:
+      type: string
+      default: nodpv
+      pattern: '{p}'
+    NoPattern:
+      type: string
+      default: nodpv
+    OtherPattern:
+      type: string
+      pattern: '^B[0-9]{{6}}$'
+      default: nodpv
+    BlockDefault:
+      type: string
+      pattern: '{p}'
+      default: |
+        nodpv
+    InExample:
+      type: object
+      example:
+        pattern: '{p}'
+        default: nodpv
+    Split:
+      type: object
+      properties:
+        a:
+          default: nodpv
+        b:
+          type: string
+          pattern: '{p}'
+    NamedDefault:
+      type: object
+      properties:
+        default:
+          type: string
+          pattern: '{p}'
+",
+            p = DPV_PURPOSE_PATTERN
+        );
+        // Flagged, in document order: BadNoPrefix.default (no `dpv:` sentinel beside a same-indent
+        // DPV-purpose `pattern`), BadColonSuffix.default (a colon in the suffix), BadEmptySuffix
+        // .default (`dpv:` with an empty suffix), and PatternBelow.default (bad value, DPV-purpose
+        // `pattern` a line below — down-scan pairs it). Not flagged: GoodQuoted / GoodPlain (both
+        // valid, the latter proving the first-colon key/value split); NoPattern (no `pattern`
+        // sibling); OtherPattern (sibling is the result-code pattern, not DPV-purpose — an off-pattern
+        // value there is out of scope); BlockDefault (block-scalar opener `|`, no inline value);
+        // InExample's inner `default: nodpv` (sits inside the outer `example:` payload); Split.a
+        // .default, whose only DPV-purpose `pattern` is in the following property Split.b past a
+        // dedent; and NamedDefault's `default:` property opening a block (no inline value).
+        let flagged = dpv_purpose_pattern_defaults_malformed(&body);
+        let flagged_props: Vec<&str> = flagged
+            .iter()
+            .map(|&n| {
+                // Walk up to the nearest schema-name line (indent 4) for a stable label.
+                let lines: Vec<&str> = body.lines().collect();
+                let mut k = n - 1;
+                loop {
+                    let l = lines[k];
+                    let ind = l.len() - l.trim_start().len();
+                    if ind == 4 && l.trim_end().ends_with(':') {
+                        break l.trim().trim_end_matches(':');
+                    }
+                    if k == 0 {
+                        break "";
+                    }
+                    k -= 1;
+                }
+            })
+            .collect();
+        assert_eq!(
+            flagged_props,
+            vec!["BadNoPrefix", "BadColonSuffix", "BadEmptySuffix", "PatternBelow"]
+        );
+
+        // Non-vacuous floor (future-drift posture, mirroring the seventeen prior `pattern`-default
+        // twins): across every registered spec every `default` beside a same-indent DPV-purpose
+        // `pattern` matches it (the invariant the contract test asserts). The corpus declares the
+        // DPV-purpose `pattern` on the Consent Info `purpose` schema but pairs it with an `example`,
+        // **not** a `default`, in the *same* Schema Object today — so this asserts a clean `== 0`
+        // genuine-pair count and guards future drift; the synthetic body above keeps the detection
+        // path live. The pair count reuses the extractor's own **dedent-bounded** same-indent sibling
+        // scan — the genuine-Schema-Object pairing — rather than a crude window, and stays independent
+        // of the extractor's *validity* (`matches_dpv_purpose_pattern`) comparison.
+        let mut dpv_defaults = 0usize;
+        for api in APIS {
+            assert!(
+                dpv_purpose_pattern_defaults_malformed(api.body).is_empty(),
+                "{}: every default beside a same-indent DPV-purpose `pattern` must match it",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            let raw_inline = |l: &str, name: &str| -> Option<String> {
+                let (k, v) = l.trim_start().split_once(':')?;
+                if k.trim() != name {
+                    return None;
+                }
+                let v = v.split('#').next().unwrap_or(v).trim();
+                if v.is_empty() { None } else { Some(v.to_string()) }
+            };
+            // A genuine same-Schema-Object DPV-purpose `pattern` sibling of the `default` on line `i`
+            // (indent `c`): scan down through the object's block then up, dedent-bounded exactly like
+            // the extractor's `sibling_is_dpv_purpose_pattern`, so a *following* property's DPV-purpose
+            // `pattern` past a dedent never counts.
+            let sibling_is_dpv = |i: usize, c: usize| -> bool {
+                let is_dpv = |l: &str| -> bool {
+                    raw_inline(l, "pattern")
+                        .map(|v| v.trim_matches('"').trim_matches('\'') == DPV_PURPOSE_PATTERN)
+                        .unwrap_or(false)
+                };
+                let mut j = i + 1;
+                while j < lines.len() {
+                    let l = lines[j];
+                    if l.trim().is_empty() {
+                        j += 1;
+                        continue;
+                    }
+                    if indent(l) < c {
+                        break;
+                    }
+                    if indent(l) == c && is_dpv(l) {
+                        return true;
+                    }
+                    j += 1;
+                }
+                let mut k = i;
+                while k > 0 {
+                    k -= 1;
+                    let l = lines[k];
+                    if l.trim().is_empty() {
+                        continue;
+                    }
+                    if indent(l) < c {
+                        break;
+                    }
+                    if indent(l) == c && is_dpv(l) {
+                        return true;
+                    }
+                }
+                false
+            };
+            for (i, l) in lines.iter().enumerate() {
+                let Some(v) = raw_inline(l, "default") else {
+                    continue;
+                };
+                // Inline scalar only (skip block-scalar openers), mirroring the extractor so the
+                // floor counts exactly the pairs it inspects.
+                if v.starts_with('>') || v.starts_with('|') {
+                    continue;
+                }
+                let c = indent(l);
+                if sibling_is_dpv(i, c) {
+                    dpv_defaults += 1;
+                }
+            }
+        }
+        assert_eq!(
+            dpv_defaults, 0,
+            "expected no genuine default + same-Schema-Object DPV-purpose `pattern` pairs across \
+             specs (the future-drift posture; a new pair means switch this guard to a `>= 1` floor \
+             like the example side), got {dpv_defaults}"
+        );
+    }
+
     const NO_SEMICOLON_PATTERN: &str = r"^[^;]*$";
 
     /// True when `s` matches the no-semicolon `pattern` `^[^;]*$` exactly: a string of zero or more

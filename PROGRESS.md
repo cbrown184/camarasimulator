@@ -3335,6 +3335,28 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - a **DPV-purpose `pattern`-`default` conformance** contract test (`src/registry.rs`
+    `every_dpv_purpose_pattern_default_conforms_to_the_dpv_purpose_pattern`) — the `default`-side twin
+    of `every_dpv_purpose_pattern_example_conforms_to_the_dpv_purpose_pattern` and the **eighteenth
+    member of the `pattern`-default family** after E.164 / IMEI / ICCID / name / token / 32-hex / MAC /
+    result-code / UUID / email / full-date / semver / geohash / app-name / DNS-label / TAC / IMEISV,
+    the **first over a fixed literal `dpv:` sentinel (letters plus a colon) then a variable-length
+    alphanumeric run** (`^dpv:[a-zA-Z0-9]+$`, the Consent Info API's `purpose` field — a
+    `dpv:<Purpose>` token from the W3C Data Privacy Vocabulary, the purpose-scope grammar CamaraSim's
+    `auth::purpose` validates). No earlier default member expresses this shape: the result-code twin
+    (`^B[0-9]{6}$`) is nearest — a fixed literal prefix then a bounded run — but its prefix is a single
+    letter and its run digit-only and fixed-length, so it cannot express a four-character prefix that
+    itself contains a colon nor an unbounded mixed alphanumeric suffix; a bare alphanumeric default
+    with the `dpv:` prefix dropped (which the name/token matchers accept) is the fault none of the
+    seventeen prior members catches. Carries no `format` sibling, so beyond the `format`-default
+    family. New pure `dpv_purpose_pattern_defaults_malformed` (the `imeisv_pattern_defaults_malformed`
+    shape keyed on `DPV_PURPOSE_PATTERN` equality + judged by `matches_dpv_purpose_pattern`, both
+    already present from the example side; trigger key `default:`, block-scalar opener skipped,
+    dedent-bounded same-indent sibling scan, in-`example:` payload excluded). Corpus declares the
+    DPV-purpose `pattern` (Consent Info `purpose`) but pairs it with an `example`, **not** a `default`
+    → asserts clean `== 0` genuine-pair count (future-drift posture) + guards future drift; floor
+    reuses the dedent-bounded sibling scan. Unit-covered (`dpv_purpose_pattern_default_extraction_rules`).
+    Test-only, no spec change.
   - an **IMEISV `pattern`-`default` conformance** contract test (`src/registry.rs`
     `every_imeisv_pattern_default_conforms_to_the_imeisv_pattern`) — the `default`-side twin of
     `every_imeisv_pattern_example_conforms_to_the_imeisv_pattern` and the **seventeenth member of
@@ -6644,6 +6666,38 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-24 — Contract-test harness: guard that every **DPV-purpose `pattern` `default` matches the
+  pattern** (`src/registry.rs` `every_dpv_purpose_pattern_default_conforms_to_the_dpv_purpose_pattern`).
+  The **eighteenth member of the `pattern`-default family** after E.164, IMEI, ICCID, name, token,
+  32-hex, MAC, result-code, UUID, email, full-date, semver, geohash, app-name, DNS-label, TAC, and
+  IMEISV — the `default`-side twin of `every_dpv_purpose_pattern_example_conforms_to_the_dpv_purpose_pattern`
+  (DPV-purpose pattern `^dpv:[a-zA-Z0-9]+$` — the Consent Info API's `purpose` field: a
+  `dpv:<Purpose>` token from the W3C Data Privacy Vocabulary, the purpose-scope grammar CamaraSim's
+  `auth::purpose` validates). The **first pattern-default member over a fixed literal `dpv:` sentinel
+  (letters plus a colon) then a variable-length alphanumeric run**: the nearest, the result-code twin
+  `^B[0-9]{6}$`, is a fixed literal prefix + bounded run too, but its prefix is a single letter and
+  its run is digit-only and fixed-length, so it can express neither a four-character prefix that
+  itself contains a colon nor an unbounded mixed alphanumeric suffix — a bare alphanumeric default
+  with the `dpv:` prefix dropped (which the name/token matchers accept) is the fault none of the
+  seventeen prior members catches. Like the IMEI/ICCID/name/result-code patterns the DPV-purpose
+  pattern carries **no** `format` sibling, so this default is beyond the `format`-default family's
+  reach. In OpenAPI 3.0.x a `default` is the schema's fall-back *instance*, so a field constrained by
+  this `pattern` MUST carry a default the pattern accepts; a DPV-purpose default the pattern rejects
+  advertises a fall-back the schema's own validator rejects. New pure
+  `dpv_purpose_pattern_defaults_malformed` (the `imeisv_pattern_defaults_malformed` shape keyed on
+  `DPV_PURPOSE_PATTERN` equality + judged by `matches_dpv_purpose_pattern`, both already present from
+  the example side; trigger key `default:`, block-scalar opener skipped, dedent-bounded same-indent
+  sibling scan, in-`example:` payload excluded). Surveyed the corpus first — the single DPV-purpose
+  `pattern` field (Consent Info `purpose`) pairs with an `example`, **not** a `default` → asserts a
+  clean `== 0` genuine-pair count (future-drift posture, mirroring the seventeen prior default twins)
+  + guards future drift; floor reuses the dedent-bounded sibling scan. Unit-covered
+  (`dpv_purpose_pattern_default_extraction_rules`: valid quoted (`dpv:FraudPreventionAndDetection`) /
+  unquoted (`dpv:Marketing`, proving the first-colon key/value split) cleared; no-prefix / colon-in-
+  suffix / empty-suffix / pattern-below flagged as `[BadNoPrefix, BadColonSuffix, BadEmptySuffix,
+  PatternBelow]`; no-pattern / different-pattern (result-code `^B[0-9]{6}$`) / block-scalar /
+  in-`example:` / following-property-across-dedent / property-named-`default` skipped). Test-only, no
+  spec change. `cargo test` 3002 pass (+2); `cargo build --release` clean, no new dep. — binary
+  (release): 5,323,160 bytes (~5.08 MiB; unchanged by a test-only change).
 - 2026-08-24 — Contract-test harness: guard that every **IMEISV `pattern` `default` matches the
   pattern** (`src/registry.rs` `every_imeisv_pattern_default_conforms_to_the_imeisv_pattern`). The
   **seventeenth member of the `pattern`-default family** after E.164, IMEI, ICCID, name, token,
