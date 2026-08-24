@@ -51850,6 +51850,404 @@ components:
         );
     }
 
+    /// The 1-based line numbers, in document order, of every `default:` keyword whose inline
+    /// scalar value sits in a Schema Object declaring a *same-indent* semver `pattern` sibling
+    /// (`^v?\d+\.\d+(?:\.\d+)?(?:[-+][0-9A-Za-z.-]+)?$`) yet is not a well-formed semver, without
+    /// a YAML dep. The **`default` twin** of `semver_pattern_examples_malformed`: identical
+    /// scoping, keyed on `SEMVER_PATTERN` and judged by `matches_semver_pattern` (both already
+    /// present from the example side), but triggered by the `default:` keyword — the
+    /// `date_pattern_defaults_malformed` shape.
+    ///
+    /// In OpenAPI 3.0.x (JSON Schema) a `default` is the schema's fall-back *instance*, so a
+    /// field constrained by `pattern` MUST carry a default the pattern accepts. A semver default
+    /// that is a four-part `1.2.3.4`, a non-numeric part `0.4.x`, an empty part `1..0`, an
+    /// uppercase `V` prefix, an empty pre-release `1.0.0-`, or a suffix character outside
+    /// `[0-9A-Za-z.-]` advertises a fall-back the schema's own validator rejects, so a
+    /// Redoc/Swagger form pre-fills a version control with an unusable value and a codegen
+    /// client's generated instance carries a value no field bound by this pattern can legally
+    /// hold. Like the SSID / WPA-password / hex / token / MAC patterns the semver pattern carries
+    /// no `format` sibling (there is no OpenAPI `semver` format), so this default is beyond the
+    /// `format`-default family's reach.
+    ///
+    /// Scoping mirrors `date_pattern_defaults_malformed` exactly: only a `default` carrying an
+    /// inline scalar (a block/object default opens no inline value and is skipped) with a
+    /// same-indent `pattern` sibling *equal to* `SEMVER_PATTERN` in the same Schema Object is
+    /// inspected — the sibling is scanned at the default's own indent, down through the object's
+    /// block then up, dedent-bounded, so a nested or *following* property's `pattern` never
+    /// pairs. A `default:` nested inside an outer `example:`/`examples:` payload (sample data,
+    /// not a schema keyword) is skipped. Only the semver pattern is matched; other patterns are
+    /// out of scope.
+    fn semver_pattern_defaults_malformed(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let raw_inline = |l: &str, name: &str| -> Option<String> {
+            let (k, v) = l.trim_start().split_once(':')?;
+            if k.trim() != name {
+                return None;
+            }
+            let v = v.split('#').next().unwrap_or(v).trim();
+            if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            }
+        };
+        // Whether a same-indent `pattern:` sibling of line `i` (indent `c`) in the same Schema
+        // Object equals the semver pattern: scan down through the object's block then up,
+        // dedent-bounded so a nested or following object's `pattern` never pairs.
+        let sibling_is_semver_pattern = |i: usize, c: usize| -> bool {
+            let is_semver_pattern = |l: &str| -> bool {
+                raw_inline(l, "pattern")
+                    .map(|v| v.trim_matches('"').trim_matches('\'') == SEMVER_PATTERN)
+                    .unwrap_or(false)
+            };
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_semver_pattern(l) {
+                    return true;
+                }
+                j += 1;
+            }
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_semver_pattern(l) {
+                    return true;
+                }
+            }
+            false
+        };
+        // True when line `i` (indent `c`) sits inside an outer `example:`/`examples:` payload —
+        // some enclosing container key up the indent ladder is `example`/`examples`, so an inner
+        // `default` key there is sample data, not a schema keyword.
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some(raw) = raw_inline(line, "default") else {
+                continue;
+            };
+            // A block-scalar opener (`>`/`|`, optionally with a chomping indicator) carries its
+            // value on the following lines, not inline — skip it.
+            if raw.starts_with('>') || raw.starts_with('|') {
+                continue;
+            }
+            let c = indent(line);
+            if inside_example(i, c) {
+                continue;
+            }
+            if !sibling_is_semver_pattern(i, c) {
+                continue;
+            }
+            let value = raw.trim_matches('"').trim_matches('\'');
+            if !matches_semver_pattern(value) {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_semver_pattern_default_conforms_to_the_semver_pattern() {
+        // Contract-harness invariant (OpenAPI 3.0.x / JSON-Schema structural rule): where a
+        // Schema Object declares an inline `default` beside a same-indent semver `pattern`
+        // (`^v?\d+\.\d+(?:\.\d+)?(?:[-+][0-9A-Za-z.-]+)?$`, the shape a Kubernetes / semver
+        // version string takes — the `KubernetesClusterInfo.version` field uses this pattern
+        // verbatim), the default MUST match that pattern. A `default` is the schema's fall-back
+        // *instance*, so a four-part `1.2.3.4`, a non-numeric part `0.4.x`, an uppercase `V`
+        // prefix, or an empty pre-release suffix `1.0.0-` is a self-contradictory schema whose
+        // own validator rejects the fall-back it pre-supplies, so a Redoc/Swagger form pre-fills
+        // a version control with an unusable value and a codegen client's generated instance
+        // carries a value no field constrained by this pattern can hold.
+        //
+        // The **`default` twin** of `every_semver_pattern_example_conforms_to_the_semver_pattern`
+        // and the twelfth member of the `pattern`-*default* family after the E.164 / IMEI /
+        // ICCID / name / token / 32-hex / MAC / result-code / UUID / email / full-date default
+        // twins, and the first pattern-default member over a **semver-shaped alphabet**: no
+        // earlier default member expresses (a) an optional single-character prefix (`v?`),
+        // (b) a *two-to-three*-part dot-separated ranged repetition (semver's optional PATCH), or
+        // (c) an optional two-alternative suffix separator (`-` or `+`) followed by a bounded
+        // free-run of `[0-9A-Za-z.-]`. The full-date default twin is the nearest neighbour
+        // (dot-vs-hyphen aside) but joins *exactly three fixed-width* all-digit runs with no
+        // optional part and no suffix; semver's parts are variable-width, its third part optional,
+        // and it carries a pre-release/build tail none of the eleven prior members model. Like
+        // the SSID / WPA-password / hex / token / MAC patterns the semver pattern carries no
+        // `format` sibling (there is no OpenAPI `semver` format), so this default is beyond the
+        // `format`-default family's reach. Future-drift posture (like the eleven prior default
+        // twins): the corpus declares the semver `pattern` on `KubernetesClusterInfo.version` but
+        // pairs it with an `example`, **not** a `default`, so the guard asserts clean across all
+        // specs today and holds the line against a future version default drifting to a
+        // mis-shaped value; the synthetic unit body in `semver_pattern_default_extraction_rules`
+        // keeps the detection path live. Verified true across all mounted specs before asserting.
+        for api in APIS {
+            let offenders = semver_pattern_defaults_malformed(api.body);
+            assert!(
+                offenders.is_empty(),
+                "{} spec declares a `default` beside a same-indent semver \
+                 `pattern: '^v?\\d+\\.\\d+(?:\\.\\d+)?(?:[-+][0-9A-Za-z.-]+)?$'` that does not \
+                 match that pattern (a fall-back the pattern's own validator would reject) at \
+                 `default:` line(s): {:?}",
+                api.name,
+                offenders
+            );
+        }
+    }
+
+    #[test]
+    fn semver_pattern_default_extraction_rules() {
+        // Unit-cover `semver_pattern_defaults_malformed` so the contract test above can't pass
+        // vacuously and its detection is pinned (`matches_semver_pattern` itself is already
+        // covered by `semver_pattern_example_extraction_rules`).
+        //
+        // Extractor: a valid quoted and a valid unquoted semver default beside a same-indent
+        // semver `pattern` pass; a four-part `1.2.3.4`, a non-numeric part `0.4.x`, an uppercase
+        // `V` prefix, and an empty pre-release suffix `1.0.0-` are flagged; a bad value with the
+        // pattern *below* it (down-scan) is flagged; a value with no `pattern` sibling and one
+        // whose sibling is a *different* pattern (the WPA-password `^[\x20-\x7E]{8,63}$`) are
+        // skipped; a block-scalar default is skipped; a default in one property never pairs with
+        // a *following* property's semver `pattern` across the dedent; an inner `default` inside
+        // an outer `example:` payload is skipped; and a property literally named `default`
+        // (opening a block) is skipped.
+        let body = format!(
+            "openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    GoodQuoted:
+      type: string
+      pattern: '{p}'
+      default: \"1.29.4\"
+    GoodUnquoted:
+      type: string
+      pattern: '{p}'
+      default: 1.2.3
+    FourPart:
+      type: string
+      pattern: '{p}'
+      default: 1.2.3.4
+    NonNumeric:
+      type: string
+      pattern: '{p}'
+      default: 0.4.x
+    UpperV:
+      type: string
+      pattern: '{p}'
+      default: V1.0.0
+    EmptySuffix:
+      type: string
+      pattern: '{p}'
+      default: 1.0.0-
+    PatternBelow:
+      type: string
+      default: 1.2.3.4
+      pattern: '{p}'
+    NoPattern:
+      type: string
+      default: 1.2.3.4
+    OtherPattern:
+      type: string
+      pattern: \"{wpa}\"
+      default: 1.2.3.4
+    BlockDefault:
+      type: string
+      pattern: '{p}'
+      default: |
+        1.2.3.4
+    InExample:
+      type: object
+      example:
+        pattern: '{p}'
+        default: 1.2.3.4
+    Split:
+      type: object
+      properties:
+        a:
+          default: 1.2.3.4
+        b:
+          type: string
+          pattern: '{p}'
+    NamedDefault:
+      type: object
+      properties:
+        default:
+          type: string
+          pattern: '{p}'
+",
+            p = SEMVER_PATTERN,
+            wpa = r"^[\\x20-\\x7E]{8,63}$",
+        );
+        // Flagged, in document order: FourPart.default (4 parts, over the top-level cap);
+        // NonNumeric.default (`x` isn't a digit); UpperV.default (case-sensitive `v?`);
+        // EmptySuffix.default (`+` quantifier forbids an empty tail); PatternBelow.default
+        // (4-part with `pattern` a line below — down-scan pairs it). Not flagged: GoodQuoted /
+        // GoodUnquoted (both valid); NoPattern (no `pattern` sibling); OtherPattern (sibling is
+        // the WPA-password pattern, not semver — an out-of-scope value proving exact-pattern
+        // keying); BlockDefault (block-scalar opener `|`, no inline value); InExample's inner
+        // `default: 1.2.3.4` (sits inside the outer `example:` payload); Split.a.default, whose
+        // only semver `pattern` is in the following property Split.b past a dedent; and
+        // NamedDefault's `default:` property opening a block (no inline value).
+        let flagged = semver_pattern_defaults_malformed(&body);
+        let flagged_props: Vec<&str> = flagged
+            .iter()
+            .map(|&n| {
+                let lines: Vec<&str> = body.lines().collect();
+                let mut k = n - 1;
+                loop {
+                    let l = lines[k];
+                    let ind = l.len() - l.trim_start().len();
+                    if ind == 4 && l.trim_end().ends_with(':') {
+                        break l.trim().trim_end_matches(':');
+                    }
+                    if k == 0 {
+                        break "";
+                    }
+                    k -= 1;
+                }
+            })
+            .collect();
+        assert_eq!(
+            flagged_props,
+            vec!["FourPart", "NonNumeric", "UpperV", "EmptySuffix", "PatternBelow"]
+        );
+
+        // Non-vacuous floor (future-drift posture, mirroring the eleven prior `pattern`-default
+        // twins): across every registered spec every `default` beside a same-indent semver
+        // `pattern` matches it (the invariant the contract test asserts). The corpus declares the
+        // semver `pattern` on `KubernetesClusterInfo.version` but pairs it with an `example`,
+        // **not** a `default`, in the *same* Schema Object today — so this asserts a clean `== 0`
+        // genuine-pair count and guards future drift; the synthetic body above keeps the
+        // detection path live. The pair count reuses the extractor's own **dedent-bounded**
+        // same-indent sibling scan — the genuine-Schema-Object pairing — rather than a crude
+        // window, and stays independent of the extractor's *validity* (`matches_semver_pattern`)
+        // comparison.
+        let mut semver_defaults = 0usize;
+        for api in APIS {
+            assert!(
+                semver_pattern_defaults_malformed(api.body).is_empty(),
+                "{}: every default beside a same-indent semver `pattern` must match it",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            let raw_inline = |l: &str, name: &str| -> Option<String> {
+                let (k, v) = l.trim_start().split_once(':')?;
+                if k.trim() != name {
+                    return None;
+                }
+                let v = v.split('#').next().unwrap_or(v).trim();
+                if v.is_empty() { None } else { Some(v.to_string()) }
+            };
+            // A genuine same-Schema-Object semver `pattern` sibling of the `default` on line `i`
+            // (indent `c`): scan down through the object's block then up, dedent-bounded exactly
+            // like the extractor's `sibling_is_semver_pattern`, so a *following* property's semver
+            // `pattern` past a dedent never counts.
+            let sibling_is_semver = |i: usize, c: usize| -> bool {
+                let is_semver = |l: &str| -> bool {
+                    raw_inline(l, "pattern")
+                        .map(|v| v.trim_matches('"').trim_matches('\'') == SEMVER_PATTERN)
+                        .unwrap_or(false)
+                };
+                let mut j = i + 1;
+                while j < lines.len() {
+                    let l = lines[j];
+                    if l.trim().is_empty() {
+                        j += 1;
+                        continue;
+                    }
+                    if indent(l) < c {
+                        break;
+                    }
+                    if indent(l) == c && is_semver(l) {
+                        return true;
+                    }
+                    j += 1;
+                }
+                let mut k = i;
+                while k > 0 {
+                    k -= 1;
+                    let l = lines[k];
+                    if l.trim().is_empty() {
+                        continue;
+                    }
+                    if indent(l) < c {
+                        break;
+                    }
+                    if indent(l) == c && is_semver(l) {
+                        return true;
+                    }
+                }
+                false
+            };
+            for (i, l) in lines.iter().enumerate() {
+                let Some(v) = raw_inline(l, "default") else {
+                    continue;
+                };
+                // Inline scalar only (skip block-scalar openers), mirroring the extractor so the
+                // floor counts exactly the pairs it inspects.
+                if v.starts_with('>') || v.starts_with('|') {
+                    continue;
+                }
+                let c = indent(l);
+                if sibling_is_semver(i, c) {
+                    semver_defaults += 1;
+                }
+            }
+        }
+        assert_eq!(
+            semver_defaults, 0,
+            "expected no genuine default + same-Schema-Object semver `pattern` pairs across \
+             specs (the future-drift posture; a new pair means switch this guard to a `>= 1` \
+             floor like the example side), got {semver_defaults}"
+        );
+    }
+
     // NB: written as it appears *raw in the YAML source* (double-quoted, so the `\.` is
     // authored `\\.` — a double backslash — in the file), because `raw_inline("pattern")`
     // returns the source substring after stripping only the outer quotes (no YAML-escape

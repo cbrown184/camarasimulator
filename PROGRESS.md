@@ -3335,6 +3335,24 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - a **semver `pattern`-`default` conformance** contract test (`src/registry.rs`
+    `every_semver_pattern_default_conforms_to_the_semver_pattern`) — the `default`-side twin of
+    `every_semver_pattern_example_conforms_to_the_semver_pattern` and the **twelfth member of the
+    `pattern`-default family** after E.164 / IMEI / ICCID / name / token / 32-hex / MAC /
+    result-code / UUID / email / full-date, the **first over a semver-shaped alphabet**
+    (`^v?\d+\.\d+(?:\.\d+)?(?:[-+][0-9A-Za-z.-]+)?$`, the `KubernetesClusterInfo.version` shape).
+    No earlier default member expresses an optional `v?` prefix, a 2-to-3-part dot-separated
+    ranged core (optional PATCH), or an optional `-`/`+` pre-release/build tail; the full-date
+    twin is nearest (dotted numeric) but is exactly three fixed-width runs with no optional part
+    and no suffix. Carries no `format` sibling (no OpenAPI `semver` format), so beyond the
+    `format`-default family. New pure `semver_pattern_defaults_malformed` (the
+    `date_pattern_defaults_malformed` shape keyed on `SEMVER_PATTERN` equality + judged by
+    `matches_semver_pattern`, both already present from the example side; trigger key `default:`,
+    block-scalar opener skipped, dedent-bounded same-indent sibling scan, in-`example:` payload
+    excluded). Corpus declares the semver `pattern` (`version`) but pairs it with an `example`,
+    **not** a `default` → asserts clean `== 0` genuine-pair count (future-drift posture) + guards
+    future drift; floor reuses the dedent-bounded sibling scan. Unit-covered
+    (`semver_pattern_default_extraction_rules`). Test-only, no spec change.
   - a **full-date `pattern`-`default` conformance** contract test (`src/registry.rs`
     `every_date_pattern_default_conforms_to_the_date_pattern`) — the `default`-side twin of
     `every_date_pattern_example_conforms_to_the_date_pattern` and the **eleventh member of the
@@ -6546,6 +6564,38 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-24 — Contract-test harness: guard that every **semver `pattern` `default` matches the
+  pattern** (`src/registry.rs` `every_semver_pattern_default_conforms_to_the_semver_pattern`). The
+  **twelfth member of the `pattern`-default family** after E.164, IMEI, ICCID, name, token, 32-hex,
+  MAC, result-code, UUID, email, and full-date, the `default`-side twin of
+  `every_semver_pattern_example_conforms_to_the_semver_pattern`, and the **first pattern-default
+  member over a semver-shaped alphabet** (`^v?\d+\.\d+(?:\.\d+)?(?:[-+][0-9A-Za-z.-]+)?$` — the
+  `KubernetesClusterInfo.version` field's pattern: an optional lowercase `v?` prefix, a
+  2-to-3-part dot-separated all-digit core with an OPTIONAL third PATCH run, and an OPTIONAL
+  `-`/`+` pre-release/build tail of `[0-9A-Za-z.-]`). A four-part `1.2.3.4`, a non-numeric part
+  `0.4.x`, an uppercase `V` prefix, or an empty pre-release `1.0.0-` is a fault none of the eleven
+  prior members can express: the full-date twin is nearest (dotted-numeric) but joins exactly
+  three fixed-width all-digit runs with no optional part and no suffix, and the single-run
+  IMEI/ICCID/TAC checks carry no separator or optional tail. Like the SSID / WPA / hex / token /
+  MAC patterns the semver pattern carries **no** `format` sibling (there is no OpenAPI `semver`
+  format), so this default is beyond the `format`-default family's reach. In OpenAPI 3.0.x a
+  `default` is the schema's fall-back *instance*, so a field constrained by this `pattern` MUST
+  carry a default the pattern accepts; a semver default the pattern rejects advertises a fall-back
+  the schema's own validator rejects. New pure `semver_pattern_defaults_malformed` (the
+  `date_pattern_defaults_malformed` shape keyed on `SEMVER_PATTERN` equality + judged by
+  `matches_semver_pattern`, both already present from the example side; trigger key `default:`,
+  block-scalar opener skipped, dedent-bounded same-indent sibling scan, in-`example:` payload
+  excluded). Surveyed the corpus first — the sole semver `pattern` field
+  (`KubernetesClusterInfo.version`, Edge Application Management) pairs with an `example`, **not** a
+  `default` → asserts a clean `== 0` genuine-pair count (future-drift posture, mirroring the
+  eleven prior default twins) + guards future drift; floor reuses the dedent-bounded sibling scan.
+  Unit-covered (`semver_pattern_default_extraction_rules`: valid quoted/unquoted semver cleared;
+  four-part / non-numeric / uppercase-`V` / empty-suffix / pattern-below flagged as
+  `[FourPart, NonNumeric, UpperV, EmptySuffix, PatternBelow]`; no-pattern / different-pattern
+  (WPA-password) / block-scalar / in-`example:` / following-property-across-dedent /
+  property-named-`default` skipped). Test-only, no spec change. `cargo test` 2990 pass (+2);
+  `cargo build --release` clean, no new dep. — binary (release): 5,323,160 bytes (~5.08 MiB;
+  unchanged by a test-only change).
 - 2026-08-24 — Contract-test harness: guard that every **full-date `pattern` `default` matches
   the pattern** (`src/registry.rs` `every_date_pattern_default_conforms_to_the_date_pattern`). The
   **eleventh member of the `pattern`-default family** after E.164, IMEI, ICCID, name, token,
