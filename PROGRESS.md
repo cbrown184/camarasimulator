@@ -6666,6 +6666,37 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-24 — Contract-test harness: guard that every **16-hex `pattern` `default` matches the
+  pattern** (`src/registry.rs` `every_hex16_pattern_default_conforms_to_the_hex16_pattern`). The
+  **nineteenth member of the `pattern`-default family** after E.164, IMEI, ICCID, name, token,
+  32-hex, MAC, result-code, UUID, email, full-date, semver, geohash, app-name, DNS-label, TAC,
+  IMEISV, and DPV-purpose — the `default`-side twin of
+  `every_hex16_pattern_example_conforms_to_the_hex16_pattern` (16-hex pattern `^[0-9a-fA-F]{16}$` —
+  Network Access Domains' `extendedPanId` field, a 16-hex-digit Thread/Zigbee Extended PAN ID) and
+  the **second fixed-length hex-digit run** after 32-hex, the first pinning exactly 16 hex digits.
+  Each family member is keyed on the exact pattern string, so the 32-hex default member (keyed on
+  `^[A-Fa-f0-9]{32}$`, length 32) never pairs with a 16-hex default, and — crucially — neither does
+  the 16-*decimal* IMEISV member (`^[0-9]{16}$`): the two share a length but not an alphabet, so a
+  valid 16-hex value like `d63e8e3e495ebbc3` fails the IMEISV matcher on its non-digit `d`, while a
+  15-/17-char or non-hex value beside this pattern is the fault neither the length-32 hex nor the
+  decimal-only IMEISV member can catch. It also reaches past the generic length-bounds family
+  (`extendedPanId` carries `maxLength: 16` but no `minLength`, and a length-bounds check counts
+  chars, not hex-ness). Like the 32-hex/IMEI/ICCID patterns the 16-hex pattern carries **no**
+  `format` sibling, so this default is beyond the `format`-default family's reach. New pure
+  `hex16_pattern_defaults_malformed` (the `imeisv_pattern_defaults_malformed` shape keyed on
+  `HEX16_PATTERN` equality + judged by `matches_hex16_pattern`, both already present from the example
+  side; trigger key `default:`, block-scalar opener skipped, dedent-bounded same-indent sibling scan,
+  in-`example:` payload excluded). Surveyed the corpus first — the single 16-hex `pattern` field
+  (Network Access Domains `extendedPanId`) pairs with an `example`, **not** a `default` → asserts a
+  clean `== 0` genuine-pair count (future-drift posture, mirroring the eighteen prior default twins) +
+  guards future drift; floor reuses the dedent-bounded sibling scan. Unit-covered
+  (`hex16_pattern_default_extraction_rules`: valid quoted (`d63e8e3e495ebbc3`) / unquoted
+  (`D63E8E3E495EBBC3`) cleared; too-few (15-hex) / too-many (17-hex) / non-hex (`g`) / pattern-below
+  flagged as `[TooShort, TooLong, NonHex, PatternBelow]`; no-pattern / different-pattern (16-decimal
+  IMEISV `^[0-9]{16}$`) / block-scalar / in-`example:` / following-property-across-dedent /
+  property-named-`default` skipped). Test-only, no spec change. `cargo test` 3004 pass (+2);
+  `cargo build --release` clean, no new dep. — binary (release): 5,323,160 bytes (~5.08 MiB;
+  unchanged by a test-only change).
 - 2026-08-24 — Contract-test harness: guard that every **DPV-purpose `pattern` `default` matches the
   pattern** (`src/registry.rs` `every_dpv_purpose_pattern_default_conforms_to_the_dpv_purpose_pattern`).
   The **eighteenth member of the `pattern`-default family** after E.164, IMEI, ICCID, name, token,
