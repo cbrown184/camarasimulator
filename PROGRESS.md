@@ -3335,6 +3335,25 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - a **geohash `pattern`-`default` conformance** contract test (`src/registry.rs`
+    `every_geohash_pattern_default_conforms_to_the_geohash_pattern`) — the `default`-side twin of
+    `every_geohash_pattern_example_conforms_to_the_geohash_pattern` and the **thirteenth member of
+    the `pattern`-default family** after E.164 / IMEI / ICCID / name / token / 32-hex / MAC /
+    result-code / UUID / email / full-date / semver, the **first over a restricted base32 alphabet
+    that excludes specific letters** (`^[0-9bcdefghjkmnpqrstuvwxyz]{1,12}$`, the location-data APIs'
+    `geohash` field). No earlier default member expresses digits-plus-lowercase with `a`/`i`/`l`/`o`
+    genuinely dropped: the digit-run members accept only decimal digits, the 32-hex member only hex,
+    and name/token the entire ASCII letter set — a wrong-alphabet or uppercase geohash default is
+    the fault none catches. Carries no `format` sibling (no OpenAPI `geohash` format), so beyond the
+    `format`-default family. New pure `geohash_pattern_defaults_malformed` (the
+    `date_pattern_defaults_malformed` shape keyed on `GEOHASH_PATTERN` equality + judged by
+    `matches_geohash_pattern`, both already present from the example side; trigger key `default:`,
+    block-scalar opener skipped, dedent-bounded same-indent sibling scan, in-`example:` payload
+    excluded). Corpus declares the geohash `pattern` (predictive-connectivity-data /
+    population-density-data) but pairs it with an `example`, **not** a `default` → asserts clean
+    `== 0` genuine-pair count (future-drift posture) + guards future drift; floor reuses the
+    dedent-bounded sibling scan. Unit-covered (`geohash_pattern_default_extraction_rules`).
+    Test-only, no spec change.
   - a **semver `pattern`-`default` conformance** contract test (`src/registry.rs`
     `every_semver_pattern_default_conforms_to_the_semver_pattern`) — the `default`-side twin of
     `every_semver_pattern_example_conforms_to_the_semver_pattern` and the **twelfth member of the
@@ -6564,6 +6583,37 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-24 — Contract-test harness: guard that every **geohash `pattern` `default` matches the
+  pattern** (`src/registry.rs` `every_geohash_pattern_default_conforms_to_the_geohash_pattern`). The
+  **thirteenth member of the `pattern`-default family** after E.164, IMEI, ICCID, name, token,
+  32-hex, MAC, result-code, UUID, email, full-date, and semver, the `default`-side twin of
+  `every_geohash_pattern_example_conforms_to_the_geohash_pattern`, and the **first pattern-default
+  member over a restricted base32 alphabet that drops specific letters**
+  (`^[0-9bcdefghjkmnpqrstuvwxyz]{1,12}$` — the geohash-string shape the location-data APIs
+  (predictive-connectivity-data, population-density-data) use on a `geohash` field: 1–12 chars, each
+  an ASCII digit or a lowercase geohash base32 letter with `a`/`i`/`l`/`o` genuinely excluded to
+  avoid visual ambiguity). A wrong-alphabet letter (`a`/`i`/`l`/`o`), an uppercase char, or a value
+  past the 12-char ceiling is a fault none of the twelve prior members can express: the digit-run
+  IMEI/ICCID members accept only decimal digits, the 32-hex member only hex, and the name/token
+  members the *entire* ASCII letter set (plus `_`/`.`/`-`); the nearest neighbour, the name pattern,
+  admits every letter and cannot drop four of them. Like the IMEI/ICCID/32-hex/MAC/result-code/semver
+  patterns the geohash pattern carries **no** `format` sibling (there is no OpenAPI `geohash`
+  format), so this default is beyond the `format`-default family's reach. In OpenAPI 3.0.x a
+  `default` is the schema's fall-back *instance*, so a field constrained by this `pattern` MUST carry
+  a default the pattern accepts; a geohash default the pattern rejects advertises a fall-back the
+  schema's own validator rejects. New pure `geohash_pattern_defaults_malformed` (the
+  `date_pattern_defaults_malformed` shape keyed on `GEOHASH_PATTERN` equality + judged by
+  `matches_geohash_pattern`, both already present from the example side; trigger key `default:`,
+  block-scalar opener skipped, dedent-bounded same-indent sibling scan, in-`example:` payload
+  excluded). Surveyed the corpus first — the two geohash `pattern` fields both pair with an
+  `example`, **not** a `default` → asserts a clean `== 0` genuine-pair count (future-drift posture,
+  mirroring the twelve prior default twins) + guards future drift; floor reuses the dedent-bounded
+  sibling scan. Unit-covered (`geohash_pattern_default_extraction_rules`: valid quoted/unquoted
+  geohashes cleared; excluded-letter / uppercase / too-long / pattern-below flagged as
+  `[ExcludedLetter, UpperCase, TooLong, PatternBelow]`; no-pattern / different-pattern (ICCID) /
+  block-scalar / in-`example:` / following-property-across-dedent / property-named-`default`
+  skipped). Test-only, no spec change. `cargo test` 2992 pass (+2); `cargo build --release` clean,
+  no new dep. — binary (release): 5,323,160 bytes (~5.08 MiB; unchanged by a test-only change).
 - 2026-08-24 — Contract-test harness: guard that every **semver `pattern` `default` matches the
   pattern** (`src/registry.rs` `every_semver_pattern_default_conforms_to_the_semver_pattern`). The
   **twelfth member of the `pattern`-default family** after E.164, IMEI, ICCID, name, token, 32-hex,

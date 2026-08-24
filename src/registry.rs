@@ -44660,6 +44660,393 @@ components:
         );
     }
 
+    /// The 1-based line numbers, in document order, of every `default:` keyword whose inline
+    /// scalar value sits in a Schema Object declaring a *same-indent* geohash `pattern` sibling
+    /// (`^[0-9bcdefghjkmnpqrstuvwxyz]{1,12}$`) yet does not match that pattern, without a YAML
+    /// dep. The **`default` twin** of `geohash_pattern_examples_malformed`: identical scoping,
+    /// keyed on `GEOHASH_PATTERN` and judged by `matches_geohash_pattern` (both already present
+    /// from the example side), but triggered by the `default:` keyword — the
+    /// `date_pattern_defaults_malformed` shape.
+    ///
+    /// In OpenAPI 3.0.x (JSON Schema) a `default` is the schema's fall-back *instance*, so a
+    /// field constrained by `pattern` MUST carry a default the pattern accepts. A geohash default
+    /// carrying an excluded letter (`a`/`i`/`l`/`o`), an uppercase character, a value past the
+    /// 12-char ceiling, or a placeholder pasted beside the pattern advertises a fall-back the
+    /// schema's own validator rejects, so a Redoc/Swagger form pre-fills a geohash control with an
+    /// unusable value and a codegen client's generated instance carries a value no field bound by
+    /// this pattern can legally hold. The geohash pattern carries no `format` sibling (there is no
+    /// standard OpenAPI `geohash` format), so these defaults are beyond the `format`-default
+    /// family's reach.
+    ///
+    /// Scoping mirrors `date_pattern_defaults_malformed` exactly: only a `default` carrying an
+    /// inline scalar (a block/object default opens no inline value and is skipped) with a
+    /// same-indent `pattern` sibling *equal to* `GEOHASH_PATTERN` in the same Schema Object is
+    /// inspected — the sibling is scanned at the default's own indent, down through the object's
+    /// block then up, dedent-bounded, so a nested or *following* property's `pattern` never pairs.
+    /// A `default:` nested inside an outer `example:`/`examples:` payload (sample data, not a
+    /// schema keyword) is skipped. Only the geohash pattern is matched; other patterns are out of
+    /// scope.
+    fn geohash_pattern_defaults_malformed(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let raw_inline = |l: &str, name: &str| -> Option<String> {
+            let (k, v) = l.trim_start().split_once(':')?;
+            if k.trim() != name {
+                return None;
+            }
+            let v = v.split('#').next().unwrap_or(v).trim();
+            if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            }
+        };
+        // Whether a same-indent `pattern:` sibling of line `i` (indent `c`) in the same Schema
+        // Object equals the geohash pattern: scan down through the object's block then up,
+        // dedent-bounded so a nested or following object's `pattern` never pairs.
+        let sibling_is_geohash_pattern = |i: usize, c: usize| -> bool {
+            let is_geohash_pattern = |l: &str| -> bool {
+                raw_inline(l, "pattern")
+                    .map(|v| v.trim_matches('"').trim_matches('\'') == GEOHASH_PATTERN)
+                    .unwrap_or(false)
+            };
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_geohash_pattern(l) {
+                    return true;
+                }
+                j += 1;
+            }
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_geohash_pattern(l) {
+                    return true;
+                }
+            }
+            false
+        };
+        // True when line `i` (indent `c`) sits inside an outer `example:`/`examples:` payload —
+        // some enclosing container key up the indent ladder is `example`/`examples`, so an inner
+        // `default` key there is sample data, not a schema keyword.
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some(raw) = raw_inline(line, "default") else {
+                continue;
+            };
+            // A block-scalar opener (`>`/`|`, optionally with a chomping indicator) carries its
+            // value on the following lines, not inline — skip it.
+            if raw.starts_with('>') || raw.starts_with('|') {
+                continue;
+            }
+            let c = indent(line);
+            if inside_example(i, c) {
+                continue;
+            }
+            if !sibling_is_geohash_pattern(i, c) {
+                continue;
+            }
+            let value = raw.trim_matches('"').trim_matches('\'');
+            if !matches_geohash_pattern(value) {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_geohash_pattern_default_conforms_to_the_geohash_pattern() {
+        // Contract-harness invariant (OpenAPI 3.0.x / JSON-Schema structural rule): where a
+        // Schema Object declares an inline `default` beside a same-indent geohash `pattern`
+        // (`^[0-9bcdefghjkmnpqrstuvwxyz]{1,12}$`, the geohash-string pattern the location-data
+        // APIs use for a `geohash` field), the default MUST match that pattern. A `default` is the
+        // schema's fall-back *instance*, so a value carrying an excluded letter (`a`/`i`/`l`/`o`),
+        // an uppercase character, a value past the 12-char ceiling, or a placeholder pasted beside
+        // the pattern is a self-contradictory schema whose own validator rejects the fall-back it
+        // pre-supplies, so a Redoc/Swagger form pre-fills a geohash control with an unusable value
+        // and a codegen client's generated instance carries a value no field constrained by this
+        // pattern can hold.
+        //
+        // The **`default` twin** of `every_geohash_pattern_example_conforms_to_the_geohash_pattern`
+        // and the thirteenth member of the `pattern`-*default* family after the E.164 / IMEI /
+        // ICCID / name / token / 32-hex / MAC / result-code / UUID / email / full-date / semver
+        // default twins, and the first pattern-default member over a **restricted base32 alphabet
+        // that excludes specific letters**: the digit-run members (IMEI / ICCID) accept only
+        // decimal digits, the 32-hex member only hex digits, and the name / token members accept
+        // the *entire* ASCII letter set (plus `_`/`.`/`-`), so none can express geohash's alphabet
+        // — digits plus lowercase letters with `a`/`i`/`l`/`o` genuinely removed (the classic
+        // ambiguity-avoiding drops). A wrong-alphabet or uppercase geohash default is the fault
+        // none of them catches. Like the IMEI / ICCID / 32-hex / MAC / result-code / semver
+        // patterns the geohash pattern carries no `format` sibling, so these defaults are beyond
+        // the `format`-default family's reach. Future-drift posture (like the twelve prior default
+        // twins): the corpus declares the geohash `pattern` (predictive-connectivity-data and
+        // population-density-data each on a `geohash` field) but pairs it with an `example`,
+        // **not** a `default`, so the guard asserts clean across all specs today and holds the line
+        // against a future geohash default drifting to a wrong-alphabet value; the synthetic unit
+        // body in `geohash_pattern_default_extraction_rules` keeps the detection path live.
+        // Verified true across all mounted specs before asserting.
+        for api in APIS {
+            let offenders = geohash_pattern_defaults_malformed(api.body);
+            assert!(
+                offenders.is_empty(),
+                "{} spec declares a `default` beside a same-indent geohash \
+                 `pattern: '^[0-9bcdefghjkmnpqrstuvwxyz]{{1,12}}$'` that does not match that \
+                 pattern (a fall-back the pattern's own validator would reject) at `default:` \
+                 line(s): {:?}",
+                api.name,
+                offenders
+            );
+        }
+    }
+
+    #[test]
+    fn geohash_pattern_default_extraction_rules() {
+        // Unit-cover `geohash_pattern_defaults_malformed` so the contract test above can't pass
+        // vacuously and its detection is pinned (`matches_geohash_pattern` itself is already
+        // covered by `geohash_pattern_example_extraction_rules`).
+        //
+        // Extractor: a valid quoted (`u4pruy`) and a valid unquoted (`0`) geohash default beside a
+        // same-indent geohash `pattern` pass; an excluded letter, an uppercase character, and a
+        // too-long value are flagged; a bad value with the pattern *below* it (down-scan) is
+        // flagged; a value with no `pattern` sibling and one whose sibling is a *different* pattern
+        // (the ICCID `^[0-9]{19,20}$`) are skipped; a block-scalar default is skipped; a default in
+        // one property never pairs with a *following* property's geohash `pattern` across the
+        // dedent; an inner `default` inside an outer `example:` payload is skipped; and a property
+        // literally named `default` (opening a block) is skipped.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    GoodQuoted:
+      type: string
+      pattern: '^[0-9bcdefghjkmnpqrstuvwxyz]{1,12}$'
+      default: 'u4pruy'
+    GoodUnquoted:
+      type: string
+      pattern: '^[0-9bcdefghjkmnpqrstuvwxyz]{1,12}$'
+      default: 0
+    ExcludedLetter:
+      type: string
+      pattern: '^[0-9bcdefghjkmnpqrstuvwxyz]{1,12}$'
+      default: 'gcdefa'
+    UpperCase:
+      type: string
+      pattern: '^[0-9bcdefghjkmnpqrstuvwxyz]{1,12}$'
+      default: 'U4pruy'
+    TooLong:
+      type: string
+      pattern: '^[0-9bcdefghjkmnpqrstuvwxyz]{1,12}$'
+      default: 'ezs42ebpbpbmz'
+    PatternBelow:
+      type: string
+      default: 'gcdefa'
+      pattern: '^[0-9bcdefghjkmnpqrstuvwxyz]{1,12}$'
+    NoPattern:
+      type: string
+      default: 'gcdefa'
+    OtherPattern:
+      type: string
+      pattern: '^[0-9]{19,20}$'
+      default: 'gcdefa'
+    BlockDefault:
+      type: string
+      pattern: '^[0-9bcdefghjkmnpqrstuvwxyz]{1,12}$'
+      default: |
+        gcdefa
+    InExample:
+      type: object
+      example:
+        pattern: '^[0-9bcdefghjkmnpqrstuvwxyz]{1,12}$'
+        default: 'BAD!'
+    Split:
+      type: object
+      properties:
+        a:
+          default: 'BAD!'
+        b:
+          type: string
+          pattern: '^[0-9bcdefghjkmnpqrstuvwxyz]{1,12}$'
+    NamedDefault:
+      type: object
+      properties:
+        default:
+          type: string
+          pattern: '^[0-9bcdefghjkmnpqrstuvwxyz]{1,12}$'
+";
+        // Flagged, in document order: ExcludedLetter.default (`gcdefa`, excluded `a`);
+        // UpperCase.default (`U4pruy`); TooLong.default (`ezs42ebpbpbmz`, 13 chars);
+        // PatternBelow.default (`gcdefa` with the geohash `pattern` a line below — down-scan pairs
+        // it). Not flagged: GoodQuoted / GoodUnquoted (both valid); NoPattern (no `pattern`
+        // sibling); OtherPattern (sibling is the ICCID pattern, not geohash — an out-of-scope value
+        // proving exact-pattern keying); BlockDefault (block-scalar opener `|`, no inline value);
+        // InExample's inner `default: 'BAD!'` (sits inside the outer `example:` payload);
+        // Split.a.default, whose only geohash `pattern` is in the following property Split.b past a
+        // dedent; and NamedDefault's `default:` property opening a block (no inline value).
+        let flagged = geohash_pattern_defaults_malformed(body);
+        let flagged_props: Vec<&str> = flagged
+            .iter()
+            .map(|&n| {
+                let lines: Vec<&str> = body.lines().collect();
+                let mut k = n - 1;
+                loop {
+                    let l = lines[k];
+                    let ind = l.len() - l.trim_start().len();
+                    if ind == 4 && l.trim_end().ends_with(':') {
+                        break l.trim().trim_end_matches(':');
+                    }
+                    if k == 0 {
+                        break "";
+                    }
+                    k -= 1;
+                }
+            })
+            .collect();
+        assert_eq!(
+            flagged_props,
+            vec!["ExcludedLetter", "UpperCase", "TooLong", "PatternBelow"]
+        );
+
+        // Non-vacuous floor (future-drift posture, mirroring the twelve prior `pattern`-default
+        // twins): across every registered spec every `default` beside a same-indent geohash
+        // `pattern` matches it (the invariant the contract test asserts). The corpus declares the
+        // geohash `pattern` on a `geohash` field (predictive-connectivity-data,
+        // population-density-data) but pairs it with an `example`, **not** a `default`, in the
+        // *same* Schema Object today — so this asserts a clean `== 0` genuine-pair count and guards
+        // future drift; the synthetic body above keeps the detection path live. The pair count
+        // reuses the extractor's own **dedent-bounded** same-indent sibling scan — the
+        // genuine-Schema-Object pairing — rather than a crude window, and stays independent of the
+        // extractor's *validity* (`matches_geohash_pattern`) comparison.
+        let mut geohash_defaults = 0usize;
+        for api in APIS {
+            assert!(
+                geohash_pattern_defaults_malformed(api.body).is_empty(),
+                "{}: every default beside a same-indent geohash `pattern` must match it",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            let raw_inline = |l: &str, name: &str| -> Option<String> {
+                let (k, v) = l.trim_start().split_once(':')?;
+                if k.trim() != name {
+                    return None;
+                }
+                let v = v.split('#').next().unwrap_or(v).trim();
+                if v.is_empty() { None } else { Some(v.to_string()) }
+            };
+            // A genuine same-Schema-Object geohash `pattern` sibling of the `default` on line `i`
+            // (indent `c`): scan down through the object's block then up, dedent-bounded exactly
+            // like the extractor's `sibling_is_geohash_pattern`, so a *following* property's
+            // geohash `pattern` past a dedent never counts.
+            let sibling_is_geohash = |i: usize, c: usize| -> bool {
+                let is_geohash = |l: &str| -> bool {
+                    raw_inline(l, "pattern")
+                        .map(|v| v.trim_matches('"').trim_matches('\'') == GEOHASH_PATTERN)
+                        .unwrap_or(false)
+                };
+                let mut j = i + 1;
+                while j < lines.len() {
+                    let l = lines[j];
+                    if l.trim().is_empty() {
+                        j += 1;
+                        continue;
+                    }
+                    if indent(l) < c {
+                        break;
+                    }
+                    if indent(l) == c && is_geohash(l) {
+                        return true;
+                    }
+                    j += 1;
+                }
+                let mut k = i;
+                while k > 0 {
+                    k -= 1;
+                    let l = lines[k];
+                    if l.trim().is_empty() {
+                        continue;
+                    }
+                    if indent(l) < c {
+                        break;
+                    }
+                    if indent(l) == c && is_geohash(l) {
+                        return true;
+                    }
+                }
+                false
+            };
+            for (i, l) in lines.iter().enumerate() {
+                let Some(v) = raw_inline(l, "default") else {
+                    continue;
+                };
+                // Inline scalar only (skip block-scalar openers), mirroring the extractor so the
+                // floor counts exactly the pairs it inspects.
+                if v.starts_with('>') || v.starts_with('|') {
+                    continue;
+                }
+                let c = indent(l);
+                if sibling_is_geohash(i, c) {
+                    geohash_defaults += 1;
+                }
+            }
+        }
+        assert_eq!(
+            geohash_defaults, 0,
+            "expected no genuine default + same-Schema-Object geohash `pattern` pairs across \
+             specs (the future-drift posture; a new pair means switch this guard to a `>= 1` \
+             floor like the example side), got {geohash_defaults}"
+        );
+    }
+
     const APP_NAME_PATTERN: &str = r"^[A-Za-z][A-Za-z0-9_]{1,63}$";
 
     /// True when `s` matches the app-name `pattern` `^[A-Za-z][A-Za-z0-9_]{1,63}$` exactly:
