@@ -59700,6 +59700,379 @@ components:
         );
     }
 
+    /// The 1-based line numbers, in document order, of every `default:` keyword whose
+    /// inline scalar value sits in a Schema Object declaring a *same-indent*
+    /// `pattern: '^[a-zA-Z0-9_\-]{1,128}$'` sibling yet does not match that client-id
+    /// pattern, without a YAML dep. The **`default`-side twin** of
+    /// `client_id_pattern_examples_malformed` and the twenty-sixth member of the
+    /// `pattern`-*default* family, keyed on `CLIENT_ID_PATTERN`.
+    ///
+    /// In OpenAPI 3.0.x (JSON Schema) a `default` is the schema's fall-back *instance*, so a
+    /// field constrained by `pattern` MUST carry a default the pattern accepts (the same
+    /// Spectral `oas3-valid-schema-example` posture that validates an example against its
+    /// schema applies to a `default` — it is a schema-level instance too). A client-id default
+    /// that includes a character the class forbids — a space, a dot, a slash — or runs past the
+    /// 128-character ceiling advertises a fall-back the schema's own validator rejects, so a
+    /// Redoc/Swagger form pre-fills a `clientId` control with an unusable value and a codegen
+    /// client carries a value no field constrained by this pattern can legally hold. Like the
+    /// client-id-example twin (and the token pattern) it carries no `format` sibling, so such a
+    /// default is otherwise unchecked; and — the **128-ceiling twin of the token-default
+    /// member** — a 65–128-character client-id default (legal here, rejected by the token
+    /// member) is the fault the `{1,64}` token-default check cannot express, the two pattern
+    /// strings being distinct so they never cross-pair.
+    ///
+    /// Structurally identical to `token_pattern_defaults_malformed`, keyed on
+    /// `CLIENT_ID_PATTERN` and judged by `matches_client_id_pattern`: the trigger key is
+    /// `default:` and a block-scalar opener (`default: >-` / `default: |`) is skipped (it opens
+    /// no inline value). Scoping is otherwise unchanged: only a `default` carrying an inline
+    /// scalar with a same-indent `pattern` sibling *equal to* `CLIENT_ID_PATTERN` in the same
+    /// Schema Object is inspected — the sibling is scanned at the default's own indent, down
+    /// through the object's block then up, dedent-bounded, so a nested or following object's
+    /// `pattern` never pairs (in particular the dot-admitting, unbounded name pattern
+    /// `^[a-zA-Z0-9_.-]+$` and the 64-char token pattern `^[a-zA-Z0-9_\-]{1,64}$` are
+    /// *different* patterns and never pair). A `default:` nested inside an outer
+    /// `example:`/`examples:` payload (sample data, not a schema keyword) is skipped. Only the
+    /// client-id pattern is matched; other patterns are out of scope.
+    fn client_id_pattern_defaults_malformed(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let raw_inline = |l: &str, name: &str| -> Option<String> {
+            let (k, v) = l.trim_start().split_once(':')?;
+            if k.trim() != name {
+                return None;
+            }
+            let v = v.split('#').next().unwrap_or(v).trim();
+            if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            }
+        };
+        // Whether a same-indent `pattern:` sibling of line `i` (indent `c`) in the same
+        // Schema Object equals the client-id pattern: scan down through the object's block
+        // then up, dedent-bounded so a nested or following object's `pattern` never pairs.
+        let sibling_is_client_id_pattern = |i: usize, c: usize| -> bool {
+            let is_client_id_pattern = |l: &str| -> bool {
+                raw_inline(l, "pattern")
+                    .map(|v| v.trim_matches('"').trim_matches('\'') == CLIENT_ID_PATTERN)
+                    .unwrap_or(false)
+            };
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_client_id_pattern(l) {
+                    return true;
+                }
+                j += 1;
+            }
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_client_id_pattern(l) {
+                    return true;
+                }
+            }
+            false
+        };
+        // True when line `i` (indent `c`) sits inside an outer `example:`/`examples:`
+        // payload — some enclosing container key up the indent ladder is
+        // `example`/`examples`, so an inner `default` key there is sample data.
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some(raw) = raw_inline(line, "default") else {
+                continue;
+            };
+            // A block-scalar opener (`>`/`|`, optionally with a chomping indicator)
+            // carries its value on the following lines, not inline — skip it.
+            if raw.starts_with('>') || raw.starts_with('|') {
+                continue;
+            }
+            let c = indent(line);
+            if inside_example(i, c) {
+                continue;
+            }
+            if !sibling_is_client_id_pattern(i, c) {
+                continue;
+            }
+            let value = raw.trim_matches('"').trim_matches('\'');
+            if !matches_client_id_pattern(value) {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_client_id_pattern_default_conforms_to_the_client_id_pattern() {
+        // Contract-harness invariant (OpenAPI 3.0.x / JSON-Schema structural rule): where
+        // a Schema Object declares an inline `default` beside a same-indent
+        // `pattern: '^[a-zA-Z0-9_\-]{1,128}$'` (the eSIM Remote Management `clientId` pattern),
+        // the default MUST match that pattern. A `default` is the schema's fall-back *instance*,
+        // so a value the `pattern` rejects — a client id carrying a space, a dot, a slash, or
+        // running past 128 characters — is a self-contradictory schema whose own validator
+        // rejects the fall-back it pre-supplies, so a Redoc/Swagger form pre-fills a `clientId`
+        // control with an unusable value and a codegen client's generated instance carries a
+        // value no field constrained by this pattern can legally hold.
+        //
+        // The **`default` twin** of
+        // `every_client_id_pattern_example_conforms_to_the_client_id_pattern` and the
+        // twenty-sixth member of the `pattern`-*default* family after E.164 / IMEI / ICCID /
+        // name / token / 32-hex / MAC / result-code / UUID / email / full-date / semver /
+        // geohash / app-name / DNS-label / TAC / IMEISV / DPV-purpose / 16-hex / text256 /
+        // 4-hex / text512 / version-4-UUID / OTP-template / region — the **128-ceiling twin of
+        // the token-default member**: it shares the token pattern's alphanumeric-plus-`_-`
+        // alphabet (dot-forbidding) but doubles the `{1,64}` ceiling to `{1,128}`, so a
+        // 65–128-character default — legal here, rejected by the token member — is the fault
+        // only this member catches, and the two pattern strings differ so they never cross-pair.
+        // Like the token pattern it carries no `format` sibling, so beyond the `format`-default
+        // family. Future-drift posture (like the twenty-five prior default twins): the corpus
+        // declares the client-id `pattern` (the two eSIM `clientId` fields) but pairs it with an
+        // `example`, **not** a `default` today, so the guard asserts clean across all specs and
+        // holds the line against a future `clientId` default drifting to a forbidden-character
+        // or over-length value; the synthetic unit body in
+        // `client_id_pattern_default_extraction_rules` keeps the detection path live. Verified
+        // true across all mounted specs before asserting.
+        for api in APIS {
+            let offenders = client_id_pattern_defaults_malformed(api.body);
+            assert!(
+                offenders.is_empty(),
+                "{} spec declares a `default` beside a same-indent client-id \
+                 `pattern: '^[a-zA-Z0-9_\\-]{{1,128}}$'` that does not match that pattern (a \
+                 fall-back the pattern's own validator would reject) at `default:` line(s): {:?}",
+                api.name,
+                offenders
+            );
+        }
+    }
+
+    #[test]
+    fn client_id_pattern_default_extraction_rules() {
+        // Unit-cover `client_id_pattern_defaults_malformed` so the contract test above can't
+        // pass vacuously and its detection is pinned (`matches_client_id_pattern` itself is
+        // already covered by `client_id_pattern_example_extraction_rules`).
+        //
+        // Extractor: a valid quoted client id and a valid unquoted client id beside a same-indent
+        // client-id `pattern` pass; a space-, dot-, and slash-bearing value are flagged (all
+        // forbidden by the client-id class); a bad value with the pattern *below* it (down-scan)
+        // is flagged; a value with no `pattern` sibling and one whose sibling is a *different*
+        // pattern (the dot-admitting name `^[a-zA-Z0-9_.-]+$`) are skipped; a block-scalar
+        // default is skipped; a default in one property never pairs with a *following*
+        // property's client-id `pattern` across the dedent; an inner `default` inside an outer
+        // `example:` payload is skipped; and a property literally named `default` (opening a
+        // block) is skipped.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    GoodQuoted:
+      type: string
+      pattern: '^[a-zA-Z0-9_\\-]{1,128}$'
+      default: \"client-app_0001\"
+    GoodUnquoted:
+      type: string
+      pattern: '^[a-zA-Z0-9_\\-]{1,128}$'
+      default: eIM_client-123
+    HasSpace:
+      type: string
+      pattern: '^[a-zA-Z0-9_\\-]{1,128}$'
+      default: \"has space\"
+    HasDot:
+      type: string
+      pattern: '^[a-zA-Z0-9_\\-]{1,128}$'
+      default: \"a.b\"
+    HasSlash:
+      type: string
+      pattern: '^[a-zA-Z0-9_\\-]{1,128}$'
+      default: \"a/b\"
+    PatternBelow:
+      type: string
+      default: \"bad value\"
+      pattern: '^[a-zA-Z0-9_\\-]{1,128}$'
+    NoPattern:
+      type: string
+      default: \"no pattern here\"
+    OtherPattern:
+      type: string
+      pattern: '^[a-zA-Z0-9_.-]+$'
+      default: \"a.b\"
+    BlockDefault:
+      type: string
+      pattern: '^[a-zA-Z0-9_\\-]{1,128}$'
+      default: |
+        has space
+    InExample:
+      type: object
+      example:
+        pattern: '^[a-zA-Z0-9_\\-]{1,128}$'
+        default: \"bad thing\"
+    Split:
+      type: object
+      properties:
+        a:
+          default: \"bad value\"
+        b:
+          type: string
+          pattern: '^[a-zA-Z0-9_\\-]{1,128}$'
+    NamedDefault:
+      type: object
+      properties:
+        default:
+          type: string
+          pattern: '^[a-zA-Z0-9_\\-]{1,128}$'
+";
+        // Flagged, in document order: HasSpace.default (line 25, a space), HasDot.default
+        // (line 29, a dot — legal in a *name* but not a client id), HasSlash.default (line 33,
+        // a slash), and PatternBelow.default (line 36, value `bad value` with a space, its
+        // client-id `pattern` a line below — down-scan pairs it). Not flagged:
+        // GoodQuoted/GoodUnquoted (valid client ids); NoPattern (no `pattern` sibling);
+        // OtherPattern (sibling is the dot-admitting *name* pattern, not the client-id pattern —
+        // its `a.b` default is a valid name and never inspected here); BlockDefault (block-scalar
+        // opener `|`, no inline value); InExample's inner `default: \"bad thing\"` (sits inside
+        // the outer `example:` payload); Split.a.default, whose only client-id `pattern` is in
+        // the following property Split.b past a dedent; and NamedDefault's `default:` property
+        // opening a block (no inline value).
+        assert_eq!(client_id_pattern_defaults_malformed(body), vec![25, 29, 33, 36]);
+
+        // Non-vacuous floor (future-drift posture, mirroring the twenty-five prior default
+        // twins): across every registered spec every `default` beside a same-indent client-id
+        // `pattern` matches it (the invariant the contract test asserts). The corpus declares the
+        // client-id `pattern` (the two eSIM `clientId` fields) but pairs **none** with a
+        // `default` in the *same* Schema Object today (they carry examples, not defaults) — so
+        // this asserts a clean `== 0` genuine-pair count and guards future drift; the synthetic
+        // body above keeps the detection path live. The pair count reuses the extractor's own
+        // **dedent-bounded** same-indent sibling scan — the genuine-Schema-Object pairing —
+        // rather than a crude window, and stays independent of the extractor's *validity*
+        // (`matches_client_id_pattern`) comparison.
+        let mut client_id_defaults = 0usize;
+        for api in APIS {
+            assert!(
+                client_id_pattern_defaults_malformed(api.body).is_empty(),
+                "{}: every default beside a same-indent client-id `pattern` must match it",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            let raw_inline = |l: &str, name: &str| -> Option<String> {
+                let (k, v) = l.trim_start().split_once(':')?;
+                if k.trim() != name {
+                    return None;
+                }
+                let v = v.split('#').next().unwrap_or(v).trim();
+                if v.is_empty() { None } else { Some(v.to_string()) }
+            };
+            // A genuine same-Schema-Object client-id `pattern` sibling of the `default` on
+            // line `i` (indent `c`): scan down through the object's block then up,
+            // dedent-bounded exactly like the extractor's `sibling_is_client_id_pattern`, so a
+            // *following* property's client-id `pattern` past a dedent never counts.
+            let sibling_is_client_id = |i: usize, c: usize| -> bool {
+                let is_client_id = |l: &str| -> bool {
+                    raw_inline(l, "pattern")
+                        .map(|v| v.trim_matches('"').trim_matches('\'') == CLIENT_ID_PATTERN)
+                        .unwrap_or(false)
+                };
+                let mut j = i + 1;
+                while j < lines.len() {
+                    let l = lines[j];
+                    if l.trim().is_empty() {
+                        j += 1;
+                        continue;
+                    }
+                    if indent(l) < c {
+                        break;
+                    }
+                    if indent(l) == c && is_client_id(l) {
+                        return true;
+                    }
+                    j += 1;
+                }
+                let mut k = i;
+                while k > 0 {
+                    k -= 1;
+                    let l = lines[k];
+                    if l.trim().is_empty() {
+                        continue;
+                    }
+                    if indent(l) < c {
+                        break;
+                    }
+                    if indent(l) == c && is_client_id(l) {
+                        return true;
+                    }
+                }
+                false
+            };
+            for (i, l) in lines.iter().enumerate() {
+                let Some(v) = raw_inline(l, "default") else {
+                    continue;
+                };
+                // Inline scalar only (skip block-scalar openers), mirroring the extractor
+                // so the floor counts exactly the pairs it inspects.
+                if v.starts_with('>') || v.starts_with('|') {
+                    continue;
+                }
+                let c = indent(l);
+                if sibling_is_client_id(i, c) {
+                    client_id_defaults += 1;
+                }
+            }
+        }
+        assert_eq!(
+            client_id_defaults, 0,
+            "expected no genuine default + same-Schema-Object client-id `pattern` pairs across \
+             specs (the future-drift posture; a new pair means switch this guard to a \
+             `>= 1` floor like the example side), got {client_id_defaults}"
+        );
+    }
+
     // Authored as a Rust raw string equal to the corpus's `pattern` text (double-quoted in the
     // YAML source, no backslashes inside), so the extractor compares it to the corpus verbatim
     // after stripping the surrounding quotes, mirroring how the other `_PATTERN` constants are

@@ -3335,6 +3335,26 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - a **client-id `pattern`-`default` conformance** contract test (`src/registry.rs`
+    `every_client_id_pattern_default_conforms_to_the_client_id_pattern`) — the `default`-side
+    twin of `every_client_id_pattern_example_conforms_to_the_client_id_pattern` and the
+    **twenty-sixth member of the `pattern`-default family** after E.164 / IMEI / ICCID / name /
+    token / 32-hex / MAC / result-code / UUID / email / full-date / semver / geohash / app-name /
+    DNS-label / TAC / IMEISV / DPV-purpose / 16-hex / text256 / 4-hex / text512 / version-4-UUID /
+    OTP-template / region, the **128-ceiling twin of the token member**
+    (`^[a-zA-Z0-9_\-]{1,128}$`, the eSIM Remote Management `clientId` field). It shares the token
+    pattern's alphanumeric-plus-`_-` (dot-forbidding) alphabet but doubles the `{1,64}` ceiling to
+    `{1,128}`, so a 65–128-character default — legal here, rejected by the token member — is the
+    fault only this member catches; each member keys on the exact pattern string, so the two never
+    cross-pair. Carries no `format` sibling, so beyond the `format`-default family. New pure
+    `client_id_pattern_defaults_malformed` (the `token_pattern_defaults_malformed` shape keyed on
+    `CLIENT_ID_PATTERN` equality + judged by `matches_client_id_pattern`, both already present from
+    the example side; trigger key `default:`, block-scalar opener skipped, dedent-bounded
+    same-indent sibling scan, in-`example:` payload excluded). Corpus declares the client-id
+    `pattern` (the two eSIM `clientId` fields) but pairs it with an `example`, **not** a `default`
+    → asserts a clean `== 0` genuine-pair count (future-drift posture, mirroring the twenty-five
+    prior default twins) + guards future drift. Unit-covered
+    (`client_id_pattern_default_extraction_rules`). Test-only, no spec change.
   - a **region-name `pattern`-`default` conformance** contract test (`src/registry.rs`
     `every_region_pattern_default_conforms_to_the_region_pattern`) — the `default`-side twin of
     `every_region_pattern_example_conforms_to_the_region_pattern` and the **twenty-fifth member of
@@ -6790,6 +6810,32 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-24 — Contract-test harness: guard that every **client-id `pattern` `default` matches the
+  pattern** (`src/registry.rs` `every_client_id_pattern_default_conforms_to_the_client_id_pattern`).
+  The **twenty-sixth member of the `pattern`-default family** after E.164, IMEI, ICCID, name,
+  token, 32-hex, MAC, result-code, UUID, email, full-date, semver, geohash, app-name, DNS-label,
+  TAC, IMEISV, DPV-purpose, 16-hex, text256, 4-hex, text512, version-4-UUID, OTP-template, and
+  region — the `default`-side twin of `every_client_id_pattern_example_conforms_to_the_client_id_pattern`
+  (`^[a-zA-Z0-9_\-]{1,128}$`, the eSIM Remote Management `clientId` field), the **128-ceiling twin
+  of the token-default member**: it shares the token pattern's alphanumeric-plus-`_-` (dot-forbidding)
+  alphabet but doubles the `{1,64}` ceiling to `{1,128}`, so a 65–128-character `clientId` default
+  — legal here, rejected by the token member on length — is the fault only this member catches;
+  members key on the exact pattern string, so the two never cross-pair. Like the token pattern the
+  client-id pattern carries **no** `format` sibling, so this default is beyond the `format`-default
+  family's reach. New pure `client_id_pattern_defaults_malformed` (the
+  `token_pattern_defaults_malformed` shape keyed on `CLIENT_ID_PATTERN` equality + judged by
+  `matches_client_id_pattern`, both already present from the example side; trigger key `default:`,
+  block-scalar opener skipped, dedent-bounded same-indent sibling scan, in-`example:` payload
+  excluded). Surveyed the corpus first — the client-id `pattern` (two eSIM `clientId` fields) pairs
+  with an `example`, **not** a `default` → asserts a clean `== 0` genuine-pair count (future-drift
+  posture, mirroring the twenty-five prior default twins) + guards future drift; floor reuses the
+  dedent-bounded sibling scan. Unit-covered (`client_id_pattern_default_extraction_rules`: valid
+  quoted (`client-app_0001`) / unquoted (`eIM_client-123`) cleared; space (`has space`) / dot
+  (`a.b`) / slash (`a/b`) / pattern-below values flagged; no-pattern / different-pattern (name
+  `^[a-zA-Z0-9_.-]+$`) / block-scalar / in-`example:` / following-property-across-dedent /
+  property-named-`default` skipped). Test-only, no spec change. `cargo test` 3018 pass (+2);
+  `cargo build --release` clean, no new dep. — binary (release): 5,323,160 bytes (~5.08 MiB;
+  unchanged by a test-only change).
 - 2026-08-24 — Contract-test harness: guard that every **region-name `pattern` `default` matches
   the pattern** (`src/registry.rs` `every_region_pattern_default_conforms_to_the_region_pattern`).
   The **twenty-fifth member of the `pattern`-default family** after E.164, IMEI, ICCID, name, token,
