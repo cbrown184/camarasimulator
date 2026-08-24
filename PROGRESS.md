@@ -6526,6 +6526,35 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-24 — Contract-test harness: guard that every **email `pattern` `default` matches the
+  pattern** (`src/registry.rs` `every_email_pattern_default_conforms_to_the_email_pattern`). The
+  **tenth member of the `pattern`-default family** after E.164, IMEI, ICCID, name, token, 32-hex,
+  MAC, result-code, and UUID, the `default`-side twin of
+  `every_email_pattern_example_conforms_to_the_email_pattern`, and the **first pattern-default
+  member over an `@`-separated local-part/domain/TLD structure**
+  (`^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$` — the Sponsored Data `SponsorId` pattern:
+  a class-constrained local part, a single `@`, then a `[a-zA-Z0-9.-]+` host anchored by a final
+  `\.[a-zA-Z]{2,}` TLD). A no-`@`, second-`@`, empty-local, un-dotted-domain, 1-char-TLD, or
+  trailing-dot fault is one none of the nine prior members can express (single-run classes, a
+  hyphen-joined hex/UUID run, an alpha-prefix + digit run) — no earlier member splits its input on
+  a literal separator into two class-constrained runs and anchors a final TLD. Like the SSID / WPA
+  / hex / token / MAC / semver patterns the SponsorId email pattern carries **no** `format`
+  sibling, so this default is beyond the `format`-default family's reach. In OpenAPI 3.0.x a
+  `default` is the schema's fall-back *instance*, so a field constrained by this `pattern` MUST
+  carry a default the pattern accepts; an email default the pattern rejects advertises a fall-back
+  the schema's own validator rejects. New pure `email_pattern_defaults_malformed` (the
+  `uuid_pattern_defaults_malformed` shape keyed on `EMAIL_PATTERN` equality + judged by
+  `matches_email_pattern`, both already present from the example side; trigger key `default:`,
+  block-scalar opener skipped, dedent-bounded same-indent sibling scan, in-`example:` payload
+  excluded). Surveyed the corpus first — the sole email `pattern` field (`SponsorId`) pairs with an
+  `example`, **not** a `default` → asserts a clean `== 0` genuine-pair count (future-drift posture,
+  mirroring the nine prior default twins) + guards future drift; floor reuses the dedent-bounded
+  sibling scan. Unit-covered (`email_pattern_default_extraction_rules`: valid quoted/unquoted
+  emails cleared; no-`@`/1-char-TLD/empty-local/pattern-below flagged as
+  `[NoAt, ShortTld, EmptyLocal, PatternBelow]`; no-pattern / different-pattern (IMEI) /
+  block-scalar / in-`example:` / following-property-across-dedent / property-named-`default`
+  skipped). Test-only, no spec change. `cargo test` 2986 pass (+2); `cargo build --release` clean,
+  no new dep. — binary (release): 5,323,160 bytes (~5.08 MiB; unchanged by a test-only change).
 - 2026-08-24 — Contract-test harness: guard that every **UUID `pattern` `default` matches the
   pattern** (`src/registry.rs` `every_uuid_pattern_default_conforms_to_the_uuid_pattern`). The
   **ninth member of the `pattern`-default family** after E.164, IMEI, ICCID, name, token, 32-hex,

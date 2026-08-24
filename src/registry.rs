@@ -52279,6 +52279,392 @@ components:
         );
     }
 
+    /// The 1-based line numbers, in document order, of every `default:` keyword whose inline
+    /// scalar value sits in a Schema Object declaring a *same-indent* email `pattern` sibling
+    /// (`^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$`) yet is not a well-formed
+    /// `local@domain.tld` address, without a YAML dep. The **`default` twin** of
+    /// `email_pattern_examples_malformed`: identical scoping, keyed on `EMAIL_PATTERN` and
+    /// judged by `matches_email_pattern` (both already present from the example side), but
+    /// triggered by the `default:` keyword — the `uuid_pattern_defaults_malformed` shape.
+    ///
+    /// In OpenAPI 3.0.x (JSON Schema) a `default` is the schema's fall-back *instance*, so a
+    /// field constrained by `pattern` MUST carry a default the pattern accepts. An email
+    /// default with no `@` / a second `@` / an empty local part / a domain with no dotted TLD /
+    /// a one-character TLD / a trailing dot advertises a fall-back the schema's own validator
+    /// rejects, so a Redoc/Swagger form pre-fills a sponsor-id control with an unusable value
+    /// and a codegen client's generated instance carries a value no field bound by this pattern
+    /// can legally hold. Like the SSID / WPA-password / hex / token / MAC / semver patterns the
+    /// SponsorId email pattern carries no `format` sibling, so this default is beyond the
+    /// `format`-default family's reach.
+    ///
+    /// Scoping mirrors `uuid_pattern_defaults_malformed` exactly: only a `default` carrying an
+    /// inline scalar (a block/object default opens no inline value and is skipped) with a
+    /// same-indent `pattern` sibling *equal to* `EMAIL_PATTERN` in the same Schema Object is
+    /// inspected — the sibling is scanned at the default's own indent, down through the object's
+    /// block then up, dedent-bounded, so a nested or *following* property's `pattern` never
+    /// pairs. A `default:` nested inside an outer `example:`/`examples:` payload (sample data,
+    /// not a schema keyword) is skipped. Only the email pattern is matched; other patterns are
+    /// out of scope.
+    fn email_pattern_defaults_malformed(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let raw_inline = |l: &str, name: &str| -> Option<String> {
+            let (k, v) = l.trim_start().split_once(':')?;
+            if k.trim() != name {
+                return None;
+            }
+            let v = v.split('#').next().unwrap_or(v).trim();
+            if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            }
+        };
+        // Whether a same-indent `pattern:` sibling of line `i` (indent `c`) in the same Schema
+        // Object equals the email pattern: scan down through the object's block then up,
+        // dedent-bounded so a nested or following object's `pattern` never pairs.
+        let sibling_is_email_pattern = |i: usize, c: usize| -> bool {
+            let is_email_pattern = |l: &str| -> bool {
+                raw_inline(l, "pattern")
+                    .map(|v| v.trim_matches('"').trim_matches('\'') == EMAIL_PATTERN)
+                    .unwrap_or(false)
+            };
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_email_pattern(l) {
+                    return true;
+                }
+                j += 1;
+            }
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_email_pattern(l) {
+                    return true;
+                }
+            }
+            false
+        };
+        // True when line `i` (indent `c`) sits inside an outer `example:`/`examples:` payload —
+        // some enclosing container key up the indent ladder is `example`/`examples`, so an inner
+        // `default` key there is sample data, not a schema keyword.
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some(raw) = raw_inline(line, "default") else {
+                continue;
+            };
+            // A block-scalar opener (`>`/`|`, optionally with a chomping indicator) carries its
+            // value on the following lines, not inline — skip it.
+            if raw.starts_with('>') || raw.starts_with('|') {
+                continue;
+            }
+            let c = indent(line);
+            if inside_example(i, c) {
+                continue;
+            }
+            if !sibling_is_email_pattern(i, c) {
+                continue;
+            }
+            let value = raw.trim_matches('"').trim_matches('\'');
+            if !matches_email_pattern(value) {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_email_pattern_default_conforms_to_the_email_pattern() {
+        // Contract-harness invariant (OpenAPI 3.0.x / JSON-Schema structural rule): where a
+        // Schema Object declares an inline `default` beside a same-indent email `pattern`
+        // (`^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$`, the `local@domain.tld` shape a
+        // sponsor identifier takes — the `SponsorId` field uses this pattern verbatim), the
+        // default MUST match that pattern. A `default` is the schema's fall-back *instance*, so
+        // a value with no `@` / a second `@` / an empty local part / a domain with no dotted TLD
+        // / a one-character TLD / a trailing dot is a self-contradictory schema whose own
+        // validator rejects the fall-back it pre-supplies, so a Redoc/Swagger form pre-fills a
+        // sponsor-id control with an unusable value and a codegen client's generated instance
+        // carries a value no field constrained by this pattern can legally hold.
+        //
+        // The **`default` twin** of `every_email_pattern_example_conforms_to_the_email_pattern`
+        // and the tenth member of the `pattern`-*default* family after the E.164 / IMEI / ICCID
+        // / name / token / 32-hex / MAC / result-code / UUID default twins, and the first
+        // pattern-default member over an **`@`-separated local-part/domain/TLD structure**: no
+        // earlier default member splits its input on a literal separator into two
+        // class-constrained runs and anchors a final `\.[a-zA-Z]{2,}` TLD. Like the SSID / WPA /
+        // hex / token / MAC / semver patterns the SponsorId email pattern carries no `format`
+        // sibling, so this default is beyond the `format`-default family's reach. Future-drift
+        // posture (like the E.164/IMEI/ICCID/name/token/32-hex/MAC/result-code/UUID-default
+        // twins): the corpus declares the email `pattern` on `SponsorId` but pairs it with an
+        // `example`, **not** a `default`, so the guard asserts clean across all specs today and
+        // holds the line against a future sponsor-id default drifting to a non-address value;
+        // the synthetic unit body in `email_pattern_default_extraction_rules` keeps the
+        // detection path live. Verified true across all mounted specs before asserting.
+        for api in APIS {
+            let offenders = email_pattern_defaults_malformed(api.body);
+            assert!(
+                offenders.is_empty(),
+                "{} spec declares a `default` beside a same-indent email \
+                 `pattern: '^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{{2,}}$'` that does \
+                 not match that pattern (a fall-back the pattern's own validator would reject) \
+                 at `default:` line(s): {:?}",
+                api.name,
+                offenders
+            );
+        }
+    }
+
+    #[test]
+    fn email_pattern_default_extraction_rules() {
+        // Unit-cover `email_pattern_defaults_malformed` so the contract test above can't pass
+        // vacuously and its detection is pinned (`matches_email_pattern` itself is already
+        // covered by `email_pattern_example_extraction_rules`).
+        //
+        // Extractor: a valid quoted and a valid unquoted email default beside a same-indent
+        // email `pattern` pass; a no-`@`, a one-character-TLD, and an empty-local-part value are
+        // flagged; a bad value with the pattern *below* it (down-scan) is flagged; a value with
+        // no `pattern` sibling and one whose sibling is a *different* pattern (an IMEI
+        // `^[0-9]{15}$`) are skipped; a block-scalar default is skipped; a default in one
+        // property never pairs with a *following* property's email `pattern` across the dedent;
+        // an inner `default` inside an outer `example:` payload is skipped; and a property
+        // literally named `default` (opening a block) is skipped.
+        let body = format!(
+            "openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    GoodQuoted:
+      type: string
+      pattern: '{p}'
+      default: \"user.name+tag@mail.co\"
+    GoodUnquoted:
+      type: string
+      pattern: '{p}'
+      default: acme@sponsor.example.com
+    NoAt:
+      type: string
+      pattern: '{p}'
+      default: acme.example.com
+    ShortTld:
+      type: string
+      pattern: '{p}'
+      default: acme@x.c
+    EmptyLocal:
+      type: string
+      pattern: '{p}'
+      default: \"@sponsor.example.com\"
+    PatternBelow:
+      type: string
+      default: acme.example.com
+      pattern: '{p}'
+    NoPattern:
+      type: string
+      default: acme.example.com
+    OtherPattern:
+      type: string
+      pattern: '{imei}'
+      default: acme.example.com
+    BlockDefault:
+      type: string
+      pattern: '{p}'
+      default: |
+        acme.example.com
+    InExample:
+      type: object
+      example:
+        pattern: '{p}'
+        default: BAD-THING
+    Split:
+      type: object
+      properties:
+        a:
+          default: acme.example.com
+        b:
+          type: string
+          pattern: '{p}'
+    NamedDefault:
+      type: object
+      properties:
+        default:
+          type: string
+          pattern: '{p}'
+",
+            p = EMAIL_PATTERN,
+            imei = r"^[0-9]{15}$",
+        );
+        // Flagged, in document order: NoAt.default (no `@`); ShortTld.default (1-char TLD);
+        // EmptyLocal.default (empty local part); PatternBelow.default (no-`@` with `pattern` a
+        // line below — down-scan pairs it). Not flagged: GoodQuoted / GoodUnquoted (both valid);
+        // NoPattern (no `pattern` sibling); OtherPattern (sibling is the IMEI pattern, not email
+        // — an invalid-email value the email matcher would also reject, proving exact-pattern
+        // keying); BlockDefault (block-scalar opener `|`, no inline value); InExample's inner
+        // `default: BAD-THING` (sits inside the outer `example:` payload); Split.a.default,
+        // whose only email `pattern` is in the following property Split.b past a dedent; and
+        // NamedDefault's `default:` property opening a block (no inline value).
+        let flagged = email_pattern_defaults_malformed(&body);
+        let flagged_props: Vec<&str> = flagged
+            .iter()
+            .map(|&n| {
+                let lines: Vec<&str> = body.lines().collect();
+                let mut k = n - 1;
+                loop {
+                    let l = lines[k];
+                    let ind = l.len() - l.trim_start().len();
+                    if ind == 4 && l.trim_end().ends_with(':') {
+                        break l.trim().trim_end_matches(':');
+                    }
+                    if k == 0 {
+                        break "";
+                    }
+                    k -= 1;
+                }
+            })
+            .collect();
+        assert_eq!(
+            flagged_props,
+            vec!["NoAt", "ShortTld", "EmptyLocal", "PatternBelow"]
+        );
+
+        // Non-vacuous floor (future-drift posture, mirroring the E.164/IMEI/ICCID/name/token/
+        // 32-hex/MAC/result-code/UUID-default twins): across every registered spec every
+        // `default` beside a same-indent email `pattern` matches it (the invariant the contract
+        // test asserts). The corpus declares the email `pattern` on `SponsorId` but pairs it
+        // with an `example`, **not** a `default`, in the *same* Schema Object today — so this
+        // asserts a clean `== 0` genuine-pair count and guards future drift; the synthetic body
+        // above keeps the detection path live. The pair count reuses the extractor's own
+        // **dedent-bounded** same-indent sibling scan — the genuine-Schema-Object pairing —
+        // rather than a crude window, and stays independent of the extractor's *validity*
+        // (`matches_email_pattern`) comparison.
+        let mut email_defaults = 0usize;
+        for api in APIS {
+            assert!(
+                email_pattern_defaults_malformed(api.body).is_empty(),
+                "{}: every default beside a same-indent email `pattern` must match it",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            let raw_inline = |l: &str, name: &str| -> Option<String> {
+                let (k, v) = l.trim_start().split_once(':')?;
+                if k.trim() != name {
+                    return None;
+                }
+                let v = v.split('#').next().unwrap_or(v).trim();
+                if v.is_empty() { None } else { Some(v.to_string()) }
+            };
+            // A genuine same-Schema-Object email `pattern` sibling of the `default` on line `i`
+            // (indent `c`): scan down through the object's block then up, dedent-bounded exactly
+            // like the extractor's `sibling_is_email_pattern`, so a *following* property's email
+            // `pattern` past a dedent never counts.
+            let sibling_is_email = |i: usize, c: usize| -> bool {
+                let is_email = |l: &str| -> bool {
+                    raw_inline(l, "pattern")
+                        .map(|v| v.trim_matches('"').trim_matches('\'') == EMAIL_PATTERN)
+                        .unwrap_or(false)
+                };
+                let mut j = i + 1;
+                while j < lines.len() {
+                    let l = lines[j];
+                    if l.trim().is_empty() {
+                        j += 1;
+                        continue;
+                    }
+                    if indent(l) < c {
+                        break;
+                    }
+                    if indent(l) == c && is_email(l) {
+                        return true;
+                    }
+                    j += 1;
+                }
+                let mut k = i;
+                while k > 0 {
+                    k -= 1;
+                    let l = lines[k];
+                    if l.trim().is_empty() {
+                        continue;
+                    }
+                    if indent(l) < c {
+                        break;
+                    }
+                    if indent(l) == c && is_email(l) {
+                        return true;
+                    }
+                }
+                false
+            };
+            for (i, l) in lines.iter().enumerate() {
+                let Some(v) = raw_inline(l, "default") else {
+                    continue;
+                };
+                // Inline scalar only (skip block-scalar openers), mirroring the extractor so the
+                // floor counts exactly the pairs it inspects.
+                if v.starts_with('>') || v.starts_with('|') {
+                    continue;
+                }
+                let c = indent(l);
+                if sibling_is_email(i, c) {
+                    email_defaults += 1;
+                }
+            }
+        }
+        assert_eq!(
+            email_defaults, 0,
+            "expected no genuine default + same-Schema-Object email `pattern` pairs across \
+             specs (the future-drift posture; a new pair means switch this guard to a `>= 1` \
+             floor like the example side), got {email_defaults}"
+        );
+    }
+
     // NB: written as it appears *raw in the YAML source* (single-quoted, so the `\d`
     // stays a single backslash in the file), because `raw_inline("pattern")` returns the
     // source substring after stripping only the outer quotes (no YAML-escape decoding),
