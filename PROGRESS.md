@@ -3335,6 +3335,25 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - an **IMEISV `pattern`-`default` conformance** contract test (`src/registry.rs`
+    `every_imeisv_pattern_default_conforms_to_the_imeisv_pattern`) — the `default`-side twin of
+    `every_imeisv_pattern_example_conforms_to_the_imeisv_pattern` and the **seventeenth member of
+    the `pattern`-default family** after E.164 / IMEI / ICCID / name / token / 32-hex / MAC /
+    result-code / UUID / email / full-date / semver / geohash / app-name / DNS-label / TAC. A bare
+    digit run (`^[0-9]{16}$`, the Device Identifier `imeisv` field — an IMEI's 14-digit body plus a
+    2-digit software-version suffix) like the IMEI (`^[0-9]{15}$`), ICCID (`^[0-9]{19,20}$`) and
+    TAC (`^[0-9]{8}$`) default twins, but a genuinely new *length* class none of those three
+    express: each member is keyed on the exact pattern string, so the IMEI/ICCID/TAC matchers each
+    reject a 16-digit value on length — none catches a 15- or 17-digit IMEISV default. Reaches past
+    the length-bounds family too (`maxLength: 16` but no `minLength`, and char-count not digit-ness)
+    and carries no `format` sibling, so beyond the `format`-default family. New pure
+    `imeisv_pattern_defaults_malformed` (the `tac_pattern_defaults_malformed` shape keyed on
+    `IMEISV_PATTERN` equality + judged by `matches_imeisv_pattern`, both already present from the
+    example side; trigger key `default:`, block-scalar opener skipped, dedent-bounded same-indent
+    sibling scan, in-`example:` payload excluded). Corpus declares the IMEISV `pattern` (Device
+    Identifier `imeisv`) but pairs it with an `example`, **not** a `default` → asserts clean `== 0`
+    genuine-pair count (future-drift posture) + guards future drift; floor reuses the dedent-bounded
+    sibling scan. Unit-covered (`imeisv_pattern_default_extraction_rules`). Test-only, no spec change.
   - a **DNS-label `pattern`-`default` conformance** contract test (`src/registry.rs`
     `every_dns_label_pattern_default_conforms_to_the_dns_label_pattern`) — the `default`-side twin of
     `every_dns_label_pattern_example_conforms_to_the_dns_label_pattern` and the **fifteenth member of
@@ -6625,6 +6644,37 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-24 — Contract-test harness: guard that every **IMEISV `pattern` `default` matches the
+  pattern** (`src/registry.rs` `every_imeisv_pattern_default_conforms_to_the_imeisv_pattern`). The
+  **seventeenth member of the `pattern`-default family** after E.164, IMEI, ICCID, name, token,
+  32-hex, MAC, result-code, UUID, email, full-date, semver, geohash, app-name, DNS-label, and TAC,
+  the `default`-side twin of `every_imeisv_pattern_example_conforms_to_the_imeisv_pattern` (IMEISV
+  pattern `^[0-9]{16}$` — the `imeisv` field of Device Identifier's device schemas: an IMEI's
+  14-digit body plus a 2-digit software-version suffix, 16 digits in all). Though a bare digit run
+  like the IMEI (`^[0-9]{15}$`), ICCID (`^[0-9]{19,20}$`) and TAC (`^[0-9]{8}$`) default twins, it
+  is a genuinely new *length* class none of those three can express: each family member is keyed on
+  the exact pattern string, so the IMEI/ICCID/TAC matchers each reject a 16-digit value on length —
+  none catches a 15- or 17-digit IMEISV default. It also reaches past the generic length-bounds
+  family: the `imeisv` field carries `maxLength: 16` but no `minLength`, so a length-bounds default
+  check never floors a 15-digit default and checks char count rather than digit-ness — both of which
+  this pattern pins. Like the IMEI/ICCID/TAC patterns the IMEISV pattern carries **no** `format`
+  sibling, so this default is beyond the `format`-default family's reach. In OpenAPI 3.0.x a
+  `default` is the schema's fall-back *instance*, so a field constrained by this `pattern` MUST
+  carry a default the pattern accepts; an IMEISV default the pattern rejects advertises a fall-back
+  the schema's own validator rejects. New pure `imeisv_pattern_defaults_malformed` (the
+  `tac_pattern_defaults_malformed` shape keyed on `IMEISV_PATTERN` equality + judged by
+  `matches_imeisv_pattern`, both already present from the example side; trigger key `default:`,
+  block-scalar opener skipped, dedent-bounded same-indent sibling scan, in-`example:` payload
+  excluded). Surveyed the corpus first — the IMEISV `pattern` field (Device Identifier `imeisv`)
+  pairs with an `example`, **not** a `default` → asserts a clean `== 0` genuine-pair count
+  (future-drift posture, mirroring the sixteen prior default twins) + guards future drift; floor
+  reuses the dedent-bounded sibling scan. Unit-covered (`imeisv_pattern_default_extraction_rules`:
+  valid quoted (`0001020304050607`) / unquoted (`3584710412345678`) cleared; too-few (15-digit
+  IMEI) / too-many / non-digit / pattern-below flagged as `[TooFew, TooMany, NonDigit,
+  PatternBelow]`; no-pattern / different-pattern (IMEI `^[0-9]{15}$`) / block-scalar / in-`example:`
+  / following-property-across-dedent / property-named-`default` skipped). Test-only, no spec change.
+  `cargo test` 3000 pass (+2); `cargo build --release` clean, no new dep. — binary (release):
+  5,323,160 bytes (~5.08 MiB; unchanged by a test-only change).
 - 2026-08-24 — Contract-test harness: guard that every **TAC `pattern` `default` matches the
   pattern** (`src/registry.rs` `every_tac_pattern_default_conforms_to_the_tac_pattern`). The
   **sixteenth member of the `pattern`-default family** after E.164, IMEI, ICCID, name, token,
