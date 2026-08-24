@@ -53077,6 +53077,395 @@ components:
         );
     }
 
+    /// The 1-based line numbers, in document order, of every `default:` keyword whose inline
+    /// scalar value sits in a Schema Object declaring a *same-indent* full-date `pattern`
+    /// sibling (`^\d{4}-\d{2}-\d{2}$`) yet is not a well-formed `YYYY-MM-DD` string, without a
+    /// YAML dep. The **`default` twin** of `date_pattern_examples_malformed`: identical scoping,
+    /// keyed on `DATE_PATTERN` and judged by `matches_date_pattern` (both already present from
+    /// the example side), but triggered by the `default:` keyword — the
+    /// `email_pattern_defaults_malformed` shape.
+    ///
+    /// In OpenAPI 3.0.x (JSON Schema) a `default` is the schema's fall-back *instance*, so a
+    /// field constrained by `pattern` MUST carry a default the pattern accepts. A date default
+    /// with a one-digit month/day, a two-digit year, `/` separators, or a trailing time suffix
+    /// advertises a fall-back the schema's own validator rejects, so a Redoc/Swagger form
+    /// pre-fills a calendar-date control with an unusable value and a codegen client's generated
+    /// instance carries a value no field bound by this pattern can legally hold. Unlike the
+    /// SSID / WPA-password / semver / email patterns the `accessDate` field DOES carry a
+    /// `format: date` sibling, so a `format`-default guard also sees this declaration — but this
+    /// member is the first to guard the *`pattern`* default for it, and its exact-pattern-equality
+    /// scoping fires only where the same-indent `pattern` equals `DATE_PATTERN`, independent of
+    /// `format`.
+    ///
+    /// Scoping mirrors `email_pattern_defaults_malformed` exactly: only a `default` carrying an
+    /// inline scalar (a block/object default opens no inline value and is skipped) with a
+    /// same-indent `pattern` sibling *equal to* `DATE_PATTERN` in the same Schema Object is
+    /// inspected — the sibling is scanned at the default's own indent, down through the object's
+    /// block then up, dedent-bounded, so a nested or *following* property's `pattern` never
+    /// pairs. A `default:` nested inside an outer `example:`/`examples:` payload (sample data,
+    /// not a schema keyword) is skipped. Only the full-date pattern is matched; other patterns
+    /// are out of scope.
+    fn date_pattern_defaults_malformed(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let raw_inline = |l: &str, name: &str| -> Option<String> {
+            let (k, v) = l.trim_start().split_once(':')?;
+            if k.trim() != name {
+                return None;
+            }
+            let v = v.split('#').next().unwrap_or(v).trim();
+            if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            }
+        };
+        // Whether a same-indent `pattern:` sibling of line `i` (indent `c`) in the same Schema
+        // Object equals the full-date pattern: scan down through the object's block then up,
+        // dedent-bounded so a nested or following object's `pattern` never pairs.
+        let sibling_is_date_pattern = |i: usize, c: usize| -> bool {
+            let is_date_pattern = |l: &str| -> bool {
+                raw_inline(l, "pattern")
+                    .map(|v| v.trim_matches('"').trim_matches('\'') == DATE_PATTERN)
+                    .unwrap_or(false)
+            };
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_date_pattern(l) {
+                    return true;
+                }
+                j += 1;
+            }
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_date_pattern(l) {
+                    return true;
+                }
+            }
+            false
+        };
+        // True when line `i` (indent `c`) sits inside an outer `example:`/`examples:` payload —
+        // some enclosing container key up the indent ladder is `example`/`examples`, so an inner
+        // `default` key there is sample data, not a schema keyword.
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some(raw) = raw_inline(line, "default") else {
+                continue;
+            };
+            // A block-scalar opener (`>`/`|`, optionally with a chomping indicator) carries its
+            // value on the following lines, not inline — skip it.
+            if raw.starts_with('>') || raw.starts_with('|') {
+                continue;
+            }
+            let c = indent(line);
+            if inside_example(i, c) {
+                continue;
+            }
+            if !sibling_is_date_pattern(i, c) {
+                continue;
+            }
+            let value = raw.trim_matches('"').trim_matches('\'');
+            if !matches_date_pattern(value) {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_date_pattern_default_conforms_to_the_date_pattern() {
+        // Contract-harness invariant (OpenAPI 3.0.x / JSON-Schema structural rule): where a
+        // Schema Object declares an inline `default` beside a same-indent full-date `pattern`
+        // (`^\d{4}-\d{2}-\d{2}$`, the `YYYY-MM-DD` shape a calendar-date field takes — the
+        // `accessDate` field uses this pattern verbatim), the default MUST match that pattern. A
+        // `default` is the schema's fall-back *instance*, so a value with a one-digit month/day,
+        // a two-digit year, `/` separators, or a trailing time suffix is a self-contradictory
+        // schema whose own validator rejects the fall-back it pre-supplies, so a Redoc/Swagger
+        // form pre-fills a calendar-date control with an unusable value and a codegen client's
+        // generated instance carries a value no field constrained by this pattern can hold.
+        //
+        // The **`default` twin** of `every_date_pattern_example_conforms_to_the_date_pattern`
+        // and the eleventh member of the `pattern`-*default* family after the E.164 / IMEI /
+        // ICCID / name / token / 32-hex / MAC / result-code / UUID / email default twins, and
+        // the first pattern-default member over a **hyphen-delimited fixed-width numeric-triplet
+        // (calendar-date) structure**: no earlier default member joins three all-digit runs of
+        // *fixed, differing* widths (4 / 2 / 2) with two literal `-`. MAC is the nearest
+        // neighbour (separator-joined groups) but is hex, `:`-or-`-`, and six equal-width pairs;
+        // IMEI / IMEISV / TAC are single fixed-width digit runs with no internal separator; email
+        // splits on a single `@`. Unlike the SSID / WPA / semver / email patterns the `accessDate`
+        // field DOES carry a `format: date` sibling, so a `format`-default guard sees the
+        // declaration too — but this member is the first to guard the *`pattern`* default for it,
+        // and its exact-pattern-equality scoping is independent of `format`. Future-drift posture
+        // (like the ten prior default twins): the corpus declares the full-date `pattern` on
+        // `accessDate` but pairs it with an `example`, **not** a `default`, so the guard asserts
+        // clean across all specs today and holds the line against a future calendar-date default
+        // drifting to a mis-shaped value; the synthetic unit body in
+        // `date_pattern_default_extraction_rules` keeps the detection path live. Verified true
+        // across all mounted specs before asserting.
+        for api in APIS {
+            let offenders = date_pattern_defaults_malformed(api.body);
+            assert!(
+                offenders.is_empty(),
+                "{} spec declares a `default` beside a same-indent full-date \
+                 `pattern: '^\\d{{4}}-\\d{{2}}-\\d{{2}}$'` that does not match that pattern (a \
+                 fall-back the pattern's own validator would reject) at `default:` line(s): {:?}",
+                api.name,
+                offenders
+            );
+        }
+    }
+
+    #[test]
+    fn date_pattern_default_extraction_rules() {
+        // Unit-cover `date_pattern_defaults_malformed` so the contract test above can't pass
+        // vacuously and its detection is pinned (`matches_date_pattern` itself is already covered
+        // by `date_pattern_example_extraction_rules`).
+        //
+        // Extractor: a valid quoted and a valid unquoted date default beside a same-indent
+        // full-date `pattern` pass; a one-digit month, `/` separators, and a two-digit year are
+        // flagged; a bad value with the pattern *below* it (down-scan) is flagged; a value with
+        // no `pattern` sibling and one whose sibling is a *different* pattern (an IMEI
+        // `^[0-9]{15}$`) are skipped; a block-scalar default is skipped; a default in one
+        // property never pairs with a *following* property's date `pattern` across the dedent; an
+        // inner `default` inside an outer `example:` payload is skipped; and a property literally
+        // named `default` (opening a block) is skipped.
+        let body = format!(
+            "openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    GoodQuoted:
+      type: string
+      pattern: '{p}'
+      default: \"2024-06-01\"
+    GoodUnquoted:
+      type: string
+      pattern: '{p}'
+      default: 2020-01-01
+    OneDigitMonth:
+      type: string
+      pattern: '{p}'
+      default: 2024-6-01
+    Slashes:
+      type: string
+      pattern: '{p}'
+      default: 2024/06/01
+    ShortYear:
+      type: string
+      pattern: '{p}'
+      default: 24-06-01
+    PatternBelow:
+      type: string
+      default: 2024-6-01
+      pattern: '{p}'
+    NoPattern:
+      type: string
+      default: 2024-6-01
+    OtherPattern:
+      type: string
+      pattern: '{imei}'
+      default: 2024-6-01
+    BlockDefault:
+      type: string
+      pattern: '{p}'
+      default: |
+        2024-6-01
+    InExample:
+      type: object
+      example:
+        pattern: '{p}'
+        default: 2024-6-01
+    Split:
+      type: object
+      properties:
+        a:
+          default: 2024-6-01
+        b:
+          type: string
+          pattern: '{p}'
+    NamedDefault:
+      type: object
+      properties:
+        default:
+          type: string
+          pattern: '{p}'
+",
+            p = DATE_PATTERN,
+            imei = r"^[0-9]{15}$",
+        );
+        // Flagged, in document order: OneDigitMonth.default (one-digit month); Slashes.default
+        // (`/` separators); ShortYear.default (two-digit year); PatternBelow.default (one-digit
+        // month with `pattern` a line below — down-scan pairs it). Not flagged: GoodQuoted /
+        // GoodUnquoted (both valid); NoPattern (no `pattern` sibling); OtherPattern (sibling is
+        // the IMEI pattern, not date — an out-of-scope value proving exact-pattern keying);
+        // BlockDefault (block-scalar opener `|`, no inline value); InExample's inner
+        // `default: 2024-6-01` (sits inside the outer `example:` payload); Split.a.default, whose
+        // only date `pattern` is in the following property Split.b past a dedent; and
+        // NamedDefault's `default:` property opening a block (no inline value).
+        let flagged = date_pattern_defaults_malformed(&body);
+        let flagged_props: Vec<&str> = flagged
+            .iter()
+            .map(|&n| {
+                let lines: Vec<&str> = body.lines().collect();
+                let mut k = n - 1;
+                loop {
+                    let l = lines[k];
+                    let ind = l.len() - l.trim_start().len();
+                    if ind == 4 && l.trim_end().ends_with(':') {
+                        break l.trim().trim_end_matches(':');
+                    }
+                    if k == 0 {
+                        break "";
+                    }
+                    k -= 1;
+                }
+            })
+            .collect();
+        assert_eq!(
+            flagged_props,
+            vec!["OneDigitMonth", "Slashes", "ShortYear", "PatternBelow"]
+        );
+
+        // Non-vacuous floor (future-drift posture, mirroring the ten prior `pattern`-default
+        // twins): across every registered spec every `default` beside a same-indent full-date
+        // `pattern` matches it (the invariant the contract test asserts). The corpus declares the
+        // full-date `pattern` on `accessDate` but pairs it with an `example`, **not** a `default`,
+        // in the *same* Schema Object today — so this asserts a clean `== 0` genuine-pair count
+        // and guards future drift; the synthetic body above keeps the detection path live. The
+        // pair count reuses the extractor's own **dedent-bounded** same-indent sibling scan — the
+        // genuine-Schema-Object pairing — rather than a crude window, and stays independent of the
+        // extractor's *validity* (`matches_date_pattern`) comparison.
+        let mut date_defaults = 0usize;
+        for api in APIS {
+            assert!(
+                date_pattern_defaults_malformed(api.body).is_empty(),
+                "{}: every default beside a same-indent full-date `pattern` must match it",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            let raw_inline = |l: &str, name: &str| -> Option<String> {
+                let (k, v) = l.trim_start().split_once(':')?;
+                if k.trim() != name {
+                    return None;
+                }
+                let v = v.split('#').next().unwrap_or(v).trim();
+                if v.is_empty() { None } else { Some(v.to_string()) }
+            };
+            // A genuine same-Schema-Object full-date `pattern` sibling of the `default` on line
+            // `i` (indent `c`): scan down through the object's block then up, dedent-bounded
+            // exactly like the extractor's `sibling_is_date_pattern`, so a *following* property's
+            // date `pattern` past a dedent never counts.
+            let sibling_is_date = |i: usize, c: usize| -> bool {
+                let is_date = |l: &str| -> bool {
+                    raw_inline(l, "pattern")
+                        .map(|v| v.trim_matches('"').trim_matches('\'') == DATE_PATTERN)
+                        .unwrap_or(false)
+                };
+                let mut j = i + 1;
+                while j < lines.len() {
+                    let l = lines[j];
+                    if l.trim().is_empty() {
+                        j += 1;
+                        continue;
+                    }
+                    if indent(l) < c {
+                        break;
+                    }
+                    if indent(l) == c && is_date(l) {
+                        return true;
+                    }
+                    j += 1;
+                }
+                let mut k = i;
+                while k > 0 {
+                    k -= 1;
+                    let l = lines[k];
+                    if l.trim().is_empty() {
+                        continue;
+                    }
+                    if indent(l) < c {
+                        break;
+                    }
+                    if indent(l) == c && is_date(l) {
+                        return true;
+                    }
+                }
+                false
+            };
+            for (i, l) in lines.iter().enumerate() {
+                let Some(v) = raw_inline(l, "default") else {
+                    continue;
+                };
+                // Inline scalar only (skip block-scalar openers), mirroring the extractor so the
+                // floor counts exactly the pairs it inspects.
+                if v.starts_with('>') || v.starts_with('|') {
+                    continue;
+                }
+                let c = indent(l);
+                if sibling_is_date(i, c) {
+                    date_defaults += 1;
+                }
+            }
+        }
+        assert_eq!(
+            date_defaults, 0,
+            "expected no genuine default + same-Schema-Object full-date `pattern` pairs across \
+             specs (the future-drift posture; a new pair means switch this guard to a `>= 1` \
+             floor like the example side), got {date_defaults}"
+        );
+    }
+
     // NB: written as it appears *raw in the YAML source* (double-quoted, so the `\.` before the
     // TLD is authored `\\.` — a double backslash — in the file), because `raw_inline("pattern")`
     // returns the source substring after stripping only the outer quotes (no YAML-escape

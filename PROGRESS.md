@@ -3335,6 +3335,26 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - a **full-date `pattern`-`default` conformance** contract test (`src/registry.rs`
+    `every_date_pattern_default_conforms_to_the_date_pattern`) — the `default`-side twin of
+    `every_date_pattern_example_conforms_to_the_date_pattern` and the **eleventh member of the
+    `pattern`-default family** after E.164 / IMEI / ICCID / name / token / 32-hex / MAC /
+    result-code / UUID / email, the **first over a hyphen-delimited fixed-width numeric-triplet
+    (calendar-date) structure** (`^\d{4}-\d{2}-\d{2}$`, the `YYYY-MM-DD` shape the Network
+    Traffic Analysis `accessDate` field uses verbatim). A one-digit month/day, a two-digit year,
+    `/` separators, or a trailing time suffix is a fault none of the ten prior members express
+    (single-run digit/hex classes, a hyphen-joined equal-width MAC, an `@`-split email). Unlike
+    SSID / WPA / semver / email the field also carries a `format: date` sibling, so a
+    `format`-default guard sees it too — but this member is the first to guard the *`pattern`*
+    default for it, exact-pattern-keyed independent of `format`. New pure
+    `date_pattern_defaults_malformed` (the `email_pattern_defaults_malformed` shape keyed on
+    `DATE_PATTERN` equality + judged by `matches_date_pattern`, both already present from the
+    example side; trigger key `default:`, block-scalar opener skipped, dedent-bounded same-indent
+    sibling scan, in-`example:` payload excluded). Corpus declares the one full-date `pattern`
+    field (`accessDate`) but pairs it with an `example`, **not** a `default` → asserts clean
+    `== 0` genuine-pair count (future-drift posture) + guards future drift; floor reuses the
+    dedent-bounded sibling scan. Unit-covered (`date_pattern_default_extraction_rules`).
+    Test-only, no spec change.
   - a **UUID `pattern`-`default` conformance** contract test (`src/registry.rs`
     `every_uuid_pattern_default_conforms_to_the_uuid_pattern`) — the `default`-side twin of
     `every_uuid_pattern_example_conforms_to_the_uuid_pattern` and the **ninth member of the
@@ -6526,6 +6546,35 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-24 — Contract-test harness: guard that every **full-date `pattern` `default` matches
+  the pattern** (`src/registry.rs` `every_date_pattern_default_conforms_to_the_date_pattern`). The
+  **eleventh member of the `pattern`-default family** after E.164, IMEI, ICCID, name, token,
+  32-hex, MAC, result-code, UUID, and email, the `default`-side twin of
+  `every_date_pattern_example_conforms_to_the_date_pattern`, and the **first pattern-default member
+  over a hyphen-delimited fixed-width numeric-triplet (calendar-date) structure**
+  (`^\d{4}-\d{2}-\d{2}$` — the `YYYY-MM-DD` shape the Network Traffic Analysis `accessDate` field
+  uses verbatim: three all-ASCII-digit runs of widths 4/2/2 joined by two literal `-`). A one-digit
+  month/day, a two-digit year, `/` separators, or a trailing time suffix is a fault none of the ten
+  prior members can express (single-run digit/hex classes, a hyphen-joined equal-width MAC, an
+  `@`-split email local/domain/TLD). Unlike the SSID / WPA / semver / email patterns the `accessDate`
+  field DOES carry a `format: date` sibling, so a `format`-default guard sees the declaration too —
+  but this member is the first to guard the *`pattern`* default for it, exact-pattern-keyed
+  independent of `format`. In OpenAPI 3.0.x a `default` is the schema's fall-back *instance*, so a
+  field constrained by this `pattern` MUST carry a default the pattern accepts; a date default the
+  pattern rejects advertises a fall-back the schema's own validator rejects. New pure
+  `date_pattern_defaults_malformed` (the `email_pattern_defaults_malformed` shape keyed on
+  `DATE_PATTERN` equality + judged by `matches_date_pattern`, both already present from the example
+  side; trigger key `default:`, block-scalar opener skipped, dedent-bounded same-indent sibling
+  scan, in-`example:` payload excluded). Surveyed the corpus first — the sole full-date `pattern`
+  field (`accessDate`) pairs with an `example`, **not** a `default` → asserts a clean `== 0`
+  genuine-pair count (future-drift posture, mirroring the ten prior default twins) + guards future
+  drift; floor reuses the dedent-bounded sibling scan. Unit-covered
+  (`date_pattern_default_extraction_rules`: valid quoted/unquoted dates cleared;
+  one-digit-month / `/`-separators / two-digit-year / pattern-below flagged as
+  `[OneDigitMonth, Slashes, ShortYear, PatternBelow]`; no-pattern / different-pattern (IMEI) /
+  block-scalar / in-`example:` / following-property-across-dedent / property-named-`default`
+  skipped). Test-only, no spec change. `cargo test` 2988 pass (+2); `cargo build --release` clean,
+  no new dep. — binary (release): 5,323,160 bytes (~5.08 MiB; unchanged by a test-only change).
 - 2026-08-24 — Contract-test harness: guard that every **email `pattern` `default` matches the
   pattern** (`src/registry.rs` `every_email_pattern_default_conforms_to_the_email_pattern`). The
   **tenth member of the `pattern`-default family** after E.164, IMEI, ICCID, name, token, 32-hex,
