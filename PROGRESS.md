@@ -3335,6 +3335,28 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - a **version-4 UUID `pattern`-`default` conformance** contract test (`src/registry.rs`
+    `every_uuid_v4_pattern_default_conforms_to_the_uuid_v4_pattern`) — the `default`-side twin of
+    `every_uuid_v4_pattern_example_conforms_to_the_uuid_v4_pattern` and the **twenty-third member
+    of the `pattern`-default family** after E.164 / IMEI / ICCID / name / token / 32-hex / MAC /
+    result-code / UUID (strict lowercase v1–5) / email / full-date / semver / geohash / app-name /
+    DNS-label / TAC / IMEISV / DPV-purpose / 16-hex / text256 / 4-hex / text512, the
+    **version-4-pinned mixed-case sibling of the UUID member**
+    (`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$`, the
+    Sponsored Data `callbackToken` field). The existing `uuid` default member is keyed on the
+    strict-lowercase v1–5 `UUID_PATTERN` (versions `1..=5`, rejects uppercase) while this is keyed
+    on `UUID_V4_PATTERN` (only version `4`, admits uppercase), so a lowercase v1 default and an
+    uppercase v4 default are each caught by only one member and the two pattern strings never
+    cross-pair. The field carries a shape-only `format: uuid` sibling, so the version-4 pinning is
+    otherwise unchecked and beyond the `format`-default family's reach. New pure
+    `uuid_v4_pattern_defaults_malformed` (the `text512_pattern_defaults_malformed` shape keyed on
+    `UUID_V4_PATTERN` equality + judged by `matches_uuid_v4_pattern`, both already present from the
+    example side; trigger key `default:`, block-scalar opener skipped, dedent-bounded same-indent
+    sibling scan, in-`example:` payload excluded). Corpus declares the version-4 UUID `pattern`
+    (Sponsored Data `callbackToken`) but pairs it with an `example`, **not** a `default` → asserts
+    a clean `== 0` genuine-pair count (future-drift posture, mirroring the twenty-two prior default
+    twins) + guards future drift. Unit-covered (`uuid_v4_pattern_default_extraction_rules`).
+    Test-only, no spec change.
   - a **bounded-any-char (512-wide) `pattern`-`default` conformance** contract test
     (`src/registry.rs` `every_text512_pattern_default_conforms_to_the_text512_pattern`) — the
     `default`-side twin of `every_text512_pattern_example_conforms_to_the_text512_pattern` and the
@@ -6728,6 +6750,35 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-24 — Contract-test harness: guard that every **version-4 UUID `pattern` `default`
+  matches the pattern** (`src/registry.rs`
+  `every_uuid_v4_pattern_default_conforms_to_the_uuid_v4_pattern`). The **twenty-third member of
+  the `pattern`-default family** after E.164, IMEI, ICCID, name, token, 32-hex, MAC, result-code,
+  UUID (strict lowercase v1–5), email, full-date, semver, geohash, app-name, DNS-label, TAC,
+  IMEISV, DPV-purpose, 16-hex, text256, 4-hex, and text512 — the `default`-side twin of
+  `every_uuid_v4_pattern_example_conforms_to_the_uuid_v4_pattern`
+  (`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$`, the
+  Sponsored Data `callbackToken` field) and the **version-4-pinned mixed-case sibling of the UUID
+  default member**: where the existing `uuid` default member is keyed on the strict *lowercase*
+  v1–5 `UUID_PATTERN` (versions `1..=5`, rejects uppercase hex), this is keyed on `UUID_V4_PATTERN`
+  (only version `4`, admits uppercase hex), so a lowercase v1 default (legal for v1–5, rejected
+  here) and an uppercase v4 default (legal here, rejected by v1–5) are each caught by only one
+  member and the two pattern strings never cross-pair. The field carries a `format: uuid` sibling,
+  but that check is shape-only (any version/variant nibble), so the version-4 pinning is otherwise
+  unchecked and beyond the `format`-default family's reach. New pure
+  `uuid_v4_pattern_defaults_malformed` (the `text512_pattern_defaults_malformed` shape keyed on
+  `UUID_V4_PATTERN` equality + judged by `matches_uuid_v4_pattern`, both already present from the
+  example side; trigger key `default:`, block-scalar opener skipped, dedent-bounded same-indent
+  sibling scan, in-`example:` payload excluded). Surveyed the corpus first — the single version-4
+  UUID `pattern` field (Sponsored Data `callbackToken`) pairs with an `example`, **not** a
+  `default` → asserts a clean `== 0` genuine-pair count (future-drift posture, mirroring the
+  twenty-two prior default twins) + guards future drift; floor reuses the dedent-bounded sibling
+  scan. Unit-covered (`uuid_v4_pattern_default_extraction_rules`: valid quoted v4 / unquoted
+  uppercase v4 cleared; a version-3 and a wrong-variant `c…` value flagged both same-indent and
+  pattern-below; no-pattern / different-pattern (strict-lowercase v1–5) / block-scalar /
+  in-`example:` / following-property-across-dedent / property-named-`default` skipped). Test-only,
+  no spec change. `cargo test` 3012 pass (+2); `cargo build --release` clean, no new dep. —
+  binary (release): 5,323,160 bytes (~5.08 MiB; unchanged by a test-only change).
 - 2026-08-24 — Contract-test harness: guard that every **bounded-any-char (512-wide) `pattern`
   `default` matches the pattern** (`src/registry.rs`
   `every_text512_pattern_default_conforms_to_the_text512_pattern`). The **twenty-second member of the

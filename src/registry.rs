@@ -59311,6 +59311,388 @@ components:
         );
     }
 
+    /// The 1-based line numbers, in document order, of every `default:` keyword whose inline
+    /// scalar value sits in a Schema Object declaring a *same-indent* `pattern` equal to
+    /// `UUID_V4_PATTERN` yet does not match that version-4 UUID pattern, without a YAML dep.
+    /// The `default`-side twin of `uuid_v4_pattern_examples_malformed`: same scoping and same
+    /// `UUID_V4_PATTERN` key, but triggered by `default:` (and skipping a block-scalar opener,
+    /// mirroring `text512_pattern_defaults_malformed`).
+    ///
+    /// In OpenAPI 3.0.x (JSON Schema) a `default` is the schema's fall-back *instance*, so a
+    /// field constrained by `pattern` MUST carry a default the pattern accepts. A UUID default
+    /// whose version nibble is not `4` (a version-1/3/5 UUID), whose variant nibble is outside
+    /// `8/9/a/b`, or that is otherwise not a hyphenated 8-4-4-4-12 hex string advertises a
+    /// fall-back the schema's own validator rejects — a Redoc/Swagger form pre-fills the control
+    /// with an off-pattern token and a codegen client's generated instance carries a value no
+    /// field constrained by this pattern can hold. This field *does* carry a `format: uuid`
+    /// sibling, but that format check is shape-only (it accepts any version/variant nibble), so
+    /// the version-4 pinning this `pattern` adds is otherwise unchecked and beyond the
+    /// `format`-default family's reach.
+    ///
+    /// Scoping mirrors `uuid_v4_pattern_examples_malformed` / `text512_pattern_defaults_malformed`
+    /// exactly: only a `default` carrying an inline scalar (a block/object default opens no inline
+    /// value and is skipped) with a same-indent `pattern` sibling *equal to* `UUID_V4_PATTERN` in
+    /// the same Schema Object is inspected — the sibling is scanned at the default's own indent,
+    /// down through the object's block then up, dedent-bounded, so a nested or *following*
+    /// property's `pattern` never pairs, and a folded `description` block between the two is
+    /// stepped over. The strict-lowercase v1–5 UUID pattern (`UUID_PATTERN`) is a *different*
+    /// pattern string and never pairs, so the two UUID-pattern members stay distinct. A `default:`
+    /// nested inside an outer `example:`/`examples:` payload (sample data, not a schema keyword) is
+    /// skipped. Only the version-4 UUID pattern is matched; other patterns are out of scope.
+    fn uuid_v4_pattern_defaults_malformed(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let raw_inline = |l: &str, name: &str| -> Option<String> {
+            let (k, v) = l.trim_start().split_once(':')?;
+            if k.trim() != name {
+                return None;
+            }
+            let v = v.split('#').next().unwrap_or(v).trim();
+            if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            }
+        };
+        // Whether a same-indent `pattern:` sibling of line `i` (indent `c`) in the same Schema
+        // Object equals the version-4 UUID pattern: scan down through the object's block then up,
+        // dedent-bounded so a nested or following object's `pattern` never pairs.
+        let sibling_is_uuid_v4_pattern = |i: usize, c: usize| -> bool {
+            let is_uuid_v4_pattern = |l: &str| -> bool {
+                raw_inline(l, "pattern")
+                    .map(|v| v.trim_matches('"').trim_matches('\'') == UUID_V4_PATTERN)
+                    .unwrap_or(false)
+            };
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_uuid_v4_pattern(l) {
+                    return true;
+                }
+                j += 1;
+            }
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_uuid_v4_pattern(l) {
+                    return true;
+                }
+            }
+            false
+        };
+        // True when line `i` (indent `c`) sits inside an outer `example:`/`examples:` payload —
+        // some enclosing container key up the indent ladder is `example`/`examples`, so an inner
+        // `default` key there is sample data, not a schema keyword.
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some(raw) = raw_inline(line, "default") else {
+                continue;
+            };
+            // A block-scalar opener (`>`/`|`, optionally with a chomping indicator) carries its
+            // value on the following lines, not inline — skip it.
+            if raw.starts_with('>') || raw.starts_with('|') {
+                continue;
+            }
+            let c = indent(line);
+            if inside_example(i, c) {
+                continue;
+            }
+            if !sibling_is_uuid_v4_pattern(i, c) {
+                continue;
+            }
+            let value = raw.trim_matches('"').trim_matches('\'');
+            if !matches_uuid_v4_pattern(value) {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_uuid_v4_pattern_default_conforms_to_the_uuid_v4_pattern() {
+        // Contract-harness invariant (OpenAPI 3.0.x / JSON-Schema structural rule): where a Schema
+        // Object declares an inline `default` beside a same-indent
+        // `pattern: "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"`
+        // (the Sponsored Data `callbackToken` field's version-4 UUID shape), the default MUST match
+        // that pattern. A `default` is the schema's fall-back *instance*, so a value the `pattern`
+        // rejects — a non-version-4 UUID, a wrong variant nibble, a non-hex or mis-shaped string —
+        // is a self-contradictory schema whose own validator rejects the fall-back it pre-supplies,
+        // so a Redoc/Swagger prefill and a codegen client's generated default carry a value no field
+        // constrained by this pattern can hold.
+        //
+        // The **`default` twin** of `every_uuid_v4_pattern_example_conforms_to_the_uuid_v4_pattern`
+        // and the twenty-third member of the `pattern`-*default* family after the E.164 / IMEI /
+        // ICCID / name / token / 32-hex / MAC / result-code / UUID (strict lowercase v1–5) / email /
+        // full-date / semver / geohash / app-name / DNS-label / TAC / IMEISV / DPV-purpose / 16-hex /
+        // bounded-any-char (256) / 4-hex / bounded-any-char (512) default twins, and the
+        // **version-4-pinned mixed-case sibling of the UUID default member**: where the existing
+        // `uuid` default member is keyed on the strict *lowercase* v1–5 `UUID_PATTERN` (accepting
+        // versions `1..=5` but rejecting uppercase hex), this is keyed on `UUID_V4_PATTERN`
+        // (accepting *only* version `4` but *admitting uppercase* hex) — so a lowercase version-1
+        // default (legal for v1–5, rejected here) and an uppercase version-4 default (legal here,
+        // rejected by v1–5) are each the fault only one member can catch, and the two `pattern`
+        // strings differ so they never cross-pair. Unlike most family members this field carries a
+        // `format: uuid` sibling, but that check is shape-only (accepts any version/variant nibble),
+        // so the version-4 pinning stays otherwise unchecked. Future-drift posture (like the
+        // twenty-two prior default twins): the corpus declares this `pattern` (Sponsored Data
+        // `callbackToken`) but pairs it with an `example`, **not** a `default`, in the same Schema
+        // Object today, so the guard asserts clean across all specs and holds the line against a
+        // future off-version-4 default drift; the synthetic body in
+        // `uuid_v4_pattern_default_extraction_rules` keeps the detection path live. Verified true
+        // across all mounted specs before asserting.
+        for api in APIS {
+            let offenders = uuid_v4_pattern_defaults_malformed(api.body);
+            assert!(
+                offenders.is_empty(),
+                "{} spec declares a `default` beside a same-indent version-4 UUID `pattern` \
+                 that does not match that pattern (a fall-back the pattern's own validator \
+                 would reject) at `default:` line(s): {:?}",
+                api.name,
+                offenders
+            );
+        }
+    }
+
+    #[test]
+    fn uuid_v4_pattern_default_extraction_rules() {
+        // Unit-cover `uuid_v4_pattern_defaults_malformed` so the contract test above can't pass
+        // vacuously and its detection is pinned (`matches_uuid_v4_pattern` itself is already covered
+        // by `uuid_v4_pattern_example_extraction_rules`).
+        //
+        // Extractor: a valid quoted version-4 default and a valid unquoted uppercase version-4
+        // default beside a same-indent version-4 UUID `pattern` both pass; a version-3 UUID
+        // (legal for v1–5, invalid here) is flagged; a wrong-variant (`c…`) value with the
+        // `pattern` a line *below* it (down-scan) is flagged; a value with no `pattern` sibling and
+        // one whose sibling is the strict-lowercase v1–5 pattern (`UUID_PATTERN`, a different
+        // string — out of scope here, its version-3 value never inspected) are skipped; a
+        // block-scalar default is skipped; a default in one property never pairs with a *following*
+        // property's version-4 `pattern` across the dedent; an inner `default` inside an outer
+        // `example:` payload is skipped; and a property literally named `default` (opening a block)
+        // is skipped.
+        let body = format!(
+            "openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    GoodQuoted:
+      type: string
+      format: uuid
+      pattern: '{p}'
+      default: \"550e8400-e29b-41d4-a716-446655440000\"
+    GoodUppercase:
+      type: string
+      pattern: '{p}'
+      default: 550E8400-E29B-41D4-A716-44665544000B
+    BadVersion3:
+      type: string
+      pattern: '{p}'
+      default: 550e8400-e29b-31d4-a716-446655440000
+    PatternBelow:
+      type: string
+      default: 550e8400-e29b-41d4-c716-446655440000
+      pattern: '{p}'
+    NoPattern:
+      type: string
+      default: 550e8400-e29b-31d4-a716-446655440000
+    OtherPattern:
+      type: string
+      pattern: '{pv15}'
+      default: 550e8400-e29b-31d4-a716-446655440000
+    BlockDefault:
+      type: string
+      pattern: '{p}'
+      default: |
+        not-a-uuid
+    InExample:
+      type: object
+      example:
+        pattern: '{p}'
+        default: 550e8400-e29b-31d4-a716-446655440000
+    Split:
+      type: object
+      properties:
+        a:
+          default: 550e8400-e29b-31d4-a716-446655440000
+        b:
+          type: string
+          pattern: '{p}'
+    NamedDefault:
+      type: object
+      properties:
+        default:
+          type: string
+          pattern: '{p}'
+",
+            p = UUID_V4_PATTERN,
+            pv15 = UUID_PATTERN
+        );
+        // Flagged, in document order: BadVersion3.default (a version-3 UUID beside a same-indent
+        // version-4 `pattern`) and PatternBelow.default (a wrong-variant value, the `pattern` a line
+        // below — down-scan pairs it). Not flagged: GoodQuoted / GoodUppercase (both valid version-4,
+        // the uppercase one proving mixed-case hex is admitted); NoPattern (no `pattern` sibling);
+        // OtherPattern (sibling is the strict-lowercase v1–5 pattern, not the version-4 string — its
+        // version-3 value is legal for v1–5 and out of scope here, proving the two UUID patterns
+        // never cross-pair); BlockDefault (block-scalar opener `|`, no inline value); InExample's
+        // inner `default` (inside the outer `example:` payload); Split.a.default, whose only
+        // version-4 `pattern` is in the following property Split.b past a dedent; and NamedDefault's
+        // `default:` property opening a block (no inline value).
+        let flagged = uuid_v4_pattern_defaults_malformed(&body);
+        let flagged_props: Vec<&str> = flagged
+            .iter()
+            .map(|&n| {
+                let lines: Vec<&str> = body.lines().collect();
+                let mut k = n - 1;
+                loop {
+                    let l = lines[k];
+                    let ind = l.len() - l.trim_start().len();
+                    if ind == 4 && l.trim_end().ends_with(':') {
+                        break l.trim().trim_end_matches(':');
+                    }
+                    if k == 0 {
+                        break "";
+                    }
+                    k -= 1;
+                }
+            })
+            .collect();
+        assert_eq!(flagged_props, vec!["BadVersion3", "PatternBelow"]);
+
+        // Non-vacuous floor (future-drift posture, mirroring the twenty-two prior `pattern`-default
+        // twins): across every registered spec every `default` beside a same-indent version-4 UUID
+        // `pattern` matches it (the invariant the contract test asserts). The corpus declares the
+        // version-4 UUID `pattern` on the Sponsored Data `callbackToken` field but pairs it with an
+        // `example`, **not** a `default`, in the *same* Schema Object today — so this asserts a clean
+        // `== 0` genuine-pair count and guards future drift; the synthetic body above keeps the
+        // detection path live. The pair count reuses the extractor's own **dedent-bounded**
+        // same-indent sibling scan — the genuine-Schema-Object pairing — rather than a crude window,
+        // and stays independent of the extractor's *validity* (`matches_uuid_v4_pattern`) comparison.
+        let mut uuid_v4_defaults = 0usize;
+        for api in APIS {
+            assert!(
+                uuid_v4_pattern_defaults_malformed(api.body).is_empty(),
+                "{}: every default beside a same-indent version-4 UUID `pattern` must match it",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            let raw_inline = |l: &str, name: &str| -> Option<String> {
+                let (k, v) = l.trim_start().split_once(':')?;
+                if k.trim() != name {
+                    return None;
+                }
+                let v = v.split('#').next().unwrap_or(v).trim();
+                if v.is_empty() { None } else { Some(v.to_string()) }
+            };
+            // A genuine same-Schema-Object version-4 UUID `pattern` sibling of the `default` on line
+            // `i` (indent `c`): scan down through the object's block then up, dedent-bounded exactly
+            // like the extractor's `sibling_is_uuid_v4_pattern`, so a *following* property's pattern
+            // past a dedent never counts.
+            let sibling_is_uuid_v4 = |i: usize, c: usize| -> bool {
+                let is_uuid_v4 = |l: &str| -> bool {
+                    raw_inline(l, "pattern")
+                        .map(|v| v.trim_matches('"').trim_matches('\'') == UUID_V4_PATTERN)
+                        .unwrap_or(false)
+                };
+                let mut j = i + 1;
+                while j < lines.len() {
+                    let l = lines[j];
+                    if l.trim().is_empty() {
+                        j += 1;
+                        continue;
+                    }
+                    if indent(l) < c {
+                        break;
+                    }
+                    if indent(l) == c && is_uuid_v4(l) {
+                        return true;
+                    }
+                    j += 1;
+                }
+                let mut k = i;
+                while k > 0 {
+                    k -= 1;
+                    let l = lines[k];
+                    if l.trim().is_empty() {
+                        continue;
+                    }
+                    if indent(l) < c {
+                        break;
+                    }
+                    if indent(l) == c && is_uuid_v4(l) {
+                        return true;
+                    }
+                }
+                false
+            };
+            for (i, l) in lines.iter().enumerate() {
+                let Some(v) = raw_inline(l, "default") else {
+                    continue;
+                };
+                if v.starts_with('>') || v.starts_with('|') {
+                    continue;
+                }
+                let c = indent(l);
+                if sibling_is_uuid_v4(i, c) {
+                    uuid_v4_defaults += 1;
+                }
+            }
+        }
+        assert_eq!(
+            uuid_v4_defaults, 0,
+            "expected no genuine default + same-Schema-Object version-4 UUID `pattern` pairs across \
+             specs (the future-drift posture; a new pair means switch this guard to a `>= 1` floor \
+             like the example side), got {uuid_v4_defaults}"
+        );
+    }
+
     const BOUNDED_HTTP_URL_PATTERN: &str =
         r"^https?://[a-zA-Z0-9\\-._~:/?#\\[\\]@!$&'()*+,;=]{1,256}$";
 
