@@ -6625,6 +6625,36 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-24 — Contract-test harness: guard that every **TAC `pattern` `default` matches the
+  pattern** (`src/registry.rs` `every_tac_pattern_default_conforms_to_the_tac_pattern`). The
+  **sixteenth member of the `pattern`-default family** after E.164, IMEI, ICCID, name, token,
+  32-hex, MAC, result-code, UUID, email, full-date, semver, geohash, app-name, and DNS-label, the
+  `default`-side twin of `every_tac_pattern_example_conforms_to_the_tac_pattern` (TAC pattern
+  `^[0-9]{8}$` — the `tac` field of Device Identifier's device schemas, "the first 8 digits of the
+  IMEI"). Though a bare digit run like the IMEI (`^[0-9]{15}$`) and ICCID (`^[0-9]{19,20}$`) default
+  twins, it is a genuinely new *length* class those two can't express: each family member is keyed
+  on the exact pattern string, so the IMEI matcher rejects an eight-digit value on length and the
+  ICCID matcher rejects it likewise — neither catches a seven- or nine-digit TAC default. It also
+  reaches past the generic length-bounds family: the `tac` field carries `maxLength: 8` but no
+  `minLength`, so a length-bounds default check never floors a seven-digit default and checks char
+  count rather than digit-ness — both of which this pattern pins. Like the IMEI/ICCID patterns the
+  TAC pattern carries **no** `format` sibling, so this default is beyond the `format`-default
+  family's reach. In OpenAPI 3.0.x a `default` is the schema's fall-back *instance*, so a field
+  constrained by this `pattern` MUST carry a default the pattern accepts; a TAC default the pattern
+  rejects advertises a fall-back the schema's own validator rejects. New pure
+  `tac_pattern_defaults_malformed` (the `dns_label_pattern_defaults_malformed` shape keyed on
+  `TAC_PATTERN` equality + judged by `matches_tac_pattern`, both already present from the example
+  side; trigger key `default:`, block-scalar opener skipped, dedent-bounded same-indent sibling
+  scan, in-`example:` payload excluded). Surveyed the corpus first — the two TAC `pattern` fields
+  (Device Identifier `tac` schemas) both pair with an `example`, **not** a `default` → asserts a
+  clean `== 0` genuine-pair count (future-drift posture, mirroring the fifteen prior default twins) +
+  guards future drift; floor reuses the dedent-bounded sibling scan. Unit-covered
+  (`tac_pattern_default_extraction_rules`: valid quoted (`00010203`) / unquoted (`35847104`) cleared;
+  too-few / too-many / non-digit / pattern-below flagged as `[TooFew, TooMany, NonDigit,
+  PatternBelow]`; no-pattern / different-pattern (IMEI `^[0-9]{15}$`) / block-scalar / in-`example:` /
+  following-property-across-dedent / property-named-`default` skipped). Test-only, no spec change.
+  `cargo test` 2998 pass (+2); `cargo build --release` clean, no new dep. — binary (release):
+  5,323,160 bytes (~5.08 MiB; unchanged by a test-only change).
 - 2026-08-24 — Contract-test harness: guard that every **DNS-label `pattern` `default` matches the
   pattern** (`src/registry.rs` `every_dns_label_pattern_default_conforms_to_the_dns_label_pattern`).
   The **fifteenth member of the `pattern`-default family** after E.164, IMEI, ICCID, name, token,

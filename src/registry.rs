@@ -46174,6 +46174,388 @@ components:
         );
     }
 
+    /// The 1-based line numbers, in document order, of every `default:` keyword whose inline scalar
+    /// value sits in a Schema Object declaring a *same-indent* TAC `pattern` `^[0-9]{8}$` sibling
+    /// yet does not match that pattern, without a YAML dep. The `default`-side twin of
+    /// `tac_pattern_examples_malformed`: same scoping, keyed on `TAC_PATTERN`, judged by
+    /// `matches_tac_pattern`, but triggered by `default:` and skipping a block-scalar opener.
+    ///
+    /// In OpenAPI 3.0.x (JSON Schema) a `default` is the schema's fall-back *instance*, so a field
+    /// constrained by `pattern` MUST carry a default the pattern accepts. A TAC default with too
+    /// few digits, too many digits, a non-digit character, or a placeholder pasted beside the
+    /// pattern advertises a fall-back the schema's own validator rejects, so a Redoc/Swagger form
+    /// pre-fills a `tac` control with an unusable value and a codegen client's generated instance
+    /// carries a value the field can never legally hold. Like the IMEI/ICCID patterns the TAC
+    /// pattern carries no `format` sibling, so these defaults are beyond the `format`-default
+    /// family's reach.
+    ///
+    /// Scoping mirrors `dns_label_pattern_defaults_malformed` exactly: only a `default` carrying an
+    /// inline scalar (a block/object default opens no inline value and is skipped) with a
+    /// same-indent `pattern` sibling *equal to* `TAC_PATTERN` in the same Schema Object is
+    /// inspected — the sibling is scanned at the default's own indent, down through the object's
+    /// block then up, dedent-bounded, so a nested or *following* property's `pattern` never pairs. A
+    /// `default:` nested inside an outer `example:`/`examples:` payload (sample data, not a schema
+    /// keyword) is skipped. Only the TAC pattern is matched; other digit-run patterns (IMEI
+    /// `^[0-9]{15}$`, ICCID `^[0-9]{19,20}$`) are a *different* string and never pair.
+    fn tac_pattern_defaults_malformed(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let raw_inline = |l: &str, name: &str| -> Option<String> {
+            let (k, v) = l.trim_start().split_once(':')?;
+            if k.trim() != name {
+                return None;
+            }
+            let v = v.split('#').next().unwrap_or(v).trim();
+            if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            }
+        };
+        // Whether a same-indent `pattern:` sibling of line `i` (indent `c`) in the same Schema
+        // Object equals the TAC pattern: scan down through the object's block then up,
+        // dedent-bounded so a nested or following object's `pattern` never pairs.
+        let sibling_is_tac_pattern = |i: usize, c: usize| -> bool {
+            let is_tac_pattern = |l: &str| -> bool {
+                raw_inline(l, "pattern")
+                    .map(|v| v.trim_matches('"').trim_matches('\'') == TAC_PATTERN)
+                    .unwrap_or(false)
+            };
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_tac_pattern(l) {
+                    return true;
+                }
+                j += 1;
+            }
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_tac_pattern(l) {
+                    return true;
+                }
+            }
+            false
+        };
+        // True when line `i` (indent `c`) sits inside an outer `example:`/`examples:` payload —
+        // some enclosing container key up the indent ladder is `example`/`examples`, so an inner
+        // `default` key there is sample data, not a schema keyword.
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some(raw) = raw_inline(line, "default") else {
+                continue;
+            };
+            // A block-scalar opener (`>`/`|`, optionally with a chomping indicator) carries its
+            // value on the following lines, not inline — skip it.
+            if raw.starts_with('>') || raw.starts_with('|') {
+                continue;
+            }
+            let c = indent(line);
+            if inside_example(i, c) {
+                continue;
+            }
+            if !sibling_is_tac_pattern(i, c) {
+                continue;
+            }
+            let value = raw.trim_matches('"').trim_matches('\'');
+            if !matches_tac_pattern(value) {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_tac_pattern_default_conforms_to_the_tac_pattern() {
+        // Contract-harness invariant (OpenAPI 3.0.x / JSON-Schema structural rule): where a Schema
+        // Object declares an inline `default` beside a same-indent Type Allocation Code `pattern`
+        // (`^[0-9]{8}$`, the `tac` field of Device Identifier's device schemas — "the first 8
+        // digits of the IMEI"), the default MUST match that pattern. A `default` is the schema's
+        // fall-back *instance*, so a value with too few digits, too many digits, a non-digit
+        // character, or a placeholder pasted beside the pattern is a self-contradictory schema
+        // whose own validator rejects the fall-back it pre-supplies, so a Redoc/Swagger form
+        // pre-fills a `tac` control with an unusable value and a codegen client's generated instance
+        // carries a value no field constrained by this pattern can hold.
+        //
+        // The **`default` twin** of `every_tac_pattern_example_conforms_to_the_tac_pattern` and the
+        // sixteenth member of the `pattern`-*default* family after the E.164 / IMEI / ICCID / name /
+        // token / 32-hex / MAC / result-code / UUID / email / full-date / semver / geohash /
+        // app-name / DNS-label default twins. Though a bare digit run like the IMEI (`^[0-9]{15}$`)
+        // and ICCID (`^[0-9]{19,20}$`) default twins, it is a genuinely new *length* class those two
+        // cannot express: each family member is keyed on the exact pattern string, so the IMEI
+        // matcher rejects an eight-digit value on length and the ICCID matcher rejects it likewise —
+        // neither is scoped to catch a seven- or nine-digit TAC default. It also reaches past the
+        // generic length-bounds family: the `tac` field carries a `maxLength: 8` but no `minLength`,
+        // so a length-bounds default check never floors a seven-digit default and checks character
+        // count rather than digit-ness — both of which this pattern pins. Like the IMEI/ICCID
+        // patterns the TAC pattern carries no `format` sibling, so these defaults are beyond the
+        // `format`-default family's reach. Future-drift posture (like the fifteen prior default
+        // twins): the corpus declares the TAC `pattern` (Device Identifier, on two `tac` schemas)
+        // but pairs it with an `example`, **not** a `default`, so the guard asserts clean across all
+        // specs today and holds the line against a future TAC default drifting to a wrong-length or
+        // non-digit value; the synthetic unit body in `tac_pattern_default_extraction_rules` keeps
+        // the detection path live. Verified true across all mounted specs before asserting.
+        for api in APIS {
+            let offenders = tac_pattern_defaults_malformed(api.body);
+            assert!(
+                offenders.is_empty(),
+                "{} spec declares a `default` beside a same-indent Type Allocation Code \
+                 `pattern: '^[0-9]{{8}}$'` that does not match that pattern (a fall-back the \
+                 pattern's own validator would reject) at `default:` line(s): {:?}",
+                api.name,
+                offenders
+            );
+        }
+    }
+
+    #[test]
+    fn tac_pattern_default_extraction_rules() {
+        // Unit-cover `tac_pattern_defaults_malformed` so the contract test above can't pass
+        // vacuously and its detection is pinned (`matches_tac_pattern` itself is already covered by
+        // `tac_pattern_example_extraction_rules`).
+        //
+        // Extractor: a valid quoted (`00010203`) and a valid unquoted (`35847104`) TAC default
+        // beside a same-indent TAC `pattern` pass; a too-few-digits, a too-many-digits, and a
+        // non-digit-tail value are flagged; a bad value with the pattern *below* it (down-scan) is
+        // flagged; a value with no `pattern` sibling and one whose sibling is a *different* digit-run
+        // pattern (the IMEI `^[0-9]{15}$`, a 15-digit value the TAC matcher would reject on length)
+        // are skipped; a block-scalar default is skipped; a default in one property never pairs with
+        // a *following* property's TAC `pattern` across the dedent; an inner `default` inside an
+        // outer `example:` payload is skipped; and a property literally named `default` (opening a
+        // block) is skipped.
+        let body = "\
+openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    GoodQuoted:
+      type: string
+      pattern: '^[0-9]{8}$'
+      default: '00010203'
+    GoodUnquoted:
+      type: string
+      pattern: '^[0-9]{8}$'
+      default: 35847104
+    TooFew:
+      type: string
+      pattern: '^[0-9]{8}$'
+      default: '1234567'
+    TooMany:
+      type: string
+      pattern: '^[0-9]{8}$'
+      default: '123456789'
+    NonDigit:
+      type: string
+      pattern: '^[0-9]{8}$'
+      default: '3584710X'
+    PatternBelow:
+      type: string
+      default: '1234567'
+      pattern: '^[0-9]{8}$'
+    NoPattern:
+      type: string
+      default: '35847104-but-no-pattern'
+    OtherPattern:
+      type: string
+      pattern: '^[0-9]{15}$'
+      default: '353490069873319'
+    BlockDefault:
+      type: string
+      pattern: '^[0-9]{8}$'
+      default: |
+        1234567
+    InExample:
+      type: object
+      example:
+        pattern: '^[0-9]{8}$'
+        default: 'bad'
+    Split:
+      type: object
+      properties:
+        a:
+          default: '1234567'
+        b:
+          type: string
+          pattern: '^[0-9]{8}$'
+    NamedDefault:
+      type: object
+      properties:
+        default:
+          type: string
+          pattern: '^[0-9]{8}$'
+";
+        // Flagged, in document order: TooFew.default (`1234567`, seven digits); TooMany.default
+        // (`123456789`, nine digits); NonDigit.default (`3584710X`, non-digit tail);
+        // PatternBelow.default (`1234567` with the TAC `pattern` a line below — down-scan pairs it).
+        // Not flagged: GoodQuoted / GoodUnquoted (both valid); NoPattern (no `pattern` sibling);
+        // OtherPattern (sibling is the IMEI pattern, not TAC — a 15-digit value the TAC matcher
+        // rejects on length, proving exact-pattern keying); BlockDefault (block-scalar opener `|`,
+        // no inline value); InExample's inner `default: 'bad'` (sits inside the outer `example:`
+        // payload); Split.a.default, whose only TAC `pattern` is in the following property Split.b
+        // past a dedent; and NamedDefault's `default:` property opening a block (no inline value).
+        let flagged = tac_pattern_defaults_malformed(body);
+        let flagged_props: Vec<&str> = flagged
+            .iter()
+            .map(|&n| {
+                let lines: Vec<&str> = body.lines().collect();
+                let mut k = n - 1;
+                loop {
+                    let l = lines[k];
+                    let ind = l.len() - l.trim_start().len();
+                    if ind == 4 && l.trim_end().ends_with(':') {
+                        break l.trim().trim_end_matches(':');
+                    }
+                    if k == 0 {
+                        break "";
+                    }
+                    k -= 1;
+                }
+            })
+            .collect();
+        assert_eq!(
+            flagged_props,
+            vec!["TooFew", "TooMany", "NonDigit", "PatternBelow"]
+        );
+
+        // Non-vacuous floor (future-drift posture, mirroring the fifteen prior `pattern`-default
+        // twins): across every registered spec every `default` beside a same-indent TAC `pattern`
+        // matches it (the invariant the contract test asserts). The corpus declares the TAC
+        // `pattern` on two `tac` schemas (Device Identifier) but pairs it with an `example`,
+        // **not** a `default`, in the *same* Schema Object today — so this asserts a clean `== 0`
+        // genuine-pair count and guards future drift; the synthetic body above keeps the detection
+        // path live. The pair count reuses the extractor's own **dedent-bounded** same-indent
+        // sibling scan — the genuine-Schema-Object pairing — rather than a crude window, and stays
+        // independent of the extractor's *validity* (`matches_tac_pattern`) comparison.
+        let mut tac_defaults = 0usize;
+        for api in APIS {
+            assert!(
+                tac_pattern_defaults_malformed(api.body).is_empty(),
+                "{}: every default beside a same-indent TAC `pattern` must match it",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            let raw_inline = |l: &str, name: &str| -> Option<String> {
+                let (k, v) = l.trim_start().split_once(':')?;
+                if k.trim() != name {
+                    return None;
+                }
+                let v = v.split('#').next().unwrap_or(v).trim();
+                if v.is_empty() { None } else { Some(v.to_string()) }
+            };
+            // A genuine same-Schema-Object TAC `pattern` sibling of the `default` on line `i`
+            // (indent `c`): scan down through the object's block then up, dedent-bounded exactly
+            // like the extractor's `sibling_is_tac_pattern`, so a *following* property's TAC
+            // `pattern` past a dedent never counts.
+            let sibling_is_tac = |i: usize, c: usize| -> bool {
+                let is_tac = |l: &str| -> bool {
+                    raw_inline(l, "pattern")
+                        .map(|v| v.trim_matches('"').trim_matches('\'') == TAC_PATTERN)
+                        .unwrap_or(false)
+                };
+                let mut j = i + 1;
+                while j < lines.len() {
+                    let l = lines[j];
+                    if l.trim().is_empty() {
+                        j += 1;
+                        continue;
+                    }
+                    if indent(l) < c {
+                        break;
+                    }
+                    if indent(l) == c && is_tac(l) {
+                        return true;
+                    }
+                    j += 1;
+                }
+                let mut k = i;
+                while k > 0 {
+                    k -= 1;
+                    let l = lines[k];
+                    if l.trim().is_empty() {
+                        continue;
+                    }
+                    if indent(l) < c {
+                        break;
+                    }
+                    if indent(l) == c && is_tac(l) {
+                        return true;
+                    }
+                }
+                false
+            };
+            for (i, l) in lines.iter().enumerate() {
+                let Some(v) = raw_inline(l, "default") else {
+                    continue;
+                };
+                // Inline scalar only (skip block-scalar openers), mirroring the extractor so the
+                // floor counts exactly the pairs it inspects.
+                if v.starts_with('>') || v.starts_with('|') {
+                    continue;
+                }
+                let c = indent(l);
+                if sibling_is_tac(i, c) {
+                    tac_defaults += 1;
+                }
+            }
+        }
+        assert_eq!(
+            tac_defaults, 0,
+            "expected no genuine default + same-Schema-Object TAC `pattern` pairs across specs \
+             (the future-drift posture; a new pair means switch this guard to a `>= 1` floor like \
+             the example side), got {tac_defaults}"
+        );
+    }
+
     const REGION_PATTERN: &str = r"^[A-Za-z0-9-]+$";
 
     /// True when `s` matches the region-name `pattern` `^[A-Za-z0-9-]+$` exactly: one or more
