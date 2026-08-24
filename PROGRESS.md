@@ -3335,6 +3335,24 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - a **campaign-id `pattern`-`default` conformance** contract test (`src/registry.rs`
+    `every_campaign_id_pattern_default_conforms_to_the_campaign_id_pattern`) — the `default`-side twin
+    of `every_campaign_id_pattern_example_conforms_to_the_campaign_id_pattern` and the **thirtieth
+    member of the `pattern`-default family**, over the Sponsored Data `CampaignId` pattern
+    `^[0-9a-fA-F]{8}-…-[0-9a-fA-F]{12}@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$` (the `UUID@domain.tld` onboarding
+    identifier). The **UUID-local sibling of the email default member**: email is keyed on
+    `EMAIL_PATTERN` (`^[a-zA-Z0-9._%+-]+@…`, whose local class admits `acme`), so an `acme@…` default
+    is legal there but rejected here — the local part must be a hyphen-grouped hex UUID; the two share
+    the `@domain.tld` leg but differ in the whole `pattern` string, so members key on the exact string
+    and never cross-pair; no `format` sibling, so beyond the `format`-default family. New pure
+    `campaign_id_pattern_defaults_malformed` (the `uuid_v4_pattern_defaults_malformed` shape keyed on
+    `CAMPAIGN_ID_PATTERN` + judged by `matches_campaign_id_pattern`, both already present from the
+    example side; `default:` trigger, block-scalar opener skipped, dedent-bounded same-indent sibling
+    scan, in-`example:` payload excluded). Corpus declares the campaign-id `pattern` (the one
+    `CampaignId` field) but pairs it with an `example`, **not** a `default` → asserts a clean `== 0`
+    genuine-pair count (future-drift posture, mirroring the twenty-nine prior default twins) + guards
+    future drift. Unit-covered (`campaign_id_pattern_default_extraction_rules`). Test-only, no spec
+    change.
   - a **no-CR/LF `pattern`-`default` conformance** contract test (`src/registry.rs`
     `every_no_crlf_pattern_default_conforms_to_the_no_crlf_pattern`) — the `default`-side twin of
     `every_no_crlf_pattern_example_conforms_to_the_no_crlf_pattern` and the **twenty-ninth member of
@@ -6874,6 +6892,29 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-24 — Contract-test harness: guard that every **campaign-id `pattern` `default` matches the
+  pattern** (`src/registry.rs` `every_campaign_id_pattern_default_conforms_to_the_campaign_id_pattern`).
+  The **thirtieth member of the `pattern`-default family** — the `default`-side twin of
+  `every_campaign_id_pattern_example_conforms_to_the_campaign_id_pattern`, over the Sponsored Data
+  `CampaignId` pattern `^[0-9a-fA-F]{8}-…-[0-9a-fA-F]{12}@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$` (the
+  `UUID@domain.tld` onboarding identifier). The **UUID-local sibling of the email default member**:
+  the email default member is keyed on `EMAIL_PATTERN` (`^[a-zA-Z0-9._%+-]+@…`), whose local-part
+  class admits `acme`, so an `acme@…`-shaped default is legal there but rejected here (the local part
+  must be a hyphen-grouped hex UUID); the two share the `@domain.tld` domain leg but differ in the
+  whole `pattern` string, so members key on the exact pattern string and never cross-pair, and the
+  field carries no `format` sibling (beyond the `format`-default family). New pure
+  `campaign_id_pattern_defaults_malformed` (the `uuid_v4_pattern_defaults_malformed` shape keyed on
+  `CAMPAIGN_ID_PATTERN` + judged by `matches_campaign_id_pattern`, both already present from the
+  example side; `default:` trigger, block-scalar opener skipped, dedent-bounded same-indent sibling
+  scan, in-`example:` payload excluded). Surveyed the corpus — the campaign-id `pattern` (the one
+  `CampaignId` field) pairs with an `example`, **not** a `default` → asserts a clean `== 0`
+  genuine-pair count (future-drift posture, mirroring the twenty-nine prior default twins) + guards
+  future drift. Unit-covered (`campaign_id_pattern_default_extraction_rules`: valid quoted /
+  unquoted-upper-case-hex cleared; valid-email-but-non-UUID-local (`acme@…`) / no-dotted-TLD-pattern-
+  below flagged; no-pattern / email-pattern-sibling (`EMAIL_PATTERN`, admits `acme@…`) / block-scalar
+  / in-`example:` / following-property-across-dedent / property-named-`default` skipped). Test-only,
+  no spec change. `cargo test` 3026 pass (+2); `cargo build --release` clean, no new dep. — binary
+  (release): 5,323,160 bytes (~5.08 MiB; unchanged by a test-only change).
 - 2026-08-24 — Contract-test harness: guard that every **no-CR/LF `pattern` `default` matches the
   pattern** (`src/registry.rs` `every_no_crlf_pattern_default_conforms_to_the_no_crlf_pattern`).
   The **twenty-ninth member of the `pattern`-default family** — the `default`-side twin of

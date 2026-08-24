@@ -59750,6 +59750,367 @@ components:
         );
     }
 
+    /// The 1-based line numbers, in document order, of every `default:` keyword whose inline scalar
+    /// value sits in a Schema Object declaring a *same-indent* campaign-id `pattern` sibling
+    /// (`^[0-9a-fA-F]{8}-…-[0-9a-fA-F]{12}@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$`) yet is not a well-formed
+    /// `UUID@domain.tld` value, without a YAML dep. The `default`-side twin of
+    /// `campaign_id_pattern_examples_malformed`: same scoping, keyed on `CAMPAIGN_ID_PATTERN` and
+    /// judged by `matches_campaign_id_pattern`, but triggered by `default:` (the schema's fall-back
+    /// *instance*) instead of `example:`.
+    fn campaign_id_pattern_defaults_malformed(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let raw_inline = |l: &str, name: &str| -> Option<String> {
+            let (k, v) = l.trim_start().split_once(':')?;
+            if k.trim() != name {
+                return None;
+            }
+            let v = v.split('#').next().unwrap_or(v).trim();
+            if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            }
+        };
+        // Whether a same-indent `pattern:` sibling of line `i` (indent `c`) in the same Schema
+        // Object equals the campaign-id pattern: scan down through the object's block then up,
+        // dedent-bounded so a nested or following object's `pattern` never pairs.
+        let sibling_is_campaign_id_pattern = |i: usize, c: usize| -> bool {
+            let is_campaign_id_pattern = |l: &str| -> bool {
+                raw_inline(l, "pattern")
+                    .map(|v| v.trim_matches('"').trim_matches('\'') == CAMPAIGN_ID_PATTERN)
+                    .unwrap_or(false)
+            };
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_campaign_id_pattern(l) {
+                    return true;
+                }
+                j += 1;
+            }
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_campaign_id_pattern(l) {
+                    return true;
+                }
+            }
+            false
+        };
+        // True when line `i` (indent `c`) sits inside an outer `example:`/`examples:` payload —
+        // some enclosing container key up the indent ladder is `example`/`examples`, so an inner
+        // `default` key there is sample data, not a schema keyword.
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some(raw) = raw_inline(line, "default") else {
+                continue;
+            };
+            // A block-scalar opener (`>`/`|`, optionally with a chomping indicator) carries its
+            // value on the following lines, not inline — skip it.
+            if raw.starts_with('>') || raw.starts_with('|') {
+                continue;
+            }
+            let c = indent(line);
+            if inside_example(i, c) {
+                continue;
+            }
+            if !sibling_is_campaign_id_pattern(i, c) {
+                continue;
+            }
+            let value = raw.trim_matches('"').trim_matches('\'');
+            if !matches_campaign_id_pattern(value) {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_campaign_id_pattern_default_conforms_to_the_campaign_id_pattern() {
+        // Contract-harness invariant (OpenAPI 3.0.x / JSON-Schema structural rule): where a Schema
+        // Object declares an inline `default` beside a same-indent campaign-id `pattern`
+        // (`^[0-9a-fA-F]{8}-…-[0-9a-fA-F]{12}@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$`, the `UUID@domain.tld`
+        // shape the Sponsored Data `CampaignId` field — a campaign's onboarding identifier — uses
+        // verbatim), the default MUST match that pattern. A `default` is the schema's fall-back
+        // *instance*, so a value the `pattern` rejects — a non-UUID local part, no `@`, a second
+        // `@`, a domain with no dotted TLD, a one-character TLD — is a self-contradictory schema
+        // whose own validator rejects the fall-back it pre-supplies, so a Redoc/Swagger prefill and
+        // a codegen client's generated default carry a value no field constrained by this pattern
+        // can hold.
+        //
+        // The **`default` twin** of `every_campaign_id_pattern_example_conforms_to_the_campaign_id_pattern`
+        // and the **thirtieth member of the `pattern`-*default* family** after E.164 / IMEI / ICCID /
+        // name / token / 32-hex / MAC / result-code / UUID / email / full-date / semver / geohash /
+        // app-name / DNS-label / TAC / IMEISV / DPV-purpose / 16-hex / text256 / 4-hex / text512 /
+        // version-4-UUID / OTP-template / region / client-id / correlator / no-semicolon / no-CR/LF.
+        // The **UUID-local sibling of the email default member**: the email default member is keyed
+        // on `EMAIL_PATTERN` (`^[a-zA-Z0-9._%+-]+@…`), whose local-part class admits `acme`, so an
+        // `acme@…`-shaped default is legal there but rejected here (the local part must be a
+        // hyphen-grouped hex UUID); the two share the `@domain.tld` domain leg but differ in the
+        // whole `pattern` string, so a member keys on its own exact pattern and the two never
+        // cross-pair. Like the email / SSID / WPA-password / hex / token patterns the `CampaignId`
+        // pattern carries **no** `format` sibling (the field is `type: string` with only
+        // `pattern` + `example`), so this default is beyond the `format`-default family's reach.
+        // Future-drift posture (like the twenty-nine prior default twins): the corpus declares this
+        // `pattern` (Sponsored Data `CampaignId`) but pairs it with an `example`, **not** a
+        // `default`, in the same Schema Object today, so the guard asserts clean across all specs
+        // and holds the line against a future off-shape default drift; the synthetic body in
+        // `campaign_id_pattern_default_extraction_rules` keeps the detection path live. Verified
+        // true across all mounted specs before asserting.
+        for api in APIS {
+            let offenders = campaign_id_pattern_defaults_malformed(api.body);
+            assert!(
+                offenders.is_empty(),
+                "{} spec declares a `default` beside a same-indent campaign-id `pattern` \
+                 that does not match that pattern (a fall-back the pattern's own validator \
+                 would reject) at `default:` line(s): {:?}",
+                api.name,
+                offenders
+            );
+        }
+    }
+
+    #[test]
+    fn campaign_id_pattern_default_extraction_rules() {
+        // Unit-cover `campaign_id_pattern_defaults_malformed` so the contract test above can't pass
+        // vacuously and its detection is pinned (`matches_campaign_id_pattern` itself is already
+        // covered by `campaign_id_pattern_example_extraction_rules`).
+        //
+        // Extractor: a valid quoted `UUID@domain.tld` default and a valid unquoted upper-case-hex
+        // default beside a same-indent campaign-id `pattern` both pass (the second proving the hex
+        // class is case-insensitive); a valid-email-but-non-UUID-local default (`acme@…`, legal
+        // under the email pattern) is flagged; a no-dotted-TLD value with the `pattern` a line
+        // *below* it (down-scan) is flagged; a value with no `pattern` sibling and one whose sibling
+        // is the plain email pattern (`EMAIL_PATTERN`, a different string — out of scope here, its
+        // `acme@…` value never inspected) are skipped; a block-scalar default is skipped; a default
+        // in one property never pairs with a *following* property's campaign-id `pattern` across the
+        // dedent; an inner `default` inside an outer `example:` payload is skipped; and a property
+        // literally named `default` (opening a block) is skipped.
+        let body = format!(
+            "openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    GoodQuoted:
+      type: string
+      pattern: '{p}'
+      default: \"123e4567-e89b-12d3-a456-426614174000@sponsor.example.com\"
+    GoodUppercase:
+      type: string
+      pattern: '{p}'
+      default: 123E4567-E89B-12D3-A456-426614174000@mail.co
+    BadLocal:
+      type: string
+      pattern: '{p}'
+      default: acme@sponsor.example.com
+    PatternBelow:
+      type: string
+      default: 123e4567-e89b-12d3-a456-426614174000@nodot
+      pattern: '{p}'
+    NoPattern:
+      type: string
+      default: acme@sponsor.example.com
+    OtherPattern:
+      type: string
+      pattern: '{pemail}'
+      default: acme@sponsor.example.com
+    BlockDefault:
+      type: string
+      pattern: '{p}'
+      default: |
+        123e4567-e89b-12d3-a456-426614174000@nodot
+    InExample:
+      type: object
+      example:
+        pattern: '{p}'
+        default: acme@sponsor.example.com
+    Split:
+      type: object
+      properties:
+        a:
+          default: 123e4567-e89b-12d3-a456-426614174000@nodot
+        b:
+          type: string
+          pattern: '{p}'
+    NamedDefault:
+      type: object
+      properties:
+        default:
+          type: string
+          pattern: '{p}'
+",
+            p = CAMPAIGN_ID_PATTERN,
+            pemail = EMAIL_PATTERN
+        );
+        // Flagged, in document order: BadLocal.default (a valid email whose local part is not a hex
+        // UUID, beside a same-indent campaign-id `pattern`) and PatternBelow.default (a no-dotted-TLD
+        // value, the `pattern` a line below — down-scan pairs it). Not flagged: GoodQuoted /
+        // GoodUppercase (both valid `UUID@domain.tld`, the upper-case one proving mixed-case hex is
+        // admitted); NoPattern (no `pattern` sibling); OtherPattern (sibling is the plain email
+        // pattern, a different string — its `acme@…` value is legal for email and out of scope here,
+        // proving the two `@`-bearing patterns never cross-pair); BlockDefault (block-scalar opener
+        // `|`, no inline value); InExample's inner `default` (inside the outer `example:` payload);
+        // Split.a.default, whose only campaign-id `pattern` is in the following property Split.b past
+        // a dedent; and NamedDefault's `default:` property opening a block (no inline value).
+        let flagged = campaign_id_pattern_defaults_malformed(&body);
+        let flagged_props: Vec<&str> = flagged
+            .iter()
+            .map(|&n| {
+                let lines: Vec<&str> = body.lines().collect();
+                let mut k = n - 1;
+                loop {
+                    let l = lines[k];
+                    let ind = l.len() - l.trim_start().len();
+                    if ind == 4 && l.trim_end().ends_with(':') {
+                        break l.trim().trim_end_matches(':');
+                    }
+                    if k == 0 {
+                        break "";
+                    }
+                    k -= 1;
+                }
+            })
+            .collect();
+        assert_eq!(flagged_props, vec!["BadLocal", "PatternBelow"]);
+
+        // Non-vacuous floor (future-drift posture, mirroring the twenty-nine prior `pattern`-default
+        // twins): across every registered spec every `default` beside a same-indent campaign-id
+        // `pattern` matches it (the invariant the contract test asserts). The corpus declares the
+        // campaign-id `pattern` on the Sponsored Data `CampaignId` field but pairs it with an
+        // `example`, **not** a `default`, in the *same* Schema Object today — so this asserts a clean
+        // `== 0` genuine-pair count and guards future drift; the synthetic body above keeps the
+        // detection path live. The pair count reuses the extractor's own **dedent-bounded**
+        // same-indent sibling scan — the genuine-Schema-Object pairing — rather than a crude window,
+        // and stays independent of the extractor's *validity* (`matches_campaign_id_pattern`)
+        // comparison.
+        let mut campaign_id_defaults = 0usize;
+        for api in APIS {
+            assert!(
+                campaign_id_pattern_defaults_malformed(api.body).is_empty(),
+                "{}: every default beside a same-indent campaign-id `pattern` must match it",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            let raw_inline = |l: &str, name: &str| -> Option<String> {
+                let (k, v) = l.trim_start().split_once(':')?;
+                if k.trim() != name {
+                    return None;
+                }
+                let v = v.split('#').next().unwrap_or(v).trim();
+                if v.is_empty() { None } else { Some(v.to_string()) }
+            };
+            // A genuine same-Schema-Object campaign-id `pattern` sibling of the `default` on line
+            // `i` (indent `c`): scan down through the object's block then up, dedent-bounded exactly
+            // like the extractor's `sibling_is_campaign_id_pattern`, so a *following* property's
+            // pattern past a dedent never counts.
+            let sibling_is_campaign_id = |i: usize, c: usize| -> bool {
+                let is_campaign_id = |l: &str| -> bool {
+                    raw_inline(l, "pattern")
+                        .map(|v| v.trim_matches('"').trim_matches('\'') == CAMPAIGN_ID_PATTERN)
+                        .unwrap_or(false)
+                };
+                let mut j = i + 1;
+                while j < lines.len() {
+                    let l = lines[j];
+                    if l.trim().is_empty() {
+                        j += 1;
+                        continue;
+                    }
+                    if indent(l) < c {
+                        break;
+                    }
+                    if indent(l) == c && is_campaign_id(l) {
+                        return true;
+                    }
+                    j += 1;
+                }
+                let mut k = i;
+                while k > 0 {
+                    k -= 1;
+                    let l = lines[k];
+                    if l.trim().is_empty() {
+                        continue;
+                    }
+                    if indent(l) < c {
+                        break;
+                    }
+                    if indent(l) == c && is_campaign_id(l) {
+                        return true;
+                    }
+                }
+                false
+            };
+            for (i, l) in lines.iter().enumerate() {
+                let Some(v) = raw_inline(l, "default") else {
+                    continue;
+                };
+                if v.starts_with('>') || v.starts_with('|') {
+                    continue;
+                }
+                let c = indent(l);
+                if sibling_is_campaign_id(i, c) {
+                    campaign_id_defaults += 1;
+                }
+            }
+        }
+        assert_eq!(
+            campaign_id_defaults, 0,
+            "expected no genuine default + same-Schema-Object campaign-id `pattern` pairs across \
+             specs (the future-drift posture; a new pair means switch this guard to a `>= 1` \
+             floor like the example side), got {campaign_id_defaults}"
+        );
+    }
+
     // NB: written as it appears *raw in the YAML source* (unquoted, so `\/` is authored as a
     // literal backslash-slash and every brace is a literal), because `raw_inline("pattern")`
     // returns the source substring after the colon (no YAML-escape decoding) and this constant is
