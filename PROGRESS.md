@@ -3335,6 +3335,26 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - a **WPA-password `pattern`-`default` conformance** contract test (`src/registry.rs`
+    `every_wpa_password_pattern_default_conforms_to_the_wpa_password_pattern`) — the `default`-side
+    twin of `every_wpa_password_pattern_example_conforms_to_the_wpa_password_pattern` and the
+    **thirty-second member of the `pattern`-default family**, over the network-access-domains
+    `WpaPersonalDetail.password` pattern `^[\x20-\x7E]{8,63}$` (the IEEE 802.11i WPA-Personal
+    pre-shared-key rule: 8–63 printable ASCII, no leading/trailing-space rule). The **edge-space-
+    tolerant, wider-range sibling of the SSID default member**: the SSID pattern
+    `^(?! )[\x20-\x7E]{2,32}(?<! )$` shares the printable-ASCII alphabet but narrows the length to
+    2–32 and forbids an edge space, so a 33–63-char or edge-space default — legal here — is rejected
+    there, and a 2–7-char default — legal there — is rejected here; the two differ in the whole
+    `pattern` string, so members key on the exact string and never cross-pair; no `format` sibling,
+    so beyond the `format`-default family. New pure `wpa_password_pattern_defaults_malformed` (the
+    `ssid_pattern_defaults_malformed` shape keyed on `WPA_PASSWORD_PATTERN` + judged by
+    `matches_wpa_password_pattern`, both already present from the example side; `default:` trigger,
+    block-scalar opener skipped, dedent-bounded same-indent sibling scan, in-`example:` payload
+    excluded). Corpus declares the WPA `pattern` (the one `password` field) but pairs it with an
+    `example` (`"my-password"`), **not** a `default` → asserts a clean `== 0` genuine-pair count
+    (future-drift posture, mirroring the thirty-one prior default twins) + guards future drift.
+    Unit-covered (`wpa_password_pattern_default_extraction_rules`, incl. an edge-space default that
+    is legal here but not for SSID). Test-only, no spec change.
   - an **SSID `pattern`-`default` conformance** contract test (`src/registry.rs`
     `every_ssid_pattern_default_conforms_to_the_ssid_pattern`) — the `default`-side twin of
     `every_ssid_pattern_example_conforms_to_the_ssid_pattern` and the **thirty-first member of the
@@ -6910,6 +6930,31 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-25 — Contract-test harness: guard that every **WPA-password `pattern` `default` matches the
+  pattern** (`src/registry.rs` `every_wpa_password_pattern_default_conforms_to_the_wpa_password_pattern`).
+  The **thirty-second member of the `pattern`-default family** — the `default`-side twin of
+  `every_wpa_password_pattern_example_conforms_to_the_wpa_password_pattern`, over the
+  network-access-domains `WpaPersonalDetail.password` pattern `^[\x20-\x7E]{8,63}$` (the IEEE 802.11i
+  WPA-Personal pre-shared-key rule — 8–63 printable ASCII, and, unlike SSID, **no** leading/trailing-
+  space rule). The **edge-space-tolerant, wider-range sibling of the SSID default member**: the SSID
+  pattern `^(?! )[\x20-\x7E]{2,32}(?<! )$` shares the printable-ASCII alphabet but narrows the length
+  to 2–32 and forbids an edge space, so a 33–63-char or edge-space default — legal here — is rejected
+  there, and a 2–7-char default — legal there — is rejected here; the two differ in the whole
+  `pattern` string, so members key on the exact pattern string and never cross-pair, and the field
+  carries no `format` sibling (beyond the `format`-default family). New pure
+  `wpa_password_pattern_defaults_malformed` (the `ssid_pattern_defaults_malformed` shape keyed on
+  `WPA_PASSWORD_PATTERN` + judged by `matches_wpa_password_pattern`, both already present from the
+  example side; `default:` trigger, block-scalar opener skipped, dedent-bounded same-indent sibling
+  scan, in-`example:` payload excluded). Surveyed the corpus — the WPA `pattern` (the one `password`
+  field) pairs with an `example`, **not** a `default` → asserts a clean `== 0` genuine-pair count
+  (future-drift posture, mirroring the thirty-one prior default twins) + guards future drift.
+  Unit-covered (`wpa_password_pattern_default_extraction_rules`: valid quoted `"my-password"` /
+  unquoted `hunter22` cleared; a valid edge-space default `" hunter2 "` cleared — legal here though
+  SSID would reject it; seven-char `hunter1` (below the `{8,63}` floor) / 64-char (over the ceiling,
+  pattern-below down-scan) flagged; no-pattern / SSID-pattern-sibling (admits the two-char `Wi`) /
+  block-scalar / in-`example:` / following-property-across-dedent / property-named-`default`
+  skipped). Test-only, no spec change. `cargo test` 3030 pass (+2); `cargo build --release` clean,
+  no new dep. — binary (release): 5,323,160 bytes (~5.08 MiB; unchanged by a test-only change).
 - 2026-08-25 — Contract-test harness: guard that every **SSID `pattern` `default` matches the
   pattern** (`src/registry.rs` `every_ssid_pattern_default_conforms_to_the_ssid_pattern`). The
   **thirty-first member of the `pattern`-default family** — the `default`-side twin of

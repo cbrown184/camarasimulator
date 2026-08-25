@@ -60472,6 +60472,377 @@ components:
         );
     }
 
+    /// The 1-based line numbers, in document order, of every `default:` keyword whose inline
+    /// scalar value sits in a Schema Object declaring a *same-indent* WPA-Personal password
+    /// `pattern` sibling (`^[\x20-\x7E]{8,63}$`) yet is not a well-formed WPA password (8–63
+    /// printable ASCII), without a YAML dep. The `default` twin of
+    /// `wpa_password_pattern_examples_malformed`: same scoping, keyed on `WPA_PASSWORD_PATTERN`
+    /// and judged by `matches_wpa_password_pattern`, but triggered by `default:` (the schema's
+    /// fall-back *instance*) instead of `example:`.
+    fn wpa_password_pattern_defaults_malformed(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let raw_inline = |l: &str, name: &str| -> Option<String> {
+            let (k, v) = l.trim_start().split_once(':')?;
+            if k.trim() != name {
+                return None;
+            }
+            let v = v.split('#').next().unwrap_or(v).trim();
+            if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            }
+        };
+        // Whether a same-indent `pattern:` sibling of line `i` (indent `c`) in the same Schema
+        // Object equals the WPA-password pattern: scan down through the object's block then up,
+        // dedent-bounded so a nested or following object's `pattern` never pairs. Steps over any
+        // intervening same-indent non-`pattern` siblings (`minLength`/`maxLength`/a `description:
+        // |` block scalar whose continuation lines are more deeply indented), so the corpus's
+        // `minLength`→`maxLength`→`pattern`→`description`→`default` shape would pair correctly.
+        let sibling_is_wpa_pattern = |i: usize, c: usize| -> bool {
+            let is_wpa_pattern = |l: &str| -> bool {
+                raw_inline(l, "pattern")
+                    .map(|v| v.trim_matches('"').trim_matches('\'') == WPA_PASSWORD_PATTERN)
+                    .unwrap_or(false)
+            };
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_wpa_pattern(l) {
+                    return true;
+                }
+                j += 1;
+            }
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_wpa_pattern(l) {
+                    return true;
+                }
+            }
+            false
+        };
+        // True when line `i` (indent `c`) sits inside an outer `example:`/`examples:` payload —
+        // some enclosing container key up the indent ladder is `example`/`examples`, so an inner
+        // `default` key there is sample data, not a schema keyword.
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some(raw) = raw_inline(line, "default") else {
+                continue;
+            };
+            // A block-scalar opener (`>`/`|`, optionally with a chomping indicator) carries its
+            // value on the following lines, not inline — skip it.
+            if raw.starts_with('>') || raw.starts_with('|') {
+                continue;
+            }
+            let c = indent(line);
+            if inside_example(i, c) {
+                continue;
+            }
+            if !sibling_is_wpa_pattern(i, c) {
+                continue;
+            }
+            let value = raw.trim_matches('"').trim_matches('\'');
+            if !matches_wpa_password_pattern(value) {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_wpa_password_pattern_default_conforms_to_the_wpa_password_pattern() {
+        // Contract-harness invariant (OpenAPI 3.0.x / JSON-Schema structural rule): where a Schema
+        // Object declares an inline `default` beside a same-indent WPA-Personal password `pattern`
+        // (`^[\x20-\x7E]{8,63}$`, the IEEE 802.11i pre-shared-key rule the network-access-domains
+        // `WpaPersonalDetail.password` field uses), the default MUST match that pattern. A
+        // `default` is the schema's fall-back *instance*, so a value the `pattern` rejects — under
+        // 8 characters / over 63 characters / carrying a non-printable ASCII character — is a
+        // self-contradictory schema whose own validator rejects the fall-back it pre-supplies, so a
+        // Redoc/Swagger prefill and a codegen client's generated default carry a value no field
+        // constrained by this pattern can legally hold.
+        //
+        // The **`default` twin** of `every_wpa_password_pattern_example_conforms_to_the_wpa_password_pattern`
+        // and the **thirty-second member of the `pattern`-*default* family** after E.164 / IMEI /
+        // ICCID / name / token / 32-hex / MAC / result-code / UUID / email / full-date / semver /
+        // geohash / app-name / DNS-label / TAC / IMEISV / DPV-purpose / 16-hex / text256 / 4-hex /
+        // text512 / version-4-UUID / OTP-template / region / client-id / correlator / no-semicolon /
+        // no-CR/LF / campaign-id / SSID. The **edge-space-tolerant, wider-range sibling of the SSID
+        // default member**: the SSID pattern `^(?! )[\x20-\x7E]{2,32}(?<! )$` shares the WPA
+        // password's printable-ASCII alphabet but narrows the length to 2–32 and forbids a
+        // leading/trailing space, so a 33–63-character or edge-space default — legal here — is
+        // rejected there, while a 2–7-character default — legal there — is rejected here; the two
+        // differ in the whole `pattern` string, so a member keys on its own exact pattern and the
+        // two never cross-pair. Like the SSID / email / hex / token patterns the WPA password
+        // carries **no** `format` sibling (there is no OpenAPI `wpa-password` format — the field is
+        // `type: string` with only `minLength`/`maxLength`/`pattern` + `example`), so this default
+        // is beyond the `format`-default family's reach. Future-drift posture (like the thirty-one
+        // prior default twins): the corpus declares this `pattern` (the `WpaPersonalDetail.password`
+        // field) but pairs it with an `example` (`"my-password"`), **not** a `default`, in the same
+        // Schema Object today, so the guard asserts clean across all specs and holds the line
+        // against a future off-shape default drift; the synthetic body in
+        // `wpa_password_pattern_default_extraction_rules` keeps the detection path live. Verified
+        // true across all mounted specs before asserting.
+        for api in APIS {
+            let offenders = wpa_password_pattern_defaults_malformed(api.body);
+            assert!(
+                offenders.is_empty(),
+                "{} spec declares a `default` beside a same-indent WPA-password \
+                 `pattern: '^[\\x20-\\x7E]{{8,63}}$'` that does not match that pattern (a fall-back \
+                 the pattern's own validator would reject) at `default:` line(s): {:?}",
+                api.name,
+                offenders
+            );
+        }
+    }
+
+    #[test]
+    fn wpa_password_pattern_default_extraction_rules() {
+        // Unit-cover `wpa_password_pattern_defaults_malformed` so the contract test above can't
+        // pass vacuously and its detection is pinned (`matches_wpa_password_pattern` itself is
+        // already covered by `wpa_password_pattern_example_extraction_rules`).
+        //
+        // Extractor: a valid quoted WPA default and a valid unquoted WPA default beside a
+        // same-indent WPA `pattern` both pass; a valid *edge-space* default (legal here — no
+        // leading/trailing-space rule, unlike SSID) passes; a seven-character default (too short,
+        // `{8,63}` floor) beside a same-indent `pattern` is flagged; a 64-character value (over the
+        // ceiling) with the `pattern` a line *below* it (down-scan) is flagged; a value with no
+        // `pattern` sibling and one whose sibling is the SSID pattern (`SSID_PATTERN`, a different
+        // string — out of scope here, its two-char value never inspected) are skipped; a
+        // block-scalar default is skipped; a default in one property never pairs with a *following*
+        // property's WPA `pattern` across the dedent; an inner `default` inside an outer `example:`
+        // payload is skipped; and a property literally named `default` (opening a block) is skipped.
+        let long64 = "a".repeat(64);
+        let body = format!(
+            "openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    GoodQuoted:
+      type: string
+      pattern: '{p}'
+      default: \"my-password\"
+    GoodUnquoted:
+      type: string
+      pattern: '{p}'
+      default: hunter22
+    GoodEdgeSpace:
+      type: string
+      pattern: '{p}'
+      default: \" hunter2 \"
+    TooShort:
+      type: string
+      pattern: '{p}'
+      default: hunter1
+    TooLongBelow:
+      type: string
+      default: {long64}
+      pattern: '{p}'
+    NoPattern:
+      type: string
+      default: hunter1
+    OtherPattern:
+      type: string
+      pattern: '{pssid}'
+      default: Wi
+    BlockDefault:
+      type: string
+      pattern: '{p}'
+      default: |
+        hunter22
+    InExample:
+      type: object
+      example:
+        pattern: '{p}'
+        default: hunter1
+    Split:
+      type: object
+      properties:
+        a:
+          default: hunter1
+        b:
+          type: string
+          pattern: '{p}'
+    NamedDefault:
+      type: object
+      properties:
+        default:
+          type: string
+          pattern: '{p}'
+",
+            p = WPA_PASSWORD_PATTERN,
+            pssid = SSID_PATTERN,
+            long64 = long64
+        );
+        // Flagged, in document order: TooShort.default (seven characters, below the `{8,63}` floor,
+        // beside a same-indent WPA `pattern`) and TooLongBelow.default (64 characters, over the
+        // ceiling, the `pattern` a line below — down-scan pairs it). Not flagged: GoodQuoted /
+        // GoodUnquoted (valid 8–63-printable-ASCII passwords); GoodEdgeSpace (a leading+trailing
+        // space value, legal here — proving the WPA member does NOT inherit SSID's edge-space rule);
+        // NoPattern (no `pattern` sibling); OtherPattern (sibling is the SSID pattern, a different
+        // string — its two-char value is legal for SSID `{2,32}` and out of scope here, proving the
+        // two printable-ASCII patterns never cross-pair); BlockDefault (block-scalar opener `|`, no
+        // inline value); InExample's inner `default` (inside the outer `example:` payload);
+        // Split.a.default, whose only WPA `pattern` is in the following property Split.b past a
+        // dedent; and NamedDefault's `default:` property opening a block (no inline value).
+        let flagged = wpa_password_pattern_defaults_malformed(&body);
+        let flagged_props: Vec<&str> = flagged
+            .iter()
+            .map(|&n| {
+                let lines: Vec<&str> = body.lines().collect();
+                let mut k = n - 1;
+                loop {
+                    let l = lines[k];
+                    let ind = l.len() - l.trim_start().len();
+                    if ind == 4 && l.trim_end().ends_with(':') {
+                        break l.trim().trim_end_matches(':');
+                    }
+                    if k == 0 {
+                        break "";
+                    }
+                    k -= 1;
+                }
+            })
+            .collect();
+        assert_eq!(flagged_props, vec!["TooShort", "TooLongBelow"]);
+
+        // Non-vacuous floor (future-drift posture, mirroring the thirty-one prior `pattern`-default
+        // twins): across every registered spec every `default` beside a same-indent WPA `pattern`
+        // matches it (the invariant the contract test asserts). The corpus declares the WPA
+        // password `pattern` on the `WpaPersonalDetail.password` field but pairs it with an
+        // `example`, **not** a `default`, in the *same* Schema Object today — so this asserts a
+        // clean `== 0` genuine-pair count and guards future drift; the synthetic body above keeps
+        // the detection path live. The pair count reuses the extractor's own **dedent-bounded**
+        // same-indent sibling scan — the genuine-Schema-Object pairing — rather than a crude
+        // window, and stays independent of the extractor's *validity* comparison.
+        let mut wpa_defaults = 0usize;
+        for api in APIS {
+            assert!(
+                wpa_password_pattern_defaults_malformed(api.body).is_empty(),
+                "{}: every default beside a same-indent WPA `pattern` must match it",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            let raw_inline = |l: &str, name: &str| -> Option<String> {
+                let (k, v) = l.trim_start().split_once(':')?;
+                if k.trim() != name {
+                    return None;
+                }
+                let v = v.split('#').next().unwrap_or(v).trim();
+                if v.is_empty() { None } else { Some(v.to_string()) }
+            };
+            // A genuine same-Schema-Object WPA `pattern` sibling of the `default` on line `i`
+            // (indent `c`): scan down through the object's block then up, dedent-bounded exactly
+            // like the extractor's `sibling_is_wpa_pattern`, so a *following* property's pattern
+            // past a dedent never counts.
+            let sibling_is_wpa = |i: usize, c: usize| -> bool {
+                let is_wpa = |l: &str| -> bool {
+                    raw_inline(l, "pattern")
+                        .map(|v| v.trim_matches('"').trim_matches('\'') == WPA_PASSWORD_PATTERN)
+                        .unwrap_or(false)
+                };
+                let mut j = i + 1;
+                while j < lines.len() {
+                    let l = lines[j];
+                    if l.trim().is_empty() {
+                        j += 1;
+                        continue;
+                    }
+                    if indent(l) < c {
+                        break;
+                    }
+                    if indent(l) == c && is_wpa(l) {
+                        return true;
+                    }
+                    j += 1;
+                }
+                let mut k = i;
+                while k > 0 {
+                    k -= 1;
+                    let l = lines[k];
+                    if l.trim().is_empty() {
+                        continue;
+                    }
+                    if indent(l) < c {
+                        break;
+                    }
+                    if indent(l) == c && is_wpa(l) {
+                        return true;
+                    }
+                }
+                false
+            };
+            for (i, l) in lines.iter().enumerate() {
+                let Some(v) = raw_inline(l, "default") else {
+                    continue;
+                };
+                if v.starts_with('>') || v.starts_with('|') {
+                    continue;
+                }
+                let c = indent(l);
+                if sibling_is_wpa(i, c) {
+                    wpa_defaults += 1;
+                }
+            }
+        }
+        assert_eq!(
+            wpa_defaults, 0,
+            "expected no genuine default + same-Schema-Object WPA `pattern` pairs across specs \
+             (the future-drift posture; a new pair means switch this guard to a `>= 1` floor like \
+             the example side), got {wpa_defaults}"
+        );
+    }
+
     // NB: written as it appears *raw in the YAML source* (unquoted, so `\/` is authored as a
     // literal backslash-slash and every brace is a literal), because `raw_inline("pattern")`
     // returns the source substring after the colon (no YAML-escape decoding) and this constant is
