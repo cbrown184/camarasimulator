@@ -31,6 +31,22 @@ Status keys: `[ ]` todo · `[~]` in-progress (claimed) · `[x]` done · `[!]` bl
 > provisioning-worker-backed notification streams, `REFRESHTOKEN` sink auth); or (c) the
 > per-version error catalogs (DESIGN §8, still TODO). If none of these is actioned, prefer a
 > journal note over more treadmill.
+>
+> **Update — 2026-08-25 (option (a) now investigated; see today's "Missing-API audit"
+> journal entry).** Cross-checked the live `org:camaraproject` repo list (93 repos) against
+> the 60 mounted specs. **No small, stateless, non-spatial, spec-bearing net-new API
+> remains.** Every genuinely-missing repo is either (i) an **empty upstream scaffold** with
+> no spec to vendor (e.g. RainfallIntensity — `code/API_definitions/` holds only a "delete
+> me" README; VoiceNotification; VoiceVerificationCode), or (ii) a **stateful / CRUD /
+> out-of-phase** API that needs the deferred provisioning-worker + state infrastructure
+> (ModelAsAService's three LLM CRUD APIs, WebRTC call sessions, NetworkSliceBooking,
+> Multi­PointVPN / HighThroughputElasticNetworks provisioning, EnergyFootprintNotification
+> subscriptions, ConsentManagement, IoTDeviceManagement, IoTNetworkOptimization,
+> NetworkInsights). So (a) collapses into (b): unlocking more coverage now requires the
+> **stateful/notification infrastructure**, which is a multi-pass build, not a one-pass unit.
+> **Human decision needed:** (i) authorise building the provisioning-worker/state layer,
+> (ii) name a specific missing API to vendor, or (iii) pause the hourly routine. No code
+> change this pass.
 
 Phase 0 auth underway: OIDC discovery + JWKS + the token endpoint's
 `client_credentials` **and `authorization_code` + PKCE** grants. The simulator holds one
@@ -6953,6 +6969,31 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-25 — **Missing-API audit — option (a) investigated; no small stateless net-new API
+  remains; no code change.** Followed up the previous pass's open recommendation (a) —
+  "confirm which CAMARA APIs are actually missing and vendor their real specs" — with a live
+  reconnaissance instead of another conformance test. Enumerated `org:camaraproject` via the
+  GitHub search API (**93 repos**) and cross-checked against the **60 mounted specs** under
+  `specs/`. Every genuinely-missing repo falls into one of two buckets, neither a safe
+  one-pass unit: **(i) empty upstream scaffolds** with nothing to vendor — RainfallIntensity
+  (`code/API_definitions/` contains only a `README.MD` reading *"Delete this README.MD file
+  after the first file is added"*), VoiceNotification (only the Spectral workflow present),
+  VoiceVerificationCode (no spec indexed); **(ii) stateful / CRUD / out-of-phase** APIs that
+  need the deferred provisioning-worker + in-memory-state layer — ModelAsAService (three LLM
+  APIs: knowledge-base CRUD, qa-assistant-manage CRUD, qa-assistant-service query), WebRTC
+  (call sessions), NetworkSliceBooking (booking lifecycle), MultiPointVPN &
+  HighThroughputElasticNetworks (network provisioning), EnergyFootprintNotification
+  (notification subscriptions), ConsentManagement (consent CRUD), IoTDeviceManagement,
+  IoTNetworkOptimization, NetworkInsights. **Conclusion:** the stateless & non-spatial slice
+  is exhausted; option (a) collapses into option (b) — further coverage now requires the
+  stateful/notification infrastructure (a multi-pass build), which per `docs/AGENT.md`'s
+  one-small-pass rule and the phase order is **not** a unit I should start unattended. This
+  is the concrete answer the prior note asked for, so future runs need not repeat the
+  network reconnaissance. **Human decision needed** (recorded atop *Current status*):
+  authorise the provisioning-worker/state layer, name a specific API to vendor, or pause the
+  hourly routine. Docs-only change (this note + a status-note update); no Rust touched, so
+  `cargo` state is unchanged from the last green code commit (3030 pass / 0 fail; release
+  binary ~5.08 MiB). Did **not** add contract-test member #36.
 - 2026-08-25 — **Backlog review — no productive code increment; treadmill flagged & paused.**
   This pass read `docs/AGENT.md`, `PROGRESS.md`, the git log and the source tree instead of
   reflexively adding another conformance test. Findings: (1) The simulator is essentially
