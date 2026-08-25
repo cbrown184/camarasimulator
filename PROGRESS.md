@@ -6983,6 +6983,25 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-25 — **Idle re-verification (4th consecutive idle pass) — no productive one-pass unit;
+  no code change; no redundant push.** Re-confirmed the prior three passes' conclusion rather
+  than reflexively committing a contract-test member. Independently re-checked the one angle the
+  earlier notes flagged as maybe-open — `PLAIN` / `REFRESHTOKEN` `sinkCredential` auth: grepped
+  every notifications module and found **`PLAIN` is already implemented across all sink-bearing
+  APIs, Traffic Influence included** (the "PLAIN a cut" wording in *Current status* is stale —
+  `traffic_influence::notifications::sink_authorization` handles ACCESSTOKEN **and** PLAIN), and
+  **`REFRESHTOKEN` is a deliberate, uniform documented cut everywhere** (needs an outbound
+  token-exchange round trip at delivery time — not a safe unattended one-pass unit). So the
+  sink-auth angle is exhausted/consistent, not an oversight. State recap: only `[ ]` item is the
+  Traffic Influence ongoing state-change stream (needs the deferred provisioning worker —
+  multi-pass, human-gated); (a) net-new stateless APIs exhausted; (c) error catalogs already
+  covered. No safe, productive, non-treadmill increment exists, so **no code committed** (docs-only
+  note). Code is byte-identical to the last verified-green commit (last three commits are
+  docs-only to `PROGRESS.md`): baseline unchanged — 3030 pass / 0 fail; release binary 5,323,160
+  bytes (~5.08 MiB). **No new push this pass** — the routine owner was already escalated via push
+  earlier today about this exact decision point and nothing has changed since, so a duplicate
+  notification would be noise. Human decision still needed (authorise the provisioning-worker/state
+  layer, name a specific increment, or pause the hourly routine).
 - 2026-08-25 — **Option (c) assessed — per-version error catalogs already covered; all three
   options now closed; routine owner notified via push; no code change.** Followed the prior
   two passes' open recommendation by assessing the last untried option, (c) per-version error
