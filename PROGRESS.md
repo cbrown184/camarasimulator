@@ -32,6 +32,20 @@ Status keys: `[ ]` todo · `[~]` in-progress (claimed) · `[x]` done · `[!]` bl
 > per-version error catalogs (DESIGN §8, still TODO). If none of these is actioned, prefer a
 > journal note over more treadmill.
 >
+> **Update — 2026-08-25 (option (c) now assessed; see today's "Option (c) assessed" journal
+> entry).** Per-version error-catalog conformance is **already extensively covered** by the
+> contract-test harness (`src/registry.rs`): dozens of dedicated tests already assert that
+> every operation declares a client-error response and the CAMARA auth error set, that every
+> declared/scenario/example error `code` is a well-formed CAMARA code, that each error
+> example's `status` matches its response key and canonical status, and that every served
+> error response carries an `x-correlator` (and auth errors a `WWW-Authenticate`) header.
+> So (c) is **not** fresh one-pass work — pursuing it means more treadmill. **All three
+> options are now closed as either already-covered ((a) exhausted, (c) covered) or human-gated
+> ((b) multi-pass structural).** No safe, productive, non-treadmill one-pass unit remains; the
+> hourly routine is spinning at a decision point. **Human decision needed:** authorise the
+> provisioning-worker/state layer for (b), name a specific API/increment to build, or **pause
+> the hourly routine**. The routine owner has been notified via push this pass.
+>
 > **Update — 2026-08-25 (option (a) now investigated; see today's "Missing-API audit"
 > journal entry).** Cross-checked the live `org:camaraproject` repo list (93 repos) against
 > the 60 mounted specs. **No small, stateless, non-spatial, spec-bearing net-new API
@@ -6969,6 +6983,27 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-25 — **Option (c) assessed — per-version error catalogs already covered; all three
+  options now closed; routine owner notified via push; no code change.** Followed the prior
+  two passes' open recommendation by assessing the last untried option, (c) per-version error
+  catalogs (DESIGN §8). Grepped the contract-test harness (`src/registry.rs`, 83,426 lines):
+  error-catalog conformance is **already extensively covered** — `every_operation_declares_a_client_error_response`,
+  `every_business_operation_declares_the_camara_auth_error_responses`,
+  `every_error_example_code_is_a_well_formed_camara_code`, `every_error_example_status_matches_its_response_key`,
+  `every_generic_error_example_code_matches_its_response_status`, `every_scenario_error_result_names_a_well_formed_camara_code`,
+  `every_served_error_response_declares_an_x_correlator_header`,
+  `every_shared_auth_error_response_declares_a_www_authenticate_header`, and ~30 more
+  (481 lines mention `error`). So (c) is **not** fresh one-pass work — adding to it is more
+  treadmill. **Net conclusion: all three "genuine remaining" options are closed** — (a)
+  net-new stateless APIs exhausted (prior pass's live GitHub audit), (c) error catalogs
+  already covered, and only (b) — the deferred provisioning-worker/state layer — remains,
+  which is a multi-pass, human-gated build, not a one-pass unit. No safe, productive,
+  non-treadmill increment exists this pass, so **no code committed** (per `docs/AGENT.md`
+  prime directive). Code unchanged since the last verified-green commit (3030 pass / 0 fail;
+  release binary ~5.08 MiB / 5,323,160 bytes), so test/build state is unchanged; this is a
+  docs-only note. **Escalated to the routine owner via PushNotification** — the hourly
+  routine is now spinning at a decision point and needs direction or a pause. Did **not** add
+  a contract-test member.
 - 2026-08-25 — **Missing-API audit — option (a) investigated; no small stateless net-new API
   remains; no code change.** Followed up the previous pass's open recommendation (a) —
   "confirm which CAMARA APIs are actually missing and vendor their real specs" — with a live
