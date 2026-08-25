@@ -9,6 +9,29 @@ Status keys: `[ ]` todo · `[~]` in-progress (claimed) · `[x]` done · `[!]` bl
 
 ## Current status
 
+> **⚠ AGENT NOTE — 2026-08-25 — productive backlog appears exhausted; contract-test
+> treadmill paused pending direction. READ THIS BEFORE PICKING WORK.**
+>
+> A review this pass found the simulator is essentially **feature-complete**: ~62 CAMARA
+> APIs are mounted, and every backlog item across Phases 0–5 and the "Other CAMARA APIs"
+> slice is `[x]`. The **only** literal unchecked (`[ ]`) backlog item is a structural
+> deferral (Traffic Influence ongoing state-change stream — needs a provisioning worker).
+>
+> Meanwhile the last **160+ consecutive commits** (spanning weeks) are all contract-test
+> *format/pattern conformance* permutations in `src/registry.rs`, which is now **83,426
+> lines**. The current family (pattern→`default`, 35 members) asserts a `== 0` genuine-pair
+> count against the corpus — i.e. it guards against spec drift that does not currently
+> exist. Value per added member is now marginal and the single test file's size is itself a
+> maintainability concern. **No new API/feature work has landed in this window.**
+>
+> **Recommendation (needs a human decision — see the scan-journal entry dated 2026-08-25
+> "Backlog review"):** do **not** reflexively add another pattern/format conformance member.
+> Genuine remaining work: (a) net-new CAMARA APIs not yet covered — first confirm which are
+> actually missing and vendor their real specs; (b) close deferred structural cuts (e.g.
+> provisioning-worker-backed notification streams, `REFRESHTOKEN` sink auth); or (c) the
+> per-version error catalogs (DESIGN §8, still TODO). If none of these is actioned, prefer a
+> journal note over more treadmill.
+
 Phase 0 auth underway: OIDC discovery + JWKS + the token endpoint's
 `client_credentials` **and `authorization_code` + PKCE** grants. The simulator holds one
 fixed, public, simulator-only RSA key (RS256) bundled in the binary; its public half is
@@ -6930,6 +6953,28 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-25 — **Backlog review — no productive code increment; treadmill flagged & paused.**
+  This pass read `docs/AGENT.md`, `PROGRESS.md`, the git log and the source tree instead of
+  reflexively adding another conformance test. Findings: (1) The simulator is essentially
+  **feature-complete** — ~62 CAMARA APIs mounted (`src/apis/`), every backlog item across
+  Phases 0–5 and the "Other CAMARA APIs" slice `[x]`; the **only** literal `[ ]` item is a
+  structural deferral (Traffic Influence ongoing state-change stream — needs a provisioning
+  worker, not a one-pass unit). (2) The last **160+ consecutive commits** (weeks) are all
+  contract-test *format/pattern conformance* permutations in `src/registry.rs`, which has
+  grown to **83,426 lines**. The current pattern→`default` family (35 members) asserts a
+  `== 0` genuine-pair count against the corpus — pure future-drift guards over spec drift
+  that does not currently exist; marginal value per member and a growing maintainability
+  cost. No new API/feature work has landed in this window. **Decision:** rather than commit
+  member #36 of a degenerate loop (or embark unattended on a net-new API without a confirmed
+  canonical spec — a larger, riskier pass), this pass makes **no code change**. It records
+  this note and adds a prominent "⚠ AGENT NOTE" atop *Current status* recommending the
+  treadmill be paused pending a human decision, and listing the genuine remaining options:
+  (a) net-new CAMARA APIs (confirm which are actually missing + vendor real specs), (b)
+  deferred structural cuts (provisioning-worker notification streams, `REFRESHTOKEN` sink
+  auth), or (c) per-version error catalogs (DESIGN §8, still TODO). Baseline verified green
+  before landing this docs-only change: `cargo test` **3030 pass / 0 fail**; `cargo build
+  --release` clean, no new dep. — binary (release): 5,323,160 bytes (~5.08 MiB; unchanged,
+  docs-only change).
 - 2026-08-25 — Contract-test harness: guard that every **WPA-password `pattern` `default` matches the
   pattern** (`src/registry.rs` `every_wpa_password_pattern_default_conforms_to_the_wpa_password_pattern`).
   The **thirty-second member of the `pattern`-default family** — the `default`-side twin of
