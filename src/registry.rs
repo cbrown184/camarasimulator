@@ -60111,6 +60111,367 @@ components:
         );
     }
 
+    /// The 1-based line numbers, in document order, of every `default:` keyword whose inline
+    /// scalar value sits in a Schema Object declaring a *same-indent* SSID `pattern` sibling
+    /// (`^(?! )[\x20-\x7E]{2,32}(?<! )$`) yet is not a well-formed SSID (2–32 printable ASCII, no
+    /// leading/trailing space), without a YAML dep. The `default` twin of
+    /// `ssid_pattern_examples_malformed`: same scoping, keyed on `SSID_PATTERN` and judged by
+    /// `matches_ssid_pattern`, but triggered by `default:` (the schema's fall-back *instance*)
+    /// instead of `example:`.
+    fn ssid_pattern_defaults_malformed(body: &str) -> Vec<usize> {
+        let lines: Vec<&str> = body.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let raw_inline = |l: &str, name: &str| -> Option<String> {
+            let (k, v) = l.trim_start().split_once(':')?;
+            if k.trim() != name {
+                return None;
+            }
+            let v = v.split('#').next().unwrap_or(v).trim();
+            if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            }
+        };
+        // Whether a same-indent `pattern:` sibling of line `i` (indent `c`) in the same Schema
+        // Object equals the SSID pattern: scan down through the object's block then up,
+        // dedent-bounded so a nested or following object's `pattern` never pairs.
+        let sibling_is_ssid_pattern = |i: usize, c: usize| -> bool {
+            let is_ssid_pattern = |l: &str| -> bool {
+                raw_inline(l, "pattern")
+                    .map(|v| v.trim_matches('"').trim_matches('\'') == SSID_PATTERN)
+                    .unwrap_or(false)
+            };
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                if l.trim().is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_ssid_pattern(l) {
+                    return true;
+                }
+                j += 1;
+            }
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                if indent(l) < c {
+                    break;
+                }
+                if indent(l) == c && is_ssid_pattern(l) {
+                    return true;
+                }
+            }
+            false
+        };
+        // True when line `i` (indent `c`) sits inside an outer `example:`/`examples:` payload —
+        // some enclosing container key up the indent ladder is `example`/`examples`, so an inner
+        // `default` key there is sample data, not a schema keyword.
+        let inside_example = |i: usize, c: usize| -> bool {
+            let mut level = c;
+            let mut k = i;
+            while k > 0 {
+                k -= 1;
+                let l = lines[k];
+                if l.trim().is_empty() {
+                    continue;
+                }
+                let li = indent(l);
+                if li < level {
+                    if let Some((key, _)) = l.trim_start().split_once(':') {
+                        let key = key.trim();
+                        if key == "example" || key == "examples" {
+                            return true;
+                        }
+                    }
+                    level = li;
+                    if li == 0 {
+                        break;
+                    }
+                }
+            }
+            false
+        };
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some(raw) = raw_inline(line, "default") else {
+                continue;
+            };
+            // A block-scalar opener (`>`/`|`, optionally with a chomping indicator) carries its
+            // value on the following lines, not inline — skip it.
+            if raw.starts_with('>') || raw.starts_with('|') {
+                continue;
+            }
+            let c = indent(line);
+            if inside_example(i, c) {
+                continue;
+            }
+            if !sibling_is_ssid_pattern(i, c) {
+                continue;
+            }
+            let value = raw.trim_matches('"').trim_matches('\'');
+            if !matches_ssid_pattern(value) {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_ssid_pattern_default_conforms_to_the_ssid_pattern() {
+        // Contract-harness invariant (OpenAPI 3.0.x / JSON-Schema structural rule): where a Schema
+        // Object declares an inline `default` beside a same-indent SSID `pattern`
+        // (`^(?! )[\x20-\x7E]{2,32}(?<! )$`, the 2–32-printable-ASCII, no-leading/trailing-space
+        // 802.11 network-name shape the Network Access Domains Wi-Fi `ssid` field uses verbatim),
+        // the default MUST match that pattern. A `default` is the schema's fall-back *instance*, so
+        // a value the `pattern` rejects — empty / one character / over 32 characters / a
+        // leading-or-trailing space / a control or non-ASCII character — is a self-contradictory
+        // schema whose own validator rejects the fall-back it pre-supplies, so a Redoc/Swagger
+        // prefill and a codegen client's generated default carry a value no field constrained by
+        // this pattern can hold.
+        //
+        // The **`default` twin** of `every_ssid_pattern_example_conforms_to_the_ssid_pattern` and
+        // the **thirty-first member of the `pattern`-*default* family** after E.164 / IMEI / ICCID
+        // / name / token / 32-hex / MAC / result-code / UUID / email / full-date / semver / geohash
+        // / app-name / DNS-label / TAC / IMEISV / DPV-purpose / 16-hex / text256 / 4-hex / text512 /
+        // version-4-UUID / OTP-template / region / client-id / correlator / no-semicolon / no-CR/LF /
+        // campaign-id. The **length-bounded, no-edge-space sibling of the WPA-password default
+        // member's family**: the WPA password pattern `^[\x20-\x7E]{8,63}$` shares the SSID's
+        // printable-ASCII alphabet but widens the length to 8–63 and drops the
+        // leading/trailing-space rule, so a 33–63-character or edge-space default — legal there —
+        // is rejected here; the two differ in the whole `pattern` string, so a member keys on its
+        // own exact pattern and the two never cross-pair. Like the email / campaign-id / hex / token
+        // patterns the SSID pattern carries **no** `format` sibling (there is no OpenAPI `ssid`
+        // format — the field is `type: string` with only `minLength`/`maxLength`/`pattern` +
+        // `example`), so this default is beyond the `format`-default family's reach. Future-drift
+        // posture (like the thirty prior default twins): the corpus declares this `pattern` (the
+        // Network Access Domains Wi-Fi `ssid` field, in both WPA-Personal and WPA-Enterprise access
+        // details) but pairs it with an `example` (`"my-ssid"`), **not** a `default`, in the same
+        // Schema Object today, so the guard asserts clean across all specs and holds the line
+        // against a future off-shape default drift; the synthetic body in
+        // `ssid_pattern_default_extraction_rules` keeps the detection path live. Verified true
+        // across all mounted specs before asserting.
+        for api in APIS {
+            let offenders = ssid_pattern_defaults_malformed(api.body);
+            assert!(
+                offenders.is_empty(),
+                "{} spec declares a `default` beside a same-indent SSID `pattern` that does not \
+                 match that pattern (a fall-back the pattern's own validator would reject) at \
+                 `default:` line(s): {:?}",
+                api.name,
+                offenders
+            );
+        }
+    }
+
+    #[test]
+    fn ssid_pattern_default_extraction_rules() {
+        // Unit-cover `ssid_pattern_defaults_malformed` so the contract test above can't pass
+        // vacuously and its detection is pinned (`matches_ssid_pattern` itself is already covered by
+        // `ssid_pattern_example_extraction_rules`).
+        //
+        // Extractor: a valid quoted SSID default and a valid unquoted SSID default beside a
+        // same-indent SSID `pattern` both pass; a one-character default (too short, `{2,32}` floor)
+        // beside a same-indent `pattern` is flagged; a leading-space value with the `pattern` a line
+        // *below* it (down-scan) is flagged; a value with no `pattern` sibling and one whose sibling
+        // is the WPA-password pattern (`WPA_PASSWORD_PATTERN`, a different string — out of scope
+        // here, its over-32-char value never inspected) are skipped; a block-scalar default is
+        // skipped; a default in one property never pairs with a *following* property's SSID
+        // `pattern` across the dedent; an inner `default` inside an outer `example:` payload is
+        // skipped; and a property literally named `default` (opening a block) is skipped.
+        let body = format!(
+            "openapi: 3.0.3
+info:
+  title: t
+  version: 1.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    GoodQuoted:
+      type: string
+      pattern: '{p}'
+      default: \"my-ssid\"
+    GoodUnquoted:
+      type: string
+      pattern: '{p}'
+      default: HomeNetwork5G
+    TooShort:
+      type: string
+      pattern: '{p}'
+      default: a
+    LeadingSpaceBelow:
+      type: string
+      default: \" leads\"
+      pattern: '{p}'
+    NoPattern:
+      type: string
+      default: a
+    OtherPattern:
+      type: string
+      pattern: '{pwpa}'
+      default: passwordpasswordpasswordpasswordpassword
+    BlockDefault:
+      type: string
+      pattern: '{p}'
+      default: |
+        a
+    InExample:
+      type: object
+      example:
+        pattern: '{p}'
+        default: a
+    Split:
+      type: object
+      properties:
+        a:
+          default: a
+        b:
+          type: string
+          pattern: '{p}'
+    NamedDefault:
+      type: object
+      properties:
+        default:
+          type: string
+          pattern: '{p}'
+",
+            p = SSID_PATTERN,
+            pwpa = WPA_PASSWORD_PATTERN
+        );
+        // Flagged, in document order: TooShort.default (one character, below the `{2,32}` floor,
+        // beside a same-indent SSID `pattern`) and LeadingSpaceBelow.default (a leading-space value,
+        // the `pattern` a line below — down-scan pairs it). Not flagged: GoodQuoted / GoodUnquoted
+        // (both valid 2–32-printable-ASCII SSIDs, no edge space); NoPattern (no `pattern` sibling);
+        // OtherPattern (sibling is the WPA-password pattern, a different string — its 40-character
+        // value is legal for WPA `{8,63}` and out of scope here, proving the two printable-ASCII
+        // patterns never cross-pair); BlockDefault (block-scalar opener `|`, no inline value);
+        // InExample's inner `default` (inside the outer `example:` payload); Split.a.default, whose
+        // only SSID `pattern` is in the following property Split.b past a dedent; and NamedDefault's
+        // `default:` property opening a block (no inline value).
+        let flagged = ssid_pattern_defaults_malformed(&body);
+        let flagged_props: Vec<&str> = flagged
+            .iter()
+            .map(|&n| {
+                let lines: Vec<&str> = body.lines().collect();
+                let mut k = n - 1;
+                loop {
+                    let l = lines[k];
+                    let ind = l.len() - l.trim_start().len();
+                    if ind == 4 && l.trim_end().ends_with(':') {
+                        break l.trim().trim_end_matches(':');
+                    }
+                    if k == 0 {
+                        break "";
+                    }
+                    k -= 1;
+                }
+            })
+            .collect();
+        assert_eq!(flagged_props, vec!["TooShort", "LeadingSpaceBelow"]);
+
+        // Non-vacuous floor (future-drift posture, mirroring the thirty prior `pattern`-default
+        // twins): across every registered spec every `default` beside a same-indent SSID `pattern`
+        // matches it (the invariant the contract test asserts). The corpus declares the SSID
+        // `pattern` on the Network Access Domains Wi-Fi `ssid` field but pairs it with an `example`,
+        // **not** a `default`, in the *same* Schema Object today — so this asserts a clean `== 0`
+        // genuine-pair count and guards future drift; the synthetic body above keeps the detection
+        // path live. The pair count reuses the extractor's own **dedent-bounded** same-indent
+        // sibling scan — the genuine-Schema-Object pairing — rather than a crude window, and stays
+        // independent of the extractor's *validity* (`matches_ssid_pattern`) comparison.
+        let mut ssid_defaults = 0usize;
+        for api in APIS {
+            assert!(
+                ssid_pattern_defaults_malformed(api.body).is_empty(),
+                "{}: every default beside a same-indent SSID `pattern` must match it",
+                api.name
+            );
+            let lines: Vec<&str> = api.body.lines().collect();
+            let indent = |l: &str| l.len() - l.trim_start().len();
+            let raw_inline = |l: &str, name: &str| -> Option<String> {
+                let (k, v) = l.trim_start().split_once(':')?;
+                if k.trim() != name {
+                    return None;
+                }
+                let v = v.split('#').next().unwrap_or(v).trim();
+                if v.is_empty() { None } else { Some(v.to_string()) }
+            };
+            // A genuine same-Schema-Object SSID `pattern` sibling of the `default` on line `i`
+            // (indent `c`): scan down through the object's block then up, dedent-bounded exactly
+            // like the extractor's `sibling_is_ssid_pattern`, so a *following* property's pattern
+            // past a dedent never counts.
+            let sibling_is_ssid = |i: usize, c: usize| -> bool {
+                let is_ssid = |l: &str| -> bool {
+                    raw_inline(l, "pattern")
+                        .map(|v| v.trim_matches('"').trim_matches('\'') == SSID_PATTERN)
+                        .unwrap_or(false)
+                };
+                let mut j = i + 1;
+                while j < lines.len() {
+                    let l = lines[j];
+                    if l.trim().is_empty() {
+                        j += 1;
+                        continue;
+                    }
+                    if indent(l) < c {
+                        break;
+                    }
+                    if indent(l) == c && is_ssid(l) {
+                        return true;
+                    }
+                    j += 1;
+                }
+                let mut k = i;
+                while k > 0 {
+                    k -= 1;
+                    let l = lines[k];
+                    if l.trim().is_empty() {
+                        continue;
+                    }
+                    if indent(l) < c {
+                        break;
+                    }
+                    if indent(l) == c && is_ssid(l) {
+                        return true;
+                    }
+                }
+                false
+            };
+            for (i, l) in lines.iter().enumerate() {
+                let Some(v) = raw_inline(l, "default") else {
+                    continue;
+                };
+                if v.starts_with('>') || v.starts_with('|') {
+                    continue;
+                }
+                let c = indent(l);
+                if sibling_is_ssid(i, c) {
+                    ssid_defaults += 1;
+                }
+            }
+        }
+        assert_eq!(
+            ssid_defaults, 0,
+            "expected no genuine default + same-Schema-Object SSID `pattern` pairs across specs \
+             (the future-drift posture; a new pair means switch this guard to a `>= 1` floor like \
+             the example side), got {ssid_defaults}"
+        );
+    }
+
     // NB: written as it appears *raw in the YAML source* (unquoted, so `\/` is authored as a
     // literal backslash-slash and every brace is a literal), because `raw_inline("pattern")`
     // returns the source substring after the colon (no YAML-escape decoding) and this constant is

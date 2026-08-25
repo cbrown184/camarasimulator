@@ -3335,6 +3335,24 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
   `$ref`s resolve; catalog advertises each `spec_url`). Per-API *vendoring/annotation*
   continues alongside each new API.
 - [~] Contract-test harness (validate responses against vendored spec) — slices landed:
+  - an **SSID `pattern`-`default` conformance** contract test (`src/registry.rs`
+    `every_ssid_pattern_default_conforms_to_the_ssid_pattern`) — the `default`-side twin of
+    `every_ssid_pattern_example_conforms_to_the_ssid_pattern` and the **thirty-first member of the
+    `pattern`-default family**, over the Network Access Domains Wi-Fi `ssid` pattern
+    `^(?! )[\x20-\x7E]{2,32}(?<! )$` (2–32 printable ASCII, no leading/trailing space — the 802.11
+    network name, on both the WPA-Personal and WPA-Enterprise access details). The **length-bounded,
+    no-edge-space sibling of the WPA-password family**: the WPA password pattern `^[\x20-\x7E]{8,63}$`
+    shares the printable-ASCII alphabet but widens the length to 8–63 and drops the
+    leading/trailing-space rule, so a 33–63-char or edge-space default — legal there — is rejected
+    here; the two differ in the whole `pattern` string, so members key on the exact string and never
+    cross-pair; no `format` sibling, so beyond the `format`-default family. New pure
+    `ssid_pattern_defaults_malformed` (the `campaign_id_pattern_defaults_malformed` shape keyed on
+    `SSID_PATTERN` + judged by `matches_ssid_pattern`, both already present from the example side;
+    `default:` trigger, block-scalar opener skipped, dedent-bounded same-indent sibling scan,
+    in-`example:` payload excluded). Corpus declares the SSID `pattern` (the two `ssid` fields) but
+    pairs it with an `example` (`"my-ssid"`), **not** a `default` → asserts a clean `== 0`
+    genuine-pair count (future-drift posture, mirroring the thirty prior default twins) + guards
+    future drift. Unit-covered (`ssid_pattern_default_extraction_rules`). Test-only, no spec change.
   - a **campaign-id `pattern`-`default` conformance** contract test (`src/registry.rs`
     `every_campaign_id_pattern_default_conforms_to_the_campaign_id_pattern`) — the `default`-side twin
     of `every_campaign_id_pattern_example_conforms_to_the_campaign_id_pattern` and the **thirtieth
@@ -6892,6 +6910,29 @@ _None._  <!-- agent: put the claimed item + run timestamp here, clear it when do
 
 ## Scan journal
 
+- 2026-08-25 — Contract-test harness: guard that every **SSID `pattern` `default` matches the
+  pattern** (`src/registry.rs` `every_ssid_pattern_default_conforms_to_the_ssid_pattern`). The
+  **thirty-first member of the `pattern`-default family** — the `default`-side twin of
+  `every_ssid_pattern_example_conforms_to_the_ssid_pattern`, over the Network Access Domains Wi-Fi
+  `ssid` pattern `^(?! )[\x20-\x7E]{2,32}(?<! )$` (2–32 printable ASCII, no leading/trailing space —
+  the 802.11 network name on both the WPA-Personal and WPA-Enterprise access details). The
+  **length-bounded, no-edge-space sibling of the WPA-password family**: the WPA password pattern
+  `^[\x20-\x7E]{8,63}$` shares the printable-ASCII alphabet but widens the length to 8–63 and drops
+  the leading/trailing-space rule, so a 33–63-char or edge-space default — legal there — is rejected
+  here; the two differ in the whole `pattern` string, so members key on the exact pattern string and
+  never cross-pair, and the field carries no `format` sibling (beyond the `format`-default family).
+  New pure `ssid_pattern_defaults_malformed` (the `campaign_id_pattern_defaults_malformed` shape
+  keyed on `SSID_PATTERN` + judged by `matches_ssid_pattern`, both already present from the example
+  side; `default:` trigger, block-scalar opener skipped, dedent-bounded same-indent sibling scan,
+  in-`example:` payload excluded). Surveyed the corpus — the SSID `pattern` (the two `ssid` fields in
+  network-access-domains) pairs with an `example`, **not** a `default` → asserts a clean `== 0`
+  genuine-pair count (future-drift posture, mirroring the thirty prior default twins) + guards future
+  drift. Unit-covered (`ssid_pattern_default_extraction_rules`: valid quoted `"my-ssid"` /
+  unquoted `HomeNetwork5G` cleared; one-char-too-short / leading-space-pattern-below flagged;
+  no-pattern / WPA-password-pattern-sibling (`^[\x20-\x7E]{8,63}$`, admits the 40-char value) /
+  block-scalar / in-`example:` / following-property-across-dedent / property-named-`default`
+  skipped). Test-only, no spec change. `cargo test` 3028 pass (+2); `cargo build --release` clean,
+  no new dep. — binary (release): 5,323,160 bytes (~5.08 MiB; unchanged by a test-only change).
 - 2026-08-24 — Contract-test harness: guard that every **campaign-id `pattern` `default` matches the
   pattern** (`src/registry.rs` `every_campaign_id_pattern_default_conforms_to_the_campaign_id_pattern`).
   The **thirtieth member of the `pattern`-default family** — the `default`-side twin of
